@@ -1,3 +1,6 @@
+# No claude file for now
+CLAUDE.md
+
 # Rust build artifacts
 /target/
 **/target/
