@@ -1,0 +1,46 @@
+# Rust build artifacts
+/target/
+**/target/
+Cargo.lock
+
+# Debug and release builds
+debug/
+release/
+
+# Generated files
+**/*.rs.bk
+*.pdb
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing and coverage
+*.profraw
+*.profdata
+coverage/
+tarpaulin-report.html
+
+# Benchmarking
+criterion/
+flamegraph.svg
+perf.data*
+
+# Logs
+*.log
+
+# Environment files
+.env
+.env.local
+
+# Calibration data (if too large or sensitive)
+# Uncomment if needed:
+# calibration_data/*.bin
+
+# Temporary files
+tmp/
+temp/
