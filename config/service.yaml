@@ -1,0 +1,49 @@
+# Antenna Model Service Configuration
+# This file contains the main service configuration settings
+
+server:
+  # Host to bind to (use "0.0.0.0" for all interfaces, "127.0.0.1" for localhost only)
+  host: "127.0.0.1"
+
+  # Port to listen on
+  port: 3000
+
+  # Request timeout in seconds
+  request_timeout_secs: 30
+
+  # Maximum request body size in bytes (10 MB)
+  max_body_size_bytes: 10485760
+
+calibration:
+  # Directory containing calibration binary artifacts
+  data_directory: "calibration_data"
+
+  # Path to antenna configuration file
+  antenna_config_file: "calibration_data/antennas.yaml"
+
+  # Whether to fail fast if calibration data is missing or corrupted
+  fail_fast: true
+
+logging:
+  # Log level: trace, debug, info, warn, error
+  level: "info"
+
+  # Log format: text or json
+  # Use "json" for structured logging in production environments
+  format: "text"
+
+  # Include file names and line numbers in logs
+  # Useful for debugging but adds overhead
+  include_location: false
+
+performance:
+  # Number of worker threads for batch processing
+  # Set to 0 for auto-detection based on available CPU cores
+  worker_threads: 0
+
+  # Maximum number of evaluations allowed in a single batch request
+  max_batch_size: 1000
+
+  # Enable parallel processing for batch requests
+  # Set to false to disable parallelization (useful for debugging)
+  enable_parallel_processing: true

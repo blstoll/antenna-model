@@ -1,0 +1,22 @@
+# Antenna Configuration
+# This file defines the available antenna models and their calibration data files
+
+antennas:
+  # Example antenna configuration entry
+  # Uncomment and modify when you have actual calibration data
+
+  # - id: "antenna_1"
+  #   name: "Deep Space Network 34m"
+  #   calibration_file: "antenna_1.bin"
+  #   enabled: true
+
+  # - id: "antenna_2"
+  #   name: "Ground Station Array Element"
+  #   calibration_file: "antenna_2.bin"
+  #   enabled: true
+
+  # Placeholder entry (remove when adding real antennas)
+  - id: "example_antenna"
+    name: "Example Antenna (Placeholder)"
+    calibration_file: "example.bin"
+    enabled: false
