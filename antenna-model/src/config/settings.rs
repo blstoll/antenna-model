@@ -2,22 +2,9 @@
 //!
 //! This module provides configuration loading from YAML files with environment variable overrides.
 
+use crate::error::ConfigError;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use thiserror::Error;
-
-/// Configuration error types
-#[derive(Debug, Error)]
-pub enum ConfigError {
-    #[error("Configuration loading failed: {0}")]
-    LoadError(#[from] config::ConfigError),
-
-    #[error("Invalid configuration: {0}")]
-    ValidationError(String),
-
-    #[error("Missing required configuration field: {0}")]
-    MissingField(String),
-}
 
 /// Main service configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -283,36 +270,41 @@ impl ServiceConfig {
     fn validate(&self) -> Result<(), ConfigError> {
         // Validate server configuration
         if self.server.port == 0 {
-            return Err(ConfigError::ValidationError(
-                "server.port must be greater than 0".to_string()
-            ));
+            return Err(ConfigError::InvalidValue {
+                key: "server.port".to_string(),
+                reason: "must be greater than 0".to_string(),
+            });
         }
 
         if self.server.request_timeout_secs == 0 {
-            return Err(ConfigError::ValidationError(
-                "server.request_timeout_secs must be greater than 0".to_string()
-            ));
+            return Err(ConfigError::InvalidValue {
+                key: "server.request_timeout_secs".to_string(),
+                reason: "must be greater than 0".to_string(),
+            });
         }
 
         if self.server.max_body_size_bytes == 0 {
-            return Err(ConfigError::ValidationError(
-                "server.max_body_size_bytes must be greater than 0".to_string()
-            ));
+            return Err(ConfigError::InvalidValue {
+                key: "server.max_body_size_bytes".to_string(),
+                reason: "must be greater than 0".to_string(),
+            });
         }
 
         // Validate logging configuration
         let valid_levels = ["trace", "debug", "info", "warn", "error"];
         if !valid_levels.contains(&self.logging.level.to_lowercase().as_str()) {
-            return Err(ConfigError::ValidationError(
-                format!("logging.level must be one of: {}", valid_levels.join(", "))
-            ));
+            return Err(ConfigError::InvalidValue {
+                key: "logging.level".to_string(),
+                reason: format!("must be one of: {}", valid_levels.join(", ")),
+            });
         }
 
         // Validate performance configuration
         if self.performance.max_batch_size == 0 {
-            return Err(ConfigError::ValidationError(
-                "performance.max_batch_size must be greater than 0".to_string()
-            ));
+            return Err(ConfigError::InvalidValue {
+                key: "performance.max_batch_size".to_string(),
+                reason: "must be greater than 0".to_string(),
+            });
         }
 
         Ok(())
@@ -355,15 +347,15 @@ pub struct AntennaConfig {
 impl AntennaConfig {
     /// Load antenna configuration from a YAML file
     pub fn from_file(path: &str) -> Result<Self, ConfigError> {
-        let contents = std::fs::read_to_string(path)
-            .map_err(|e| ConfigError::LoadError(
-                config::ConfigError::Message(format!("Failed to read antenna config file: {}", e))
-            ))?;
+        let contents = std::fs::read_to_string(path).map_err(|e| ConfigError::FileNotFound {
+            path: format!("{}: {}", path, e),
+        })?;
 
-        let config: AntennaConfig = serde_yaml::from_str(&contents)
-            .map_err(|e| ConfigError::LoadError(
-                config::ConfigError::Message(format!("Failed to parse antenna config: {}", e))
-            ))?;
+        let config: AntennaConfig =
+            serde_yaml::from_str(&contents).map_err(|e| ConfigError::ParseError {
+                path: path.to_string(),
+                reason: format!("Failed to parse antenna config: {}", e),
+            })?;
 
         config.validate()?;
         Ok(config)
@@ -372,23 +364,26 @@ impl AntennaConfig {
     /// Validate antenna configuration
     fn validate(&self) -> Result<(), ConfigError> {
         if self.antennas.is_empty() {
-            return Err(ConfigError::ValidationError(
-                "At least one antenna configuration is required".to_string()
-            ));
+            return Err(ConfigError::InvalidValue {
+                key: "antennas".to_string(),
+                reason: "at least one antenna configuration is required".to_string(),
+            });
         }
 
         // Check for duplicate antenna IDs
         let mut ids = std::collections::HashSet::new();
         for entry in &self.antennas {
             if entry.id.is_empty() {
-                return Err(ConfigError::ValidationError(
-                    "Antenna ID cannot be empty".to_string()
-                ));
+                return Err(ConfigError::InvalidValue {
+                    key: "antenna.id".to_string(),
+                    reason: "antenna ID cannot be empty".to_string(),
+                });
             }
             if !ids.insert(&entry.id) {
-                return Err(ConfigError::ValidationError(
-                    format!("Duplicate antenna ID: {}", entry.id)
-                ));
+                return Err(ConfigError::InvalidValue {
+                    key: "antenna.id".to_string(),
+                    reason: format!("duplicate antenna ID: {}", entry.id),
+                });
             }
         }
 

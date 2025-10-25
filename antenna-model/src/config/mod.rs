@@ -6,7 +6,7 @@
 pub mod settings;
 
 // Re-export commonly used types
-pub use settings::{ConfigError, LogFormat, ServiceConfig};
+pub use settings::{LogFormat, ServiceConfig};
 
 // Re-export all types for advanced usage
 #[allow(unused_imports)]

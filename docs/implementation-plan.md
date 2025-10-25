@@ -2,10 +2,13 @@
 
 ## Document Overview
 
-**Version:** 1.0
+**Version:** 2.0 (Revised for Physical Optics Model)
 **Created:** 2025-10-22
+**Revised:** 2025-10-25
 **Target Timeline:** 8 sprints (16 weeks)
-**Scope:** MVP with full REST API, calibration tool, and Kubernetes deployment
+**Scope:** MVP with physical optics computation engine, REST API, calibration tool, and Kubernetes deployment
+
+**Key Change from v1.0:** This plan now implements a full **physical optics antenna model** (Ruze equation, coma aberration, mesh effects) rather than a simple interpolation service. The calibration tool optimizes physical parameters to match measurements instead of fitting B-splines.
 
 This implementation plan breaks down the Antenna Model Service into manageable sprints, each containing tasks scoped for a mid-level engineer to complete within a 2-week period.
 
@@ -16,12 +19,12 @@ This implementation plan breaks down the Antenna Model Service into manageable s
 | Sprint | Focus Area | Duration | Key Deliverables |
 |--------|-----------|----------|-----------------|
 | Sprint 1 | Project Foundation & Core Data Types | 2 weeks | Repository structure, basic REST API with /status endpoint, core data types, basic tests |
-| Sprint 2 | B-Spline Interpolation Engine | 2 weeks | 4D interpolation, extrapolation, unit tests |
-| Sprint 3 | Calibration Data Management | 2 weeks | Data loader, repository, configuration system |
-| Sprint 4 | Calibration CLI Tool | 2 weeks | CSV parser, B-spline fitter, artifact serializer |
+| Sprint 2 | Physical Optics Computation Engine | 2 weeks | Aperture integration, phase functions (path, coma, surface, mesh), far-field pattern computation |
+| Sprint 3 | Surface Error & Mesh Reflector Models | 2 weeks | Ruze equation, mesh transparency, coordinate transformations, edge case handling |
+| Sprint 4 | Calibration via Parameter Optimization | 2 weeks | Physical parameter fitting, differential evolution optimizer, Zernike polynomials, correction surfaces |
 | Sprint 5 | REST API - Core Endpoints | 2 weeks | Production middleware, enhanced health checks, single evaluation endpoints |
 | Sprint 6 | REST API - Advanced Endpoints | 2 weeks | Batch processing, heatmap generation |
-| Sprint 7 | Integration & Performance Testing | 2 weeks | End-to-end tests, performance benchmarks |
+| Sprint 7 | Integration & Performance Testing | 2 weeks | End-to-end tests, performance benchmarks, validation against measurements |
 | Sprint 8 | Deployment & Documentation | 2 weeks | Docker, Kubernetes, operational docs |
 
 ---
@@ -30,7 +33,7 @@ This implementation plan breaks down the Antenna Model Service into manageable s
 
 **Goal:** Establish project structure, dependencies, and foundational data types
 
-**Status:** 4/5 tasks complete (80%) - Tasks 1.1, 1.2, 1.3, 1.4 ✅ | Task 1.5 pending
+**Status:** ✅ COMPLETE - 5/5 tasks complete (100%) - All tasks ✅
 
 ### Tasks
 
@@ -196,33 +199,45 @@ This implementation plan breaks down the Antenna Model Service into manageable s
 
 ---
 
-#### 1.5 Error Handling Framework (2-3 days)
+#### 1.5 Error Handling Framework (2-3 days) ✅ COMPLETE
 **Objective:** Define error types and handling strategy
 
 **Steps:**
-- Create custom error types using `thiserror`:
-  - `DataError` - calibration data issues
-  - `ApiError` - HTTP/API errors
-  - `ValidationError` - input validation failures
-  - `ComputationError` - interpolation/math errors
-- Implement `From` conversions for common error types
-- Add error context helpers
-- Write error formatting tests
+- ✅ Create custom error types using `thiserror`:
+  - ✅ `DataError` - calibration data issues
+  - ✅ `ApiError` - HTTP/API errors
+  - ✅ `ValidationError` - input validation failures
+  - ✅ `ComputationError` - interpolation/math errors
+  - ✅ `ConfigError` - configuration errors
+- ✅ Implement `From` conversions for common error types
+- ✅ Add error context helpers (`ErrorContext` trait)
+- ✅ Write error formatting tests
 
 **Acceptance Criteria:**
-- All error types implement proper `Display` and `Debug`
-- Error chains preserve context information
-- Conversion traits allow ergonomic error propagation
-- Tests verify error message formatting
+- ✅ All error types implement proper `Display` and `Debug`
+- ✅ Error chains preserve context information
+- ✅ Conversion traits allow ergonomic error propagation
+- ✅ Tests verify error message formatting
 
-**Files to Create:**
-- `src/error.rs`
-- `src/lib.rs` (export error module)
+**Files Created:**
+- ✅ `src/error.rs` (570+ lines with comprehensive error types)
+- ✅ `src/lib.rs` (updated to export error module)
 
 **Test Coverage:**
-- Error creation and formatting
-- Error chain preservation
-- Conversion trait tests
+- ✅ Error creation and formatting (16 tests)
+- ✅ Error chain preservation
+- ✅ Conversion trait tests
+- ✅ HTTP status code mapping tests
+- ✅ Error context helpers (with closure support)
+- ✅ **Total: 16 new tests, all passing**
+
+**Implementation Notes:**
+- Created 5 main error types plus top-level `AntennaModelError`
+- ApiError includes HTTP status code mapping and client/server error classification
+- Result type aliases for ergonomic error handling (`Result<T>`, `DataResult<T>`, etc.)
+- ErrorContext trait provides `.context()` and `.with_context()` methods
+- Comprehensive conversions between error types for API response formatting
+- Updated config module to use centralized error types
 
 ---
 
@@ -233,366 +248,540 @@ This implementation plan breaks down the Antenna Model Service into manageable s
 - ✅ Basic REST API server with status endpoint for health checks
 - ✅ Core data structures with serialization (Task 1.3 ✅)
 - ✅ Configuration system with YAML support (Task 1.4 ✅)
-- ✅ Current test coverage: 100% for implemented modules (27 tests passing)
+- ✅ Comprehensive error handling framework (Task 1.5 ✅)
+- ✅ Current test coverage: 100% for implemented modules (43 tests passing)
 
-**In Progress:**
-- ⏳ Error handling framework (Task 1.5 - pending)
+**Sprint 1 Progress: 5/5 tasks complete (100%)**
 
-**Sprint 1 Progress: 4/5 tasks complete (80%)**
+**Sprint 1 Summary:**
+Sprint 1 is now complete! All foundational components are in place:
+- Project structure and build system configured
+- REST API server with health checks operational
+- Core data types with full serialization support
+- Configuration system with YAML and environment variable support
+- Comprehensive error handling framework with 5 error types
+
+Total test count: 43 unit tests + 2 integration tests = 45 tests, all passing.
+
+Ready to proceed to Sprint 2.
+
+**⚠️ IMPORTANT NOTE - Plan Revision (v2.0):**
+After Sprint 1 completion, the implementation approach was fundamentally revised from an interpolation-based service to a **physics-based antenna model with correction surfaces**.
+
+**Impact on Sprint 1 artifacts:**
+- Sprint 1's data types (`BSplineModel4D`, etc.) will be **partially retained** but repurposed:
+  - `BSplineModel4D` structure used for **correction surfaces** (Sprint 4), not primary model
+  - New physics-based structures added (`ReflectorGeometry`, `FeedParameters`, `MeshParameters`) in Sprint 2-3
+- Core error handling and configuration systems from Sprint 1 remain valid
+- `CalibrationRepository` concept remains, but will load:
+  - Antenna configurations (physical parameters)
+  - Correction surfaces (B-spline data)
+  - Combined model: physics + corrections
+
+**Data loading note:**
+- Original Sprint 3 was "Calibration Data Management" (loading, repository)
+- Revised Sprint 3 is now "Surface Error & Mesh Models" (physics implementation)
+- **Data repository and loading** functionality will be integrated into **Sprint 5** (REST API implementation)
+- Service will load calibration artifacts and apply: `G/T = PhysicsModel(antenna_config) + CorrectionSurface(freq, cone, clock)`
 
 ---
 
-## Sprint 2: B-Spline Interpolation Engine
+## Sprint 2: Physical Optics Computation Engine
 
-**Goal:** Implement the core computation engine for 4D B-spline interpolation
+**Goal:** Implement the core physical optics model for parabolic reflector antenna pattern computation
+
+**Reference:** See `docs/antenna-model-design-doc.md` Sections 2-3 for mathematical foundations
 
 ### Tasks
 
-#### 2.1 1D B-Spline Primitives (4-5 days)
-**Objective:** Implement fundamental B-spline basis function evaluation
+#### 2.1 Antenna Geometry Data Structures (3-4 days)
+**Objective:** Define data structures for antenna geometry and physical parameters
 
 **Steps:**
-- Create `src/model/bspline.rs` with:
-  - `find_knot_interval()` - binary search for knot span
-  - `basis_functions()` - Cox-de Boor recursive algorithm
-  - `basis_derivatives()` - derivative computation (for future use)
-- Implement efficient caching for repeated evaluations
-- Add comprehensive unit tests against known B-spline values
-- Benchmark performance and optimize hot paths
+- Create `src/model/geometry.rs` with core structures:
+  - `ReflectorGeometry` - dish diameter, focal length, f/D ratio, surface RMS
+  - `FeedParameters` - position (x, y, z), pattern parameters (q-factor), phase center offset
+  - `MeshParameters` - mesh spacing, wire diameter, angle of incidence effects
+  - `AntennaConfiguration` - combines all geometry for a complete antenna
+- Add coordinate system definitions:
+  - Aperture coordinates (ρ, φ') for integration
+  - Far-field coordinates (θ, φ) for pattern
+  - E-clock/E-cone to Cartesian transformations
+- Implement builder patterns for ergonomic construction
+- Add validation for physical constraints (f/D > 0, diameter > 0, etc.)
 
 **Acceptance Criteria:**
-- Basis function evaluation matches reference implementations
-- Binary search completes in O(log n) time
-- Unit tests cover edge cases (boundaries, repeated knots)
-- Performance benchmarks show <1μs per evaluation
+- All geometry structures compile with proper validation
+- Coordinate transformation methods tested against hand calculations
+- Builder patterns allow easy test fixture creation
+- Documentation comments on all public types
 
 **Files to Create:**
-- `src/model/bspline.rs`
+- `src/model/geometry.rs`
 - `src/model/mod.rs`
-- `benches/bspline_bench.rs`
+- `src/model/coordinates.rs` (coordinate transformations)
 
 **Test Coverage:**
-- Known B-spline values (compare to published tables)
-- Boundary conditions
-- Repeated knot handling
+- Geometry validation (physical constraints)
+- Coordinate transformations (E-clock/E-cone ↔ Cartesian per Section 2.5)
+- Builder pattern tests
+- Round-trip coordinate conversions
+
+---
+
+#### 2.2 Phase Function Implementations (5-6 days)
+**Objective:** Implement all phase components for physical optics integration
+
+**Steps:**
+- Create `src/model/phase.rs` implementing phase functions from Section 2.2:
+  - `phase_path(ρ, φ', θ, φ, f)` - Standard parabolic path phase: `k·[ρ²/(4f) - ρ·sin(θ)·cos(φ-φ')]`
+  - `phase_feed_displacement(ρ, φ', δ_feed, α, f)` - Coma aberration: `k·δ_feed·[ρ/(2f)]·[2·cos(α) - (ρ/(2f))·cos(2α-φ')]`
+  - `phase_surface_error(ρ, φ', ε, θ_incident)` - Surface errors: `(4π/λ)·ε(ρ,φ')·cos(θ_incident)`
+  - `phase_mesh(d_mesh, λ, θ_incident)` - Mesh effects: `arctan[(2π·d_mesh/λ)·sin(θ_incident)]`
+  - `phase_total()` - Combines all phase components
+- Implement surface error modeling:
+  - Random Gaussian surface (for testing)
+  - Systematic error patterns (Zernike polynomials)
+- Add wavenumber calculation: `k = 2π/λ`
+
+**Acceptance Criteria:**
+- Each phase function matches equations in design doc Section 2.2
+- Combined phase produces correct aberration patterns
+- Unit tests verify phase contributions at known points
+- Numerical stability for extreme parameters
+
+**Files to Create:**
+- `src/model/phase.rs`
+- `tests/unit/phase_tests.rs`
+
+**Test Coverage:**
+- Individual phase component calculations
+- Combined phase at various feed displacements
+- Coma lobe formation verification
+- Edge cases (on-axis, large offsets)
+
+**References:**
+- Design doc Section 2.2 (Phase Components)
+- Classical optics texts for coma aberration validation
+
+---
+
+#### 2.3 Feed Illumination Model (3-4 days)
+**Objective:** Implement feed pattern models for aperture illumination
+
+**Steps:**
+- Create `src/model/illumination.rs` with:
+  - `cos_q_pattern(ψ, q)` - Cosine approximation: `cos(ψ)^q` for `ψ < π/2`
+  - `feed_angle(ρ, φ', feed_pos, f)` - Angle from feed to aperture point
+  - `illumination_amplitude(ρ, φ', feed_params)` - Combined amplitude
+  - Support for asymmetric patterns (E-plane vs H-plane)
+- Implement q-factor selection for edge taper:
+  - q ≈ 6-8 for 10 dB edge taper
+  - q ≈ 10-12 for 12 dB edge taper
+- Add phase center offset modeling
+- Test against known feed patterns
+
+**Acceptance Criteria:**
+- cos^q pattern produces correct edge taper
+- Feed angle calculation verified geometrically
+- Asymmetric E/H plane patterns supported
+- Tests compare to measured feed patterns (if available)
+
+**Files to Create:**
+- `src/model/illumination.rs`
+
+**Test Coverage:**
+- cos^q pattern at various q values
+- Edge taper calculations (dB at edge vs center)
+- Feed angle geometry
+- Phase center effects
+
+**References:**
+- Design doc Section 2.3 (Illumination Function)
+- Antenna textbooks for feed pattern validation
+
+---
+
+#### 2.4 Aperture Integration Engine (5-6 days)
+**Objective:** Implement numerical integration over reflector aperture
+
+**Steps:**
+- Create `src/model/integration.rs` with:
+  - `integrate_aperture(θ, φ, config, frequency)` - Main integration function
+  - Numerical integration method (adaptive Simpson's or Gaussian quadrature)
+  - Integration in polar coordinates (ρ, φ')
+  - Integration limits: `ρ ∈ [0, D/2]`, `φ' ∈ [0, 2π]`
+- Implement integrand function:
+  - Combine illumination amplitude × exp(j·Ψ_total)
+  - Include aperture blockage (feed structure)
+  - Handle edge effects
+- Optimize for performance:
+  - Adaptive grid refinement near nulls
+  - Parallel integration for batch evaluations
+  - Caching of frequently-used patterns
+- Add convergence monitoring and error estimation
+
+**Acceptance Criteria:**
+- Integration converges to stable values
+- Accuracy validated against known patterns (e.g., uniform illumination)
+- Performance acceptable for real-time use (<100ms target)
+- Adaptive refinement works near pattern nulls
+
+**Files to Create:**
+- `src/model/integration.rs`
+- `benches/integration_bench.rs`
+
+**Test Coverage:**
+- Uniform illumination (compare to analytical solution)
+- Tapered illumination (cos^q patterns)
+- Various feed displacements (coma lobe formation)
+- Convergence tests
 - Performance benchmarks
 
-**Reference:**
-- "A Practical Guide to Splines" by de Boor
-- Verify against scipy.interpolate results
+**Numerical Methods:**
+- Consider `quadrature` or `integrate` crates for adaptive integration
+- May implement custom integrator for performance
 
 ---
 
-#### 2.2 4D Tensor Interpolation (5-6 days)
-**Objective:** Extend 1D B-splines to 4D tensor interpolation
+#### 2.5 Far-Field Pattern Computation (4-5 days)
+**Objective:** Complete far-field electric field and gain pattern computation
 
 **Steps:**
-- Create `src/model/interpolation.rs` with:
-  - `evaluate_4d()` - main interpolation entry point
-  - `tensor_product()` - combines 1D basis functions
-  - `extract_local_coefficients()` - retrieves relevant coefficient subset
-- Implement dimension ordering (azimuth, elevation, frequency, temperature)
-- Optimize memory access patterns for cache efficiency
-- Add interpolation accuracy tests
+- Create `src/model/pattern.rs` with:
+  - `compute_electric_field(θ, φ, config, frequency)` - Far-field E-field from Section 2.1
+  - `compute_gain_db(θ, φ, config, frequency)` - Gain in dB
+  - `compute_g_over_t(θ, φ, config, frequency, temperature)` - G/T ratio
+  - Normalization to peak gain (on-axis or measured reference)
+- Implement Ruze efficiency (Section 2.4):
+  - `η_ruze = exp(-(4π·σ/λ)²)` for surface RMS σ
+  - Apply to overall gain calculation
+- Add mesh transparency effects (Section 2.4):
+  - `T = 1/(1 + (λ₀/λ)²)` for low frequencies
+  - Combine with Ruze efficiency
+- Implement pattern utilities:
+  - Peak gain normalization
+  - Beamwidth calculations
+  - Sidelobe level extraction
+- Add caching for repeated evaluations at same frequency
 
 **Acceptance Criteria:**
-- 4D interpolation produces continuous, smooth results
-- Accuracy within floating-point precision for synthetic data
-- Memory access patterns minimize cache misses
-- Tests verify C2 continuity (for cubic splines)
+- Far-field pattern matches design doc Section 2.1 formulation
+- Ruze efficiency correctly models surface errors
+- Mesh effects match frequency dependencies
+- On-axis gain matches theoretical expectations
+- Coma lobes appear at correct angles for feed displacement
 
 **Files to Create:**
-- `src/model/interpolation.rs`
-- `tests/integration/interpolation_tests.rs`
+- `src/model/pattern.rs`
+- `tests/integration/pattern_tests.rs`
 
 **Test Coverage:**
-- Synthetic 4D function interpolation (polynomial, trigonometric)
-- Boundary point evaluation
-- Continuity verification
-- Derivative continuity (if implemented)
+- On-axis gain (no feed displacement)
+- Coma lobe formation and location
+- Ruze efficiency vs frequency
+- Mesh transparency at low frequencies
+- Comparison to measured patterns (if available)
 
-**Test Data:**
-- Create synthetic 4D datasets with known analytical forms
-- Example: `f(az, el, freq, temp) = sin(az) * cos(el) * log(freq)`
-
----
-
-#### 2.3 Extrapolation Handling (3-4 days)
-**Objective:** Implement safe out-of-range query handling
-
-**Steps:**
-- Create `src/model/extrapolation.rs` with:
-  - `ExtrapolationStrategy` enum (Linear, Constant, Nearest)
-  - `check_bounds()` - determine if query is in-range
-  - `extrapolate_4d()` - apply strategy per dimension
-  - Warning generation for out-of-range queries
-- Implement conservative default strategy (nearest neighbor)
-- Add configuration for extrapolation behavior
-- Test extrapolation accuracy and stability
-
-**Acceptance Criteria:**
-- Out-of-range queries return valid results (no panics)
-- Warnings correctly identify which dimensions are extrapolated
-- Extrapolated values are physically reasonable
-- Tests cover all dimension combinations
-
-**Files to Create:**
-- `src/model/extrapolation.rs`
-- Update `src/model/interpolation.rs` to integrate extrapolation
-
-**Test Coverage:**
-- Each dimension out-of-range individually
-- Multiple dimensions out-of-range simultaneously
-- Extrapolation strategy variations
-- Warning message generation
-
----
-
-#### 2.4 Performance Optimization (2-3 days)
-**Objective:** Optimize interpolation to meet <1ms evaluation target
-
-**Steps:**
-- Profile interpolation code with `cargo flamegraph`
-- Optimize hot paths identified in profiling:
-  - Pre-compute knot interval searches where possible
-  - Use SIMD for basis function evaluation (if beneficial)
-  - Optimize coefficient indexing and memory layout
-- Add performance benchmarks for various model sizes
-- Document performance characteristics
-
-**Acceptance Criteria:**
-- Single evaluation completes in <1ms (p95) for typical model
-- Benchmark suite tracks performance across model sizes
-- No performance regressions in CI
-- Documentation explains performance trade-offs
-
-**Files to Create:**
-- `benches/interpolation_bench.rs`
-- `docs/performance-characteristics.md`
-
-**Benchmarks:**
-- Various knot grid sizes (10x10x10x1, 50x50x20x1, etc.)
-- Different spline orders (linear, cubic)
-- Memory usage tracking
+**References:**
+- Design doc Section 2.1 (Core Physical Optics Model)
+- Design doc Section 2.4 (Mesh Reflector Efficiency)
 
 ---
 
 ### Sprint 2 Deliverables
 
-- ✅ Working 4D B-spline interpolation engine
-- ✅ Extrapolation handling with warnings
-- ✅ Performance meeting <1ms evaluation target
+- ✅ Complete physical optics computation engine
+- ✅ All phase components implemented (path, coma, surface, mesh)
+- ✅ Feed illumination model with configurable patterns
+- ✅ Aperture integration with adaptive quadrature
+- ✅ Far-field pattern computation including Ruze and mesh effects
+- ✅ Coma lobe modeling for off-axis feeds
+- ✅ Performance meeting <100ms target for single evaluation
 - ✅ Comprehensive unit and integration tests
-- ✅ Performance benchmark suite
-- ✅ 85%+ test coverage
+- ✅ 80%+ test coverage
 
 ---
 
-## Sprint 3: Calibration Data Management
+## Sprint 3: Surface Error & Mesh Reflector Models
 
-**Goal:** Implement data loading, repository, and in-memory management
+**Goal:** Implement advanced surface error modeling, mesh effects, and edge case handling for the physical optics engine
+
+**Reference:** See `docs/antenna-model-design-doc.md` Sections 2.4 and 3.1 for mathematical foundations
 
 ### Tasks
 
-#### 3.1 Binary Artifact Serialization (3-4 days)
-**Objective:** Implement efficient binary format for calibration data
+#### 3.1 Ruze Surface Error Model (3-4 days)
+**Objective:** Implement surface error modeling using Ruze's equation and Zernike polynomials
 
 **Steps:**
-- Create `src/data/serializer.rs` with:
-  - `serialize_calibration()` - write calibration to binary
-  - `deserialize_calibration()` - read from binary
-  - Checksum/CRC validation for data integrity
-  - Version header for format evolution
-- Choose serialization format (bincode recommended for performance)
-- Add compression option for larger datasets
-- Test serialization round-trips and compatibility
+- Create `src/model/surface.rs` with:
+  - `ruze_efficiency(σ, λ)` - Ruze equation: `η = exp(-(4π·σ/λ)²)`
+  - `ZernikePolynomial` - Systematic aberrations (coma, astigmatism, spherical, etc.)
+  - `surface_error_pattern(ρ, φ, zernike_coeffs)` - Combine Zernike terms
+  - Random Gaussian surface generator (for Monte Carlo testing)
+- Implement Zernike polynomials up to 5th order:
+  - Piston, tip/tilt (order 1)
+  - Defocus, astigmatism (order 2)
+  - Coma (order 3)
+  - Spherical aberration (order 4)
+  - Higher-order terms (order 5)
+- Add RMS calculation for arbitrary surface patterns
+- Integrate with phase calculation from Sprint 2
 
 **Acceptance Criteria:**
-- Serialization preserves all calibration data accurately
-- Checksums detect corrupted files
-- Version header allows format migration
-- Compressed files reduce size by >50% (if enabled)
+- Ruze efficiency matches published values for various σ/λ ratios
+- Zernike polynomials orthonormal over unit circle
+- Surface RMS calculation verified
+- Integration with phase functions produces correct degradation
 
 **Files to Create:**
-- `src/data/serializer.rs`
-- Update `src/data/types.rs` with serialization metadata
+- `src/model/surface.rs`
+- `tests/unit/surface_tests.rs`
 
 **Test Coverage:**
-- Round-trip serialization
-- Checksum validation (both valid and corrupted data)
-- Version compatibility
-- Compression effectiveness
+- Ruze efficiency at various frequencies
+- Zernike polynomial orthogonality
+- RMS calculations for known surfaces
+- Combined effect on antenna gain
+- Comparison to literature values
+
+**References:**
+- Design doc Section 2.4 (Mesh Reflector Efficiency)
+- Ruze, J. "Antenna Tolerance Theory" (1966)
+- Zernike polynomial standards (Noll ordering)
 
 ---
 
-#### 3.2 Calibration Data Loader (4-5 days)
-**Objective:** Load calibration artifacts from filesystem
+#### 3.2 Mesh Reflector Physics (4-5 days)
+**Objective:** Implement frequency-dependent mesh transparency and scattering effects
 
 **Steps:**
-- Create `src/data/loader.rs` with:
-  - `load_calibration()` - load single calibration file
-  - `load_all_calibrations()` - load from directory
-  - Parallel loading for multiple files (using `rayon`)
-  - Detailed error reporting for load failures
-- Integrate with configuration system for paths
-- Add validation checks on loaded data
-- Implement fail-fast strategy for corrupted data
+- Create `src/model/mesh.rs` with:
+  - `mesh_transparency(λ, mesh_spacing, wire_diameter)` - Frequency-dependent transmission
+  - `mesh_reflection_coefficient()` - Effective reflectivity
+  - Low-frequency model: `T = 1/(1 + (λ₀/λ)²)` for `λ > 10·mesh_spacing`
+  - High-frequency model: Geometric optics approximation
+  - Transition region: Floquet mode analysis (simplified)
+- Implement angle-of-incidence effects:
+  - Varying transparency with incident angle
+  - Polarization dependence (if significant)
+- Add wire diameter effects:
+  - Thin wire approximation for small diameters
+  - Finite width corrections for larger wires
+- Integrate with Ruze efficiency for combined surface effects
 
 **Acceptance Criteria:**
-- Successfully loads valid calibration files
-- Clear error messages for missing/corrupted files
-- Parallel loading speeds up multi-antenna scenarios
-- Validates data structure integrity after loading
+- Transparency model matches expected behavior vs frequency
+- Low-frequency cutoff correctly modeled
+- High-frequency asymptotic behavior correct
+- Combined with surface RMS for realistic predictions
+- Validated against measurements (if available)
 
 **Files to Create:**
-- `src/data/loader.rs`
-- `tests/fixtures/` directory with sample calibration files
+- `src/model/mesh.rs`
+- `tests/unit/mesh_tests.rs`
 
 **Test Coverage:**
-- Valid file loading
-- Missing file error handling
-- Corrupted file detection
-- Parallel loading performance
-- Fixture data for testing
+- Transparency vs frequency (across 100 MHz - 50 GHz)
+- Mesh parameter sensitivity (spacing, diameter)
+- Angle-of-incidence effects
+- Combined Ruze + mesh efficiency
+- Edge cases (very large/small mesh spacing)
 
-**Test Fixtures:**
-- Create 2-3 minimal but valid calibration files
-- One intentionally corrupted file for error testing
+**References:**
+- Design doc Section 2.2 (Mesh-Specific Phase) and 2.4
+- Wire mesh antenna literature
+- EM scattering theory for periodic structures
 
 ---
 
-#### 3.3 Calibration Repository (4-5 days)
-**Objective:** Implement in-memory repository for antenna models
+#### 3.3 Edge Case Handling (4-5 days)
+**Objective:** Handle edge cases from design doc Section 3.1 (large feed offsets, near-boresight scenarios)
 
 **Steps:**
-- Create `src/data/repository.rs` with:
-  - `CalibrationRepository` struct with `HashMap<String, AntennaCalibration>`
-  - `load_from_config()` - initialize from configuration
-  - `get_calibration()` - retrieve by antenna ID
-  - `list_antennas()` - return all loaded antenna IDs
-  - `get_validity_ranges()` - query bounds for an antenna
-- Implement thread-safe access (using `Arc` and `RwLock` if needed)
-- Add startup validation and logging
-- Create repository builder for testing
+- Create `src/model/edge_cases.rs` with:
+  - Large feed offset detection (δ_feed > 0.3·f)
+  - Switch to ray tracing for large offsets
+  - Higher-order Seidel aberration terms
+  - Spillover calculation for offset feeds
+- Implement ray tracing mode:
+  - Trace rays from aperture points to focus
+  - Calculate reflection angles and path lengths
+  - More accurate for severe aberrations
+- Handle near-boresight/far-feed scenario:
+  - Direct feed reception path
+  - Reflected path calculation
+  - Interference between direct and reflected paths
+- Add numerical stability improvements:
+  - Adaptive integration near nulls
+  - Minimum noise floor enforcement (-60 dB typical)
+  - Kaiser windowing for sidelobe continuity
 
 **Acceptance Criteria:**
-- Repository loads all configured antennas at startup
-- Thread-safe concurrent access
-- Clear logging of loaded antennas
-- Tests use builder pattern for easy fixture creation
+- Large offset handling prevents catastrophic errors
+- Ray tracing mode produces physically reasonable results
+- Direct feed path correctly modeled
+- Pattern nulls resolved with adaptive integration
+- Noise floor prevents numerical instabilities
 
 **Files to Create:**
-- `src/data/repository.rs`
-- Update `src/data/mod.rs` to export repository
+- `src/model/edge_cases.rs`
+- `src/model/ray_trace.rs` (ray tracing implementation)
+- `tests/unit/edge_case_tests.rs`
 
 **Test Coverage:**
-- Loading multiple antennas
-- Antenna ID lookup (found and not found)
-- Concurrent access patterns
-- Builder pattern for test fixtures
+- Large feed offset scenarios (δ > 0.3f, δ > 0.5f)
+- Near-boresight test cases
+- Null depth and location
+- Numerical stability tests
+- Comparison: physical optics vs ray tracing overlap region
+
+**References:**
+- Design doc Section 3.1 (Edge Cases)
+- Hopkins, H.H. "Wave Theory of Aberrations"
+- Ray tracing texts for validation
 
 ---
 
-#### 3.4 Startup Sequence & Validation (2-3 days)
-**Objective:** Implement robust startup with data loading and validation
+#### 3.4 Coordinate System Completeness (3-4 days)
+**Objective:** Complete all coordinate transformations and ensure consistency
 
 **Steps:**
-- Create initialization sequence:
-  - Load service configuration
-  - Load antenna configuration
-  - Load all calibration artifacts
-  - Validate loaded data
-  - Log startup summary
-- Add structured logging for each startup phase
-- Implement graceful failure for missing/invalid data
-- Add startup time tracking
+- Enhance `src/model/coordinates.rs` with:
+  - E-clock/E-cone ↔ Cartesian (feed position)
+  - Azimuth/Elevation ↔ θ/φ (far-field)
+  - Aperture (ρ, φ') ↔ (x, y, z) (reflector surface)
+  - Quaternion rotations for antenna mount orientation
+- Implement feed position calculation:
+  - `displacement = 2·f·tan(cone_angle/2)`
+  - `x_feed = displacement·cos(clock_angle)`
+  - `y_feed = displacement·sin(clock_angle)`
+  - `z_feed = -displacement²/(4f)` for large displacements
+- Add coordinate system validation:
+  - Round-trip transformations preserve values
+  - Jacobian determinants for integration variable changes
+- Document coordinate system conventions clearly
 
 **Acceptance Criteria:**
-- Startup completes in <10s for 5 antennas
-- Each startup phase is clearly logged
-- Validation catches common data issues
-- Service fails fast with clear error messages if data is invalid
+- All transformations invertible (round-trip error < 1e-10)
+- E-clock/E-cone matches design doc Section 2.5
+- Azimuth/Elevation conventions documented
+- Hand calculations verify key transformations
+- No sign errors or angle convention mistakes
 
 **Files to Create:**
-- Update `src/main.rs` with startup logic
-- Create `src/startup.rs` helper module
+- Update `src/model/coordinates.rs` (from Sprint 2)
+- `tests/unit/coordinates_tests.rs`
+- `docs/coordinate-systems.md` (documentation)
 
 **Test Coverage:**
-- Successful startup sequence
-- Missing calibration file handling
-- Invalid calibration data detection
-- Startup time benchmarks
+- Round-trip transformations (all coordinate pairs)
+- Feed position at known E-clock/E-cone values
+- Jacobian determinants for integration
+- Edge cases (0°, 90°, 180°, 360°)
+- Comparison to hand calculations
+
+**References:**
+- Design doc Section 2.5 (Coordinate Transformations)
+- Antenna coordinate system standards
 
 ---
 
 ### Sprint 3 Deliverables
 
-- ✅ Binary serialization with checksums
-- ✅ Calibration data loader with parallel support
-- ✅ Thread-safe calibration repository
-- ✅ Robust startup sequence with validation
-- ✅ Test fixtures for integration testing
+- ✅ Ruze surface error model with Zernike polynomials
+- ✅ Mesh reflector physics with frequency-dependent transparency
+- ✅ Edge case handling (large offsets, ray tracing, near-boresight)
+- ✅ Complete coordinate transformation library
+- ✅ Integration with Sprint 2 physical optics engine
+- ✅ Comprehensive test coverage for edge cases
+- ✅ Performance validated for realistic scenarios
 - ✅ 80%+ test coverage
 
 ---
 
-## Sprint 4: Calibration CLI Tool
+## Sprint 4: Calibration Tool with Correction Surfaces
 
-**Goal:** Build command-line tool to generate calibration artifacts from measurement data
+**Goal:** Build calibration tool that fine-tunes physical model and generates correction surfaces from measurement data
+
+**Reference:** See `docs/antenna-model-design-doc.md` Section 4 (Calibration Methodology) for mathematical approach
+
+**Philosophy:**
+1. Physical optics model (Sprint 2-3) provides **base predictions** using hybrid parameters (some shared, some per-antenna)
+2. **Optional coarse tuning**: Optimize 2-3 key physical parameters (surface RMS, mesh spacing) for per-antenna fit
+3. **Main calibration output**: Correction surface fitted to residuals (measured - model)
+4. Corrections account for:
+   - Band-split losses (frequency-dependent, antenna-specific)
+   - Model shortcomings (approximations in physical model)
+   - Antenna-specific deviations from nominal design
+5. **Runtime**: G/T_final(freq, cone, clock) = Physical_Model + Correction_Surface
 
 ### Tasks
 
-#### 4.1 CLI Framework & Argument Parsing (2-3 days)
-**Objective:** Set up CLI structure and command-line interface
+#### 4.1 Antenna Configuration & Hybrid Parameters (2-3 days)
+**Objective:** Define antenna configuration with hybrid parameter approach
 
 **Steps:**
-- Create `calibrate/src/main.rs` with `clap` argument parsing:
-  - `--input <path>` - measurement CSV file or S3 URL
-  - `--output <path>` - output binary file path
-  - `--antenna-id <id>` - antenna identifier
-  - `--validate` - run validation after fitting
-  - `--verbose` - detailed logging
-- Implement help text and usage examples
-- Add version information
-- Set up logging with `tracing`
+- Create `calibrate/src/antenna_config.rs` with:
+  - `AntennaConfiguration` struct:
+    - **Shared parameters** (from class/design): diameter, f/D ratio, nominal feed q-factor
+    - **Per-antenna tunable parameters**: surface RMS (0.1-2 mm), mesh spacing (1-10 mm), mesh wire diameter
+    - Distinction between fixed geometry and calibratable parameters
+  - Load shared parameters from antenna class definition file
+  - Define bounds for tunable parameters
+  - Serialization for saving optimized parameters
+- Create antenna class definition format:
+  - YAML file defining antenna classes (e.g., "DSN_34m", "Ground_Station_13m")
+  - Each class specifies shared geometry and nominal physical parameters
+  - Per-antenna config references class and provides overrides
+- Implement simple initial guess for tunable parameters:
+  - Default to nominal values from class definition
+  - User can provide measured surface RMS if available
 
 **Acceptance Criteria:**
-- `calibrate --help` shows clear usage information
-- All arguments parse correctly
-- Validation flags work as expected
-- Version information displays correctly
+- Clear separation between shared and per-antenna parameters
+- Antenna class definitions are reusable across multiple antennas
+- Tunable parameter count is small (2-4 parameters typically)
+- Configuration loads from files correctly
 
 **Files to Create:**
-- `calibrate/src/main.rs`
-- `calibrate/Cargo.toml` (update with dependencies)
-- `calibrate/README.md`
+- `calibrate/src/antenna_config.rs`
+- `calibrate/antenna_classes.yaml` (example)
+- `calibrate/src/mod.rs`
 
 **Test Coverage:**
-- Argument parsing tests (using clap's built-in testing)
-- Help text verification
+- Configuration loading and validation
+- Shared vs per-antenna parameter handling
+- Serialization tests
+
+**Note:** This is much simpler than full parameter optimization - we're only tuning a few key parameters, not fitting the entire model.
 
 ---
 
-#### 4.2 CSV Measurement Parser (3-4 days)
-**Objective:** Parse and validate measurement CSV files
+#### 4.2 Measurement Data Parser & Validation (3-4 days)
+**Objective:** Parse measurement CSV files and prepare for optimization
 
 **Steps:**
 - Create `calibrate/src/parser.rs` with:
   - `parse_measurements()` - read CSV into structured data
-  - `MeasurementPoint` struct (azimuth, elevation, frequency, temperature, g_over_t)
+  - `MeasurementPoint` struct (E-clock, E-cone, frequency, G/T or gain)
+  - Extract gain from G/T (requires noise temperature model)
   - Input validation (range checks, missing data handling)
   - Statistics computation (data coverage, density)
 - Support both local files and S3 URLs (using `aws-sdk-s3`)
 - Add data quality checks:
-  - Check for required column headers
-  - Validate numeric ranges
-  - Identify gaps in coverage
-- Generate parsing report
+  - Coverage across frequency range
+  - Coverage across angular range (E-clock/E-cone)
+  - Identify main lobe vs sidelobe measurements
+  - Flag outliers
+- Generate parsing report with coverage heatmaps
 
 **Acceptance Criteria:**
-- Successfully parses valid CSV files
-- Clear error messages for malformed CSV
+- Successfully parses valid CSV files with G/T data
+- Extracts gain using noise temperature assumptions
 - Data quality report identifies coverage gaps
+- Outlier detection flags suspicious measurements
 - S3 download works (if AWS credentials available)
 
 **Files to Create:**
@@ -601,103 +790,281 @@ This implementation plan breaks down the Antenna Model Service into manageable s
 
 **Test Coverage:**
 - Valid CSV parsing
-- Missing columns detection
-- Invalid numeric values
+- G/T to gain conversion
 - Coverage statistics
+- Outlier detection
 - Sample fixture data
 
 **CSV Format Example:**
 ```csv
-azimuth_deg,elevation_deg,frequency_mhz,temperature_k,g_over_t_db
-0.0,45.0,8200.0,290.0,41.5
-5.0,45.0,8200.0,290.0,41.3
+e_clock_deg,e_cone_deg,frequency_mhz,g_over_t_db,temperature_k
+0.0,0.0,8200.0,41.5,50.0
+5.0,0.0,8200.0,41.3,50.0
 ...
 ```
 
+**References:**
+- Design doc Section 4.1 (Input Data Sources)
+
 ---
 
-#### 4.3 B-Spline Fitting Engine (5-6 days)
-**Objective:** Fit B-spline models to measurement data
+#### 4.3 Coarse Parameter Tuning (Optional) (3-4 days)
+**Objective:** Optionally optimize 2-3 key physical parameters for per-antenna fit
 
 **Steps:**
-- Create `calibrate/src/fitter.rs` with:
-  - `fit_bspline_4d()` - main fitting function
-  - Knot placement strategy (uniform or data-adaptive)
-  - Least-squares coefficient solver (using `ndarray-linalg`)
-  - Residual analysis and quality metrics
-- Implement fitting algorithm:
-  - Generate basis function matrix
-  - Set up normal equations
-  - Solve for coefficients
-  - Compute fit quality (RMSE, R²)
-- Add progress reporting for large datasets
-- Implement automatic knot selection based on data density
+- Create `calibrate/src/parameter_tuner.rs` with:
+  - `tune_parameters(measurements, antenna_config)` - lightweight optimization
+  - Objective function: RMS error between model predictions and measurements
+  - Simple optimization algorithm (Nelder-Mead or grid search)
+  - Only tune 2-3 parameters: surface RMS, mesh spacing (optionally wire diameter)
+  - Keep fixed: geometry (diameter, f/D), feed q-factor (unless poor fit)
+- Implement objective function:
+  - For each measurement point:
+    - Convert E-clock/E-cone to θ/φ
+    - Call physical optics model with current parameters
+    - Compute prediction error
+  - Aggregate errors (weighted RMSE, higher weight for main lobe)
+- Add simple monitoring:
+  - Progress logging (iteration count, current error)
+  - Final parameter values vs initial
+  - Report improvement in RMSE
+- Make this step **optional** (flag: `--tune-parameters`)
+  - If skipped, use nominal parameters from antenna class
+  - Correction surface will compensate for any parameter mismatch
 
 **Acceptance Criteria:**
-- Fitting produces smooth interpolants
-- RMSE and R² metrics are computed correctly
-- Automatic knot selection works for sparse/dense data
-- Progress updates for datasets >1000 points
+- Tuning improves fit (reduces RMSE before correction surface fitting)
+- Tuned parameters are physically reasonable
+- Works well with only 2-3 tunable parameters
+- Optional - calibration works without this step
 
 **Files to Create:**
-- `calibrate/src/fitter.rs`
-- Add `ndarray-linalg` dependency
+- `calibrate/src/parameter_tuner.rs`
+- Add `argmin` crate dependency (lightweight optimizer)
 
 **Test Coverage:**
-- Synthetic data fitting (known functions)
-- Fit quality metrics verification
-- Knot placement strategies
-- Performance on various dataset sizes
+- Tuning on synthetic data (known parameters)
+- Skip tuning path (go straight to correction surface)
+- Convergence verification
 
-**References:**
-- Implement least-squares B-spline fitting as per de Boor
-- Consider using existing crates like `ndarray-linalg` for matrix operations
+**Note:** This is much simpler than Task 4.3 v1 - only 2-3 parameters, simple optimizer, optional step.
 
 ---
 
-#### 4.4 Validation & Artifact Generation (3-4 days)
-**Objective:** Validate fitted models and generate calibration artifacts
+#### 4.4 Correction Surface Fitting (5-6 days)
+**Objective:** Fit correction surface to residuals (measured - model) using B-splines or interpolation
+
+**Steps:**
+- Create `calibrate/src/correction_surface.rs` with:
+  - `fit_correction_surface(measurements, model_predictions)` - main fitting function
+  - Compute residuals: Δ(freq, cone, clock) = measured_G/T - model_G/T
+  - Fit 3D B-spline surface to residuals:
+    - Dimensions: frequency, E-cone, E-clock
+    - Cubic splines (order 3) for smooth corrections
+    - Adaptive knot placement based on measurement density
+  - Alternative: Radial basis function (RBF) interpolation for sparse data
+  - Regularization to prevent overfitting (penalize roughness)
+- Implement knot selection strategy:
+  - Denser knots where measurement density is high
+  - Sparser knots in regions with few measurements
+  - Ensure knots span full validity range
+- Handle frequency-dependent corrections:
+  - Separate correction surface per frequency band (if needed)
+  - Or single 3D surface with frequency as dimension
+- Validate correction surface:
+  - Cross-validation (leave-one-out or k-fold)
+  - Check residuals after applying correction
+  - Ensure no large oscillations between measurement points
+
+**Acceptance Criteria:**
+- Correction surface reduces residual errors significantly
+- Fitted surface is smooth (no overfitting)
+- Combined model (physics + correction) meets <1 dB accuracy
+- Correction surface works for:
+  - Band-split losses (frequency-dependent corrections)
+  - Model shortcomings (systematic biases)
+  - Antenna-specific deviations
+
+**Files to Create:**
+- `calibrate/src/correction_surface.rs`
+- `calibrate/src/bspline.rs` (B-spline fitting utilities)
+- Add `ndarray-linalg` dependency for least-squares solver
+
+**Test Coverage:**
+- B-spline fitting on synthetic data
+- Residual reduction verification
+- Cross-validation tests
+- Overfitting prevention (regularization)
+- Sparse data handling
+
+**References:**
+- "A Practical Guide to Splines" by de Boor (B-spline fitting)
+- Original Sprint 4 concept (now applied to corrections, not primary model)
+
+**Note:** This brings back B-splines, but **correctly** - as correction surfaces, not as the primary antenna model.
+
+---
+
+#### 4.5 Validation & Artifact Generation (3-4 days)
+**Objective:** Validate calibrated model (physics + corrections) and generate deployment artifacts
 
 **Steps:**
 - Create `calibrate/src/validator.rs` with:
-  - Cross-validation (k-fold or leave-one-out)
-  - Error distribution analysis
-  - Extrapolation behavior checks
-  - Comparison to measurement data
-- Update `calibrate/src/serializer.rs`:
-  - Write fitted model to binary artifact
-  - Include metadata (fit date, quality metrics, data source)
-  - Generate human-readable summary report
-- Create detailed validation report output
+  - Cross-validation (k-fold on measurement set)
+  - Error metrics computed for combined model (physics + correction):
+    - RMSE, max error, R² for full model
+    - Before/after comparison (model-only vs model+correction)
+  - Main lobe accuracy verification (<1 dB)
+  - First sidelobe accuracy verification (<1 dB)
+  - Outlier scenario identification (>1 dB error cases)
+  - Separate error analysis by:
+    - Frequency band (check band-split loss corrections)
+    - Angular region (main lobe, sidelobes)
+- Create `calibrate/src/serializer.rs`:
+  - Serialize **antenna configuration**:
+    - Antenna class reference (shared parameters)
+    - Tuned physical parameters (surface RMS, mesh spacing if optimized)
+    - Nominal parameters (if tuning was skipped)
+  - Serialize **correction surface**:
+    - B-spline coefficients, knots, dimensions
+    - Or RBF centers and weights
+    - Validity ranges (freq, cone, clock)
+  - Include **metadata**:
+    - Calibration date, measurement source
+    - Quality metrics (RMSE, R², max error)
+    - Parameter tuning flag (was tuning used?)
+    - Number of measurement points
+  - Binary format with version header and checksums
+- Generate validation report:
+  - Error statistics (overall and by region/frequency)
+  - Residual plots: measured vs (model), measured vs (model+correction)
+  - Correction surface visualization (heatmaps at sample frequencies)
+  - Tuned parameter values (if applicable)
+  - Coverage map showing measurement locations
 
 **Acceptance Criteria:**
-- Validation identifies overfitting or poor fits
-- Cross-validation RMSE within 1 dB (per requirements)
+- Validation metrics meet design doc Section 4.4 targets:
+  - **Combined model (physics + correction)**: Main-lobe max error < 1.0 dB ✓
+  - **Combined model**: First sidelobe max error < 1.0 dB ✓
+  - R² > 0.95 for combined model
+  - Correction surface reduces residuals from model-only baseline
 - Binary artifacts load correctly in main service
-- Summary report is human-readable
+- Human-readable validation report generated
+- Artifacts contain:
+  - Antenna configuration (class + tuned params)
+  - Correction surface (B-spline or RBF data)
+  - Metadata for provenance and quality
 
 **Files to Create:**
 - `calibrate/src/validator.rs`
 - `calibrate/src/serializer.rs`
-- `calibrate/src/report.rs` (for generating summary)
+- `calibrate/src/report.rs` (HTML/PDF report generation)
 
 **Test Coverage:**
 - Validation metrics computation
 - Cross-validation implementation
-- Artifact serialization
+- Artifact serialization/deserialization (both components)
 - Report generation
+
+**References:**
+- Design doc Section 4.4 (Validation Metrics)
+
+**Note:** Artifact now contains TWO components: (1) antenna configuration with optional tuned params, (2) correction surface.
+
+---
+
+#### 4.6 CLI Integration (2-3 days)
+**Objective:** Create command-line interface tying all calibration steps together
+
+**Steps:**
+- Create `calibrate/src/main.rs` with `clap` argument parsing:
+  - `--input <path>` - measurement CSV file or S3 URL (G/T data)
+  - `--output <path>` - output calibration artifact path
+  - `--antenna-id <id>` - antenna identifier
+  - `--antenna-class <name>` - antenna class (e.g., "DSN_34m") for shared parameters
+  - `--tune-parameters` - optional flag to enable parameter tuning (default: skip)
+  - `--validate` - run cross-validation after fitting
+  - `--report <path>` - generate validation report
+  - `--verbose` - detailed logging
+- Implement workflow:
+  1. Parse measurement data (CSV with E-clock, E-cone, frequency, G/T)
+  2. Load antenna class definition (shared parameters)
+  3. Create antenna configuration (shared + nominal tunable params)
+  4. **If `--tune-parameters`**: Run lightweight parameter optimization (2-3 params)
+  5. Compute model predictions using physical model (Sprint 2-3)
+  6. Compute residuals: measured - model
+  7. Fit correction surface (B-spline or RBF) to residuals
+  8. **If `--validate`**: Run cross-validation
+  9. Generate calibration artifact (antenna config + correction surface)
+  10. **If `--report`**: Generate validation report (HTML/PDF)
+- Add progress indicators:
+  - Measurement parsing progress
+  - Parameter tuning progress (if enabled)
+  - Correction surface fitting progress
+  - Validation progress
+- Handle errors gracefully with actionable messages
+
+**Acceptance Criteria:**
+- `calibrate --help` shows clear usage information
+- Full workflow executes end-to-end
+- Both modes work: with and without parameter tuning
+- Progress updates keep user informed
+- Clear error messages for common failures
+- Successful calibration generates usable artifacts with both components
+
+**Files to Create:**
+- `calibrate/src/main.rs`
+- `calibrate/Cargo.toml` (update with dependencies)
+- `calibrate/README.md` (usage guide with examples)
+
+**Test Coverage:**
+- Argument parsing tests
+- End-to-end integration test with sample data (both modes)
+- Error handling tests
+
+**Example Usage:**
+```bash
+# Basic calibration (no parameter tuning)
+./calibrate \
+  --input measurements/antenna_1.csv \
+  --output calibration_data/antenna_1.bin \
+  --antenna-id antenna_1 \
+  --antenna-class DSN_34m \
+  --validate \
+  --report reports/antenna_1_validation.html
+
+# With parameter tuning
+./calibrate \
+  --input measurements/antenna_1.csv \
+  --output calibration_data/antenna_1.bin \
+  --antenna-id antenna_1 \
+  --antenna-class DSN_34m \
+  --tune-parameters \
+  --validate \
+  --report reports/antenna_1_validation.html \
+  --verbose
+```
 
 ---
 
 ### Sprint 4 Deliverables
 
-- ✅ Working calibration CLI tool
-- ✅ CSV parsing with data quality checks
-- ✅ B-spline fitting with automatic knot selection
-- ✅ Validation suite with quality metrics
-- ✅ Binary artifact generation
+- ✅ Calibration tool with correction surface fitting
+- ✅ Antenna class system for shared parameters
+- ✅ Optional lightweight parameter tuning (2-3 parameters)
+- ✅ B-spline correction surface fitting to residuals
+- ✅ Validation suite meeting <1 dB accuracy requirements (combined model)
+- ✅ Binary artifact generation containing:
+  - Antenna configuration (class reference + tuned parameters)
+  - Correction surface (B-spline coefficients or RBF data)
+  - Metadata and quality metrics
+- ✅ Comprehensive validation reports (HTML/PDF) showing:
+  - Model-only vs model+correction comparison
+  - Error analysis by frequency and angular region
+  - Correction surface visualizations
 - ✅ Sample calibration artifacts for testing
 - ✅ 75%+ test coverage
+- ✅ End-to-end calibration workflow functional (with and without parameter tuning)
 
 ---
 
@@ -830,47 +1197,111 @@ pub struct EvaluationRequest {
 
 ---
 
-#### 5.4 Single Evaluation Endpoint (4-5 days)
-**Objective:** Implement core antenna evaluation endpoint
+#### 5.4 Calibration Data Repository (3-4 days)
+**Objective:** Implement loading and management of calibration artifacts (antenna configs + correction surfaces)
+
+**Steps:**
+- Create `src/data/repository.rs` with:
+  - `CalibrationRepository` struct managing antenna configurations and correction surfaces
+  - `load_from_config()` - load all antennas at startup
+  - `get_antenna_config(antenna_id)` - retrieve antenna configuration (physical parameters)
+  - `get_correction_surface(antenna_id)` - retrieve correction surface (B-spline data)
+  - `list_antennas()` - return all loaded antenna IDs
+  - Thread-safe access (using `Arc` for shared access)
+- Create `src/data/loader.rs` with:
+  - `load_calibration_artifact(path)` - deserialize calibration artifact
+  - Parse antenna configuration (class reference + tuned parameters)
+  - Parse correction surface (B-spline coefficients/knots or RBF data)
+  - Validation checks on loaded data
+- Integrate with configuration system:
+  - Read antenna list from `calibration_data/antennas.yaml`
+  - Load binary artifacts from `calibration_data/*.bin`
+- Add startup validation and logging:
+  - Log loaded antennas with key parameters
+  - Validate correction surface dimensions
+  - Check validity ranges
+
+**Acceptance Criteria:**
+- Repository loads all configured antennas at startup
+- Both components accessible: antenna config + correction surface
+- Thread-safe concurrent access
+- Clear logging of loaded antennas
+- Fail-fast on corrupted or missing artifacts
+
+**Files to Create:**
+- `src/data/repository.rs`
+- `src/data/loader.rs`
+- Update `src/data/mod.rs` to export repository
+- Update `src/data/types.rs` if needed for new artifact format
+
+**Test Coverage:**
+- Loading multiple antennas
+- Antenna lookup (found and not found)
+- Artifact deserialization (both components)
+- Validation of loaded data
+- Concurrent access patterns
+
+**Note:** This brings back the repository concept from original Sprint 3, but adapted for new calibration artifact format (antenna config + correction surface).
+
+---
+
+#### 5.5 Single Evaluation Endpoint (4-5 days)
+**Objective:** Implement core antenna evaluation endpoint with physics model + correction surface
 
 **Steps:**
 - Create service layer in `src/service/evaluator.rs`:
-  - `evaluate_antenna()` - orchestrate single evaluation
+  - `evaluate_antenna(antenna_id, freq, cone, clock)` - orchestrate single evaluation
   - Input validation against antenna validity ranges
-  - Call interpolation engine
-  - Generate warnings for out-of-range queries
-  - Track computation time
+  - **Step 1: Load antenna config and correction surface** from repository
+  - **Step 2: Compute base prediction** using physical optics model (Sprint 2-3) with antenna config parameters
+  - **Step 3: Evaluate correction surface** at (freq, cone, clock) using B-spline interpolation
+  - **Step 4: Combine**: `G/T_final = G/T_physics + G/T_correction`
+  - Generate warnings for:
+    - Out-of-range queries (extrapolated regions in correction surface)
+    - Physical model edge cases (large feed offsets, etc.)
+  - Track computation time (physics model + correction separately)
+- Create `src/model/correction_interpolator.rs`:
+  - `evaluate_correction(correction_surface, freq, cone, clock)` - B-spline interpolation
+  - Reuse B-spline evaluation code from Sprint 1 data types (repurposed)
+  - Handle out-of-range gracefully (return warning, use nearest or zero)
 - Add handler in `src/api/handlers.rs`:
   - `POST /api/v1/evaluate`
   - Request validation and parsing
   - Error handling and response formatting
-  - Logging with structured fields
-- Integrate with calibration repository
+  - Logging with structured fields (include both physics and correction values)
+- Integrate with calibration repository (Task 5.4)
 - Implement detailed error responses
 
 **Acceptance Criteria:**
-- Endpoint returns correct G/T values for in-range queries
+- Endpoint returns correct G/T values combining physics model + corrections
+- Response includes breakdown (optional debug field): base_model_g_t, correction_g_t, final_g_t
 - Out-of-range queries include appropriate warnings
+- Correction surface evaluation works correctly
 - Error responses follow standard format
 - Response time <100ms (p95) for typical queries
 - Comprehensive logging for debugging
 
 **Files to Create:**
 - `src/service/evaluator.rs`
+- `src/model/correction_interpolator.rs` (B-spline evaluation for corrections)
 - `src/service/mod.rs`
 - Update `src/api/handlers.rs` and `src/api/routes.rs`
 
 **Test Coverage:**
-- Valid evaluation requests
+- Valid evaluation requests (physics + correction)
+- Correction surface interpolation accuracy
+- Combined model output validation
 - Antenna not found errors
-- Out-of-range parameter warnings
+- Out-of-range parameter warnings (both dimensions)
 - Invalid parameter errors
 - Response format validation
 - Integration tests with real calibration data
 
+**Note:** This is where the complete model comes together: `PhysicsModel + CorrectionSurface = Final G/T`
+
 ---
 
-#### 5.5 Input Validation Layer (2-3 days)
+#### 5.6 Input Validation Layer (2-3 days)
 **Objective:** Implement comprehensive input validation
 
 **Steps:**
@@ -904,10 +1335,13 @@ pub struct EvaluationRequest {
 
 - ✅ Production-grade REST API with middleware (built on Sprint 1 foundation)
 - ✅ Enhanced health and status endpoints for K8s probes
-- ✅ Single evaluation endpoint with full validation
+- ✅ **Calibration data repository** loading antenna configs + correction surfaces
+- ✅ **Single evaluation endpoint** combining physics model + correction surface
+- ✅ B-spline interpolation for correction surfaces (Sprint 1 types repurposed)
+- ✅ Complete evaluation pipeline: `G/T_final = PhysicsModel + CorrectionSurface`
 - ✅ Comprehensive error handling and response formatting
 - ✅ Advanced structured logging with request IDs and timing
-- ✅ Integration tests with calibration data
+- ✅ Integration tests with calibration data (both components)
 - ✅ 80%+ test coverage
 
 ---
@@ -1108,7 +1542,7 @@ pub struct EvaluationRequest {
 ### Tasks
 
 #### 7.1 End-to-End Integration Tests (4-5 days)
-**Objective:** Test complete workflows from API to interpolation
+**Objective:** Test complete workflows from API to physical optics computation
 
 **Steps:**
 - Create `tests/integration/` test suite:
@@ -1117,17 +1551,24 @@ pub struct EvaluationRequest {
   - Concurrent request handling
   - Error recovery paths
 - Generate realistic test calibration data:
-  - 2-3 complete antenna models
-  - Various coverage patterns
-  - Edge cases (sparse data, boundary regions)
+  - 2-3 complete antenna models with physical parameters
+  - Various antenna geometries (different f/D, sizes)
+  - Various calibrated parameters (mesh, surface, feed)
+  - Edge cases (large feed offsets, extreme frequencies)
 - Test startup/shutdown sequences
 - Test configuration variations
+- **Validation against measured patterns:**
+  - Compare computed patterns to actual measurements
+  - Verify <1 dB accuracy in main lobe
+  - Verify <1 dB accuracy in first sidelobe
+  - Check coma lobe positions for offset feeds
 
 **Acceptance Criteria:**
 - Integration tests run against real server instance
 - All API endpoints covered by integration tests
 - Concurrent access patterns tested
-- Tests use realistic calibration data
+- Tests use realistic physical antenna models
+- **Model predictions match measurements within 1 dB**
 - All tests pass consistently
 
 **Files to Create:**
@@ -1152,6 +1593,8 @@ pub struct EvaluationRequest {
 **Steps:**
 - Create comprehensive benchmark suite:
   - Single evaluation latency (p50, p95, p99)
+  - Aperture integration convergence time
+  - Pattern computation at various frequencies
   - Batch throughput (requests/second)
   - Heatmap generation time vs. grid size
   - Memory usage over time
@@ -1159,18 +1602,24 @@ pub struct EvaluationRequest {
 - Use `criterion` for statistical benchmarking
 - Set up automated performance tracking
 - Profile with `flamegraph` and `perf`
-- Identify and optimize bottlenecks
+- Identify and optimize bottlenecks:
+  - **Aperture integration** (likely hottest path)
+  - Phase function calculations
+  - Coordinate transformations
+  - Feed pattern evaluations
 
 **Acceptance Criteria:**
-- Single evaluation p95 latency <100ms
+- Single evaluation p95 latency <100ms (physical optics computation)
 - Batch throughput >10 req/s for small batches
 - Heatmap generation meets performance targets
 - Memory usage stable under load
 - No performance regressions in CI
+- **Aperture integration converges accurately within time budget**
 
 **Files to Create:**
 - `benches/api_benchmarks.rs`
-- `benches/interpolation_benchmarks.rs`
+- `benches/physics_engine_benchmarks.rs`
+- `benches/aperture_integration_benchmarks.rs`
 - `benches/load_test.rs`
 - `docs/performance-results.md`
 
@@ -1572,10 +2021,20 @@ helm upgrade --install antenna-model ./helm/antenna-model \
 ### Future Enhancements (Post-Sprint 8)
 
 #### GPU Acceleration (2-3 sprints)
+**Priority: High** - Physical optics integration is compute-intensive
 - Design trait-based compute backend abstraction
-- Implement CUDA or compute shader backend
-- Benchmark performance improvements
-- Add configuration for backend selection
+- Implement CUDA or compute shader backend for aperture integration
+- Parallelize phase calculations across GPU
+- Benchmark performance improvements (target: 10-100x speedup)
+- Add configuration for backend selection (CPU/GPU)
+
+#### B-Spline Interpolation Cache (1-2 sprints)
+**Priority: Medium** - Performance optimization for repeated queries
+- Pre-compute patterns at grid points using physical model
+- Fit B-splines to pre-computed patterns
+- Use interpolation for fast lookup between grid points
+- Fall back to physical model for accuracy-critical queries
+- Hybrid mode: interpolation with physical model validation
 
 #### gRPC API (1-2 sprints)
 - Define protobuf schemas
@@ -1589,15 +2048,16 @@ helm upgrade --install antenna-model ./helm/antenna-model \
 - Custom alerting rules
 - Distributed tracing with OpenTelemetry
 
-#### Multi-Temperature Support (2-3 sprints)
-- Extend to full 4D interpolation (temperature dimension)
-- Update calibration tool for temperature data
-- API changes for temperature parameter
-- Backward compatibility with 3D models
+#### Temperature Modeling (2-3 sprints)
+- Add thermal expansion effects on surface RMS
+- Temperature-dependent mesh properties
+- Feed pattern changes with temperature
+- Extend calibration to include temperature data
 
 #### Uncertainty Quantification (2-3 sprints)
 - Add confidence intervals to predictions
-- Implement bootstrapping or Bayesian approaches
+- Parameter uncertainty propagation from calibration
+- Monte Carlo analysis with parameter distributions
 - Update API to return uncertainty estimates
 - Visualization of uncertainty regions
 
@@ -1609,10 +2069,11 @@ helm upgrade --install antenna-model ./helm/antenna-model \
 
 | Risk | Probability | Impact | Mitigation |
 |------|-------------|--------|------------|
-| B-spline fitting accuracy insufficient | Medium | High | Early validation against known data; fallback to higher-order splines |
-| Performance targets not met | Medium | High | Early benchmarking in Sprint 2; plan for GPU acceleration |
-| Calibration data format evolution | Low | Medium | Version headers in binary format; migration tools |
-| Integration complexity underestimated | Medium | Medium | Buffer time in Sprint 7; daily standups to catch issues early |
+| Physical optics model accuracy insufficient | Medium | High | Early validation against measured patterns in Sprint 2-3; detailed comparison to literature |
+| Aperture integration too slow (>100ms) | Medium | High | Early benchmarking in Sprint 2; adaptive quadrature optimization; GPU acceleration roadmap |
+| Parameter optimization doesn't converge | Medium | High | Multiple optimizer algorithms; good initial guesses; synthetic test cases |
+| Numerical instability (pattern nulls, edge cases) | Medium | Medium | Careful integration schemes; minimum noise floor; extensive edge case testing |
+| Calibration complexity underestimated | Medium | Medium | Start with simple test cases; iterative refinement; differential evolution proven for this |
 | Kubernetes deployment issues | Low | Medium | Test in local cluster early; staging environment validation |
 
 ### Mitigation Strategies
@@ -1633,19 +2094,22 @@ The project is considered successfully completed when:
 
 1. **Functional Requirements**
    - ✅ REST API with all specified endpoints operational
-   - ✅ Calibration CLI tool generates valid artifacts
+   - ✅ **Physical optics computation engine** (aperture integration, phase functions, Ruze, mesh effects)
+   - ✅ **Coma lobe modeling** for off-axis feed positions
+   - ✅ Calibration CLI tool with **parameter optimization** (differential evolution)
    - ✅ Support for multiple antenna configurations
-   - ✅ Interpolation accuracy within 1 dB for in-range queries
+   - ✅ **Model accuracy within 1 dB** for main lobe and first sidelobe (validated against measurements)
    - ✅ Proper warning generation for extrapolated queries
 
 2. **Performance Requirements**
-   - ✅ Single evaluation p95 latency <100ms
+   - ✅ Single evaluation p95 latency <100ms (physical optics computation)
    - ✅ Batch throughput >10 req/s per instance
    - ✅ Startup time <10s
    - ✅ Memory footprint <512MB
 
 3. **Quality Requirements**
    - ✅ >85% test coverage overall
+   - ✅ **Physics model validated against measured antenna patterns**
    - ✅ Zero critical bugs in production
    - ✅ All documentation complete and reviewed
    - ✅ Successful deployment to production environment
@@ -1655,6 +2119,13 @@ The project is considered successfully completed when:
    - ✅ Structured logging for all requests
    - ✅ Operational runbooks complete
    - ✅ On-call team trained on troubleshooting
+
+5. **Scientific Validation Requirements** (New)
+   - ✅ **Ruze efficiency** matches published values for various surface RMS
+   - ✅ **Zernike polynomials** correctly model aberrations
+   - ✅ **Mesh transparency** model validated across frequency range (100 MHz - 50 GHz)
+   - ✅ **Coma lobes** appear at correct angular positions for feed displacement
+   - ✅ Edge case handling (large feed offsets, near-boresight scenarios)
 
 ---
 
@@ -1712,10 +2183,17 @@ Each sprint includes ~15-20% buffer time for:
 - Access to documentation and design specs
 - Development workstation with adequate resources
 
+### Before Sprint 2
+
+- **Access to antenna physics references** (see Appendix A)
+- Understanding of physical optics and electromagnetic theory
+- Familiarity with numerical integration techniques
+
 ### Before Sprint 4
 
-- Sample measurement data (CSV files) for testing calibration tool
-- Understanding of B-spline mathematics (recommend reading materials)
+- Sample measurement data (CSV files) with G/T measurements for testing calibration tool
+- Understanding of optimization algorithms (differential evolution)
+- Access to reference antenna patterns for validation
 
 ### Before Sprint 8
 
@@ -1729,10 +2207,26 @@ Each sprint includes ~15-20% buffer time for:
 
 ### Appendix A: Recommended Reading
 
-**B-Splines and Interpolation:**
-- "A Practical Guide to Splines" by Carl de Boor
-- "Geometric Modeling with Splines" by Cohen et al.
-- SciPy interpolation documentation (for reference implementations)
+**Antenna Physics & Physical Optics:**
+- **"Antenna Theory: Analysis and Design" by Balanis** - Chapters on reflector antennas and physical optics
+- **Ruze, J. "Antenna Tolerance Theory"** (1966) - Classic paper on surface error effects
+- **"Reflector Antennas" by Love (ed.)** - IEEE Press, comprehensive reflector antenna theory
+- Silver, S. "Microwave Antenna Theory and Design" - Radiation Laboratory Series
+- Design doc: `docs/antenna-model-design-doc.md` - Mathematical formulations specific to this project
+
+**Numerical Methods:**
+- **Numerical integration techniques** - Gaussian quadrature, adaptive Simpson's rule
+- **Optimization algorithms** - Differential evolution, Nelder-Mead, gradient-free methods
+- Press et al. "Numerical Recipes" - Chapters on integration and optimization
+
+**Zernike Polynomials & Aberrations:**
+- **Noll, R.J. "Zernike Polynomials and Atmospheric Turbulence"** - Standard reference for Zernike ordering
+- Born & Wolf "Principles of Optics" - Aberration theory
+- Hopkins, H.H. "Wave Theory of Aberrations" - Coma and other Seidel aberrations
+
+**Mesh Reflectors:**
+- **Wire mesh antenna literature** - Frequency-dependent transparency
+- EM scattering theory for periodic structures
 
 **Rust Web Development:**
 - Poem framework documentation
@@ -1742,6 +2236,9 @@ Each sprint includes ~15-20% buffer time for:
 **Kubernetes:**
 - Kubernetes documentation - Deployments, Services, ConfigMaps
 - Helm documentation (if using Helm)
+
+**Optional (for future enhancements):**
+- "A Practical Guide to Splines" by Carl de Boor - If implementing B-spline interpolation cache
 
 ### Appendix B: Useful Tools
 

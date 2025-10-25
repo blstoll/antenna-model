@@ -3,10 +3,8 @@
 //! This service provides REST API access to calibrated antenna models
 //! using 4D B-spline interpolation.
 
-mod api;
-mod config;
-
-use config::ServiceConfig;
+use antenna_model::api;
+use antenna_model::config::{LogFormat, ServiceConfig};
 use tracing::{error, info};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
@@ -66,7 +64,7 @@ fn init_tracing(config: &ServiceConfig) {
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(&log_level));
 
-    let fmt_layer = if config.logging.format == config::LogFormat::Json {
+    let fmt_layer = if config.logging.format == LogFormat::Json {
         // JSON format for structured logging
         tracing_subscriber::fmt::layer()
             .json()
