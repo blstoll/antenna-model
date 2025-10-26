@@ -61,8 +61,8 @@ fn init_tracing(config: &ServiceConfig) {
     // RUST_LOG environment variable takes precedence over config file
     let log_level = std::env::var("RUST_LOG").unwrap_or_else(|_| config.logging.level.clone());
 
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(&log_level));
+    let env_filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&log_level));
 
     let fmt_layer = if config.logging.format == LogFormat::Json {
         // JSON format for structured logging

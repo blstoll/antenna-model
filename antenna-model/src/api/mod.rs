@@ -34,10 +34,7 @@ impl AppState {
 
     /// Get uptime in seconds
     pub fn uptime_seconds(&self) -> u64 {
-        self.start_time
-            .elapsed()
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
+        self.start_time.elapsed().map(|d| d.as_secs()).unwrap_or(0)
     }
 }
 

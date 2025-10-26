@@ -236,9 +236,7 @@ pub enum ComputationError {
     InvalidKnotVector { dimension: String, reason: String },
 
     /// Invalid coefficient dimensions
-    #[error(
-        "coefficient dimensions mismatch: expected {expected:?}, got {actual:?}"
-    )]
+    #[error("coefficient dimensions mismatch: expected {expected:?}, got {actual:?}")]
     DimensionMismatch {
         expected: Vec<usize>,
         actual: Vec<usize>,
@@ -249,7 +247,9 @@ pub enum ComputationError {
     UnsupportedSplineOrder { order: u8 },
 
     /// Insufficient data points
-    #[error("insufficient data points in dimension {dimension}: need at least {required}, got {actual}")]
+    #[error(
+        "insufficient data points in dimension {dimension}: need at least {required}, got {actual}"
+    )]
     InsufficientDataPoints {
         dimension: String,
         required: usize,
@@ -422,10 +422,7 @@ mod tests {
         let err = DataError::FileNotFound {
             path: "antenna_1.bin".to_string(),
         };
-        assert_eq!(
-            err.to_string(),
-            "calibration file not found: antenna_1.bin"
-        );
+        assert_eq!(err.to_string(), "calibration file not found: antenna_1.bin");
 
         let err = DataError::CorruptedData {
             path: "antenna_1.bin".to_string(),
@@ -502,10 +499,7 @@ mod tests {
             size: 1500,
             limit: 1000,
         };
-        assert_eq!(
-            err.to_string(),
-            "batch size 1500 exceeds limit of 1000"
-        );
+        assert_eq!(err.to_string(), "batch size 1500 exceeds limit of 1000");
     }
 
     #[test]

@@ -7,10 +7,20 @@ use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Complete calibration data for a single antenna.
+/// Complete calibration data for a single antenna (v2.0 physics-based).
 ///
 /// Contains all information needed to evaluate antenna G/T (Gain-to-Temperature)
-/// at arbitrary positions and frequencies within the calibrated range.
+/// using a physics-based model with optional correction surfaces.
+///
+/// # v2.0 Hybrid Model
+///
+/// The v2.0 model combines:
+/// 1. **Physical optics model** (`physical_config`) - Primary model based on reflector
+///    geometry, feed parameters, and mesh characteristics
+/// 2. **Correction surface** (`correction_surface`) - Optional B-spline model that
+///    corrects for residual errors (measured - physics model)
+///
+/// At runtime: `G/T_final = PhysicsModel(physical_config) + CorrectionSurface(freq, cone, clock)`
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq)]
 pub struct AntennaCalibration {
     /// Unique identifier for this antenna
@@ -19,8 +29,13 @@ pub struct AntennaCalibration {
     /// Metadata about the calibration process
     pub metadata: CalibrationMetadata,
 
-    /// 4D B-spline interpolation model
-    pub model: BSplineModel4D,
+    /// Physical antenna configuration (v2.0 - primary model)
+    pub physical_config: PhysicalAntennaConfig,
+
+    /// B-spline correction surface (v2.0 - optional, for residual corrections)
+    /// This is fitted to (measured - physics_model) residuals during calibration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correction_surface: Option<BSplineModel4D>,
 
     /// Valid ranges for query parameters
     pub validity_ranges: ValidityRanges,
@@ -39,8 +54,13 @@ impl AntennaCalibration {
             return Err(ValidationError::EmptyField("antenna_id".to_string()));
         }
 
-        // Validate model consistency
-        self.model.validate()?;
+        // Validate physical configuration
+        self.physical_config.validate()?;
+
+        // Validate correction surface if present
+        if let Some(ref correction) = self.correction_surface {
+            correction.validate()?;
+        }
 
         // Validate validity ranges
         self.validity_ranges.validate()?;
@@ -49,7 +69,12 @@ impl AntennaCalibration {
     }
 }
 
-/// Metadata describing the calibration process and source data.
+/// Metadata describing the calibration process and source data (v2.0).
+///
+/// # v2.0 Quality Metrics
+///
+/// Tracks quality metrics for both the physics-only model and the combined
+/// physics + correction surface model.
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq)]
 pub struct CalibrationMetadata {
     /// Human-readable antenna name
@@ -58,16 +83,16 @@ pub struct CalibrationMetadata {
     /// ISO 8601 timestamp of calibration
     pub calibration_date: String,
 
-    /// Version of calibration format
+    /// Version of calibration format (v2.0 uses "2.0")
     pub format_version: String,
 
     /// Source of measurement data (e.g., S3 path, file name)
     pub data_source: String,
 
-    /// Root mean squared error of fit (dB)
+    /// Root mean squared error of combined model (physics + correction) in dB
     pub rmse_db: f64,
 
-    /// R² correlation coefficient of fit
+    /// R² correlation coefficient of combined model
     pub r_squared: f64,
 
     /// Number of measurement points used in calibration
@@ -75,6 +100,23 @@ pub struct CalibrationMetadata {
 
     /// Optional notes about the calibration
     pub notes: Option<String>,
+
+    // ========== v2.0-specific fields ==========
+    /// RMSE of physics-only model (before correction) in dB (v2.0)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub physics_only_rmse_db: Option<f64>,
+
+    /// RMSE improvement from adding correction surface in dB (v2.0)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub correction_improvement_db: Option<f64>,
+
+    /// Whether physical parameter tuning was performed (v2.0)
+    #[serde(default)]
+    pub parameters_tuned: bool,
+
+    /// Reference to antenna class for shared parameters (v2.0)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub antenna_class: Option<String>,
 }
 
 impl CalibrationMetadata {
@@ -224,6 +266,187 @@ impl BSplineModel4D {
     }
 }
 
+// ============================================================================
+// Physics-based Antenna Model Structures (v2.0)
+// ============================================================================
+
+/// Physical reflector geometry parameters.
+///
+/// Describes the parabolic dish reflector geometry used in the physical optics model.
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq)]
+pub struct ReflectorGeometry {
+    /// Dish diameter in meters
+    pub diameter_m: f64,
+
+    /// Focal length in meters
+    pub focal_length_m: f64,
+
+    /// f/D ratio (focal length / diameter), typically 0.3 - 0.5
+    pub f_over_d_ratio: f64,
+
+    /// Surface RMS error in millimeters (for Ruze equation)
+    pub surface_rms_mm: f64,
+}
+
+impl ReflectorGeometry {
+    /// Creates a new builder for constructing ReflectorGeometry.
+    pub fn builder() -> ReflectorGeometryBuilder {
+        ReflectorGeometryBuilder::default()
+    }
+
+    /// Validates that the geometry parameters are physically reasonable.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if self.diameter_m <= 0.0 {
+            return Err(ValidationError::InvalidPhysicalParameter {
+                parameter: "diameter_m".to_string(),
+                value: self.diameter_m,
+                reason: "must be positive".to_string(),
+            });
+        }
+
+        if self.focal_length_m <= 0.0 {
+            return Err(ValidationError::InvalidPhysicalParameter {
+                parameter: "focal_length_m".to_string(),
+                value: self.focal_length_m,
+                reason: "must be positive".to_string(),
+            });
+        }
+
+        if self.f_over_d_ratio <= 0.0 || self.f_over_d_ratio > 2.0 {
+            return Err(ValidationError::InvalidPhysicalParameter {
+                parameter: "f_over_d_ratio".to_string(),
+                value: self.f_over_d_ratio,
+                reason: "must be between 0 and 2".to_string(),
+            });
+        }
+
+        if self.surface_rms_mm < 0.0 {
+            return Err(ValidationError::InvalidPhysicalParameter {
+                parameter: "surface_rms_mm".to_string(),
+                value: self.surface_rms_mm,
+                reason: "must be non-negative".to_string(),
+            });
+        }
+
+        Ok(())
+    }
+}
+
+/// Feed antenna parameters.
+///
+/// Describes the feed horn characteristics and position for physical optics computation.
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq)]
+pub struct FeedParameters {
+    /// Feed position in Cartesian coordinates (x, y, z) in meters
+    pub position: (f64, f64, f64),
+
+    /// q-factor for cos^q illumination pattern (typically 6-12)
+    pub q_factor: f64,
+
+    /// Phase center offset from feed aperture in meters
+    pub phase_center_offset_m: f64,
+}
+
+impl FeedParameters {
+    /// Creates a new builder for constructing FeedParameters.
+    pub fn builder() -> FeedParametersBuilder {
+        FeedParametersBuilder::default()
+    }
+
+    /// Validates that the feed parameters are physically reasonable.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if self.q_factor < 0.0 || self.q_factor > 20.0 {
+            return Err(ValidationError::InvalidPhysicalParameter {
+                parameter: "q_factor".to_string(),
+                value: self.q_factor,
+                reason: "must be between 0 and 20".to_string(),
+            });
+        }
+
+        Ok(())
+    }
+}
+
+/// Mesh reflector parameters.
+///
+/// Describes wire mesh characteristics for mesh reflector antennas.
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq)]
+pub struct MeshParameters {
+    /// Mesh spacing (hole size) in millimeters
+    pub mesh_spacing_mm: f64,
+
+    /// Wire diameter in millimeters
+    pub wire_diameter_mm: f64,
+}
+
+impl MeshParameters {
+    /// Creates a new builder for constructing MeshParameters.
+    pub fn builder() -> MeshParametersBuilder {
+        MeshParametersBuilder::default()
+    }
+
+    /// Validates that the mesh parameters are physically reasonable.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if self.mesh_spacing_mm <= 0.0 {
+            return Err(ValidationError::InvalidPhysicalParameter {
+                parameter: "mesh_spacing_mm".to_string(),
+                value: self.mesh_spacing_mm,
+                reason: "must be positive".to_string(),
+            });
+        }
+
+        if self.wire_diameter_mm <= 0.0 {
+            return Err(ValidationError::InvalidPhysicalParameter {
+                parameter: "wire_diameter_mm".to_string(),
+                value: self.wire_diameter_mm,
+                reason: "must be positive".to_string(),
+            });
+        }
+
+        if self.wire_diameter_mm >= self.mesh_spacing_mm {
+            return Err(ValidationError::InvalidPhysicalParameter {
+                parameter: "wire_diameter_mm".to_string(),
+                value: self.wire_diameter_mm,
+                reason: "must be less than mesh_spacing_mm".to_string(),
+            });
+        }
+
+        Ok(())
+    }
+}
+
+/// Complete physical antenna configuration.
+///
+/// Combines all physical parameters needed for physics-based antenna modeling.
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq)]
+pub struct PhysicalAntennaConfig {
+    /// Reflector geometry
+    pub reflector: ReflectorGeometry,
+
+    /// Feed parameters
+    pub feed: FeedParameters,
+
+    /// Mesh parameters (None for solid reflectors)
+    pub mesh: Option<MeshParameters>,
+}
+
+impl PhysicalAntennaConfig {
+    /// Creates a new builder for constructing PhysicalAntennaConfig.
+    pub fn builder() -> PhysicalAntennaConfigBuilder {
+        PhysicalAntennaConfigBuilder::default()
+    }
+
+    /// Validates all physical parameters.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        self.reflector.validate()?;
+        self.feed.validate()?;
+        if let Some(ref mesh) = self.mesh {
+            mesh.validate()?;
+        }
+        Ok(())
+    }
+}
+
 /// Valid ranges for antenna model parameters.
 ///
 /// Queries outside these ranges will trigger extrapolation warnings.
@@ -292,12 +515,7 @@ impl ValidityRanges {
     }
 
     /// Checks if a query point is within valid ranges.
-    pub fn contains(
-        &self,
-        azimuth: f64,
-        elevation: f64,
-        frequency: f64,
-    ) -> bool {
+    pub fn contains(&self, azimuth: f64, elevation: f64, frequency: f64) -> bool {
         azimuth >= self.azimuth_min_max.0
             && azimuth <= self.azimuth_min_max.1
             && elevation >= self.elevation_min_max.0
@@ -323,10 +541,21 @@ pub enum ValidationError {
     InvalidSplineOrder(u8),
 
     /// Invalid range (min > max or out of physical bounds)
-    InvalidRange { dimension: String, min: f64, max: f64 },
+    InvalidRange {
+        dimension: String,
+        min: f64,
+        max: f64,
+    },
 
     /// Invalid temperature value
     InvalidTemperature(f64),
+
+    /// Invalid physical parameter (v2.0)
+    InvalidPhysicalParameter {
+        parameter: String,
+        value: f64,
+        reason: String,
+    },
 }
 
 impl fmt::Display for ValidationError {
@@ -348,11 +577,26 @@ impl fmt::Display for ValidationError {
             ValidationError::InvalidSplineOrder(order) => {
                 write!(f, "Invalid spline order: {}", order)
             }
-            ValidationError::InvalidRange { dimension, min, max } => {
+            ValidationError::InvalidRange {
+                dimension,
+                min,
+                max,
+            } => {
                 write!(f, "Invalid range for {}: [{}, {}]", dimension, min, max)
             }
             ValidationError::InvalidTemperature(temp) => {
                 write!(f, "Invalid temperature: {} K", temp)
+            }
+            ValidationError::InvalidPhysicalParameter {
+                parameter,
+                value,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "Invalid physical parameter '{}' = {}: {}",
+                    parameter, value, reason
+                )
             }
         }
     }
@@ -362,12 +606,13 @@ impl std::error::Error for ValidationError {}
 
 // Builder patterns for ergonomic construction
 
-/// Builder for AntennaCalibration.
+/// Builder for AntennaCalibration (v2.0).
 #[derive(Default)]
 pub struct AntennaCalibrationBuilder {
     antenna_id: Option<String>,
     metadata: Option<CalibrationMetadata>,
-    model: Option<BSplineModel4D>,
+    physical_config: Option<PhysicalAntennaConfig>,
+    correction_surface: Option<BSplineModel4D>,
     validity_ranges: Option<ValidityRanges>,
 }
 
@@ -382,8 +627,13 @@ impl AntennaCalibrationBuilder {
         self
     }
 
-    pub fn model(mut self, model: BSplineModel4D) -> Self {
-        self.model = Some(model);
+    pub fn physical_config(mut self, config: PhysicalAntennaConfig) -> Self {
+        self.physical_config = Some(config);
+        self
+    }
+
+    pub fn correction_surface(mut self, correction: BSplineModel4D) -> Self {
+        self.correction_surface = Some(correction);
         self
     }
 
@@ -396,13 +646,14 @@ impl AntennaCalibrationBuilder {
         Ok(AntennaCalibration {
             antenna_id: self.antenna_id.ok_or("antenna_id is required")?,
             metadata: self.metadata.ok_or("metadata is required")?,
-            model: self.model.ok_or("model is required")?,
+            physical_config: self.physical_config.ok_or("physical_config is required")?,
+            correction_surface: self.correction_surface,
             validity_ranges: self.validity_ranges.ok_or("validity_ranges is required")?,
         })
     }
 }
 
-/// Builder for CalibrationMetadata.
+/// Builder for CalibrationMetadata (v2.0).
 #[derive(Default)]
 pub struct CalibrationMetadataBuilder {
     antenna_name: Option<String>,
@@ -413,6 +664,10 @@ pub struct CalibrationMetadataBuilder {
     r_squared: Option<f64>,
     num_measurements: Option<usize>,
     notes: Option<String>,
+    physics_only_rmse_db: Option<f64>,
+    correction_improvement_db: Option<f64>,
+    parameters_tuned: bool,
+    antenna_class: Option<String>,
 }
 
 impl CalibrationMetadataBuilder {
@@ -456,16 +711,44 @@ impl CalibrationMetadataBuilder {
         self
     }
 
+    pub fn physics_only_rmse_db(mut self, rmse: f64) -> Self {
+        self.physics_only_rmse_db = Some(rmse);
+        self
+    }
+
+    pub fn correction_improvement_db(mut self, improvement: f64) -> Self {
+        self.correction_improvement_db = Some(improvement);
+        self
+    }
+
+    pub fn parameters_tuned(mut self, tuned: bool) -> Self {
+        self.parameters_tuned = tuned;
+        self
+    }
+
+    pub fn antenna_class(mut self, class: impl Into<String>) -> Self {
+        self.antenna_class = Some(class.into());
+        self
+    }
+
     pub fn build(self) -> Result<CalibrationMetadata, String> {
         Ok(CalibrationMetadata {
             antenna_name: self.antenna_name.ok_or("antenna_name is required")?,
-            calibration_date: self.calibration_date.ok_or("calibration_date is required")?,
-            format_version: self.format_version.unwrap_or_else(|| "1.0".to_string()),
+            calibration_date: self
+                .calibration_date
+                .ok_or("calibration_date is required")?,
+            format_version: self.format_version.unwrap_or_else(|| "2.0".to_string()),
             data_source: self.data_source.ok_or("data_source is required")?,
             rmse_db: self.rmse_db.ok_or("rmse_db is required")?,
             r_squared: self.r_squared.ok_or("r_squared is required")?,
-            num_measurements: self.num_measurements.ok_or("num_measurements is required")?,
+            num_measurements: self
+                .num_measurements
+                .ok_or("num_measurements is required")?,
             notes: self.notes,
+            physics_only_rmse_db: self.physics_only_rmse_db,
+            correction_improvement_db: self.correction_improvement_db,
+            parameters_tuned: self.parameters_tuned,
+            antenna_class: self.antenna_class,
         })
     }
 }
@@ -525,7 +808,9 @@ impl BSplineModel4DBuilder {
             knots_azimuth: self.knots_azimuth.ok_or("knots_azimuth is required")?,
             knots_elevation: self.knots_elevation.ok_or("knots_elevation is required")?,
             knots_frequency: self.knots_frequency.ok_or("knots_frequency is required")?,
-            knots_temperature: self.knots_temperature.ok_or("knots_temperature is required")?,
+            knots_temperature: self
+                .knots_temperature
+                .ok_or("knots_temperature is required")?,
             spline_order: self.spline_order.unwrap_or(3), // Default to cubic
         })
     }
@@ -564,9 +849,153 @@ impl ValidityRangesBuilder {
     pub fn build(self) -> Result<ValidityRanges, String> {
         Ok(ValidityRanges {
             azimuth_min_max: self.azimuth_min_max.ok_or("azimuth_min_max is required")?,
-            elevation_min_max: self.elevation_min_max.ok_or("elevation_min_max is required")?,
-            frequency_min_max: self.frequency_min_max.ok_or("frequency_min_max is required")?,
-            temperature_const: self.temperature_const.ok_or("temperature_const is required")?,
+            elevation_min_max: self
+                .elevation_min_max
+                .ok_or("elevation_min_max is required")?,
+            frequency_min_max: self
+                .frequency_min_max
+                .ok_or("frequency_min_max is required")?,
+            temperature_const: self
+                .temperature_const
+                .ok_or("temperature_const is required")?,
+        })
+    }
+}
+
+// ============================================================================
+// Builders for Physics-based Structures (v2.0)
+// ============================================================================
+
+/// Builder for ReflectorGeometry.
+#[derive(Default)]
+pub struct ReflectorGeometryBuilder {
+    diameter_m: Option<f64>,
+    focal_length_m: Option<f64>,
+    f_over_d_ratio: Option<f64>,
+    surface_rms_mm: Option<f64>,
+}
+
+impl ReflectorGeometryBuilder {
+    pub fn diameter_m(mut self, diameter: f64) -> Self {
+        self.diameter_m = Some(diameter);
+        self
+    }
+
+    pub fn focal_length_m(mut self, focal_length: f64) -> Self {
+        self.focal_length_m = Some(focal_length);
+        self
+    }
+
+    pub fn f_over_d_ratio(mut self, ratio: f64) -> Self {
+        self.f_over_d_ratio = Some(ratio);
+        self
+    }
+
+    pub fn surface_rms_mm(mut self, rms: f64) -> Self {
+        self.surface_rms_mm = Some(rms);
+        self
+    }
+
+    pub fn build(self) -> Result<ReflectorGeometry, String> {
+        Ok(ReflectorGeometry {
+            diameter_m: self.diameter_m.ok_or("diameter_m is required")?,
+            focal_length_m: self.focal_length_m.ok_or("focal_length_m is required")?,
+            f_over_d_ratio: self.f_over_d_ratio.ok_or("f_over_d_ratio is required")?,
+            surface_rms_mm: self.surface_rms_mm.ok_or("surface_rms_mm is required")?,
+        })
+    }
+}
+
+/// Builder for FeedParameters.
+#[derive(Default)]
+pub struct FeedParametersBuilder {
+    position: Option<(f64, f64, f64)>,
+    q_factor: Option<f64>,
+    phase_center_offset_m: Option<f64>,
+}
+
+impl FeedParametersBuilder {
+    pub fn position(mut self, x: f64, y: f64, z: f64) -> Self {
+        self.position = Some((x, y, z));
+        self
+    }
+
+    pub fn q_factor(mut self, q: f64) -> Self {
+        self.q_factor = Some(q);
+        self
+    }
+
+    pub fn phase_center_offset_m(mut self, offset: f64) -> Self {
+        self.phase_center_offset_m = Some(offset);
+        self
+    }
+
+    pub fn build(self) -> Result<FeedParameters, String> {
+        Ok(FeedParameters {
+            position: self.position.ok_or("position is required")?,
+            q_factor: self.q_factor.ok_or("q_factor is required")?,
+            phase_center_offset_m: self.phase_center_offset_m.unwrap_or(0.0),
+        })
+    }
+}
+
+/// Builder for MeshParameters.
+#[derive(Default)]
+pub struct MeshParametersBuilder {
+    mesh_spacing_mm: Option<f64>,
+    wire_diameter_mm: Option<f64>,
+}
+
+impl MeshParametersBuilder {
+    pub fn mesh_spacing_mm(mut self, spacing: f64) -> Self {
+        self.mesh_spacing_mm = Some(spacing);
+        self
+    }
+
+    pub fn wire_diameter_mm(mut self, diameter: f64) -> Self {
+        self.wire_diameter_mm = Some(diameter);
+        self
+    }
+
+    pub fn build(self) -> Result<MeshParameters, String> {
+        Ok(MeshParameters {
+            mesh_spacing_mm: self.mesh_spacing_mm.ok_or("mesh_spacing_mm is required")?,
+            wire_diameter_mm: self
+                .wire_diameter_mm
+                .ok_or("wire_diameter_mm is required")?,
+        })
+    }
+}
+
+/// Builder for PhysicalAntennaConfig.
+#[derive(Default)]
+pub struct PhysicalAntennaConfigBuilder {
+    reflector: Option<ReflectorGeometry>,
+    feed: Option<FeedParameters>,
+    mesh: Option<MeshParameters>,
+}
+
+impl PhysicalAntennaConfigBuilder {
+    pub fn reflector(mut self, reflector: ReflectorGeometry) -> Self {
+        self.reflector = Some(reflector);
+        self
+    }
+
+    pub fn feed(mut self, feed: FeedParameters) -> Self {
+        self.feed = Some(feed);
+        self
+    }
+
+    pub fn mesh(mut self, mesh: MeshParameters) -> Self {
+        self.mesh = Some(mesh);
+        self
+    }
+
+    pub fn build(self) -> Result<PhysicalAntennaConfig, String> {
+        Ok(PhysicalAntennaConfig {
+            reflector: self.reflector.ok_or("reflector is required")?,
+            feed: self.feed.ok_or("feed is required")?,
+            mesh: self.mesh,
         })
     }
 }
@@ -581,6 +1010,30 @@ fn is_non_decreasing(v: &[f64]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Helper function to create a test physical config
+    fn create_test_physical_config() -> PhysicalAntennaConfig {
+        let reflector = ReflectorGeometry::builder()
+            .diameter_m(34.0)
+            .focal_length_m(13.6)
+            .f_over_d_ratio(0.4)
+            .surface_rms_mm(0.5)
+            .build()
+            .unwrap();
+
+        let feed = FeedParameters::builder()
+            .position(0.0, 0.0, 0.1)
+            .q_factor(8.0)
+            .phase_center_offset_m(0.0)
+            .build()
+            .unwrap();
+
+        PhysicalAntennaConfig::builder()
+            .reflector(reflector)
+            .feed(feed)
+            .build()
+            .unwrap()
+    }
 
     #[test]
     fn test_is_non_decreasing() {
@@ -677,7 +1130,7 @@ mod tests {
         assert_eq!(metadata.r_squared, 0.98);
         assert_eq!(metadata.num_measurements, 1000);
         assert_eq!(metadata.notes, Some("Test calibration".to_string()));
-        assert_eq!(metadata.format_version, "1.0");
+        assert_eq!(metadata.format_version, "2.0");
     }
 
     #[test]
@@ -774,15 +1227,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let model = BSplineModel4D::builder()
-            .coefficients(vec![1.0; 24])
-            .shape([2, 3, 2, 2])
-            .knots_azimuth(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
-            .knots_elevation(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0])
-            .knots_frequency(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
-            .knots_temperature(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
-            .build()
-            .unwrap();
+        let physical_config = create_test_physical_config();
 
         let ranges = ValidityRanges::builder()
             .azimuth_range(0.0, 360.0)
@@ -795,13 +1240,14 @@ mod tests {
         let calibration = AntennaCalibration::builder()
             .antenna_id("test_antenna")
             .metadata(metadata)
-            .model(model)
+            .physical_config(physical_config)
             .validity_ranges(ranges)
             .build()
             .unwrap();
 
         assert_eq!(calibration.antenna_id, "test_antenna");
         assert!(calibration.validate().is_ok());
+        assert!(calibration.correction_surface.is_none());
     }
 
     #[test]
@@ -816,15 +1262,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let model = BSplineModel4D::builder()
-            .coefficients(vec![1.0; 24])
-            .shape([2, 3, 2, 2])
-            .knots_azimuth(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
-            .knots_elevation(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0])
-            .knots_frequency(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
-            .knots_temperature(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
-            .build()
-            .unwrap();
+        let physical_config = create_test_physical_config();
 
         let ranges = ValidityRanges::builder()
             .azimuth_range(0.0, 360.0)
@@ -838,7 +1276,8 @@ mod tests {
         let invalid_calibration = AntennaCalibration {
             antenna_id: "".to_string(),
             metadata: metadata.clone(),
-            model: model.clone(),
+            physical_config: physical_config.clone(),
+            correction_surface: None,
             validity_ranges: ranges.clone(),
         };
         assert!(invalid_calibration.validate().is_err());
@@ -847,7 +1286,8 @@ mod tests {
         let valid_calibration = AntennaCalibration {
             antenna_id: "test".to_string(),
             metadata,
-            model,
+            physical_config,
+            correction_surface: None,
             validity_ranges: ranges,
         };
         assert!(valid_calibration.validate().is_ok());
@@ -865,7 +1305,9 @@ mod tests {
             .build()
             .unwrap();
 
-        let model = BSplineModel4D::builder()
+        let physical_config = create_test_physical_config();
+
+        let correction = BSplineModel4D::builder()
             .coefficients(vec![1.0, 2.0, 3.0, 4.0])
             .shape([2, 2, 1, 1])
             .knots_azimuth(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
@@ -886,7 +1328,8 @@ mod tests {
         let original = AntennaCalibration::builder()
             .antenna_id("test_antenna")
             .metadata(metadata)
-            .model(model)
+            .physical_config(physical_config)
+            .correction_surface(correction)
             .validity_ranges(ranges)
             .build()
             .unwrap();
@@ -899,8 +1342,12 @@ mod tests {
 
         assert_eq!(original, decoded);
         assert_eq!(original.antenna_id, decoded.antenna_id);
-        assert_eq!(original.model.coefficients, decoded.model.coefficients);
-        assert_eq!(original.model.shape, decoded.model.shape);
+        assert_eq!(
+            original.physical_config.reflector.diameter_m,
+            decoded.physical_config.reflector.diameter_m
+        );
+        assert!(original.correction_surface.is_some());
+        assert!(decoded.correction_surface.is_some());
     }
 
     #[test]
@@ -915,15 +1362,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let model = BSplineModel4D::builder()
-            .coefficients(vec![1.0, 2.0, 3.0, 4.0])
-            .shape([2, 2, 1, 1])
-            .knots_azimuth(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
-            .knots_elevation(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
-            .knots_frequency(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
-            .knots_temperature(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
-            .build()
-            .unwrap();
+        let physical_config = create_test_physical_config();
 
         let ranges = ValidityRanges::builder()
             .azimuth_range(0.0, 360.0)
@@ -936,7 +1375,7 @@ mod tests {
         let original = AntennaCalibration::builder()
             .antenna_id("test_antenna")
             .metadata(metadata)
-            .model(model)
+            .physical_config(physical_config)
             .validity_ranges(ranges)
             .build()
             .unwrap();

@@ -219,29 +219,47 @@ impl ServiceConfig {
             // Start with default values
             .set_default("server.host", default_host())?
             .set_default("server.port", default_port() as i64)?
-            .set_default("server.request_timeout_secs", default_request_timeout() as i64)?
+            .set_default(
+                "server.request_timeout_secs",
+                default_request_timeout() as i64,
+            )?
             .set_default("server.max_body_size_bytes", default_max_body_size() as i64)?
-            .set_default("calibration.data_directory", default_calibration_dir().to_string_lossy().to_string())?
-            .set_default("calibration.antenna_config_file", default_antenna_config().to_string_lossy().to_string())?
+            .set_default(
+                "calibration.data_directory",
+                default_calibration_dir().to_string_lossy().to_string(),
+            )?
+            .set_default(
+                "calibration.antenna_config_file",
+                default_antenna_config().to_string_lossy().to_string(),
+            )?
             .set_default("calibration.fail_fast", default_fail_fast())?
             .set_default("logging.level", default_log_level())?
             .set_default("logging.format", "text")?
             .set_default("logging.include_location", default_include_location())?
-            .set_default("performance.worker_threads", default_worker_threads() as i64)?
-            .set_default("performance.max_batch_size", default_max_batch_size() as i64)?
-            .set_default("performance.enable_parallel_processing", default_enable_parallel())?
+            .set_default(
+                "performance.worker_threads",
+                default_worker_threads() as i64,
+            )?
+            .set_default(
+                "performance.max_batch_size",
+                default_max_batch_size() as i64,
+            )?
+            .set_default(
+                "performance.enable_parallel_processing",
+                default_enable_parallel(),
+            )?
             // Load from YAML file (optional - won't fail if missing)
             .add_source(
                 config::File::from(std::path::Path::new(config_path))
                     .format(config::FileFormat::Yaml)
-                    .required(false)
+                    .required(false),
             )
             // Override with environment variables (prefix: ANTENNA_MODEL_)
             // Use separator "__" for nested fields (e.g., ANTENNA_MODEL_SERVER__PORT)
             .add_source(
                 config::Environment::with_prefix("ANTENNA_MODEL")
                     .separator("__")
-                    .try_parsing(true)
+                    .try_parsing(true),
             )
             .build()?;
 
@@ -520,13 +538,7 @@ antennas:
 
     #[test]
     fn test_log_format_serialization() {
-        assert_eq!(
-            serde_json::to_string(&LogFormat::Text).unwrap(),
-            "\"text\""
-        );
-        assert_eq!(
-            serde_json::to_string(&LogFormat::Json).unwrap(),
-            "\"json\""
-        );
+        assert_eq!(serde_json::to_string(&LogFormat::Text).unwrap(), "\"text\"");
+        assert_eq!(serde_json::to_string(&LogFormat::Json).unwrap(), "\"json\"");
     }
 }

@@ -8,6 +8,6 @@ pub mod types;
 // Re-export commonly used types for convenience
 pub use types::{
     AntennaCalibration, AntennaCalibrationBuilder, BSplineModel4D, BSplineModel4DBuilder,
-    CalibrationMetadata, CalibrationMetadataBuilder, ValidityRanges, ValidityRangesBuilder,
-    ValidationError,
+    CalibrationMetadata, CalibrationMetadataBuilder, ValidationError, ValidityRanges,
+    ValidityRangesBuilder,
 };

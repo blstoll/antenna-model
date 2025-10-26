@@ -3,10 +3,11 @@
 //! This library provides the core functionality for the antenna model service,
 //! including REST API server, B-spline interpolation, and calibration data management.
 
-pub mod error;
 pub mod api;
 pub mod config;
 pub mod data;
+pub mod error;
+pub mod model;
 
 // Re-export commonly used types for convenience
 pub use data::{AntennaCalibration, BSplineModel4D, CalibrationMetadata, ValidityRanges};
