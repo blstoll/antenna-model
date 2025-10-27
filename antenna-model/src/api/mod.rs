@@ -23,6 +23,12 @@ pub struct AppState {
     pub version: &'static str,
 }
 
+impl Default for AppState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AppState {
     /// Create new application state
     pub fn new() -> Self {

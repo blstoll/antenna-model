@@ -99,7 +99,7 @@ impl ReflectorGeometry {
 
         // Check f/D ratio is in reasonable range (warn if unusual)
         let f_over_d = self.f_over_d();
-        if f_over_d < 0.2 || f_over_d > 1.0 {
+        if !(0.2..=1.0).contains(&f_over_d) {
             // This is unusual but not necessarily invalid - could be a specialized design
             // We don't error, but this might be logged at a higher level
         }

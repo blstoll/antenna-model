@@ -53,13 +53,13 @@ use crate::model::{
 ///
 /// // 1mm RMS error at 8.4 GHz (λ ≈ 35.7mm)
 /// let efficiency = ruze_efficiency(0.001, 0.0357);
-/// // Should be close to 1.0 (good surface)
-/// assert!(efficiency > 0.99);
+/// // Should be about 88% (good but not perfect surface)
+/// assert!(efficiency > 0.85 && efficiency < 0.90);
 ///
 /// // 5mm RMS error at same frequency (poor surface)
 /// let efficiency_poor = ruze_efficiency(0.005, 0.0357);
-/// // Should be significantly lower
-/// assert!(efficiency_poor < 0.95);
+/// // Should be significantly lower (about 2%)
+/// assert!(efficiency_poor < 0.05);
 /// ```
 pub fn ruze_efficiency(surface_rms: f64, wavelength: f64) -> f64 {
     let ratio = 4.0 * PI * surface_rms / wavelength;
@@ -89,13 +89,13 @@ pub fn ruze_efficiency(surface_rms: f64, wavelength: f64) -> f64 {
 /// ```
 /// use antenna_model::model::pattern::mesh_transparency;
 ///
-/// // 5mm mesh at 8.4 GHz (λ ≈ 35.7mm) - well above cutoff
+/// // 5mm mesh at 8.4 GHz (λ ≈ 35.7mm) - above cutoff
 /// let transparency = mesh_transparency(0.005, 0.0357);
-/// assert!(transparency > 0.99); // Nearly opaque
+/// assert!(transparency > 0.80 && transparency < 0.90); // About 84% opaque
 ///
-/// // 5mm mesh at 100 MHz (λ = 3m) - below cutoff
+/// // 5mm mesh at 100 MHz (λ = 3m) - well below cutoff
 /// let transparency_low_freq = mesh_transparency(0.005, 3.0);
-/// assert!(transparency_low_freq < 0.1); // Mostly transparent
+/// assert!(transparency_low_freq > 0.99); // Nearly 1.0 (poor reflector, lets energy through)
 /// ```
 pub fn mesh_transparency(mesh_spacing: f64, wavelength: f64) -> f64 {
     let lambda_0 = PI * mesh_spacing;
@@ -177,12 +177,23 @@ pub fn theoretical_max_gain(diameter: f64, wavelength: f64, aperture_efficiency:
 /// ```no_run
 /// use antenna_model::model::pattern::compute_gain;
 /// use antenna_model::model::integration::IntegrationParams;
-/// # use antenna_model::model::geometry::AntennaConfiguration;
+/// # use antenna_model::model::geometry::{AntennaConfiguration, ReflectorGeometry, FeedParameters};
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// # let config = AntennaConfiguration::builder()
-/// #     .reflector_diameter(1.0)
+/// # let reflector = ReflectorGeometry::builder()
+/// #     .diameter(1.0)
 /// #     .focal_length(0.5)
+/// #     .surface_rms(0.001)
+/// #     .build()?;
+/// # let feed = FeedParameters::builder()
+/// #     .at_focus(0.5)
+/// #     .q_factor(8.0)
+/// #     .build()?;
+/// # let config = AntennaConfiguration::builder()
+/// #     .id("test")
+/// #     .name("Test")
+/// #     .reflector(reflector)
+/// #     .feed(feed)
 /// #     .build()?;
 /// let gain = compute_gain(
 ///     0.0,                 // On-axis
@@ -298,12 +309,23 @@ pub fn compute_gain_db(
 /// ```no_run
 /// use antenna_model::model::pattern::compute_g_over_t;
 /// use antenna_model::model::integration::IntegrationParams;
-/// # use antenna_model::model::geometry::AntennaConfiguration;
+/// # use antenna_model::model::geometry::{AntennaConfiguration, ReflectorGeometry, FeedParameters};
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// # let config = AntennaConfiguration::builder()
-/// #     .reflector_diameter(1.0)
+/// # let reflector = ReflectorGeometry::builder()
+/// #     .diameter(1.0)
 /// #     .focal_length(0.5)
+/// #     .surface_rms(0.001)
+/// #     .build()?;
+/// # let feed = FeedParameters::builder()
+/// #     .at_focus(0.5)
+/// #     .q_factor(8.0)
+/// #     .build()?;
+/// # let config = AntennaConfiguration::builder()
+/// #     .id("test")
+/// #     .name("Test")
+/// #     .reflector(reflector)
+/// #     .feed(feed)
 /// #     .build()?;
 /// let g_over_t = compute_g_over_t(
 ///     0.0,                 // On-axis

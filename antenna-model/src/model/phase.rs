@@ -212,6 +212,7 @@ pub fn phase_mesh(mesh_spacing: f64, theta_incident: f64, k: f64) -> f64 {
 ///
 /// # Returns
 /// Total phase in radians
+#[allow(clippy::too_many_arguments)]
 pub fn phase_total(
     aperture: ApertureCoordinates,
     theta: f64,
@@ -326,8 +327,7 @@ impl GaussianSurface {
         let h = h.wrapping_add(self.seed);
 
         // Map to [-1, 1]
-        let normalized = (h % 1000) as f64 / 500.0 - 1.0;
-        normalized
+        (h % 1000) as f64 / 500.0 - 1.0
     }
 }
 

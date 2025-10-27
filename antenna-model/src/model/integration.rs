@@ -142,13 +142,24 @@ impl IntegrationParams {
 /// # Examples
 /// ```
 /// use antenna_model::model::integration::{integrate_aperture, IntegrationParams};
-/// use antenna_model::model::geometry::AntennaConfiguration;
+/// use antenna_model::model::geometry::{AntennaConfiguration, ReflectorGeometry, FeedParameters};
 ///
 /// // Example integration at boresight (θ=0)
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
-/// # let config = AntennaConfiguration::builder()
-/// #     .reflector_diameter(1.0)
+/// # let reflector = ReflectorGeometry::builder()
+/// #     .diameter(1.0)
 /// #     .focal_length(0.5)
+/// #     .surface_rms(0.001)
+/// #     .build()?;
+/// # let feed = FeedParameters::builder()
+/// #     .at_focus(0.5)
+/// #     .q_factor(8.0)
+/// #     .build()?;
+/// # let config = AntennaConfiguration::builder()
+/// #     .id("test")
+/// #     .name("Test")
+/// #     .reflector(reflector)
+/// #     .feed(feed)
 /// #     .build()?;
 /// let result = integrate_aperture(
 ///     0.0,               // theta (boresight)

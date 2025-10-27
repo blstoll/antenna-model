@@ -142,11 +142,11 @@ impl EClockConeCoordinates {
     ///
     /// This is the key transformation from pointing angles to physical feed position.
     /// Based on design doc Section 2.5:
-    /// ```
-    /// displacement = 2·f·tan(cone_angle/2)
-    /// x_feed = displacement·cos(clock_angle)
-    /// y_feed = displacement·sin(clock_angle)
-    /// z_feed = -displacement²/(4f)  for large displacements
+    /// ```text
+    /// displacement = 2*f*tan(cone_angle/2)
+    /// x_feed = displacement*cos(clock_angle)
+    /// y_feed = displacement*sin(clock_angle)
+    /// z_feed = -displacement^2/(4f)  for large displacements
     /// ```
     ///
     /// # Arguments
