@@ -1369,8 +1369,16 @@ e_clock_deg,e_cone_deg,frequency_mhz,g_over_t_db,temperature_k
   - Bounds validation with penalties
   - 570+ lines of production code
 
+- ✅ Task 4.4: B-spline correction surface fitting to residuals (17 tests passing)
+  - 3D B-spline surface fitting with adaptive knot placement
+  - Cox-de Boor recursive algorithm for basis function evaluation
+  - Least squares fitting with regularization
+  - Residual computation and fit statistics (RMSE, R², improvement %)
+  - Cross-validation framework (simplified for integration testing)
+  - Comprehensive test coverage (unit + integration tests)
+  - 1200+ lines of production code
+
 **In Progress:**
-- ⏳ Task 4.4: B-spline correction surface fitting to residuals
 - ⏳ Task 4.5: Validation suite meeting <1 dB accuracy requirements (combined model)
 - ⏳ Task 4.6: CLI integration
 
