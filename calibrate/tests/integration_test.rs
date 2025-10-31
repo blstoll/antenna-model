@@ -65,7 +65,7 @@ fn test_load_antenna_configuration_with_tuning() {
     assert_eq!(config.tunable_parameters.mesh_spacing_mm, None);
 
     // Verify metadata
-    assert_eq!(config.metadata.parameters_tuned, true);
+    assert!(config.metadata.parameters_tuned);
     assert_eq!(config.metadata.calibration_date, Some("2025-10-30".to_string()));
 
     // Validate configuration against registry
@@ -86,7 +86,7 @@ fn test_load_antenna_configuration_no_tuning() {
 
     // Verify no tuning
     assert!(!config.tunable_parameters.has_tuned_values());
-    assert_eq!(config.metadata.parameters_tuned, false);
+    assert!(!config.metadata.parameters_tuned);
 
     // Validate configuration
     config.validate(&registry).expect("Configuration validation failed");
