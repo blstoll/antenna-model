@@ -1,0 +1,20 @@
+# Example Antenna Configuration
+#
+# This file shows how to configure a specific antenna instance that references
+# an antenna class and optionally specifies tuned parameters.
+
+antenna_id: "dsn_34m_feed_x"
+name: "DSN 34m X-band Feed"
+class_id: "DSN_34m"
+
+tunable_parameters:
+  # Leave as null to use class defaults, or specify tuned values
+  surface_rms_mm: 0.6  # Slightly different from class nominal (0.5)
+  mesh_spacing_mm: null  # Use class default (3.0 mm)
+  mesh_wire_diameter_mm: null  # Use class default (0.3 mm)
+
+metadata:
+  calibration_date: "2025-10-30"
+  measurement_source: "s3://antenna-measurements/dsn34m_xband_2025.csv"
+  parameters_tuned: true
+  notes: "Calibration with parameter tuning for surface RMS. X-band feed has unique band-split characteristics."

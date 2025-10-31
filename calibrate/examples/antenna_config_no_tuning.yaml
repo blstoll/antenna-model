@@ -1,0 +1,21 @@
+# Example Antenna Configuration Without Parameter Tuning
+#
+# This configuration uses all default values from the antenna class.
+# Only the correction surface (fitted in Task 4.4) will account for
+# measurement deviations from the nominal physical model.
+
+antenna_id: "groundstation_13m_ka_feed"
+name: "Ground Station 13m Ka-band Feed"
+class_id: "GroundStation_13m"
+
+tunable_parameters:
+  # All null - use class defaults
+  surface_rms_mm: null
+  mesh_spacing_mm: null
+  mesh_wire_diameter_mm: null
+
+metadata:
+  calibration_date: "2025-10-28"
+  measurement_source: "measurements/gs13m_kaband.csv"
+  parameters_tuned: false
+  notes: "Direct calibration without parameter tuning. Correction surface handles band-split losses."

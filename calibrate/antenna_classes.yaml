@@ -1,0 +1,116 @@
+# Antenna Class Definitions
+#
+# This file defines antenna classes with shared physical and geometric parameters.
+# Multiple antennas can reference the same class and have their own tunable parameters
+# and correction surfaces.
+
+classes:
+  DSN_34m:
+    class_id: "DSN_34m"
+    description: "Deep Space Network 34-meter beam-waveguide antenna"
+
+    geometry:
+      diameter_m: 34.0
+      f_over_d: 0.4285  # Beam-waveguide antennas typically have lower f/D
+
+    feed:
+      q_factor: 8.0  # ~-35 dB edge taper for q=8
+      phase_center_offset_wavelengths: 0.0
+      asymmetry_factor: 1.0  # Symmetric pattern
+
+    mesh:
+      spacing_mm: 3.0  # Fine mesh for high-frequency operation
+      wire_diameter_mm: 0.3
+
+    surface:
+      rms_mm: 0.5  # High-quality surface for S/X/Ka-band
+
+    system_noise_temperature_k: 50.0  # Typical low-noise system
+
+  DSN_70m:
+    class_id: "DSN_70m"
+    description: "Deep Space Network 70-meter antenna"
+
+    geometry:
+      diameter_m: 70.0
+      f_over_d: 0.4286
+
+    feed:
+      q_factor: 10.0  # Lower edge taper for larger aperture
+      phase_center_offset_wavelengths: 0.0
+      asymmetry_factor: 1.0
+
+    mesh:
+      spacing_mm: 5.0  # Coarser mesh acceptable for large aperture
+      wire_diameter_mm: 0.5
+
+    surface:
+      rms_mm: 1.0  # Larger antenna, harder to maintain tight tolerances
+
+    system_noise_temperature_k: 40.0  # Very low-noise system
+
+  GroundStation_13m:
+    class_id: "GroundStation_13m"
+    description: "Commercial ground station 13-meter antenna"
+
+    geometry:
+      diameter_m: 13.0
+      f_over_d: 0.5  # Standard prime-focus f/D
+
+    feed:
+      q_factor: 7.0  # ~-30 dB edge taper
+      phase_center_offset_wavelengths: 0.0
+      asymmetry_factor: 1.05  # Slight E/H asymmetry
+
+    mesh:
+      spacing_mm: 4.0
+      wire_diameter_mm: 0.4
+
+    surface:
+      rms_mm: 1.2  # Commercial-grade surface
+
+    system_noise_temperature_k: 70.0  # Commercial LNA
+
+  TestAntenna_1m:
+    class_id: "TestAntenna_1m"
+    description: "Small test antenna for validation"
+
+    geometry:
+      diameter_m: 1.0
+      f_over_d: 0.5
+
+    feed:
+      q_factor: 6.0  # ~-25 dB edge taper
+      phase_center_offset_wavelengths: 0.0
+      asymmetry_factor: 1.0
+
+    mesh:
+      spacing_mm: 2.0  # Very fine mesh
+      wire_diameter_mm: 0.2
+
+    surface:
+      rms_mm: 0.3  # Excellent surface quality
+
+    system_noise_temperature_k: 290.0  # Room temperature test
+
+  UHF_Array_Element:
+    class_id: "UHF_Array_Element"
+    description: "UHF phased array element (low frequency)"
+
+    geometry:
+      diameter_m: 8.0
+      f_over_d: 0.45
+
+    feed:
+      q_factor: 5.0  # Broader pattern for array element
+      phase_center_offset_wavelengths: 0.0
+      asymmetry_factor: 1.1  # Some asymmetry
+
+    mesh:
+      spacing_mm: 10.0  # Coarse mesh acceptable at UHF
+      wire_diameter_mm: 1.0  # Thicker wire
+
+    surface:
+      rms_mm: 2.0  # Relaxed tolerance at low frequency
+
+    system_noise_temperature_k: 100.0  # UHF noise floor

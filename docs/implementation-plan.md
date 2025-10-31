@@ -969,41 +969,56 @@ The physical optics model is now complete with advanced edge case handling, read
 
 ### Tasks
 
-#### 4.1 Antenna Configuration & Hybrid Parameters (2-3 days)
+#### 4.1 Antenna Configuration & Hybrid Parameters (2-3 days) ✅ COMPLETE
 **Objective:** Define antenna configuration with hybrid parameter approach
 
 **Steps:**
-- Create `calibrate/src/antenna_config.rs` with:
-  - `AntennaConfiguration` struct:
-    - **Shared parameters** (from class/design): diameter, f/D ratio, nominal feed q-factor
-    - **Per-antenna tunable parameters**: surface RMS (0.1-2 mm), mesh spacing (1-10 mm), mesh wire diameter
-    - Distinction between fixed geometry and calibratable parameters
-  - Load shared parameters from antenna class definition file
-  - Define bounds for tunable parameters
-  - Serialization for saving optimized parameters
-- Create antenna class definition format:
-  - YAML file defining antenna classes (e.g., "DSN_34m", "Ground_Station_13m")
-  - Each class specifies shared geometry and nominal physical parameters
-  - Per-antenna config references class and provides overrides
-- Implement simple initial guess for tunable parameters:
-  - Default to nominal values from class definition
-  - User can provide measured surface RMS if available
+- ✅ Create `calibrate/src/antenna_config.rs` with:
+  - ✅ `AntennaConfiguration` struct:
+    - ✅ **Shared parameters** (from class/design): diameter, f/D ratio, nominal feed q-factor
+    - ✅ **Per-antenna tunable parameters**: surface RMS (0.1-2 mm), mesh spacing (1-10 mm), mesh wire diameter
+    - ✅ Distinction between fixed geometry and calibratable parameters
+  - ✅ Load shared parameters from antenna class definition file
+  - ✅ Define bounds for tunable parameters
+  - ✅ Serialization for saving optimized parameters
+- ✅ Create antenna class definition format:
+  - ✅ YAML file defining antenna classes (e.g., "DSN_34m", "Ground_Station_13m")
+  - ✅ Each class specifies shared geometry and nominal physical parameters
+  - ✅ Per-antenna config references class and provides overrides
+- ✅ Implement simple initial guess for tunable parameters:
+  - ✅ Default to nominal values from class definition
+  - ✅ User can provide measured surface RMS if available
 
 **Acceptance Criteria:**
-- Clear separation between shared and per-antenna parameters
-- Antenna class definitions are reusable across multiple antennas
-- Tunable parameter count is small (2-4 parameters typically)
-- Configuration loads from files correctly
+- ✅ Clear separation between shared and per-antenna parameters
+- ✅ Antenna class definitions are reusable across multiple antennas
+- ✅ Tunable parameter count is small (2-4 parameters typically)
+- ✅ Configuration loads from files correctly
 
-**Files to Create:**
-- `calibrate/src/antenna_config.rs`
-- `calibrate/antenna_classes.yaml` (example)
-- `calibrate/src/mod.rs`
+**Files Created:**
+- ✅ `calibrate/src/antenna_config.rs` (540+ lines with comprehensive types)
+- ✅ `calibrate/antenna_classes.yaml` (5 example antenna classes)
+- ✅ `calibrate/src/mod.rs` and `calibrate/src/lib.rs` (module exports)
+- ✅ `calibrate/examples/antenna_config_example.yaml` (with parameter tuning)
+- ✅ `calibrate/examples/antenna_config_no_tuning.yaml` (without tuning)
+- ✅ `calibrate/tests/integration_test.rs` (7 integration tests)
 
 **Test Coverage:**
-- Configuration loading and validation
-- Shared vs per-antenna parameter handling
-- Serialization tests
+- ✅ Configuration loading and validation (11 unit tests + 7 integration tests)
+- ✅ Shared vs per-antenna parameter handling
+- ✅ Serialization tests (YAML format)
+- ✅ Parameter bounds validation
+- ✅ Effective parameter calculation (tuned vs class defaults)
+- ✅ **Total: 18 tests, all passing**
+
+**Implementation Notes:**
+- System noise temperature configurable per antenna class (for G/T to gain conversion)
+- Three main structures: `AntennaClass` (shared), `TunableParameters` (optional per-antenna), `AntennaConfiguration` (complete config)
+- Tunable parameters use `Option<f64>` - None means use class default
+- Five example antenna classes: DSN_34m, DSN_70m, GroundStation_13m, TestAntenna_1m, UHF_Array_Element
+- Parameter bounds with validation (0.1-2 mm surface RMS, 1-10 mm mesh spacing, 0.05-1 mm wire diameter)
+- YAML format for all configuration files
+- Ready for integration with parameter tuner (Task 4.3) and correction surface fitting (Task 4.4)
 
 **Note:** This is much simpler than full parameter optimization - we're only tuning a few key parameters, not fitting the entire model.
 
@@ -1299,22 +1314,35 @@ e_clock_deg,e_cone_deg,frequency_mhz,g_over_t_db,temperature_k
 
 ### Sprint 4 Deliverables
 
-- ✅ Calibration tool with correction surface fitting
-- ✅ Antenna class system for shared parameters
-- ✅ Optional lightweight parameter tuning (2-3 parameters)
-- ✅ B-spline correction surface fitting to residuals
-- ✅ Validation suite meeting <1 dB accuracy requirements (combined model)
-- ✅ Binary artifact generation containing:
+**Status:** 🔄 IN PROGRESS - 1/6 tasks complete (17%)
+
+**Completed:**
+- ✅ Task 4.1: Antenna class system for shared parameters (18 tests passing)
+  - Antenna configuration with hybrid parameter approach
+  - YAML-based antenna class definitions (5 example classes)
+  - Tunable parameter system with validation
+  - Complete serialization/deserialization support
+
+**In Progress:**
+- ⏳ Task 4.2: Measurement data parser & validation
+- ⏳ Task 4.3: Optional lightweight parameter tuning (2-3 parameters)
+- ⏳ Task 4.4: B-spline correction surface fitting to residuals
+- ⏳ Task 4.5: Validation suite meeting <1 dB accuracy requirements (combined model)
+- ⏳ Task 4.6: CLI integration
+
+**Pending Deliverables:**
+- ⏳ Calibration tool with correction surface fitting
+- ⏳ Binary artifact generation containing:
   - Antenna configuration (class reference + tuned parameters)
   - Correction surface (B-spline coefficients or RBF data)
   - Metadata and quality metrics
-- ✅ Comprehensive validation reports (HTML/PDF) showing:
+- ⏳ Comprehensive validation reports (HTML/PDF) showing:
   - Model-only vs model+correction comparison
   - Error analysis by frequency and angular region
   - Correction surface visualizations
-- ✅ Sample calibration artifacts for testing
-- ✅ 75%+ test coverage
-- ✅ End-to-end calibration workflow functional (with and without parameter tuning)
+- ⏳ Sample calibration artifacts for testing
+- ⏳ 75%+ test coverage
+- ⏳ End-to-end calibration workflow functional (with and without parameter tuning)
 
 ---
 
