@@ -7,11 +7,14 @@
 //! - Physical parameter optimization (optional)
 //! - Correction surface fitting to residuals
 //! - Validation and quality metrics
+//! - Calibration artifact generation and serialization
 
 pub mod antenna_config;
 pub mod correction_surface;
 pub mod parameter_tuner;
 pub mod parser;
+pub mod serializer;
+pub mod validator;
 
 // Re-export commonly used types
 pub use antenna_config::{
@@ -29,4 +32,14 @@ pub use parameter_tuner::{tune_parameters, TuningMode, TuningResult};
 pub use parser::{
     create_sample_csv, parse_measurements, parse_measurements_sync, DataQualityReport,
     MeasurementData, MeasurementPoint,
+};
+
+pub use validator::{
+    validate_calibration, ValidationConfig, ValidationReport, CrossValidationResults,
+    OutlierPoint, FrequencyBandStats, AngularRegionStats, ValidationError,
+};
+
+pub use serializer::{
+    save_artifact, load_artifact, export_metadata_json, export_validation_json,
+    CalibrationArtifact, ArtifactMetadata, SerializationError, artifact_format_info,
 };
