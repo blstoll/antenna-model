@@ -40,14 +40,18 @@ The Antenna Model Service is a high-accuracy antenna loss modeling system deploy
 ### 2.2 Client Interaction Patterns
 
 **Analytical Tools**
-- Batch queries for loss heatmap generation
+- Batch queries for loss heatmap generation across antenna field of view
+- 3D coordinate-based queries (ECEF or Geodetic positions)
 - Tolerance to higher latencies (seconds)
 - Require detailed error information and warnings
+- Support for rectangular or H3 hexagonal grid generation
 
 **Real-time Processors**
-- Single-point queries during operation
-- Latency-sensitive (<100ms)
+- Single-point gain queries during operation
+- 3D position-based queries (vehicle, antenna boresight, feed, emitter)
+- Latency-sensitive (<150ms including coordinate transforms)
 - Need fast failure modes
+- Support for beam squint correction with pointing frequency
 
 ## 3. System Architecture
 
@@ -130,11 +134,13 @@ The Antenna Model Service is a high-accuracy antenna loss modeling system deploy
 **Key Endpoints:**
 - `GET /health` - Health check for K8s probes
 - `GET /status` - Service status and loaded antennas
-- `POST /api/v1/loss` - Single antenna loss computation
-- `POST /api/v1/loss/batch` - Batch loss computation
-- `POST /api/v1/heatmap` - Generate loss heatmap grid
-- `GET /api/v1/antennas` - List available antennas
+- `POST /api/v1/gain` - Single antenna gain computation from 3D positions
+- `POST /api/v1/gain/batch` - Batch gain computation
+- `POST /api/v1/heatmap` - Generate loss heatmap grid (rectangular or H3 hexagonal)
+- `GET /api/v1/antennas` - List available antennas with feeds
 - `GET /api/v1/antennas/{id}` - Antenna configuration details
+- `GET /api/v1/antennas/{id}/feeds` - List feeds for antenna
+- `GET /api/v1/antennas/{id}/feeds/{feed_id}` - Feed configuration details
 
 #### 3.2.2 Service/Business Logic Layer
 **Responsibilities:**
@@ -299,27 +305,111 @@ antennas:
 
 ### 4.3 API Request/Response Schemas
 
-#### Single Evaluation Request
+**Note on Coordinate Systems:**
+All 3D positions support automatic detection of coordinate system based on magnitude:
+- **ECEF**: If `abs(x) > 6400e3 OR abs(y) > 6400e3 OR abs(z) > 6400e3` (meters)
+- **Geodetic**: Otherwise (x=longitude degrees, y=latitude degrees, z=altitude meters)
+
+#### Gain Computation Request
 ```json
 {
   "antenna_id": "antenna_1",
-  "azimuth_deg": 45.0,
-  "elevation_deg": 30.0,
-  "frequency_mhz": 8400.0
+  "feed_id": "x_band_feed",
+  "vehicle_position": {
+    "x": 4510731.123,
+    "y": 4510731.456,
+    "z": 3488865.789
+  },
+  "vehicle_attitude": {
+    "w": 1.0,
+    "x": 0.0,
+    "y": 0.0,
+    "z": 0.0
+  },
+  "reflector_boresight": {
+    "x": 4510732.0,
+    "y": 4510732.0,
+    "z": 3488950.0
+  },
+  "feed_position": {
+    "x": 4510731.5,
+    "y": 4510731.5,
+    "z": 3488870.0
+  },
+  "emitter_position": {
+    "x": 4520000.0,
+    "y": 4520000.0,
+    "z": 3500000.0
+  },
+  "frequency_mhz": 8400.0,
+  "pointing_frequency_mhz": 8450.0,
+  "include_reference": true
 }
 ```
 
-#### Single Evaluation Response
+**Alternative with Geodetic coordinates:**
 ```json
 {
   "antenna_id": "antenna_1",
-  "g_over_t_db": 41.2,
+  "feed_id": "x_band_feed",
+  "vehicle_position": {
+    "x": -118.1234,
+    "y": 34.5678,
+    "z": 100.0
+  },
+  "vehicle_attitude": {
+    "roll_deg": 0.0,
+    "pitch_deg": 5.0,
+    "yaw_deg": 180.0
+  },
+  "reflector_boresight": {
+    "x": -117.0,
+    "y": 35.0,
+    "z": 400000.0
+  },
+  "feed_position": {
+    "x": -118.124,
+    "y": 34.568,
+    "z": 105.0
+  },
+  "emitter_position": {
+    "x": -117.0,
+    "y": 35.0,
+    "z": 400000.0
+  },
+  "frequency_mhz": 8400.0,
+  "pointing_frequency_mhz": 8450.0,
+  "include_reference": true
+}
+```
+
+#### Gain Computation Response
+```json
+{
+  "antenna_id": "antenna_1",
+  "feed_id": "x_band_feed",
+  "gain_db": 41.2,
+  "reference_gain_db": 43.5,
+  "loss_db": 2.3,
+  "geometry": {
+    "feed_offset_meters": {
+      "x": 0.05,
+      "y": 0.02,
+      "z": 0.01
+    },
+    "emitter_azimuth_deg": 185.5,
+    "emitter_elevation_deg": 32.1,
+    "beam_squint_deg": 0.15
+  },
   "warnings": [
-    "frequency_mhz outside calibrated range [8000, 8300]"
+    "Beam squint correction applied (pointing_freq != operating_freq)"
   ],
   "metadata": {
-    "computation_time_ms": 1.2,
-    "extrapolated": true
+    "computation_time_ms": 2.8,
+    "coordinate_transform_ms": 0.3,
+    "physics_model_ms": 1.8,
+    "correction_surface_ms": 0.5,
+    "extrapolated": false
   }
 }
 ```
@@ -330,15 +420,25 @@ antennas:
   "evaluations": [
     {
       "antenna_id": "antenna_1",
-      "azimuth_deg": 45.0,
-      "elevation_deg": 30.0,
-      "frequency_mhz": 8400.0
+      "feed_id": "x_band_feed",
+      "vehicle_position": {"x": 4510731.123, "y": 4510731.456, "z": 3488865.789},
+      "vehicle_attitude": {"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0},
+      "reflector_boresight": {"x": 4510732.0, "y": 4510732.0, "z": 3488950.0},
+      "feed_position": {"x": 4510731.5, "y": 4510731.5, "z": 3488870.0},
+      "emitter_position": {"x": 4520000.0, "y": 4520000.0, "z": 3500000.0},
+      "frequency_mhz": 8400.0,
+      "include_reference": false
     },
     {
       "antenna_id": "antenna_2",
-      "azimuth_deg": 180.0,
-      "elevation_deg": 15.0,
-      "frequency_mhz": 2200.0
+      "feed_id": "s_band_feed",
+      "vehicle_position": {"x": -118.1234, "y": 34.5678, "z": 100.0},
+      "vehicle_attitude": {"roll_deg": 0.0, "pitch_deg": 0.0, "yaw_deg": 0.0},
+      "reflector_boresight": {"x": -117.0, "y": 35.0, "z": 400000.0},
+      "feed_position": {"x": -118.124, "y": 34.568, "z": 105.0},
+      "emitter_position": {"x": -117.0, "y": 35.0, "z": 400000.0},
+      "frequency_mhz": 2200.0,
+      "include_reference": false
     }
   ]
 }
@@ -350,7 +450,13 @@ antennas:
   "results": [
     {
       "antenna_id": "antenna_1",
-      "g_over_t_db": 41.2,
+      "feed_id": "x_band_feed",
+      "gain_db": 41.2,
+      "geometry": {
+        "feed_offset_meters": {"x": 0.05, "y": 0.02, "z": 0.01},
+        "emitter_azimuth_deg": 185.5,
+        "emitter_elevation_deg": 32.1
+      },
       "warnings": [],
       "metadata": {
         "extrapolated": false
@@ -358,7 +464,13 @@ antennas:
     },
     {
       "antenna_id": "antenna_2",
-      "g_over_t_db": 38.7,
+      "feed_id": "s_band_feed",
+      "gain_db": 38.7,
+      "geometry": {
+        "feed_offset_meters": {"x": 0.0, "y": 0.0, "z": 0.0},
+        "emitter_azimuth_deg": 45.2,
+        "emitter_elevation_deg": 78.9
+      },
       "warnings": [],
       "metadata": {
         "extrapolated": false
@@ -366,26 +478,89 @@ antennas:
     }
   ],
   "metadata": {
-    "total_computation_time_ms": 15.3,
+    "total_computation_time_ms": 25.3,
     "count": 2
   }
 }
 ```
 
-#### Heatmap Request
+#### Heatmap Request (Rectangular Grid)
 ```json
 {
   "antenna_id": "antenna_1",
-  "frequency_mhz": 8400.0,
-  "azimuth_range": {
-    "min": 0.0,
-    "max": 360.0,
-    "step": 5.0
+  "feed_id": "x_band_feed",
+  "vehicle_position": {
+    "x": 4510731.123,
+    "y": 4510731.456,
+    "z": 3488865.789
   },
-  "elevation_range": {
-    "min": 0.0,
-    "max": 90.0,
-    "step": 2.0
+  "vehicle_attitude": {
+    "w": 1.0,
+    "x": 0.0,
+    "y": 0.0,
+    "z": 0.0
+  },
+  "reflector_boresight": {
+    "x": 4510732.0,
+    "y": 4510732.0,
+    "z": 3488950.0
+  },
+  "feed_position": {
+    "x": 4510731.5,
+    "y": 4510731.5,
+    "z": 3488870.0
+  },
+  "frequency_mhz": 8400.0,
+  "pointing_frequency_mhz": 8450.0,
+  "grid_config": {
+    "grid_type": "rectangular",
+    "azimuth_range_deg": {
+      "min": 0.0,
+      "max": 360.0,
+      "step": 5.0
+    },
+    "elevation_range_deg": {
+      "min": 0.0,
+      "max": 90.0,
+      "step": 2.0
+    }
+  }
+}
+```
+
+#### Heatmap Request (H3 Hexagonal Grid)
+```json
+{
+  "antenna_id": "antenna_1",
+  "feed_id": "x_band_feed",
+  "vehicle_position": {
+    "x": 4510731.123,
+    "y": 4510731.456,
+    "z": 3488865.789
+  },
+  "vehicle_attitude": {
+    "w": 1.0,
+    "x": 0.0,
+    "y": 0.0,
+    "z": 0.0
+  },
+  "reflector_boresight": {
+    "x": 4510732.0,
+    "y": 4510732.0,
+    "z": 3488950.0
+  },
+  "feed_position": {
+    "x": 4510731.5,
+    "y": 4510731.5,
+    "z": 3488870.0
+  },
+  "frequency_mhz": 8400.0,
+  "grid_config": {
+    "grid_type": "h3",
+    "h3_resolution": 7,
+    "center_azimuth_deg": 180.0,
+    "center_elevation_deg": 45.0,
+    "field_of_view_deg": 30.0
   }
 }
 ```
@@ -394,20 +569,23 @@ antennas:
 ```json
 {
   "antenna_id": "antenna_1",
+  "feed_id": "x_band_feed",
   "frequency_mhz": 8400.0,
   "grid": {
+    "grid_type": "rectangular",
     "azimuth_values": [0.0, 5.0, 10.0, ...],
     "elevation_values": [0.0, 2.0, 4.0, ...],
-    "g_over_t_db": [
-      [41.2, 41.5, 41.8, ...],  // Row for elevation 0
-      [40.8, 41.1, 41.4, ...],  // Row for elevation 2
+    "loss_db": [
+      [2.1, 2.3, 2.8, ...],  // Row for elevation 0
+      [1.8, 2.0, 2.5, ...],  // Row for elevation 2
       ...
     ]
   },
   "warnings": ["Some points extrapolated"],
   "metadata": {
     "points_evaluated": 3276,
-    "computation_time_ms": 245.6
+    "computation_time_ms": 1245.6,
+    "peak_gain_db": 43.5
   }
 }
 ```
@@ -544,7 +722,11 @@ spec:
 ```rust
 enum ApiError {
     AntennaNotFound { antenna_id: String },
+    FeedNotFound { antenna_id: String, feed_id: String },
     InvalidParameter { param: String, reason: String },
+    InvalidCoordinate { param: String, reason: String },
+    InvalidAttitude { reason: String },
+    CoordinateTransformError { details: String },
     ComputationError { details: String },
     InternalError { details: String },
 }
@@ -552,19 +734,30 @@ enum ApiError {
 
 **HTTP Status Mappings:**
 - 200: Success
-- 400: Invalid parameters
-- 404: Antenna not found
-- 500: Internal computation/system error
+- 400: Invalid parameters, coordinates, or attitude
+- 404: Antenna or feed not found
+- 500: Internal computation/system error (including coordinate transform failures)
 - 503: Service unavailable (startup, shutdown)
+
+**Common Error Examples:**
+- Invalid ECEF coordinates: `{"error": "InvalidCoordinate", "param": "vehicle_position", "reason": "Coordinates exceed Earth radius (|pos| > 10000 km)"}`
+- Invalid Geodetic coordinates: `{"error": "InvalidCoordinate", "param": "emitter_position", "reason": "Latitude out of range [-90, 90] degrees"}`
+- Invalid attitude: `{"error": "InvalidAttitude", "reason": "Quaternion not normalized (|q| = 1.15)"}`
+- Feed not found: `{"error": "FeedNotFound", "antenna_id": "antenna_1", "feed_id": "invalid_feed"}`
+- Coordinate singularity: `{"error": "CoordinateTransformError", "details": "Gimbal lock at zenith (elevation = 90 degrees)"}`
 
 ### 6.4 Performance Targets
 
 | Metric | Target | Notes |
 |--------|--------|-------|
-| Single evaluation latency | 50-100ms | p95 |
+| Single gain computation latency | 100-150ms | p95, includes coordinate transforms |
+| Coordinate transform overhead | <10ms | Per request |
+| Physics model computation | 50-80ms | Per evaluation |
+| Correction surface interpolation | 5-10ms | Per evaluation |
 | Batch throughput | 1-20 req/s | Per instance |
+| Heatmap generation (3312 points) | <2s | Rectangular grid |
 | Startup time | <10s | Including data load |
-| Memory footprint | <512MB | With all antennas |
+| Memory footprint | <512MB | With all antennas and feeds |
 | Calibration data size | <20MB | All antennas combined |
 
 ## 7. Development Workflow

@@ -21,10 +21,23 @@ This document outlines the design for a high-performance antenna gain model for 
 - **Quality**: High-accuracy, high-quality components assumed
 
 ### 1.3 Use Cases
-1. **Primary**: Compute relative loss between ideal and actual configurations
-   - Ideal: Co-located reflector boresight, feed boresight, and emitter
-   - Actual: Arbitrary positions for all three elements
-2. **Extended**: Generate loss heatmaps across entire visible field including multiple sidelobes and nulls
+1. **Primary**: Compute antenna gain from 3D geometric configuration
+   - Given: Vehicle position (ECEF or Geodetic), vehicle attitude (quaternion/Euler)
+   - Given: Reflector boresight position, feed position, emitter position (all 3D coordinates)
+   - Given: Operating frequency and optional pointing frequency
+   - Compute: Absolute gain at emitter position
+   - Optionally compute: Reference gain (ideal: feed at focus, pointing at emitter)
+   - Optionally compute: Loss = reference gain - actual gain
+   - Support: Multiple feeds per antenna (composite antenna_id + feed_id identifier)
+   - Support: Beam squint correction for pointing frequency ≠ operating frequency
+2. **Extended**: Generate loss heatmaps across antenna field of view
+   - Generate grid of emitter positions (rectangular azimuth/elevation or H3 hexagonal)
+   - Compute loss relative to peak gain for each grid point
+   - Support field-of-view clipping based on antenna beamwidth
+3. **Coordinate System Flexibility**:
+   - Auto-detect ECEF (Earth-Centered Earth-Fixed) vs Geodetic (lon, lat, alt) coordinates
+   - Transform all positions to antenna frame for gain computation
+   - Handle vehicle attitude for proper coordinate frame alignment
 
 ## 2. Mathematical Formulation
 
@@ -96,6 +109,22 @@ z_feed = -displacement²/(4f)  for large displacements
 
 ### 3.1 Edge Cases
 
+#### Coordinate Transformation Edge Cases
+- **Coordinate Auto-Detection Boundary**:
+  - Threshold: |x| or |y| or |z| > 6400 km → ECEF
+  - Near-threshold coordinates may be ambiguous (unlikely in practice)
+  - Validation: Detect obviously invalid coordinates (NaN, Inf, unreasonable magnitudes)
+- **Geodetic Singularities**:
+  - Poles (latitude = ±90°): Handle azimuth ambiguity
+  - Earth center (altitude → -6371 km): Invalid for antenna locations
+- **Attitude Singularities**:
+  - Gimbal lock in Euler angles (pitch = ±90°)
+  - Quaternion normalization: Warn if |q| deviates from 1.0 by >0.01
+- **Vehicle at High Altitude**:
+  - Low Earth Orbit (LEO): 200-2000 km altitude
+  - Medium Earth Orbit (MEO): 2000-35786 km altitude
+  - Ensure coordinate transforms remain accurate
+
 #### Large Feed Offset (> 0.3f)
 - Switch from parabolic approximations to ray tracing
 - Include higher-order Seidel aberrations
@@ -110,6 +139,12 @@ z_feed = -displacement²/(4f)  for large displacements
 - **Low frequency (< 1 GHz)**: Mesh transparency model
 - **Transition region**: Full Floquet mode analysis
 - **High frequency (> 10 GHz)**: Surface roughness dominance
+
+#### Multi-Feed Antenna Scenarios
+- **Feed Selection**: Validate feed_id exists for antenna_id
+- **Feed Offset**: Feed positions typically at or near focal point
+- **Frequency Bands**: Different feeds for different frequency ranges (e.g., S-band, X-band, Ka-band)
+- **Beam Squint**: Frequency-dependent beam pointing differs from mechanical pointing
 
 ### 3.2 Numerical Stability
 
@@ -158,6 +193,15 @@ z_feed = -displacement²/(4f)  for large displacements
    - Q-factor: 6-10 range
    - Phase center offset: ±λ/4 typical
    - Asymmetry factor for E/H plane differences
+
+5. **Feed Configurations** (Multi-Feed Support)
+   - Feed ID to physical position mapping
+   - Feed-specific patterns and frequency ranges
+   - Example feed configurations:
+     - `s_band_feed`: 2.0-2.3 GHz, position offset (0, 0, 0) - at focal point
+     - `x_band_feed`: 7.1-8.5 GHz, position offset (0.05, 0, 0) - slightly off-axis
+     - `ka_band_feed`: 25.5-27.0 GHz, position offset (0, 0.05, 0) - different offset
+   - Per-feed calibration corrections (if applicable)
 
 ### 4.4 Validation Metrics
 

@@ -1492,44 +1492,82 @@ e_clock_deg,e_cone_deg,frequency_mhz,g_over_t_db,temperature_k
 
 ---
 
-#### 5.2 Request/Response Schemas (3-4 days)
-**Objective:** Define API contract with typed schemas
+#### 5.2 Request/Response Schemas (4-5 days)
+**Objective:** Define API contract with typed schemas supporting 3D coordinate-based queries
 
 **Steps:**
 - Create `src/api/schemas.rs` with:
-  - `EvaluationRequest` - single evaluation input
-  - `EvaluationResponse` - single evaluation output
+  - `Position3D` - 3D position (auto-detects ECEF vs Geodetic based on magnitude)
+  - `Quaternion` or `EulerAngles` - vehicle attitude representation
+  - `GainRequest` - gain computation input (replaces EvaluationRequest)
+  - `GainResponse` - gain computation output with optional reference gain
+  - `HeatmapRequest` - 2D heatmap generation input
+  - `HeatmapResponse` - 2D heatmap output
+  - `GeometryInfo` - computed geometry details (feed offset, emitter direction)
+  - `GridConfig` - grid configuration (rectangular or H3 hexagonal)
   - `ErrorResponse` - standardized error format
   - `HealthResponse` - health check response
   - `StatusResponse` - service status
-  - `AntennaInfo` - antenna metadata
+  - `AntennaInfo` - antenna metadata including feed configurations
 - Implement `serde` serialization with proper field naming (snake_case)
 - Add JSON schema annotations (using `poem-openapi` if desired)
-- Write schema documentation
+- Implement coordinate system auto-detection logic in Position3D:
+  - If `abs(x) > 6400e3 OR abs(y) > 6400e3 OR abs(z) > 6400e3` → ECEF
+  - Otherwise → Geodetic (lon degrees, lat degrees, alt meters)
+- Write schema documentation with coordinate system examples
 
 **Acceptance Criteria:**
 - All schemas serialize/deserialize correctly
 - JSON field names match API spec (section 4.3 of architecture doc)
-- Schema documentation is clear
+- Position3D auto-detection works reliably
+- Composite `(antenna_id, feed_id)` identifiers supported
+- Schema documentation is clear with coordinate examples
 - Example JSON payloads are valid
 
 **Files to Create:**
 - `src/api/schemas.rs`
-- `examples/api_requests.json` (example payloads)
+- `examples/api_requests.json` (example payloads with ECEF and Geodetic)
 
 **Test Coverage:**
 - Serialization/deserialization round-trips
+- Position3D coordinate system auto-detection (ECEF vs Geodetic)
 - Field naming conventions
 - Validation edge cases
+- Composite identifier validation
 
 **Example Schema:**
 ```rust
 #[derive(Serialize, Deserialize)]
-pub struct EvaluationRequest {
+pub struct Position3D {
+    pub x: f64,  // ECEF X (meters) OR longitude (degrees)
+    pub y: f64,  // ECEF Y (meters) OR latitude (degrees)
+    pub z: f64,  // ECEF Z (meters) OR altitude (meters)
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct GainRequest {
     pub antenna_id: String,
-    pub azimuth_deg: f64,
-    pub elevation_deg: f64,
+    pub feed_id: String,
+    pub vehicle_position: Position3D,
+    pub vehicle_attitude: Quaternion,
+    pub reflector_boresight: Position3D,
+    pub feed_position: Position3D,
+    pub emitter_position: Position3D,
     pub frequency_mhz: f64,
+    pub pointing_frequency_mhz: Option<f64>,  // For beam squint correction
+    pub include_reference: bool,  // Include ideal gain for loss calculation
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct GainResponse {
+    pub antenna_id: String,
+    pub feed_id: String,
+    pub gain_db: f64,
+    pub reference_gain_db: Option<f64>,  // If include_reference=true
+    pub loss_db: Option<f64>,  // reference - actual (if reference computed)
+    pub geometry: GeometryInfo,
+    pub warnings: Vec<String>,
+    pub metadata: ComputationMetadata,
 }
 ```
 
@@ -1575,88 +1613,116 @@ pub struct EvaluationRequest {
 ---
 
 #### 5.4 Calibration Data Repository (3-4 days)
-**Objective:** Implement loading and management of calibration artifacts (antenna configs + correction surfaces)
+**Objective:** Implement loading and management of calibration artifacts (antenna configs + correction surfaces + feed configurations)
 
 **Steps:**
 - Create `src/data/repository.rs` with:
-  - `CalibrationRepository` struct managing antenna configurations and correction surfaces
+  - `CalibrationRepository` struct managing antenna configurations, correction surfaces, and feed configurations
   - `load_from_config()` - load all antennas at startup
-  - `get_antenna_config(antenna_id)` - retrieve antenna configuration (physical parameters)
-  - `get_correction_surface(antenna_id)` - retrieve correction surface (B-spline data)
+  - `get_antenna_config(antenna_id, feed_id)` - retrieve antenna configuration with composite identifier
+  - `get_correction_surface(antenna_id, feed_id)` - retrieve correction surface (B-spline data)
+  - `get_feed_config(antenna_id, feed_id)` - retrieve feed-specific parameters (location, pattern)
   - `list_antennas()` - return all loaded antenna IDs
+  - `list_feeds(antenna_id)` - return all feeds for a given antenna
   - Thread-safe access (using `Arc` for shared access)
 - Create `src/data/loader.rs` with:
   - `load_calibration_artifact(path)` - deserialize calibration artifact
   - Parse antenna configuration (class reference + tuned parameters)
   - Parse correction surface (B-spline coefficients/knots or RBF data)
+  - Parse feed configurations (feed_id → feed position/pattern mapping)
   - Validation checks on loaded data
 - Integrate with configuration system:
   - Read antenna list from `calibration_data/antennas.yaml`
   - Load binary artifacts from `calibration_data/*.bin`
+  - Support multiple feeds per antenna
 - Add startup validation and logging:
   - Log loaded antennas with key parameters
+  - Log available feeds per antenna
   - Validate correction surface dimensions
   - Check validity ranges
+  - Validate feed configuration completeness
 
 **Acceptance Criteria:**
-- Repository loads all configured antennas at startup
-- Both components accessible: antenna config + correction surface
+- Repository loads all configured antennas with their feeds at startup
+- Three components accessible: antenna config + correction surface + feed configs
+- Composite `(antenna_id, feed_id)` lookups work correctly
 - Thread-safe concurrent access
-- Clear logging of loaded antennas
+- Clear logging of loaded antennas and feeds
 - Fail-fast on corrupted or missing artifacts
+- Feed configurations include physical location and pattern parameters
 
 **Files to Create:**
 - `src/data/repository.rs`
 - `src/data/loader.rs`
 - Update `src/data/mod.rs` to export repository
-- Update `src/data/types.rs` if needed for new artifact format
+- Update `src/data/types.rs` to include `FeedConfiguration` type
 
 **Test Coverage:**
-- Loading multiple antennas
-- Antenna lookup (found and not found)
-- Artifact deserialization (both components)
+- Loading multiple antennas with multiple feeds
+- Composite (antenna_id, feed_id) lookup (found and not found)
+- Artifact deserialization (all three components)
 - Validation of loaded data
 - Concurrent access patterns
+- Feed listing per antenna
 
-**Note:** This brings back the repository concept from original Sprint 3, but adapted for new calibration artifact format (antenna config + correction surface).
+**Note:** This brings back the repository concept from original Sprint 3, but adapted for new calibration artifact format (antenna config + correction surface + feed configurations). Supports composite identifiers for multi-feed antennas.
 
 ---
 
-#### 5.5 Single Evaluation Endpoint (4-5 days)
-**Objective:** Implement core antenna evaluation endpoint with physics model + correction surface
+#### 5.5 Gain Computation Endpoint with Coordinate Transforms (5-6 days)
+**Objective:** Implement gain computation endpoint with 3D coordinate transformations, physics model, and correction surface
 
 **Steps:**
 - Create service layer in `src/service/evaluator.rs`:
-  - `evaluate_antenna(antenna_id, freq, cone, clock)` - orchestrate single evaluation
-  - Input validation against antenna validity ranges
-  - **Step 1: Load antenna config and correction surface** from repository
-  - **Step 2: Compute base prediction** using physical optics model (Sprint 2-3) with antenna config parameters
-  - **Step 3: Evaluate correction surface** at (freq, cone, clock) using B-spline interpolation
-  - **Step 4: Combine**: `G/T_final = G/T_physics + G/T_correction`
+  - `compute_gain(request: GainRequest)` - orchestrate gain computation from 3D positions
+  - **Step 1: Transform coordinates**:
+    - Auto-detect coordinate system (ECEF vs Geodetic) for all positions
+    - Convert all positions to antenna frame using vehicle position and attitude
+    - Compute feed offset vector from reflector boresight
+    - Compute emitter direction (azimuth, elevation) in antenna frame
+    - Apply beam squint correction if pointing_frequency ≠ operating_frequency
+  - **Step 2: Load antenna config, feed config, and correction surface** from repository using composite (antenna_id, feed_id)
+  - **Step 3: Compute base prediction** using physical optics model (Sprint 2-3) with:
+    - Antenna configuration parameters
+    - Feed offset from boresight
+    - Emitter direction
+    - Operating frequency
+  - **Step 4: Evaluate correction surface** using B-spline interpolation
+  - **Step 5: Combine**: `Gain_final = Gain_physics + Correction`
+  - **Step 6 (if include_reference=true)**: Compute reference gain (ideal: feed at focus, pointing at emitter)
+  - **Step 7 (if reference computed)**: Calculate loss = reference_gain - actual_gain
   - Generate warnings for:
     - Out-of-range queries (extrapolated regions in correction surface)
     - Physical model edge cases (large feed offsets, etc.)
-  - Track computation time (physics model + correction separately)
+    - Coordinate transformation issues (singularities, large uncertainties)
+    - Beam squint correction applied
+  - Track computation time for each step
 - Create `src/model/correction_interpolator.rs`:
   - `evaluate_correction(correction_surface, freq, cone, clock)` - B-spline interpolation
   - Reuse B-spline evaluation code from Sprint 1 data types (repurposed)
   - Handle out-of-range gracefully (return warning, use nearest or zero)
 - Add handler in `src/api/handlers.rs`:
-  - `POST /api/v1/evaluate`
+  - `POST /api/v1/gain`
   - Request validation and parsing
   - Error handling and response formatting
-  - Logging with structured fields (include both physics and correction values)
-- Integrate with calibration repository (Task 5.4)
+  - Return GeometryInfo with computed geometry details
+  - Logging with structured fields (include coordinates, geometry, physics, and correction values)
+- Integrate with calibration repository (Task 5.4) using composite identifiers
+- Integrate with coordinate transformation module (Task 5.7)
 - Implement detailed error responses
 
 **Acceptance Criteria:**
-- Endpoint returns correct G/T values combining physics model + corrections
-- Response includes breakdown (optional debug field): base_model_g_t, correction_g_t, final_g_t
+- Endpoint returns correct gain values combining physics model + corrections
+- Coordinate transformations work for both ECEF and Geodetic inputs
+- Auto-detection correctly identifies coordinate systems
+- Response includes GeometryInfo with feed offset and emitter direction
+- Optional reference gain and loss calculation works correctly
+- Beam squint correction applied when pointing_frequency differs
 - Out-of-range queries include appropriate warnings
 - Correction surface evaluation works correctly
 - Error responses follow standard format
-- Response time <100ms (p95) for typical queries
-- Comprehensive logging for debugging
+- Response time <150ms (p95) for typical queries (includes coordinate transforms)
+- Comprehensive logging for debugging with geometry details
 
 **Files to Create:**
 - `src/service/evaluator.rs`
@@ -1665,61 +1731,153 @@ pub struct EvaluationRequest {
 - Update `src/api/handlers.rs` and `src/api/routes.rs`
 
 **Test Coverage:**
-- Valid evaluation requests (physics + correction)
+- Valid gain requests with ECEF coordinates (physics + correction + reference)
+- Valid gain requests with Geodetic coordinates
+- Coordinate system auto-detection accuracy
+- Coordinate transformation accuracy
+- Beam squint correction application
+- Loss calculation (reference vs actual)
 - Correction surface interpolation accuracy
 - Combined model output validation
-- Antenna not found errors
-- Out-of-range parameter warnings (both dimensions)
-- Invalid parameter errors
-- Response format validation
+- Antenna or feed not found errors
+- Out-of-range parameter warnings
+- Invalid parameter errors (bad coordinates, attitudes)
+- Response format validation including GeometryInfo
 - Integration tests with real calibration data
 
-**Note:** This is where the complete model comes together: `PhysicsModel + CorrectionSurface = Final G/T`
+**Note:** This is where the complete system comes together: `CoordinateTransform → PhysicsModel + CorrectionSurface = Final Gain`. Replaces the original simple evaluation endpoint with full 3D geometric modeling.
 
 ---
 
-#### 5.6 Input Validation Layer (2-3 days)
-**Objective:** Implement comprehensive input validation
+#### 5.6 Input Validation Layer (3-4 days)
+**Objective:** Implement comprehensive input validation for 3D coordinate-based requests
 
 **Steps:**
 - Create `src/service/validator.rs` with:
-  - `validate_evaluation_request()` - check all parameters
-  - Range validation (azimuth 0-360, elevation 0-90, etc.)
-  - Antenna ID validation (exists in repository)
+  - `validate_gain_request()` - check all gain computation parameters
+  - `validate_heatmap_request()` - check all heatmap parameters
+  - Position validation:
+    - ECEF coordinates reasonable (|x|, |y|, |z| < 10000 km)
+    - Geodetic coordinates reasonable (lon: -180 to 180, lat: -90 to 90, alt < 1000 km)
+    - Detect obviously invalid coordinates (e.g., NaN, Inf)
+  - Attitude validation:
+    - Quaternion normalization check (magnitude ≈ 1)
+    - Euler angle ranges
+  - Composite identifier validation:
+    - `(antenna_id, feed_id)` exists in repository
   - Frequency range validation
   - Generate specific error messages per field
 - Add validation to all API handlers
-- Implement custom validation error types
+- Implement custom validation error types including coordinate errors
 
 **Acceptance Criteria:**
 - All invalid inputs are caught before processing
 - Error messages specify which field failed and why
+- Coordinate validation catches common errors
+- Attitude validation ensures valid rotations
+- Composite identifier validation works correctly
 - Validation logic is reusable across endpoints
 - Tests cover all validation rules
 
 **Files to Create:**
 - `src/service/validator.rs`
-- Update error types to include validation errors
+- Update error types to include validation errors and coordinate-specific errors
 
 **Test Coverage:**
 - Each validation rule individually
+- Position validation (ECEF and Geodetic edge cases)
+- Attitude validation (invalid quaternions, out-of-range Euler angles)
+- Composite identifier validation
 - Multiple validation failures
-- Edge cases (boundary values, special characters)
+- Edge cases (boundary values, NaN, Inf, special characters)
+
+---
+
+#### 5.7 Coordinate Transformation Module (4-5 days)
+**Objective:** Implement comprehensive 3D coordinate transformations for antenna gain computation
+
+**Steps:**
+- Create `src/model/coordinates_3d.rs` with:
+  - **Coordinate System Detection**:
+    - `detect_coordinate_system(pos: Position3D)` - auto-detect ECEF vs Geodetic
+    - Detection logic: if `abs(x) > 6400e3 OR abs(y) > 6400e3 OR abs(z) > 6400e3` → ECEF
+  - **ECEF ↔ Geodetic Transformations**:
+    - `geodetic_to_ecef(lon, lat, alt)` - WGS84 conversion
+    - `ecef_to_geodetic(x, y, z)` - inverse conversion (Bowring's method or iterative)
+  - **ECEF → Antenna Frame Transformation**:
+    - `ecef_to_antenna_frame(ecef_pos, vehicle_pos, vehicle_attitude)` - transform to antenna-centered coordinates
+    - Apply vehicle attitude (quaternion or Euler angles)
+    - Compute East-North-Up (ENU) frame at vehicle location
+    - Transform to antenna mounting frame
+  - **Antenna Frame → Spherical Coordinates**:
+    - `antenna_frame_to_spherical(x, y, z)` - convert to (azimuth, elevation, range)
+    - Handle singularities at zenith/nadir
+  - **Geometric Computations**:
+    - `compute_feed_offset(feed_pos, boresight_pos, antenna_frame)` - feed displacement from boresight
+    - `compute_emitter_direction(emitter_pos, antenna_frame)` - (azimuth, elevation) to emitter
+  - **Beam Squint Correction**:
+    - `apply_beam_squint(direction, pointing_freq, operating_freq, antenna_params)` - frequency-dependent pointing offset
+- Implement WGS84 ellipsoid parameters as constants
+- Add comprehensive error handling for:
+  - Invalid coordinates (singularities, out-of-bounds)
+  - Gimbal lock in attitude transformations
+  - Numerical precision issues
+- Document coordinate conventions (right-hand rule, angle definitions)
+
+**Acceptance Criteria:**
+- Auto-detection correctly identifies ECEF vs Geodetic coordinates
+- ECEF ↔ Geodetic transformations accurate to <1 meter
+- Attitude transformations preserve vector magnitudes
+- Spherical coordinate computation handles all quadrants correctly
+- Beam squint correction applies frequency-dependent offsets correctly
+- Singularities handled gracefully with clear error messages
+- Comprehensive unit tests with known reference transformations
+
+**Files to Create:**
+- `src/model/coordinates_3d.rs`
+- Update `src/model/mod.rs` to export coordinate functions
+
+**Test Coverage:**
+- Coordinate system auto-detection (ECEF, Geodetic, edge cases)
+- ECEF ↔ Geodetic round-trip accuracy (multiple reference points)
+- Attitude transformations (quaternion and Euler angles)
+- ECEF → Antenna frame → Spherical (full pipeline)
+- Feed offset computation
+- Emitter direction computation
+- Beam squint correction at different frequency ratios
+- Singularity handling (poles, gimbal lock)
+- Edge cases (coordinates near Earth center, very high altitudes)
+
+**Reference Data for Testing:**
+- Use published WGS84 test vectors
+- NASA/JPL reference frames
+- Known antenna locations and orientations
+
+**Note:** This module is critical infrastructure for the new API. All geometric computations depend on correct coordinate transformations.
 
 ---
 
 ### Sprint 5 Deliverables
 
-- ✅ Production-grade REST API with middleware (built on Sprint 1 foundation)
-- ✅ Enhanced health and status endpoints for K8s probes
-- ✅ **Calibration data repository** loading antenna configs + correction surfaces
-- ✅ **Single evaluation endpoint** combining physics model + correction surface
-- ✅ B-spline interpolation for correction surfaces (Sprint 1 types repurposed)
-- ✅ Complete evaluation pipeline: `G/T_final = PhysicsModel + CorrectionSurface`
-- ✅ Comprehensive error handling and response formatting
-- ✅ Advanced structured logging with request IDs and timing
-- ✅ Integration tests with calibration data (both components)
-- ✅ 80%+ test coverage
+- Production-grade REST API with middleware (built on Sprint 1 foundation)
+- Enhanced health and status endpoints for K8s probes
+- **3D coordinate-based API schemas** with auto-detection (ECEF/Geodetic)
+- **Coordinate transformation module** (ECEF ↔ Geodetic ↔ Antenna Frame ↔ Spherical)
+- **Calibration data repository** loading antenna configs + correction surfaces + feed configurations
+- **Gain computation endpoint** with full geometric pipeline:
+  - Coordinate transformations (3D positions → antenna frame)
+  - Physics model evaluation
+  - Correction surface interpolation
+  - Optional reference gain and loss calculation
+  - Beam squint correction
+- B-spline interpolation for correction surfaces
+- Complete pipeline: `3D Coordinates → Transform → PhysicsModel + CorrectionSurface = Gain`
+- Composite `(antenna_id, feed_id)` identifier support
+- Comprehensive input validation for coordinates and attitudes
+- Comprehensive error handling and response formatting
+- Advanced structured logging with request IDs, timing, and geometry details
+- Integration tests with calibration data and coordinate transforms
+- 80%+ test coverage
 
 ---
 
@@ -1767,76 +1925,122 @@ pub struct EvaluationRequest {
 
 ---
 
-#### 6.2 Heatmap Generation Endpoint (5-6 days)
-**Objective:** Generate 2D heatmaps of G/T across azimuth/elevation
+#### 6.2 Heatmap Generation Endpoint (6-7 days)
+**Objective:** Generate 2D loss heatmaps across antenna field of view using rectangular or H3 hexagonal grids
 
 **Steps:**
 - Create heatmap generation logic in `src/service/evaluator.rs`:
-  - `generate_heatmap()` - evaluate grid of points
-  - Grid generation from range specifications
-  - Efficient parallel evaluation
+  - `generate_heatmap(request: HeatmapRequest)` - evaluate grid of emitter positions
+  - **Grid Generation**:
+    - **Rectangular Grid** (default):
+      - Generate azimuth/elevation grid from range specifications
+      - Convert grid points to emitter positions in 3D space
+    - **H3 Hexagonal Grid** (optional):
+      - Integrate `h3o` or `h3ron` crate for H3 cell generation
+      - Generate H3 cells at specified resolution covering field of view
+      - Convert H3 cell centers to emitter positions
+  - **For each grid point**:
+    - Compute emitter position in 3D space (antenna frame or ECEF)
+    - Call gain computation (same as Task 5.5)
+    - Compute loss relative to peak gain (reference = ideal pointing)
+  - Efficient parallel evaluation using `rayon`
   - Handle extrapolation warnings for grid points
+  - Clip grid based on antenna beamwidth at operating frequency (optional optimization)
 - Add handler for `POST /api/v1/heatmap`
 - Implement response optimization:
   - Optional data compression
   - Configurable output resolution
   - Streaming response for large grids (future enhancement)
-- Add heatmap-specific validation (reasonable grid sizes)
+- Add heatmap-specific validation:
+  - Reasonable grid sizes (warn if > 10,000 points)
+  - Valid azimuth/elevation ranges or H3 resolution
+  - Beamwidth clipping parameters
 
 **Acceptance Criteria:**
-- Heatmaps generated for specified azimuth/elevation ranges
-- Grid spacing configurable via API
-- Performance acceptable for typical grids (72x46 = 3312 points)
+- Heatmaps generated for specified azimuth/elevation ranges (rectangular grid)
+- H3 hexagonal grid option works correctly
+- Grid spacing/resolution configurable via API
+- Loss values computed relative to peak gain
+- Performance acceptable for typical grids (72x46 = 3312 points rectangular, or H3 res 6-8)
 - Warnings aggregated for out-of-range regions
 - Response size reasonable (<1MB for typical heatmaps)
+- Coordinate transformations work correctly for all grid points
+- Optional beamwidth clipping reduces computation for off-axis points
 
 **Files to Create:**
 - Update `src/service/evaluator.rs` with heatmap logic
 - Update `src/api/schemas.rs` with heatmap request/response types
 - Add heatmap handler to `src/api/handlers.rs`
+- Optional: `src/model/h3_grid.rs` for H3 grid generation
+
+**Dependencies:**
+- Add `h3o` or `h3ron` crate (if H3 support included)
 
 **Test Coverage:**
-- Small grid (10x10)
-- Large grid (100x100)
+- Small rectangular grid (10x10)
+- Large rectangular grid (100x100)
+- H3 grid at different resolutions (res 6, 7, 8)
 - Partial out-of-range grid (some extrapolated points)
-- Performance benchmarks
-- Response format validation
+- Loss calculation accuracy (verify relative to peak)
+- Coordinate transformation for grid points
+- Performance benchmarks (rectangular vs H3)
+- Response format validation (both grid types)
 
 **Performance Target:**
-- 72x46 grid (3312 points) completes in <2 seconds
+- 72x46 rectangular grid (3312 points) completes in <2 seconds
+- H3 resolution 7 (~5000 cells) completes in <3 seconds
+
+**Note:** H3 grid support is optional for MVP. Can be deferred to future sprint if time-constrained. Rectangular azimuth/elevation grid is sufficient for initial deployment.
 
 ---
 
-#### 6.3 Antenna Listing & Details Endpoints (2-3 days)
-**Objective:** Allow clients to query available antennas and their properties
+#### 6.3 Antenna Listing & Details Endpoints (3-4 days)
+**Objective:** Allow clients to query available antennas, feeds, and their properties
 
 **Steps:**
 - Add `GET /api/v1/antennas` endpoint:
-  - List all loaded antenna IDs
-  - Include basic metadata (name, enabled status)
+  - List all loaded antenna IDs with available feeds
+  - Include basic metadata (name, enabled status, feed count)
   - Sort alphabetically
 - Add `GET /api/v1/antennas/{id}` endpoint:
   - Return detailed antenna information
+  - List of available feeds with their configurations
   - Validity ranges for all dimensions
   - Calibration metadata (date, version, etc.)
   - Model statistics (knot counts, coefficient counts)
-- Implement caching for antenna list (static after startup)
+  - Physical parameters (diameter, f/D ratio, etc.)
+- Add `GET /api/v1/antennas/{id}/feeds` endpoint:
+  - List all feeds for a specific antenna
+  - Include feed positions and frequency ranges
+- Add `GET /api/v1/antennas/{id}/feeds/{feed_id}` endpoint:
+  - Return detailed feed configuration
+  - Feed position (offset from focal point)
+  - Feed pattern parameters
+  - Frequency range and beamwidth
+- Implement caching for antenna/feed lists (static after startup)
 
 **Acceptance Criteria:**
-- Antenna list returns all configured antennas
-- Antenna details include all relevant metadata
-- 404 error for unknown antenna IDs
-- Response times <50ms
+- Antenna list returns all configured antennas with feed counts
+- Antenna details include all relevant metadata and feeds
+- Feed listing works for multi-feed antennas
+- Feed details include position and pattern parameters
+- 404 error for unknown antenna or feed IDs
+- Response times <50ms for all endpoints
+- Composite `(antenna_id, feed_id)` pairs are discoverable
 
 **Files to Create:**
-- Update `src/api/handlers.rs` with antenna list/details handlers
-- Update `src/api/schemas.rs` with antenna info types
+- Update `src/api/handlers.rs` with antenna/feed list/details handlers
+- Update `src/api/schemas.rs` with antenna and feed info types
 
 **Test Coverage:**
-- List all antennas
-- Get details for existing antenna
+- List all antennas (with feeds)
+- Get details for existing antenna (with feeds list)
+- List feeds for specific antenna
+- Get details for specific feed
 - Get details for non-existent antenna (404)
-- Metadata accuracy
+- Get details for non-existent feed (404)
+- Metadata accuracy for antennas and feeds
+- Multi-feed antenna support
 
 ---
 
