@@ -99,7 +99,7 @@ This implementation plan breaks down the Antenna Model Service into manageable s
 
 **Goal:** Enhance REST API with production middleware, comprehensive health checks, and core evaluation endpoints
 
-**Status:** 🔄 IN PROGRESS - 1/5 tasks complete (20%)
+**Status:** 🔄 IN PROGRESS - 2/7 tasks complete (29%)
 
 **Note:** Basic REST API server and status endpoint were established in Sprint 1. This sprint focuses on production-grade enhancements and evaluation functionality.
 
@@ -149,48 +149,54 @@ This implementation plan breaks down the Antenna Model Service into manageable s
 
 ---
 
-#### 5.2 Request/Response Schemas (4-5 days)
+#### 5.2 Request/Response Schemas (4-5 days) ✅ COMPLETE
 **Objective:** Define API contract with typed schemas supporting 3D coordinate-based queries
 
 **Steps:**
-- Create `src/api/schemas.rs` with:
-  - `Position3D` - 3D position (auto-detects ECEF vs Geodetic based on magnitude)
-  - `Quaternion` or `EulerAngles` - vehicle attitude representation
-  - `GainRequest` - gain computation input (replaces EvaluationRequest)
-  - `GainResponse` - gain computation output with optional reference gain
-  - `HeatmapRequest` - 2D heatmap generation input
-  - `HeatmapResponse` - 2D heatmap output
-  - `GeometryInfo` - computed geometry details (feed offset, emitter direction)
-  - `GridConfig` - grid configuration (rectangular or H3 hexagonal)
-  - `ErrorResponse` - standardized error format
-  - `HealthResponse` - health check response
-  - `StatusResponse` - service status
-  - `AntennaInfo` - antenna metadata including feed configurations
-- Implement `serde` serialization with proper field naming (snake_case)
-- Add JSON schema annotations (using `poem-openapi` if desired)
-- Implement coordinate system auto-detection logic in Position3D:
-  - If `abs(x) > 6400e3 OR abs(y) > 6400e3 OR abs(z) > 6400e3` → ECEF
-  - Otherwise → Geodetic (lon degrees, lat degrees, alt meters)
-- Write schema documentation with coordinate system examples
+- ✅ Create `src/api/schemas.rs` with:
+  - ✅ `Position3D` - 3D position (auto-detects ECEF vs Geodetic based on magnitude)
+  - ✅ `Quaternion` and `EulerAngles` - vehicle attitude representation
+  - ✅ `GainRequest` - gain computation input (replaces EvaluationRequest)
+  - ✅ `GainResponse` - gain computation output with optional reference gain
+  - ✅ `HeatmapRequest` - 2D heatmap generation input
+  - ✅ `HeatmapResponse` - 2D heatmap output
+  - ✅ `GeometryInfo` - computed geometry details (feed offset, emitter direction)
+  - ✅ `GridConfig` - grid configuration (rectangular or H3 hexagonal)
+  - ✅ `ErrorResponse` - standardized error format
+  - ✅ `HealthResponse` - health check response
+  - ✅ `StatusResponse` - enhanced service status
+  - ✅ `AntennaInfo` - antenna metadata including feed configurations
+  - ✅ Additional types: `Vector3D`, `Attitude` enum, `BatchGainRequest`, `BatchGainResponse`, `AntennaListResponse`, `AntennaDetailsResponse`, `FeedInfo`, `ValidityRangesInfo`, `CalibrationInfo`, `PhysicalParametersInfo`, `MeshInfo`, `ComputationMetadata`, `BatchMetadata`, `HeatmapMetadata`, `RangeConfig`, `GridData`
+- ✅ Implement `serde` serialization with proper field naming (snake_case)
+- ✅ Coordinate system auto-detection logic in Position3D implemented:
+  - ✅ If `abs(x) > 6400e3 OR abs(y) > 6400e3 OR abs(z) > 6400e3` → ECEF
+  - ✅ Otherwise → Geodetic (lon degrees, lat degrees, alt meters)
+- ✅ Write schema documentation with coordinate system examples
 
 **Acceptance Criteria:**
-- All schemas serialize/deserialize correctly
-- JSON field names match API spec (section 4.3 of architecture doc)
-- Position3D auto-detection works reliably
-- Composite `(antenna_id, feed_id)` identifiers supported
-- Schema documentation is clear with coordinate examples
-- Example JSON payloads are valid
+- ✅ All schemas serialize/deserialize correctly
+- ✅ JSON field names match API spec (section 4.3 of architecture doc) - snake_case
+- ✅ Position3D auto-detection works reliably (tested with threshold checks)
+- ✅ Composite `(antenna_id, feed_id)` identifiers supported
+- ✅ Schema documentation is clear with coordinate examples
+- ✅ Example JSON payloads are valid
 
-**Files to Create:**
-- `src/api/schemas.rs`
-- `examples/api_requests.json` (example payloads with ECEF and Geodetic)
+**Files Created:**
+- ✅ `src/api/schemas.rs` (1214 lines, comprehensive schema definitions)
+- ✅ `examples/api_requests.json` (example payloads with ECEF and Geodetic)
 
 **Test Coverage:**
-- Serialization/deserialization round-trips
-- Position3D coordinate system auto-detection (ECEF vs Geodetic)
-- Field naming conventions
-- Validation edge cases
-- Composite identifier validation
+- ✅ Serialization/deserialization round-trips (all major types)
+- ✅ Position3D coordinate system auto-detection (ECEF vs Geodetic, boundary cases)
+- ✅ Field naming conventions (snake_case verification)
+- ✅ Quaternion validation (magnitude, normalization checks)
+- ✅ EulerAngles validation
+- ✅ Vector3D operations
+- ✅ RangeConfig calculations
+- ✅ GridConfig serialization (Rectangular and H3)
+- ✅ ErrorResponse helper methods
+- ✅ StatusResponse and HealthResponse
+- ✅ **Total: 34 schema tests, all passing**
 
 **Example Schema:**
 ```rust

@@ -1,0 +1,480 @@
+{
+  "description": "Example API request/response payloads for Antenna Model Service",
+  "version": "1.0",
+  "examples": {
+    "gain_request_ecef_quaternion": {
+      "description": "Gain computation request with ECEF coordinates and quaternion attitude",
+      "request": {
+        "antenna_id": "antenna_1",
+        "feed_id": "x_band_feed",
+        "vehicle_position": {
+          "x": 4510731.123,
+          "y": 4510731.456,
+          "z": 3488865.789
+        },
+        "vehicle_attitude": {
+          "w": 1.0,
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "reflector_boresight": {
+          "x": 4510732.0,
+          "y": 4510732.0,
+          "z": 3488950.0
+        },
+        "feed_position": {
+          "x": 4510731.5,
+          "y": 4510731.5,
+          "z": 3488870.0
+        },
+        "emitter_position": {
+          "x": 4520000.0,
+          "y": 4520000.0,
+          "z": 3500000.0
+        },
+        "frequency_mhz": 8400.0,
+        "pointing_frequency_mhz": 8450.0,
+        "include_reference": true
+      }
+    },
+    "gain_request_geodetic_euler": {
+      "description": "Gain computation request with Geodetic coordinates and Euler angles",
+      "request": {
+        "antenna_id": "antenna_1",
+        "feed_id": "x_band_feed",
+        "vehicle_position": {
+          "x": -118.1234,
+          "y": 34.5678,
+          "z": 100.0
+        },
+        "vehicle_attitude": {
+          "roll_deg": 0.0,
+          "pitch_deg": 5.0,
+          "yaw_deg": 180.0
+        },
+        "reflector_boresight": {
+          "x": -117.0,
+          "y": 35.0,
+          "z": 400000.0
+        },
+        "feed_position": {
+          "x": -118.124,
+          "y": 34.568,
+          "z": 105.0
+        },
+        "emitter_position": {
+          "x": -117.0,
+          "y": 35.0,
+          "z": 400000.0
+        },
+        "frequency_mhz": 8400.0,
+        "include_reference": false
+      }
+    },
+    "gain_response": {
+      "description": "Gain computation response with reference gain and geometry",
+      "response": {
+        "antenna_id": "antenna_1",
+        "feed_id": "x_band_feed",
+        "gain_db": 41.2,
+        "reference_gain_db": 43.5,
+        "loss_db": 2.3,
+        "geometry": {
+          "feed_offset_meters": {
+            "x": 0.05,
+            "y": 0.02,
+            "z": 0.01
+          },
+          "emitter_azimuth_deg": 185.5,
+          "emitter_elevation_deg": 32.1,
+          "beam_squint_deg": 0.15
+        },
+        "warnings": [
+          "Beam squint correction applied (pointing_freq != operating_freq)"
+        ],
+        "metadata": {
+          "computation_time_ms": 2.8,
+          "coordinate_transform_ms": 0.3,
+          "physics_model_ms": 1.8,
+          "correction_surface_ms": 0.5,
+          "extrapolated": false
+        }
+      }
+    },
+    "batch_request": {
+      "description": "Batch gain computation request",
+      "request": {
+        "evaluations": [
+          {
+            "antenna_id": "antenna_1",
+            "feed_id": "x_band_feed",
+            "vehicle_position": {
+              "x": 4510731.123,
+              "y": 4510731.456,
+              "z": 3488865.789
+            },
+            "vehicle_attitude": {
+              "w": 1.0,
+              "x": 0.0,
+              "y": 0.0,
+              "z": 0.0
+            },
+            "reflector_boresight": {
+              "x": 4510732.0,
+              "y": 4510732.0,
+              "z": 3488950.0
+            },
+            "feed_position": {
+              "x": 4510731.5,
+              "y": 4510731.5,
+              "z": 3488870.0
+            },
+            "emitter_position": {
+              "x": 4520000.0,
+              "y": 4520000.0,
+              "z": 3500000.0
+            },
+            "frequency_mhz": 8400.0,
+            "include_reference": false
+          },
+          {
+            "antenna_id": "antenna_2",
+            "feed_id": "s_band_feed",
+            "vehicle_position": {
+              "x": -118.1234,
+              "y": 34.5678,
+              "z": 100.0
+            },
+            "vehicle_attitude": {
+              "roll_deg": 0.0,
+              "pitch_deg": 0.0,
+              "yaw_deg": 0.0
+            },
+            "reflector_boresight": {
+              "x": -117.0,
+              "y": 35.0,
+              "z": 400000.0
+            },
+            "feed_position": {
+              "x": -118.124,
+              "y": 34.568,
+              "z": 105.0
+            },
+            "emitter_position": {
+              "x": -117.0,
+              "y": 35.0,
+              "z": 400000.0
+            },
+            "frequency_mhz": 2200.0,
+            "include_reference": false
+          }
+        ]
+      }
+    },
+    "batch_response": {
+      "description": "Batch gain computation response",
+      "response": {
+        "results": [
+          {
+            "antenna_id": "antenna_1",
+            "feed_id": "x_band_feed",
+            "gain_db": 41.2,
+            "geometry": {
+              "feed_offset_meters": {
+                "x": 0.05,
+                "y": 0.02,
+                "z": 0.01
+              },
+              "emitter_azimuth_deg": 185.5,
+              "emitter_elevation_deg": 32.1
+            },
+            "warnings": [],
+            "metadata": {
+              "computation_time_ms": 2.5,
+              "extrapolated": false
+            }
+          },
+          {
+            "antenna_id": "antenna_2",
+            "feed_id": "s_band_feed",
+            "gain_db": 38.7,
+            "geometry": {
+              "feed_offset_meters": {
+                "x": 0.0,
+                "y": 0.0,
+                "z": 0.0
+              },
+              "emitter_azimuth_deg": 45.2,
+              "emitter_elevation_deg": 78.9
+            },
+            "warnings": [],
+            "metadata": {
+              "computation_time_ms": 2.1,
+              "extrapolated": false
+            }
+          }
+        ],
+        "metadata": {
+          "total_computation_time_ms": 25.3,
+          "count": 2
+        }
+      }
+    },
+    "heatmap_request_rectangular": {
+      "description": "Heatmap generation request with rectangular grid",
+      "request": {
+        "antenna_id": "antenna_1",
+        "feed_id": "x_band_feed",
+        "vehicle_position": {
+          "x": 4510731.123,
+          "y": 4510731.456,
+          "z": 3488865.789
+        },
+        "vehicle_attitude": {
+          "w": 1.0,
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "reflector_boresight": {
+          "x": 4510732.0,
+          "y": 4510732.0,
+          "z": 3488950.0
+        },
+        "feed_position": {
+          "x": 4510731.5,
+          "y": 4510731.5,
+          "z": 3488870.0
+        },
+        "frequency_mhz": 8400.0,
+        "pointing_frequency_mhz": 8450.0,
+        "grid_config": {
+          "grid_type": "rectangular",
+          "azimuth_range_deg": {
+            "min": 0.0,
+            "max": 360.0,
+            "step": 5.0
+          },
+          "elevation_range_deg": {
+            "min": 0.0,
+            "max": 90.0,
+            "step": 2.0
+          }
+        }
+      }
+    },
+    "heatmap_request_h3": {
+      "description": "Heatmap generation request with H3 hexagonal grid",
+      "request": {
+        "antenna_id": "antenna_1",
+        "feed_id": "x_band_feed",
+        "vehicle_position": {
+          "x": 4510731.123,
+          "y": 4510731.456,
+          "z": 3488865.789
+        },
+        "vehicle_attitude": {
+          "w": 1.0,
+          "x": 0.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "reflector_boresight": {
+          "x": 4510732.0,
+          "y": 4510732.0,
+          "z": 3488950.0
+        },
+        "feed_position": {
+          "x": 4510731.5,
+          "y": 4510731.5,
+          "z": 3488870.0
+        },
+        "frequency_mhz": 8400.0,
+        "grid_config": {
+          "grid_type": "h3",
+          "h3_resolution": 7,
+          "center_azimuth_deg": 180.0,
+          "center_elevation_deg": 45.0,
+          "field_of_view_deg": 30.0
+        }
+      }
+    },
+    "heatmap_response_rectangular": {
+      "description": "Heatmap response with rectangular grid data",
+      "response": {
+        "antenna_id": "antenna_1",
+        "feed_id": "x_band_feed",
+        "frequency_mhz": 8400.0,
+        "grid": {
+          "grid_type": "rectangular",
+          "azimuth_values": [0.0, 5.0, 10.0, 15.0],
+          "elevation_values": [0.0, 2.0, 4.0],
+          "loss_db": [
+            [2.1, 2.3, 2.8, 3.1],
+            [1.8, 2.0, 2.5, 2.9],
+            [1.5, 1.7, 2.2, 2.6]
+          ]
+        },
+        "warnings": ["Some points extrapolated"],
+        "metadata": {
+          "points_evaluated": 3276,
+          "computation_time_ms": 1245.6,
+          "peak_gain_db": 43.5
+        }
+      }
+    },
+    "heatmap_response_h3": {
+      "description": "Heatmap response with H3 hexagonal grid data",
+      "response": {
+        "antenna_id": "antenna_1",
+        "feed_id": "x_band_feed",
+        "frequency_mhz": 8400.0,
+        "grid": {
+          "grid_type": "h3",
+          "h3_indices": [
+            "87283082fffffff",
+            "87283080fffffff",
+            "87283081fffffff"
+          ],
+          "loss_db": [1.8, 2.1, 2.3]
+        },
+        "warnings": [],
+        "metadata": {
+          "points_evaluated": 5120,
+          "computation_time_ms": 2845.2,
+          "peak_gain_db": 43.5
+        }
+      }
+    },
+    "status_response": {
+      "description": "Service status response",
+      "response": {
+        "status": "ok",
+        "version": "0.1.0",
+        "uptime_seconds": 3600,
+        "antenna_count": 2,
+        "antenna_ids": ["antenna_1", "antenna_2"],
+        "memory_bytes": 268435456
+      }
+    },
+    "health_response": {
+      "description": "Health check response",
+      "response": {
+        "status": "healthy"
+      }
+    },
+    "antenna_list_response": {
+      "description": "List of available antennas",
+      "response": {
+        "antennas": [
+          {
+            "id": "antenna_1",
+            "name": "Deep Space Network 34m",
+            "enabled": true,
+            "feed_count": 3,
+            "feed_ids": ["x_band_feed", "ka_band_feed", "s_band_feed"]
+          },
+          {
+            "id": "antenna_2",
+            "name": "Ground Station Array Element",
+            "enabled": true,
+            "feed_count": 1,
+            "feed_ids": ["s_band_feed"]
+          }
+        ]
+      }
+    },
+    "antenna_details_response": {
+      "description": "Detailed antenna information",
+      "response": {
+        "id": "antenna_1",
+        "name": "Deep Space Network 34m",
+        "enabled": true,
+        "feeds": [
+          {
+            "id": "x_band_feed",
+            "position_offset": {
+              "x": 0.0,
+              "y": 0.0,
+              "z": 0.0
+            },
+            "frequency_range_mhz": [7100.0, 8500.0],
+            "q_factor": 8.5
+          },
+          {
+            "id": "ka_band_feed",
+            "position_offset": {
+              "x": 0.05,
+              "y": 0.0,
+              "z": 0.0
+            },
+            "frequency_range_mhz": [25500.0, 27000.0],
+            "q_factor": 10.0
+          }
+        ],
+        "validity_ranges": {
+          "azimuth_deg": [0.0, 360.0],
+          "elevation_deg": [10.0, 90.0],
+          "frequency_mhz": [2000.0, 32000.0],
+          "temperature_k": 290.0
+        },
+        "calibration": {
+          "date": "2025-01-15T00:00:00Z",
+          "version": "2.0",
+          "source": "measurements/antenna_1_2025.csv",
+          "rmse_db": 0.42,
+          "r_squared": 0.995,
+          "num_measurements": 15000
+        },
+        "physical_parameters": {
+          "diameter_m": 34.0,
+          "focal_length_m": 13.6,
+          "f_over_d_ratio": 0.4,
+          "surface_rms_mm": 0.5,
+          "mesh": {
+            "mesh_spacing_mm": 3.5,
+            "wire_diameter_mm": 0.4
+          }
+        }
+      }
+    },
+    "error_response_antenna_not_found": {
+      "description": "Error response for antenna not found",
+      "response": {
+        "error": "AntennaNotFound",
+        "message": "Antenna 'invalid_antenna' not found"
+      }
+    },
+    "error_response_feed_not_found": {
+      "description": "Error response for feed not found",
+      "response": {
+        "error": "FeedNotFound",
+        "message": "Feed 'invalid_feed' not found for antenna 'antenna_1'"
+      }
+    },
+    "error_response_invalid_coordinate": {
+      "description": "Error response for invalid coordinate",
+      "response": {
+        "error": "InvalidCoordinate",
+        "message": "Coordinates exceed Earth radius (|pos| > 10000 km)",
+        "field": "vehicle_position"
+      }
+    },
+    "error_response_invalid_attitude": {
+      "description": "Error response for invalid attitude",
+      "response": {
+        "error": "InvalidAttitude",
+        "message": "Quaternion not normalized (|q| = 1.15)"
+      }
+    },
+    "error_response_coordinate_transform": {
+      "description": "Error response for coordinate transformation failure",
+      "response": {
+        "error": "CoordinateTransformError",
+        "message": "Coordinate transformation failed",
+        "details": "Gimbal lock at zenith (elevation = 90 degrees)"
+      }
+    }
+  }
+}
