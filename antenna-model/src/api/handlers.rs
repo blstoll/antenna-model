@@ -49,7 +49,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_app_state_uptime() {
-        let state = AppState::new();
+        let state = AppState::with_defaults();
 
         // Get initial uptime
         let uptime1 = state.uptime_seconds();
@@ -66,13 +66,13 @@ mod tests {
 
     #[test]
     fn test_app_state_version() {
-        let state = AppState::new();
+        let state = AppState::with_defaults();
         assert_eq!(state.version, env!("CARGO_PKG_VERSION"));
     }
 
     #[test]
     fn test_app_state_initial_uptime() {
-        let state = AppState::new();
+        let state = AppState::with_defaults();
         let uptime = state.uptime_seconds();
         // Should be very close to 0 when just created
         assert!(uptime <= 1);
