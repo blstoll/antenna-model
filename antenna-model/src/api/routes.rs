@@ -25,7 +25,7 @@ use std::sync::Arc;
 /// Create all API routes with production-grade middleware
 ///
 /// This function sets up the routing table for the API, including:
-/// - Health and status endpoints
+/// - Health and status endpoints (Sprint 5, Task 5.3)
 /// - Future: Evaluation, batch, and heatmap endpoints (Sprint 5+)
 /// - Complete middleware stack for production readiness
 ///
@@ -41,12 +41,13 @@ use std::sync::Arc;
 /// 2. **Outbound**: Handler → RequestSizeTracker → ErrorHandler → RequestLogger → RequestId → Tracing
 pub fn create_routes(state: Arc<AppState>) -> impl Endpoint {
     Route::new()
-        // Health and status endpoints
-        .at("/status", get(handlers::status))
+        // Health and status endpoints (Sprint 5, Task 5.3)
+        .at("/health", get(handlers::health))      // Liveness probe
+        .at("/ready", get(handlers::ready))        // Readiness probe
+        .at("/status", get(handlers::status))      // Detailed status
         // Future endpoints will be added here in subsequent sprints:
-        // .at("/health", get(handlers::health))
-        // .at("/api/v1/evaluate", post(handlers::evaluate))
-        // .at("/api/v1/evaluate/batch", post(handlers::evaluate_batch))
+        // .at("/api/v1/gain", post(handlers::compute_gain))
+        // .at("/api/v1/gain/batch", post(handlers::compute_gain_batch))
         // .at("/api/v1/heatmap", post(handlers::generate_heatmap))
         // .at("/api/v1/antennas", get(handlers::list_antennas))
 
@@ -75,6 +76,8 @@ pub fn create_routes_with_size_limits(
     warn_response_size: usize,
 ) -> impl Endpoint {
     Route::new()
+        .at("/health", get(handlers::health))
+        .at("/ready", get(handlers::ready))
         .at("/status", get(handlers::status))
         .with(Tracing)
         .with(RequestId)
@@ -223,5 +226,128 @@ mod tests {
             let response = cli.get("/status").send().await;
             response.assert_status_is_ok();
         }
+    }
+
+    #[tokio::test]
+    async fn test_health_route() {
+        let state = Arc::new(AppState::with_defaults());
+        let app = create_routes(state);
+        let cli = TestClient::new(app);
+
+        let response = cli.get("/health").send().await;
+        response.assert_status_is_ok();
+        response.assert_content_type("application/json; charset=utf-8");
+
+        let body = response.json().await;
+        let json_value = body.value();
+        assert_eq!(json_value.object().get("status").string(), "healthy");
+    }
+
+    #[tokio::test]
+    async fn test_ready_route_when_ready() {
+        let state = Arc::new(AppState::with_defaults());
+        state.mark_ready();
+        let app = create_routes(state);
+        let cli = TestClient::new(app);
+
+        let response = cli.get("/ready").send().await;
+        response.assert_status_is_ok();
+
+        let body = response.json().await;
+        let json_value = body.value();
+        assert_eq!(json_value.object().get("status").string(), "ready");
+    }
+
+    #[tokio::test]
+    async fn test_ready_route_when_not_ready() {
+        let state = Arc::new(AppState::with_defaults());
+        state.mark_not_ready();
+        let app = create_routes(state);
+        let cli = TestClient::new(app);
+
+        let response = cli.get("/ready").send().await;
+        response.assert_status(poem::http::StatusCode::SERVICE_UNAVAILABLE);
+
+        let body = response.json().await;
+        let json_value = body.value();
+        assert_eq!(json_value.object().get("status").string(), "not_ready");
+    }
+
+    #[tokio::test]
+    async fn test_status_route_with_antennas() {
+        let state = Arc::new(AppState::with_defaults());
+        let antenna_ids = vec!["antenna_1".to_string(), "antenna_2".to_string()];
+        state.set_antenna_ids(antenna_ids.clone());
+
+        let app = create_routes(state);
+        let cli = TestClient::new(app);
+
+        let response = cli.get("/status").send().await;
+        response.assert_status_is_ok();
+
+        let body = response.json().await;
+        let json_value = body.value();
+
+        assert_eq!(json_value.object().get("status").string(), "ok");
+        assert_eq!(json_value.object().get("antenna_count").i64(), 2);
+
+        let ids = json_value.object().get("antenna_ids").array();
+        assert_eq!(ids.len(), 2);
+        // Check that the array contains the expected values
+        let id_strings: Vec<String> = ids.iter().map(|v| v.string().to_string()).collect();
+        assert!(id_strings.contains(&"antenna_1".to_string()));
+        assert!(id_strings.contains(&"antenna_2".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_health_route_always_succeeds() {
+        let state = Arc::new(AppState::with_defaults());
+        // Even if not ready, health should succeed (liveness check)
+        state.mark_not_ready();
+
+        let app = create_routes(state);
+        let cli = TestClient::new(app);
+
+        let response = cli.get("/health").send().await;
+        response.assert_status_is_ok();
+    }
+
+    #[tokio::test]
+    async fn test_all_endpoints_present() {
+        let state = Arc::new(AppState::with_defaults());
+        let app = create_routes(state);
+        let cli = TestClient::new(app);
+
+        // Test that all three endpoints exist
+        let health_response = cli.get("/health").send().await;
+        health_response.assert_status_is_ok();
+
+        let ready_response = cli.get("/ready").send().await;
+        ready_response.assert_status_is_ok();
+
+        let status_response = cli.get("/status").send().await;
+        status_response.assert_status_is_ok();
+    }
+
+    #[tokio::test]
+    async fn test_readiness_transitions() {
+        let state = Arc::new(AppState::with_defaults());
+        let app = create_routes(state.clone());
+        let cli = TestClient::new(app);
+
+        // Start ready
+        state.mark_ready();
+        let response = cli.get("/ready").send().await;
+        response.assert_status_is_ok();
+
+        // Mark not ready
+        state.mark_not_ready();
+        let response = cli.get("/ready").send().await;
+        response.assert_status(poem::http::StatusCode::SERVICE_UNAVAILABLE);
+
+        // Mark ready again
+        state.mark_ready();
+        let response = cli.get("/ready").send().await;
+        response.assert_status_is_ok();
     }
 }

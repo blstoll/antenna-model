@@ -17,6 +17,7 @@ pub mod schemas;
 
 use crate::config::ServiceConfig;
 use poem::{listener::TcpListener, Server};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::signal;
@@ -27,7 +28,8 @@ use tracing::info;
 /// This state is thread-safe (via Arc) and contains:
 /// - Server metadata (version, start time)
 /// - Configuration settings
-/// - Future: Calibration repository, connection pools
+/// - Readiness state for health checks
+/// - Future: Calibration repository (Task 5.4)
 #[derive(Clone)]
 pub struct AppState {
     /// Server start time for uptime calculation
@@ -38,6 +40,14 @@ pub struct AppState {
 
     /// Service configuration
     pub config: Arc<ServiceConfig>,
+
+    /// Readiness state - true when service is ready to accept requests
+    /// This is false during startup and true once initialization is complete
+    pub ready: Arc<AtomicBool>,
+
+    /// Loaded antenna IDs (will be populated by Task 5.4 - Calibration Repository)
+    /// Using Arc to allow sharing without cloning Vec
+    pub antenna_ids: Arc<parking_lot::RwLock<Vec<String>>>,
 }
 
 impl AppState {
@@ -47,6 +57,8 @@ impl AppState {
             start_time: SystemTime::now(),
             version: env!("CARGO_PKG_VERSION"),
             config: Arc::new(config),
+            ready: Arc::new(AtomicBool::new(true)), // Default to ready for simple deployments
+            antenna_ids: Arc::new(parking_lot::RwLock::new(Vec::new())),
         }
     }
 
@@ -63,6 +75,56 @@ impl AppState {
     /// Get server bind address from configuration
     pub fn bind_address(&self) -> String {
         self.config.bind_address()
+    }
+
+    /// Check if service is ready to accept requests
+    pub fn is_ready(&self) -> bool {
+        self.ready.load(Ordering::Relaxed)
+    }
+
+    /// Mark service as ready
+    pub fn mark_ready(&self) {
+        self.ready.store(true, Ordering::Relaxed);
+    }
+
+    /// Mark service as not ready
+    pub fn mark_not_ready(&self) {
+        self.ready.store(false, Ordering::Relaxed);
+    }
+
+    /// Get loaded antenna IDs
+    pub fn get_antenna_ids(&self) -> Vec<String> {
+        self.antenna_ids.read().clone()
+    }
+
+    /// Set antenna IDs (called by calibration repository during initialization)
+    pub fn set_antenna_ids(&self, ids: Vec<String>) {
+        *self.antenna_ids.write() = ids;
+    }
+
+    /// Get memory usage in bytes (if available)
+    ///
+    /// Returns the current process memory usage. On some platforms this may not be available.
+    pub fn get_memory_usage(&self) -> Option<u64> {
+        // Try to get memory usage from /proc/self/statm on Linux
+        #[cfg(target_os = "linux")]
+        {
+            use std::fs;
+            if let Ok(contents) = fs::read_to_string("/proc/self/statm") {
+                // statm format: size resident shared text lib data dt
+                // We want RSS (resident set size) which is the second field
+                // Each page is typically 4096 bytes
+                if let Some(rss_pages) = contents.split_whitespace().nth(1) {
+                    if let Ok(pages) = rss_pages.parse::<u64>() {
+                        return Some(pages * 4096);
+                    }
+                }
+            }
+        }
+
+        // On macOS, we could use task_info but that requires unsafe code
+        // For now, return None on non-Linux platforms
+        None
     }
 }
 
