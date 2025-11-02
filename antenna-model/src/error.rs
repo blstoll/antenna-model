@@ -103,6 +103,18 @@ pub enum DataError {
         #[source]
         source: io::Error,
     },
+
+    /// General data loading error
+    #[error("failed to load calibration from {path}: {reason}")]
+    LoadError { path: String, reason: String },
+
+    /// Data validation error
+    #[error("validation failed for {path}: {reason}")]
+    ValidationError { path: String, reason: String },
+
+    /// Configuration error during data loading
+    #[error("configuration error: {reason}")]
+    ConfigurationError { reason: String },
 }
 
 /// Errors related to API/HTTP operations
@@ -328,6 +340,15 @@ impl From<config::ConfigError> for ConfigError {
     fn from(err: config::ConfigError) -> Self {
         ConfigError::ParseError {
             path: "config".to_string(),
+            reason: err.to_string(),
+        }
+    }
+}
+
+// Convert ConfigError to DataError for data loading operations
+impl From<ConfigError> for DataError {
+    fn from(err: ConfigError) -> Self {
+        DataError::ConfigurationError {
             reason: err.to_string(),
         }
     }

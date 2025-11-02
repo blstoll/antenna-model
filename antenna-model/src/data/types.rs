@@ -7,7 +7,7 @@ use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// Complete calibration data for a single antenna (v2.0 physics-based).
+/// Complete calibration data for a single antenna-feed combination (v2.0 physics-based).
 ///
 /// Contains all information needed to evaluate antenna G/T (Gain-to-Temperature)
 /// using a physics-based model with optional correction surfaces.
@@ -21,10 +21,21 @@ use std::fmt;
 ///    corrects for residual errors (measured - physics model)
 ///
 /// At runtime: `G/T_final = PhysicsModel(physical_config) + CorrectionSurface(freq, cone, clock)`
+///
+/// # Multi-Feed Support
+///
+/// Each calibration artifact represents one antenna-feed combination. For antennas with
+/// multiple feeds (e.g., S-band, X-band, Ka-band), separate calibration files are created
+/// with different `feed_id` values. The repository aggregates these using composite
+/// `(antenna_id, feed_id)` identifiers.
 #[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq)]
 pub struct AntennaCalibration {
     /// Unique identifier for this antenna
     pub antenna_id: String,
+
+    /// Unique identifier for this feed (e.g., "x_band", "s_band", "primary")
+    /// Allows multiple feeds per antenna with different calibrations
+    pub feed_id: String,
 
     /// Metadata about the calibration process
     pub metadata: CalibrationMetadata,
@@ -52,6 +63,11 @@ impl AntennaCalibration {
         // Validate antenna ID is not empty
         if self.antenna_id.is_empty() {
             return Err(ValidationError::EmptyField("antenna_id".to_string()));
+        }
+
+        // Validate feed ID is not empty
+        if self.feed_id.is_empty() {
+            return Err(ValidationError::EmptyField("feed_id".to_string()));
         }
 
         // Validate physical configuration
@@ -610,6 +626,7 @@ impl std::error::Error for ValidationError {}
 #[derive(Default)]
 pub struct AntennaCalibrationBuilder {
     antenna_id: Option<String>,
+    feed_id: Option<String>,
     metadata: Option<CalibrationMetadata>,
     physical_config: Option<PhysicalAntennaConfig>,
     correction_surface: Option<BSplineModel4D>,
@@ -619,6 +636,11 @@ pub struct AntennaCalibrationBuilder {
 impl AntennaCalibrationBuilder {
     pub fn antenna_id(mut self, id: impl Into<String>) -> Self {
         self.antenna_id = Some(id.into());
+        self
+    }
+
+    pub fn feed_id(mut self, id: impl Into<String>) -> Self {
+        self.feed_id = Some(id.into());
         self
     }
 
@@ -645,6 +667,7 @@ impl AntennaCalibrationBuilder {
     pub fn build(self) -> Result<AntennaCalibration, String> {
         Ok(AntennaCalibration {
             antenna_id: self.antenna_id.ok_or("antenna_id is required")?,
+            feed_id: self.feed_id.ok_or("feed_id is required")?,
             metadata: self.metadata.ok_or("metadata is required")?,
             physical_config: self.physical_config.ok_or("physical_config is required")?,
             correction_surface: self.correction_surface,
@@ -1239,6 +1262,7 @@ mod tests {
 
         let calibration = AntennaCalibration::builder()
             .antenna_id("test_antenna")
+            .feed_id("primary")
             .metadata(metadata)
             .physical_config(physical_config)
             .validity_ranges(ranges)
@@ -1246,6 +1270,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(calibration.antenna_id, "test_antenna");
+        assert_eq!(calibration.feed_id, "primary");
         assert!(calibration.validate().is_ok());
         assert!(calibration.correction_surface.is_none());
     }
@@ -1275,6 +1300,18 @@ mod tests {
         // Invalid: empty antenna ID
         let invalid_calibration = AntennaCalibration {
             antenna_id: "".to_string(),
+            feed_id: "primary".to_string(),
+            metadata: metadata.clone(),
+            physical_config: physical_config.clone(),
+            correction_surface: None,
+            validity_ranges: ranges.clone(),
+        };
+        assert!(invalid_calibration.validate().is_err());
+
+        // Invalid: empty feed ID
+        let invalid_calibration = AntennaCalibration {
+            antenna_id: "test".to_string(),
+            feed_id: "".to_string(),
             metadata: metadata.clone(),
             physical_config: physical_config.clone(),
             correction_surface: None,
@@ -1285,6 +1322,7 @@ mod tests {
         // Valid calibration
         let valid_calibration = AntennaCalibration {
             antenna_id: "test".to_string(),
+            feed_id: "primary".to_string(),
             metadata,
             physical_config,
             correction_surface: None,
@@ -1327,6 +1365,7 @@ mod tests {
 
         let original = AntennaCalibration::builder()
             .antenna_id("test_antenna")
+            .feed_id("x_band")
             .metadata(metadata)
             .physical_config(physical_config)
             .correction_surface(correction)
@@ -1342,6 +1381,7 @@ mod tests {
 
         assert_eq!(original, decoded);
         assert_eq!(original.antenna_id, decoded.antenna_id);
+        assert_eq!(original.feed_id, decoded.feed_id);
         assert_eq!(
             original.physical_config.reflector.diameter_m,
             decoded.physical_config.reflector.diameter_m
@@ -1374,6 +1414,7 @@ mod tests {
 
         let original = AntennaCalibration::builder()
             .antenna_id("test_antenna")
+            .feed_id("primary")
             .metadata(metadata)
             .physical_config(physical_config)
             .validity_ranges(ranges)
@@ -1385,5 +1426,6 @@ mod tests {
         let decoded: AntennaCalibration = serde_json::from_str(&json).unwrap();
 
         assert_eq!(original, decoded);
+        assert_eq!(decoded.feed_id, "primary");
     }
 }

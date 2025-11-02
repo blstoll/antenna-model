@@ -3,6 +3,8 @@
 //! This module contains data structures, serialization, and repository
 //! functionality for managing antenna calibration data.
 
+pub mod loader;
+pub mod repository;
 pub mod types;
 
 // Re-export commonly used types for convenience
@@ -11,3 +13,6 @@ pub use types::{
     CalibrationMetadata, CalibrationMetadataBuilder, ValidationError, ValidityRanges,
     ValidityRangesBuilder,
 };
+
+// Re-export repository for easy access
+pub use repository::CalibrationRepository;
