@@ -4,7 +4,7 @@
 
 use crate::api::schemas::{ErrorResponse, GainRequest, GainResponse, HealthResponse, StatusResponse};
 use crate::api::AppState;
-use crate::service::compute_gain_from_request;
+use crate::service::{compute_gain_from_request, validator};
 use poem::{
     handler,
     http::StatusCode,
@@ -12,7 +12,7 @@ use poem::{
     Response,
 };
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 /// GET /health - Liveness probe endpoint
 ///
@@ -186,6 +186,21 @@ pub async fn compute_gain(
         frequency_mhz = request.frequency_mhz,
         "Gain computation request received"
     );
+
+    // Validate the request
+    if let Err(validation_err) = validator::validate_gain_request(&request, &state.repository) {
+        warn!(
+            antenna_id = %request.antenna_id,
+            feed_id = %request.feed_id,
+            error = %validation_err,
+            "Request validation failed"
+        );
+        let error_response = ErrorResponse::new("validation_error", validation_err.to_string());
+        return Err(poem::Error::from_string(
+            serde_json::to_string(&error_response).unwrap_or_default(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ));
+    }
 
     // Compute gain using the service layer
     match compute_gain_from_request(&request, &state.repository) {
