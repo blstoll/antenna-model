@@ -16,6 +16,7 @@ pub mod routes;
 pub mod schemas;
 
 use crate::config::ServiceConfig;
+use crate::data::repository::CalibrationRepository;
 use poem::{listener::TcpListener, Server};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -29,7 +30,7 @@ use tracing::info;
 /// - Server metadata (version, start time)
 /// - Configuration settings
 /// - Readiness state for health checks
-/// - Future: Calibration repository (Task 5.4)
+/// - Calibration repository (Task 5.4)
 #[derive(Clone)]
 pub struct AppState {
     /// Server start time for uptime calculation
@@ -48,23 +49,27 @@ pub struct AppState {
     /// Loaded antenna IDs (will be populated by Task 5.4 - Calibration Repository)
     /// Using Arc to allow sharing without cloning Vec
     pub antenna_ids: Arc<parking_lot::RwLock<Vec<String>>>,
+
+    /// Calibration data repository (Task 5.4)
+    pub repository: CalibrationRepository,
 }
 
 impl AppState {
-    /// Create new application state with configuration
-    pub fn new(config: ServiceConfig) -> Self {
+    /// Create new application state with configuration and repository
+    pub fn new(config: ServiceConfig, repository: CalibrationRepository) -> Self {
         Self {
             start_time: SystemTime::now(),
             version: env!("CARGO_PKG_VERSION"),
             config: Arc::new(config),
             ready: Arc::new(AtomicBool::new(true)), // Default to ready for simple deployments
             antenna_ids: Arc::new(parking_lot::RwLock::new(Vec::new())),
+            repository,
         }
     }
 
-    /// Create application state with default configuration
+    /// Create application state with default configuration and empty repository
     pub fn with_defaults() -> Self {
-        Self::new(ServiceConfig::with_defaults())
+        Self::new(ServiceConfig::with_defaults(), CalibrationRepository::new())
     }
 
     /// Get uptime in seconds
@@ -149,7 +154,26 @@ impl Default for AppState {
 /// * `Ok(())` - Server ran successfully and shut down gracefully
 /// * `Err(std::io::Error)` - Failed to start or run the server
 pub async fn start_server_with_config(config: ServiceConfig) -> Result<(), std::io::Error> {
-    let state = Arc::new(AppState::new(config.clone()));
+    // Load calibration repository
+    info!(
+        calibration_dir = ?config.calibration.data_directory,
+        antenna_config = ?config.calibration.antenna_config_file,
+        fail_fast = config.calibration.fail_fast,
+        "Loading calibration data"
+    );
+
+    let repository = match CalibrationRepository::load_from_config(&config.calibration) {
+        Ok(repo) => {
+            info!("Calibration data loaded successfully");
+            repo
+        }
+        Err(e) => {
+            tracing::warn!("Failed to load calibration data: {}, starting with empty repository", e);
+            CalibrationRepository::new()
+        }
+    };
+
+    let state = Arc::new(AppState::new(config.clone(), repository));
 
     info!(
         version = state.version,
@@ -282,7 +306,8 @@ mod tests {
     #[test]
     fn test_app_state_creation() {
         let config = ServiceConfig::with_defaults();
-        let state = AppState::new(config);
+        let repository = CalibrationRepository::new();
+        let state = AppState::new(config, repository);
 
         assert_eq!(state.version, env!("CARGO_PKG_VERSION"));
         assert!(state.uptime_seconds() == 0 || state.uptime_seconds() == 1);
@@ -305,7 +330,8 @@ mod tests {
     #[test]
     fn test_app_state_bind_address() {
         let config = ServiceConfig::with_defaults();
-        let state = AppState::new(config);
+        let repository = CalibrationRepository::new();
+        let state = AppState::new(config, repository);
 
         assert_eq!(state.bind_address(), "127.0.0.1:3000");
     }
@@ -316,7 +342,8 @@ mod tests {
         config.server.host = "0.0.0.0".to_string();
         config.server.port = 8080;
 
-        let state = AppState::new(config);
+        let repository = CalibrationRepository::new();
+        let state = AppState::new(config, repository);
         assert_eq!(state.bind_address(), "0.0.0.0:8080");
     }
 

@@ -2,8 +2,9 @@
 //!
 //! This module implements HTTP request handlers for all API endpoints.
 
-use crate::api::schemas::{HealthResponse, StatusResponse};
+use crate::api::schemas::{ErrorResponse, GainRequest, GainResponse, HealthResponse, StatusResponse};
 use crate::api::AppState;
+use crate::service::compute_gain_from_request;
 use poem::{
     handler,
     http::StatusCode,
@@ -11,7 +12,7 @@ use poem::{
     Response,
 };
 use std::sync::Arc;
-use tracing::info;
+use tracing::{error, info};
 
 /// GET /health - Liveness probe endpoint
 ///
@@ -131,6 +132,98 @@ pub async fn status(state: Data<&Arc<AppState>>) -> Json<StatusResponse> {
     }
 
     Json(response)
+}
+
+/// POST /api/v1/gain - Compute antenna gain
+///
+/// Computes antenna gain based on 3D positions and vehicle attitude.
+/// This is the main computation endpoint combining coordinate transformations,
+/// physics-based modeling, and correction surface interpolation.
+///
+/// # Request Body
+/// JSON object containing:
+/// - antenna_id: Antenna identifier
+/// - feed_id: Feed identifier (for multi-feed antennas)
+/// - vehicle_position: Vehicle position (ECEF or Geodetic, auto-detected)
+/// - vehicle_attitude: Vehicle attitude (quaternion or Euler angles)
+/// - reflector_boresight: Reflector boresight position (ECEF or Geodetic)
+/// - feed_position: Feed position (ECEF or Geodetic)
+/// - emitter_position: Emitter position (ECEF or Geodetic)
+/// - frequency_mhz: Operating frequency in MHz
+/// - include_reference: Whether to include reference gain in response
+///
+/// # Response
+/// Returns HTTP 200 with JSON body containing:
+/// - gain_db: Computed gain in dB
+/// - geometry: Geometric information (feed offset, emitter direction)
+/// - warnings: Any warnings generated during computation
+/// - metadata: Computation timing metadata
+///
+/// Returns HTTP 400 for invalid input or HTTP 404 if antenna/feed not found
+///
+/// # Example Request
+/// ```json
+/// {
+///   "antenna_id": "antenna_1",
+///   "feed_id": "feed_1",
+///   "vehicle_position": {"x": 6500000.0, "y": 0.0, "z": 0.0},
+///   "vehicle_attitude": {"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0},
+///   "reflector_boresight": {"x": 6500000.0, "y": 0.0, "z": 0.0},
+///   "feed_position": {"x": 6500000.0, "y": 0.0, "z": 0.0},
+///   "emitter_position": {"x": 42164000.0, "y": 0.0, "z": 0.0},
+///   "frequency_mhz": 11450.0,
+///   "include_reference": true
+/// }
+/// ```
+#[handler]
+pub async fn compute_gain(
+    state: Data<&Arc<AppState>>,
+    Json(request): Json<GainRequest>,
+) -> poem::Result<Json<GainResponse>> {
+    info!(
+        antenna_id = %request.antenna_id,
+        feed_id = %request.feed_id,
+        frequency_mhz = request.frequency_mhz,
+        "Gain computation request received"
+    );
+
+    // Compute gain using the service layer
+    match compute_gain_from_request(&request, &state.repository) {
+        Ok(response) => {
+            info!(
+                antenna_id = %request.antenna_id,
+                feed_id = %request.feed_id,
+                gain_db = response.gain_db,
+                computation_time_ms = response.metadata.computation_time_ms,
+                warnings_count = response.warnings.len(),
+                "Gain computation successful"
+            );
+            Ok(Json(response))
+        }
+        Err(e) => {
+            error!(
+                antenna_id = %request.antenna_id,
+                feed_id = %request.feed_id,
+                error = %e,
+                "Gain computation failed"
+            );
+
+            // Map errors to appropriate HTTP status codes and create error response
+            let (status_code, error_type) = match &e {
+                crate::error::AntennaModelError::FeedNotFound { .. } => (StatusCode::NOT_FOUND, "feed_not_found"),
+                crate::error::AntennaModelError::InvalidCoordinate { .. } => (StatusCode::BAD_REQUEST, "invalid_coordinate"),
+                crate::error::AntennaModelError::InvalidAttitude { .. } => (StatusCode::BAD_REQUEST, "invalid_attitude"),
+                _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+            };
+
+            let error_response = ErrorResponse::new(error_type, e.to_string());
+
+            Err(poem::Error::from_string(
+                serde_json::to_string(&error_response).unwrap_or_default(),
+                status_code,
+            ))
+        }
+    }
 }
 
 #[cfg(test)]

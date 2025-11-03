@@ -8,6 +8,7 @@ pub mod config;
 pub mod data;
 pub mod error;
 pub mod model;
+pub mod service;
 
 // Re-export commonly used types for convenience
 pub use data::{AntennaCalibration, BSplineModel4D, CalibrationMetadata, ValidityRanges};

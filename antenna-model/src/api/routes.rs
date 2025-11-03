@@ -19,7 +19,7 @@
 use crate::api::handlers;
 use crate::api::middleware::{ErrorHandler, RequestId, RequestLogger, RequestSizeTracker};
 use crate::api::AppState;
-use poem::{get, middleware::Tracing, Endpoint, EndpointExt, Route};
+use poem::{get, post, middleware::Tracing, Endpoint, EndpointExt, Route};
 use std::sync::Arc;
 
 /// Create all API routes with production-grade middleware
@@ -45,8 +45,11 @@ pub fn create_routes(state: Arc<AppState>) -> impl Endpoint {
         .at("/health", get(handlers::health))      // Liveness probe
         .at("/ready", get(handlers::ready))        // Readiness probe
         .at("/status", get(handlers::status))      // Detailed status
+
+        // Gain computation endpoint (Sprint 5, Task 5.5)
+        .at("/api/v1/gain", post(handlers::compute_gain))
+
         // Future endpoints will be added here in subsequent sprints:
-        // .at("/api/v1/gain", post(handlers::compute_gain))
         // .at("/api/v1/gain/batch", post(handlers::compute_gain_batch))
         // .at("/api/v1/heatmap", post(handlers::generate_heatmap))
         // .at("/api/v1/antennas", get(handlers::list_antennas))
@@ -79,6 +82,7 @@ pub fn create_routes_with_size_limits(
         .at("/health", get(handlers::health))
         .at("/ready", get(handlers::ready))
         .at("/status", get(handlers::status))
+        .at("/api/v1/gain", post(handlers::compute_gain))
         .with(Tracing)
         .with(RequestId)
         .with(RequestLogger)

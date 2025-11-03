@@ -17,6 +17,8 @@
 //! - **Numerical Stability**: Adaptive integration, Kaiser windowing, noise floor management
 
 pub mod coordinates;
+pub mod coordinates_3d;
+pub mod correction_interpolator;
 pub mod direct_path;
 pub mod edge_cases;
 pub mod geometry;
@@ -34,6 +36,15 @@ pub use coordinates::{
     normalize_angle, normalize_angle_symmetric, ApertureCoordinates, AzElCoordinates,
     EClockConeCoordinates, FarFieldCoordinates,
 };
+
+pub use coordinates_3d::{
+    antenna_frame_to_spherical, apply_beam_squint_correction, attitude_to_rotation_matrix,
+    compute_emitter_direction, compute_feed_offset, ecef_to_antenna_frame, ecef_to_geodetic,
+    euler_to_rotation_matrix, geodetic_to_ecef, is_ecef_coordinates, quaternion_to_rotation_matrix,
+    validate_ecef, validate_geodetic, ECEF_THRESHOLD_M,
+};
+
+pub use correction_interpolator::{evaluate_correction, CorrectionResult};
 
 pub use geometry::{
     AntennaConfiguration, AntennaConfigurationBuilder, FeedParameters, FeedParametersBuilder,
