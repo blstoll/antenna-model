@@ -1,0 +1,4 @@
+{
+  "error": "antenna_not_found",
+  "message": "Antenna 'nonexistent_antenna' not found"
+}

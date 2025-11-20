@@ -26,7 +26,7 @@ use std::f64::consts::PI;
 
 use crate::error::{ComputationError, ComputationResult};
 use crate::model::{
-    geometry::AntennaConfiguration,
+    geometry::{AntennaConfiguration, FeedParameters, FeedPosition, ReflectorGeometry},
     integration::{compute_far_field, IntegrationParams},
     wavelength_from_frequency,
 };
@@ -216,31 +216,53 @@ pub fn compute_gain(
 ) -> ComputationResult<f64> {
     let wavelength = wavelength_from_frequency(frequency_hz);
 
-    // Compute far-field electric field
+    // Compute far-field electric field at the requested angle
     let e_field = compute_far_field(theta, phi, config, frequency_hz, params)?;
 
     // Power is proportional to |E|²
     let field_magnitude_squared = e_field.norm_sqr();
 
-    // Compute on-axis field for normalization (if not already on-axis)
-    let on_axis_field = if theta.abs() < 1e-10 && phi.abs() < 1e-10 {
-        e_field.norm_sqr()
-    } else {
-        let e_on_axis = compute_far_field(0.0, 0.0, config, frequency_hz, params)?;
-        e_on_axis.norm_sqr()
-    };
+    // Compute maximum possible on-axis field (ideal reference: feed at focus, ideal surface)
+    // This gives us the reference for computing actual aperture efficiency
+    // NOTE: These unwrap() calls are safe because we're constructing from known-valid parameters
+    let ideal_feed = FeedParameters::new(
+        FeedPosition::at_focus(config.reflector.focal_length),
+        config.feed.q_factor,
+        config.feed.phase_center_offset,
+        config.feed.asymmetry_factor,
+    )
+    .unwrap();
+    let ideal_reflector = ReflectorGeometry::new(
+        config.reflector.diameter,
+        config.reflector.focal_length,
+        0.0, // Ideal surface (no RMS error)
+    )
+    .unwrap();
+    let ideal_config = AntennaConfiguration::new(
+        format!("{}_ideal", config.id),
+        format!("{} Ideal", config.name),
+        ideal_reflector,
+        ideal_feed,
+        config.mesh.clone(), // Keep mesh parameters
+    )
+    .unwrap();
 
-    // Relative gain (normalized to on-axis)
-    let relative_gain = if on_axis_field > 1e-20 {
-        field_magnitude_squared / on_axis_field
+    // Compute ideal on-axis field for reference
+    let e_ideal_on_axis = compute_far_field(0.0, 0.0, &ideal_config, frequency_hz, params)?;
+    let ideal_on_axis_field = e_ideal_on_axis.norm_sqr();
+
+    // Relative gain (normalized to ideal on-axis)
+    // This correctly captures efficiency loss from feed displacement AND surface errors
+    let relative_gain = if ideal_on_axis_field > 1e-20 {
+        field_magnitude_squared / ideal_on_axis_field
     } else {
         return Err(ComputationError::NumericalInstability {
             operation: "compute_gain".to_string(),
-            reason: "On-axis field is zero or near-zero".to_string(),
+            reason: "Ideal on-axis field is zero or near-zero".to_string(),
         });
     };
 
-    // Apply efficiency corrections
+    // Apply efficiency corrections (Ruze and mesh)
     let efficiency = overall_efficiency(config, wavelength);
 
     // Compute absolute gain using theoretical maximum
@@ -248,6 +270,7 @@ pub fn compute_gain(
     let theoretical_gain = theoretical_max_gain(config.reflector.diameter, wavelength, 0.55);
 
     // Final gain = theoretical maximum × efficiency × relative pattern
+    // NOTE: relative_gain now includes efficiency loss from feed displacement
     let gain = theoretical_gain * efficiency * relative_gain;
 
     Ok(gain)

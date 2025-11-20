@@ -1,0 +1,15 @@
+# Test Service Configuration for Integration Tests
+
+service:
+  host: "127.0.0.1"
+  port: 3001  # Different from default to avoid conflicts
+  request_timeout_seconds: 30
+  max_request_size_bytes: 10485760  # 10MB
+
+logging:
+  level: "info"
+  format: "json"
+
+antennas:
+  config_path: "tests/fixtures/test_antennas.yaml"
+  fail_fast_on_load_error: true

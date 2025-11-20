@@ -1,0 +1,34 @@
+# Design Specifications for Medium Ground Station (7.3m)
+#
+# This file provides initial parameter estimates for boresight calibration.
+# Based on typical 7.3m dish specifications.
+
+antenna_id: "antenna_2"
+antenna_name: "7.3m Ground Station - X/Ka-Band"
+
+# Reflector geometry
+reflector:
+  diameter_m: 7.3
+  focal_length_m: 3.65  # f/D = 0.5
+  surface_rms_mm: 0.8  # Higher quality surface for Ka-band
+
+# Feed configurations
+feeds:
+  - feed_id: "x_band"
+    name: "X-Band Feed"
+    position: [0.0, 0.0, 0.0]
+    q_factor: 9.0  # Tighter pattern for larger dish
+    phase_center_offset_m: 0.0
+    frequency_range: [7100.0, 8500.0]
+
+  - feed_id: "ka_band"
+    name: "Ka-Band Feed"
+    position: [0.0, 0.08, 0.0]  # Offset in y-direction
+    q_factor: 10.0  # Higher q-factor for Ka-band
+    phase_center_offset_m: 0.01
+    frequency_range: [25500.0, 27000.0]  # Ka-band: 25.5-27 GHz
+
+# Mesh parameters (for X-band operation)
+mesh:
+  mesh_spacing_mm: 3.0  # Smaller mesh for higher frequencies
+  wire_diameter_mm: 0.3

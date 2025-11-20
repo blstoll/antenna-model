@@ -1,22 +1,314 @@
-# Antenna Configuration
-# This file defines the available antenna models and their calibration data files
+# Antenna Configuration File
+#
+# This file defines all available antenna models and their calibration status.
+# Supports three calibration levels:
+#   1. Fully Calibrated - Complete measurement grid with correction surface
+#   2. Partially Calibrated - Limited measurements (boresight or sparse grid)
+#   3. Uncalibrated - Design specifications only
+#
+# Antennas can be upgraded from uncalibrated -> partial -> full by updating
+# this file and restarting the service (or using hot-reload in future).
 
 antennas:
-  # Example antenna configuration entry
-  # Uncomment and modify when you have actual calibration data
+  # ============================================================================
+  # FULLY CALIBRATED ANTENNAS
+  # ============================================================================
+  # These antennas have complete measurement grids across azimuth, elevation,
+  # and frequency. They provide ±1 dB accuracy in main lobe and first sidelobe.
 
-  # - id: "antenna_1"
-  #   name: "Deep Space Network 34m"
-  #   calibration_file: "antenna_1.bin"
-  #   enabled: true
+  - id: "dsn_34m_full"
+    name: "DSN 34m - Fully Calibrated"
+    calibration_status: "fully_calibrated"
+    calibration_file: "dsn_34m_full.bin"
+    enabled: false  # Enable when calibration file exists
 
-  # - id: "antenna_2"
-  #   name: "Ground Station Array Element"
-  #   calibration_file: "antenna_2.bin"
-  #   enabled: true
+    # Metadata (informational)
+    description: "Large deep space antenna with complete calibration"
+    location: "Goldstone, CA"
+    commissioning_date: "2024-03-15"
 
-  # Placeholder entry (remove when adding real antennas)
-  - id: "example_antenna"
-    name: "Example Antenna (Placeholder)"
-    calibration_file: "example.bin"
-    enabled: false
+  # ============================================================================
+  # PARTIALLY CALIBRATED - BORESIGHT ONLY (Priority Use Case)
+  # ============================================================================
+  # These antennas have boresight measurements across frequency, allowing
+  # physical parameter tuning. Provides ±1 dB accuracy at boresight,
+  # ±1-2 dB loss accuracy for feed steering.
+
+  - id: "gs_3.7m_boresight"
+    name: "Ground Station 3.7m - Boresight Calibration"
+    calibration_status: "partially_calibrated"
+    calibration_file: "gs_3.7m_boresight.bin"
+    enabled: false  # Enable when boresight calibration complete
+
+    # Calibration coverage metadata
+    calibration_coverage:
+      azimuth_range: [0.0, 0.0]      # Single point
+      elevation_range: [0.0, 0.0]    # Single point
+      frequency_range: [7100.0, 8500.0]  # X-band
+      num_measurements: 28            # Frequency samples at boresight
+
+    description: "Small ground station with X-band boresight calibration"
+    location: "Test Facility A"
+
+    # Note: Physical parameters tuned from boresight measurements
+    # Off-axis predictions rely on physics model (coma, aberrations)
+    # Expected accuracy: boresight ±1 dB, off-axis ±2 dB, loss ±1-2 dB
+
+  - id: "dsn_13m_boresight"
+    name: "DSN 13m - Multi-Band Boresight Calibration"
+    calibration_status: "partially_calibrated"
+    calibration_file: "dsn_13m_boresight.bin"
+    enabled: false  # Enable when calibration complete
+
+    calibration_coverage:
+      azimuth_range: [0.0, 0.0]
+      elevation_range: [0.0, 0.0]
+      frequency_range: [7145.0, 27000.0]  # X-band and Ka-band
+      num_measurements: 85  # Multiple feeds, multiple frequencies
+
+    description: "Medium DSN antenna with X/Ka boresight calibration"
+    location: "DSN Site"
+
+  # ============================================================================
+  # PARTIALLY CALIBRATED - LIMITED COVERAGE
+  # ============================================================================
+  # These antennas have sparse measurement grids (e.g., main lobe only).
+  # Provides ±1-1.5 dB accuracy within coverage, ±2-3 dB outside.
+
+  - id: "gs_3.7m_limited"
+    name: "Ground Station 3.7m - Limited Coverage"
+    calibration_status: "partially_calibrated"
+    calibration_file: "gs_3.7m_limited.bin"
+    enabled: false  # Enable when calibration complete
+
+    calibration_coverage:
+      azimuth_range: [0.0, 360.0]     # Full azimuth
+      elevation_range: [30.0, 60.0]   # Limited elevation (typical operational range)
+      frequency_range: [2000.0, 2300.0]  # S-band
+      num_measurements: 324  # 18 az × 6 el × 3 freq
+
+    description: "Small ground station with partial S-band grid"
+    location: "Test Facility B"
+
+  # ============================================================================
+  # UNCALIBRATED ANTENNAS (Design Specifications Only)
+  # ============================================================================
+  # These antennas have no measurement data. Physical parameters come from
+  # design specifications. Provides ±3-5 dB absolute gain accuracy,
+  # ±2-3 dB loss accuracy (systematic errors cancel in relative gain).
+
+  - id: "gs_3.7m_uncalibrated"
+    name: "Ground Station 3.7m - Uncalibrated"
+    calibration_status: "uncalibrated"
+    # No calibration_file - system will load from design_specs
+    enabled: true  # Can be used immediately with design specs
+
+    # Design specifications (required for uncalibrated antennas)
+    design_specs:
+      # Reflector geometry
+      diameter_m: 3.7
+      focal_length_m: 1.85
+      f_over_d_ratio: 0.5
+      surface_rms_mm: 1.5  # Estimate from visual inspection
+
+      # Feed configurations
+      feeds:
+        - id: "s_band_feed"
+          name: "S-Band Primary Feed"
+          position: [0.0, 0.0, 0.0]
+          q_factor: 8.0
+          phase_center_offset_m: 0.0
+          frequency_range: [2000.0, 2300.0]
+
+        - id: "x_band_feed"
+          name: "X-Band Secondary Feed"
+          position: [0.05, 0.0, 0.0]
+          q_factor: 8.5
+          phase_center_offset_m: 0.0
+          frequency_range: [7100.0, 8500.0]
+
+      # Mesh reflector parameters
+      mesh:
+        mesh_spacing_mm: 5.0
+        wire_diameter_mm: 0.5
+
+    # Validity ranges (conservative - full hemisphere)
+    validity_ranges:
+      azimuth_range: [0.0, 360.0]
+      elevation_range: [0.0, 90.0]
+      frequency_range: [2000.0, 8500.0]  # Union of feed ranges
+      temperature_k: 290.0  # Assume room temperature
+
+    description: "Small ground station using design specifications"
+    location: "New Installation Site"
+
+    # Note: This antenna can be used immediately for loss analysis
+    # Expected accuracy: absolute gain ±3 dB, loss ±2 dB
+    # Recommend collecting boresight measurements for parameter tuning
+
+  - id: "dsn_13m_uncalibrated"
+    name: "DSN 13m - Uncalibrated"
+    calibration_status: "uncalibrated"
+    enabled: true
+
+    design_specs:
+      diameter_m: 13.0
+      focal_length_m: 5.2
+      f_over_d_ratio: 0.4
+      surface_rms_mm: 0.4  # High-precision design spec
+
+      feeds:
+        - id: "x_band_downlink"
+          name: "X-Band Downlink Feed"
+          position: [0.0, 0.0, 0.0]
+          q_factor: 9.0
+          phase_center_offset_m: 0.01
+          frequency_range: [7145.0, 7235.0]
+
+        - id: "x_band_uplink"
+          name: "X-Band Uplink Feed"
+          position: [0.08, 0.0, 0.0]
+          q_factor: 9.0
+          phase_center_offset_m: 0.01
+          frequency_range: [7145.0, 7235.0]
+
+        - id: "ka_band_downlink"
+          name: "Ka-Band Downlink Feed"
+          position: [0.0, 0.08, 0.0]
+          q_factor: 10.0
+          phase_center_offset_m: 0.005
+          frequency_range: [25500.0, 27000.0]
+
+      mesh: null  # Solid reflector
+
+    validity_ranges:
+      azimuth_range: [0.0, 360.0]
+      elevation_range: [0.0, 90.0]
+      frequency_range: [7145.0, 27000.0]
+      temperature_k: 290.0
+
+    description: "Medium DSN antenna using design specifications"
+    location: "DSN Complex"
+
+  - id: "dsn_34m_uncalibrated"
+    name: "DSN 34m - Uncalibrated"
+    calibration_status: "uncalibrated"
+    enabled: true
+
+    design_specs:
+      diameter_m: 34.0
+      focal_length_m: 13.6
+      f_over_d_ratio: 0.4
+      surface_rms_mm: 0.25  # Ultra-high precision
+
+      feeds:
+        - id: "s_band"
+          name: "S-Band Feed"
+          position: [0.0, 0.0, 0.0]
+          q_factor: 8.5
+          phase_center_offset_m: 0.02
+          frequency_range: [2200.0, 2300.0]
+
+        - id: "x_band"
+          name: "X-Band Feed"
+          position: [0.15, 0.0, 0.0]
+          q_factor: 9.5
+          phase_center_offset_m: 0.015
+          frequency_range: [8400.0, 8500.0]
+
+        - id: "ka_band"
+          name: "Ka-Band Feed"
+          position: [0.0, 0.15, 0.0]
+          q_factor: 11.0
+          phase_center_offset_m: 0.008
+          frequency_range: [31800.0, 32300.0]
+
+      mesh: null
+
+    validity_ranges:
+      azimuth_range: [0.0, 360.0]
+      elevation_range: [0.0, 90.0]
+      frequency_range: [2200.0, 32300.0]
+      temperature_k: 290.0
+
+    description: "Large DSN antenna using design specifications"
+    location: "Goldstone, CA"
+
+  # ============================================================================
+  # TEST ANTENNAS (For Development)
+  # ============================================================================
+
+  - id: "test_simple"
+    name: "Simple Test Antenna"
+    calibration_status: "uncalibrated"
+    enabled: true
+
+    design_specs:
+      diameter_m: 5.0
+      focal_length_m: 2.0
+      f_over_d_ratio: 0.4
+      surface_rms_mm: 1.0
+
+      feeds:
+        - id: "primary"
+          name: "Primary Feed"
+          position: [0.0, 0.0, 0.0]
+          q_factor: 8.0
+          phase_center_offset_m: 0.0
+          frequency_range: [8000.0, 8500.0]
+
+      mesh: null
+
+    validity_ranges:
+      azimuth_range: [0.0, 360.0]
+      elevation_range: [0.0, 90.0]
+      frequency_range: [8000.0, 8500.0]
+      temperature_k: 290.0
+
+    description: "Simple test antenna for development and testing"
+    location: "Development Environment"
+
+# ============================================================================
+# CALIBRATION UPGRADE WORKFLOW
+# ============================================================================
+#
+# To upgrade an antenna from uncalibrated -> partially calibrated:
+#
+# 1. Collect boresight measurements (CSV format):
+#    frequency_mhz,temperature_k,g_over_t_db
+#    7100,290,39.5
+#    7500,290,40.2
+#    ...
+#
+# 2. Run calibration tool:
+#    cargo run --release --bin calibrate -- \
+#      --input measurements/gs_3.7m_boresight.csv \
+#      --output calibration_data/gs_3.7m_boresight.bin \
+#      --antenna-id gs_3.7m_boresight \
+#      --feed-id x_band_feed \
+#      --calibration-mode boresight \
+#      --design-specs-from-config calibration_data/antennas.yaml
+#
+# 3. Update this file:
+#    - Change calibration_status to "partially_calibrated"
+#    - Set calibration_file to the .bin file
+#    - Add calibration_coverage metadata
+#
+# 4. Restart service (or use hot-reload endpoint in future)
+#
+# To upgrade from partially -> fully calibrated:
+#
+# 1. Collect full measurement grid
+# 2. Run calibration with --calibration-mode full
+# 3. Update this file with new calibration_file
+# 4. Restart service
+
+# ============================================================================
+# NOTES
+# ============================================================================
+#
+# - Uncalibrated antennas are immediately usable for loss analysis
+# - Boresight calibration improves loss accuracy from ±2-3 dB to ±1-2 dB
+# - Full calibration provides ±1 dB accuracy everywhere
+# - Multi-feed antennas require separate calibration per feed
+# - Validity ranges are used to generate warnings, not reject queries

@@ -15,6 +15,8 @@ use calibrate::{
     AntennaClassRegistry, AntennaConfiguration, CorrectionSurfaceParams,
     ValidationConfig, TuningMode, TunableParameters, CalibrationArtifact, ArtifactMetadata,
     MeasurementPoint,
+    // Boresight calibration imports
+    calibrate_boresight, build_calibration_artifact, BoresightMeasurements, DesignSpecs,
 };
 
 use antenna_model::model::{
@@ -31,9 +33,19 @@ use antenna_model::model::{
 #[command(version = "0.1.0")]
 #[command(about = "Antenna calibration tool - generate calibration artifacts from measurements", long_about = None)]
 struct Args {
+    /// Calibration mode: full, boresight, or partial
+    ///
+    /// - full: Full grid calibration from dense measurements (default)
+    /// - boresight: Boresight-only calibration from frequency sweep at az=0, el=0
+    /// - partial: Partial grid calibration (future support)
+    #[arg(long, default_value = "full")]
+    calibration_mode: String,
+
     /// Input measurement CSV file path (or S3 URL)
     ///
-    /// CSV format: e_clock_deg,e_cone_deg,frequency_mhz,g_over_t_db,temperature_k
+    /// CSV format depends on calibration mode:
+    /// - full: e_clock_deg,e_cone_deg,frequency_mhz,g_over_t_db,temperature_k
+    /// - boresight: frequency_mhz,g_over_t_db,temperature_k
     #[arg(short, long)]
     input: PathBuf,
 
@@ -47,23 +59,39 @@ struct Args {
     #[arg(short, long)]
     antenna_id: String,
 
+    /// Feed identifier (e.g., "x_band", "s_band")
+    ///
+    /// Required for boresight calibration mode
+    #[arg(long)]
+    feed_id: Option<String>,
+
     /// Antenna name (human-readable description)
     #[arg(short = 'n', long, default_value = "Untitled Antenna")]
     antenna_name: String,
 
+    /// Design specifications file path (YAML)
+    ///
+    /// Required for boresight calibration mode. Provides initial parameter estimates.
+    #[arg(long)]
+    design_specs: Option<PathBuf>,
+
     /// Antenna class name (e.g., "DSN_34m", "GroundStation_13m")
     ///
     /// References shared parameters from antenna_classes.yaml
+    /// Only used for full calibration mode
     #[arg(short = 'c', long, default_value = "DSN_34m")]
     antenna_class: String,
 
     /// Enable parameter tuning (optimizes 2-3 physical parameters)
     ///
     /// If not specified, uses nominal class parameters without tuning
+    /// Only applicable to full calibration mode
     #[arg(short = 't', long)]
     tune_parameters: bool,
 
     /// Tuning mode: surface-only, surface-and-mesh, or all
+    ///
+    /// Only applicable to full calibration mode
     #[arg(long, default_value = "surface-only")]
     tuning_mode: String,
 
@@ -80,6 +108,8 @@ struct Args {
     metadata: Option<PathBuf>,
 
     /// Path to antenna classes definition file
+    ///
+    /// Only used for full calibration mode
     #[arg(long, default_value = "calibrate/antenna_classes.yaml")]
     classes_file: PathBuf,
 
@@ -181,7 +211,126 @@ fn compute_model_predictions(
     Ok(predictions)
 }
 
-/// Main calibration workflow
+/// Boresight calibration workflow
+async fn run_boresight_calibration(args: Args) -> Result<()> {
+    info!("Starting boresight calibration workflow");
+    info!("Antenna ID: {}", args.antenna_id);
+
+    // Validate required parameters
+    let feed_id = args.feed_id.as_ref()
+        .ok_or_else(|| anyhow::anyhow!("--feed-id is required for boresight calibration mode"))?;
+
+    let design_specs_path = args.design_specs.as_ref()
+        .ok_or_else(|| anyhow::anyhow!("--design-specs is required for boresight calibration mode"))?;
+
+    info!("Feed ID: {}", feed_id);
+    info!("Input: {}", args.input.display());
+    info!("Design specs: {}", design_specs_path.display());
+    info!("Output: {}", args.output.display());
+
+    // Step 1: Load design specifications
+    info!("Step 1/4: Loading design specifications...");
+    let design_specs = DesignSpecs::load_from_file(design_specs_path)
+        .context("Failed to load design specifications")?;
+
+    info!("  ✓ Loaded design specs for {}", design_specs.antenna_name);
+    info!("    Diameter: {:.1}m, f/D: {:.4}",
+        design_specs.reflector.diameter_m,
+        design_specs.f_over_d_ratio()
+    );
+    info!("    Initial surface RMS: {:.3} mm", design_specs.reflector.surface_rms_mm);
+
+    // Step 2: Parse boresight measurements
+    info!("Step 2/4: Parsing boresight measurements...");
+    let csv_content = std::fs::read_to_string(&args.input)
+        .with_context(|| format!("Failed to read input file: {}", args.input.display()))?;
+
+    let measurements = BoresightMeasurements::from_csv(&csv_content)
+        .context("Failed to parse boresight measurements")?;
+
+    let (freq_min, freq_max) = measurements.frequency_range();
+    info!("  ✓ Parsed {} measurements", measurements.points.len());
+    info!("  Frequency range: {:.1} - {:.1} MHz", freq_min, freq_max);
+
+    // Step 3: Run boresight calibration (parameter tuning)
+    info!("Step 3/4: Running boresight calibration...");
+    let calibration_result = calibrate_boresight(
+        &design_specs,
+        feed_id,
+        &measurements,
+        Some(args.max_tuning_iterations),
+    ).context("Boresight calibration failed")?;
+
+    info!("  ✓ Boresight calibration complete");
+
+    // Step 4: Build calibration artifact
+    info!("Step 4/4: Building calibration artifact...");
+    let data_source = format!("file://{}", args.input.display());
+
+    let calibration = build_calibration_artifact(
+        &design_specs,
+        feed_id,
+        &measurements,
+        &calibration_result,
+        data_source,
+    ).context("Failed to build calibration artifact")?;
+
+    // Validate the artifact
+    calibration.validate()
+        .context("Calibration artifact failed validation")?;
+
+    // Serialize and save
+    let artifact_bytes = bincode::encode_to_vec(&calibration, bincode::config::standard())
+        .context("Failed to serialize calibration artifact")?;
+
+    std::fs::write(&args.output, &artifact_bytes)
+        .with_context(|| format!("Failed to write artifact to {}", args.output.display()))?;
+
+    let file_size = std::fs::metadata(&args.output)?.len();
+    info!("  ✓ Artifact saved: {} ({:.2} KB)",
+        args.output.display(),
+        file_size as f64 / 1024.0
+    );
+
+    // Export metadata if requested
+    if let Some(metadata_path) = args.metadata {
+        info!("Exporting metadata to JSON...");
+        let metadata_json = serde_json::to_string_pretty(&calibration.metadata)?;
+        std::fs::write(&metadata_path, metadata_json)?;
+        info!("  ✓ Metadata saved: {}", metadata_path.display());
+    }
+
+    info!("");
+    info!("✓ Boresight calibration workflow complete!");
+    info!("");
+    info!("Summary:");
+    info!("  Antenna ID: {}", args.antenna_id);
+    info!("  Feed ID: {}", feed_id);
+    info!("  Calibration mode: Boresight (PartiallyCalibrated)");
+    info!("  Measurements: {}", measurements.points.len());
+    info!("  Frequency range: {:.1} - {:.1} MHz", freq_min, freq_max);
+    info!("  Initial RMSE: {:.4} dB (design specs)", calibration_result.initial_rmse_db);
+    info!("  Final RMSE: {:.4} dB (tuned)", calibration_result.final_rmse_db);
+    info!("  Improvement: {:.4} dB ({:.1}%)",
+        calibration_result.improvement_db,
+        (calibration_result.improvement_db / calibration_result.initial_rmse_db) * 100.0
+    );
+    info!("  Tuned parameters:");
+    info!("    surface_rms: {:.3} mm", calibration_result.tuned_params.surface_rms_mm);
+    info!("    q_factor: {:.2}", calibration_result.tuned_params.q_factor);
+    if let Some(spacing) = calibration_result.tuned_params.mesh_spacing_mm {
+        info!("    mesh_spacing: {:.2} mm", spacing);
+    }
+    info!("  Expected accuracy:");
+    info!("    Boresight: ±1 dB");
+    info!("    Off-axis: ±2-3 dB (physics extrapolation)");
+    info!("    Loss (relative): ±1-2 dB");
+    info!("  Output artifact: {}", args.output.display());
+
+    Ok(())
+}
+
+/// Full calibration workflow (original)
 async fn run_calibration(args: Args) -> Result<()> {
     info!("Starting antenna calibration workflow");
     info!("Antenna ID: {}", args.antenna_id);
@@ -468,8 +617,23 @@ async fn main() {
         .with_line_number(false)
         .init();
 
-    // Run calibration workflow
-    if let Err(e) = run_calibration(args).await {
+    // Dispatch to appropriate calibration workflow based on mode
+    let result = match args.calibration_mode.as_str() {
+        "full" => run_calibration(args).await,
+        "boresight" => run_boresight_calibration(args).await,
+        "partial" => {
+            error!("Partial calibration mode is not yet implemented");
+            error!("Please use --calibration-mode=full or --calibration-mode=boresight");
+            std::process::exit(1);
+        }
+        mode => {
+            error!("Unknown calibration mode: {}", mode);
+            error!("Valid modes: full, boresight, partial");
+            std::process::exit(1);
+        }
+    };
+
+    if let Err(e) = result {
         error!("Calibration failed: {:#}", e);
         std::process::exit(1);
     }

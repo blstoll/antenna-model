@@ -396,10 +396,9 @@ fn aperture_integrand(
     let aperture = ApertureCoordinates { rho, phi_prime };
 
     // Calculate feed displacement from position
-    let feed_displacement = config
-        .feed
-        .position
-        .displacement_from_focus(config.reflector.focal_length);
+    // NOTE: For coma aberration, we only use the radial (xy-plane) displacement
+    // not the full 3D displacement. Axial displacement (z) causes defocus, not coma.
+    let feed_displacement = config.feed.position.radial_displacement();
     let feed_displacement_angle = config.feed.position.y.atan2(config.feed.position.x);
 
     // Calculate angle of incidence (simplified - assumes small angles)
@@ -409,6 +408,12 @@ fn aperture_integrand(
     // Get mesh spacing (0.0 if no mesh)
     let mesh_spacing = config.mesh.as_ref().map_or(0.0, |m| m.spacing);
 
+    // Surface error at this point (ρ, φ')
+    // TODO: Implement proper surface error model (Zernike, measured surface, etc.)
+    // For now, use ideal surface (0.0). The Ruze efficiency factor handles
+    // the statistical effect of surface RMS on overall gain.
+    let surface_error = 0.0;
+
     // Calculate total phase
     let total_phase = phase_total(
         aperture,
@@ -417,7 +422,7 @@ fn aperture_integrand(
         config.reflector.focal_length,
         feed_displacement,
         feed_displacement_angle,
-        config.reflector.surface_rms,
+        surface_error,
         theta_incident,
         mesh_spacing,
         k,

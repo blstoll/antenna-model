@@ -1,0 +1,45 @@
+{
+  "antennas": [
+    {
+      "id": "dsn_13m_uncalibrated",
+      "name": "DSN 13m - Uncalibrated - Ka-Band Downlink Feed",
+      "enabled": true,
+      "feed_count": 3,
+      "feed_ids": [
+        "ka_band_downlink",
+        "x_band_downlink",
+        "x_band_uplink"
+      ]
+    },
+    {
+      "id": "dsn_34m_uncalibrated",
+      "name": "DSN 34m - Uncalibrated - Ka-Band Feed",
+      "enabled": true,
+      "feed_count": 3,
+      "feed_ids": [
+        "ka_band",
+        "s_band",
+        "x_band"
+      ]
+    },
+    {
+      "id": "gs_3.7m_uncalibrated",
+      "name": "Ground Station 3.7m - Uncalibrated - S-Band Primary Feed",
+      "enabled": true,
+      "feed_count": 2,
+      "feed_ids": [
+        "s_band_feed",
+        "x_band_feed"
+      ]
+    },
+    {
+      "id": "test_simple",
+      "name": "Simple Test Antenna - Primary Feed",
+      "enabled": true,
+      "feed_count": 1,
+      "feed_ids": [
+        "primary"
+      ]
+    }
+  ]
+}

@@ -49,10 +49,6 @@ pub enum AntennaModelError {
     #[error("invalid coordinate for '{param}': {reason}")]
     InvalidCoordinate { param: String, reason: String },
 
-    /// Invalid attitude error
-    #[error("invalid attitude: {reason}")]
-    InvalidAttitude { reason: String },
-
     /// Coordinate transformation error
     #[error("coordinate transformation error: {details}")]
     CoordinateTransformError { details: String },
@@ -63,6 +59,10 @@ pub enum AntennaModelError {
         antenna_id: String,
         feed_id: String,
     },
+
+    /// Feature not implemented
+    #[error("feature not implemented: {feature}")]
+    NotImplemented { feature: String },
 
     /// Generic error with context
     #[error("{0}")]
@@ -402,21 +402,21 @@ impl From<ComputationError> for ApiError {
     }
 }
 
-// Convert coordinate/attitude errors to ApiError
+// Convert coordinate errors to ApiError
 impl From<AntennaModelError> for ApiError {
     fn from(err: AntennaModelError) -> Self {
         match err {
             AntennaModelError::InvalidCoordinate { param, reason } => {
                 ApiError::BadRequest(format!("invalid coordinate for '{}': {}", param, reason))
             }
-            AntennaModelError::InvalidAttitude { reason } => {
-                ApiError::BadRequest(format!("invalid attitude: {}", reason))
-            }
             AntennaModelError::CoordinateTransformError { details } => {
                 ApiError::InternalError(format!("coordinate transformation error: {}", details))
             }
             AntennaModelError::FeedNotFound { antenna_id, feed_id } => {
                 ApiError::NotFound(format!("feed '{}' not found for antenna '{}'", feed_id, antenna_id))
+            }
+            AntennaModelError::NotImplemented { feature } => {
+                ApiError::UnprocessableEntity(format!("feature not implemented: {}", feature))
             }
             AntennaModelError::Data(data_err) => data_err.into(),
             AntennaModelError::Api(api_err) => api_err,

@@ -1,0 +1,1077 @@
+openapi: 3.0.3
+info:
+  title: Antenna Model Service API
+  description: |
+    High-accuracy antenna loss modeling system providing REST API access to antenna models
+    with flexible calibration statuses. Supports real-time queries for G/T (Gain-to-Temperature)
+    predictions based on 3D geometric configuration.
+
+    ## Calibration Statuses
+
+    The system supports multiple calibration statuses:
+    - **Fully Calibrated**: ±1 dB accuracy (main lobe/first sidelobe)
+    - **Partially Calibrated (Boresight)**: ±1 dB at boresight, ±1-2 dB loss
+    - **Partially Calibrated (Limited Coverage)**: ±1-1.5 dB in-coverage, ±2-3 dB extrapolated
+    - **Uncalibrated**: ±3-5 dB absolute gain, ±2-3 dB loss (design specs only)
+
+    ## Coordinate Systems
+
+    All 3D positions support automatic coordinate system detection:
+    - **ECEF**: If `abs(x) > 6400e3 OR abs(y) > 6400e3 OR abs(z) > 6400e3` (meters)
+    - **Geodetic**: Otherwise (x=longitude degrees, y=latitude degrees, z=altitude meters)
+
+  version: 1.1.0
+  contact:
+    name: Antenna Model Service Support
+  license:
+    name: Proprietary
+    url: https://example.com/license
+
+security: []  # No authentication required (internal service)
+
+servers:
+  - url: http://localhost:3000
+    description: Local development server
+  - url: http://antenna-model-service
+    description: Kubernetes cluster internal service
+
+tags:
+  - name: health
+    description: Health check and service status endpoints
+  - name: gain
+    description: Antenna gain computation endpoints
+  - name: heatmap
+    description: Loss heatmap generation
+  - name: antennas
+    description: Antenna and feed configuration queries
+
+paths:
+  /health:
+    get:
+      tags:
+        - health
+      summary: Health check (liveness probe)
+      description: Returns 200 if the service is responsive. Used for Kubernetes liveness probe.
+      operationId: getHealth
+      responses:
+        '200':
+          description: Service is healthy and responsive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /ready:
+    get:
+      tags:
+        - health
+      summary: Readiness check (readiness probe)
+      description: Returns 200 when ready to serve requests, 503 during startup or if data fails to load.
+      operationId: getReady
+      responses:
+        '200':
+          description: Service is ready to serve requests
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: Service not ready (startup or data loading failure)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /status:
+    get:
+      tags:
+        - health
+      summary: Service status and metadata
+      description: Returns comprehensive service information including loaded antennas, uptime, and version.
+      operationId: getStatus
+      responses:
+        '200':
+          description: Service status information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+
+  /api/v1/gain:
+    post:
+      tags:
+        - gain
+      summary: Compute antenna gain from 3D geometric configuration
+      description: |
+        Computes antenna gain for a specific geometric configuration including vehicle position,
+        antenna orientation, feed position, and emitter location. Supports ECEF or Geodetic
+        coordinates (auto-detected).
+
+        Optionally computes reference gain (ideal case) and loss (reference - actual).
+      operationId: computeGain
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GainRequest'
+            examples:
+              ecef_coordinates:
+                summary: ECEF coordinates example
+                value:
+                  antenna_id: "antenna_1"
+                  feed_id: "x_band_feed"
+                  vehicle_position:
+                    x: 4510731.123
+                    y: 4510731.456
+                    z: 3488865.789
+                  vehicle_attitude:
+                    w: 1.0
+                    x: 0.0
+                    y: 0.0
+                    z: 0.0
+                  reflector_boresight:
+                    x: 4510732.0
+                    y: 4510732.0
+                    z: 3488950.0
+                  feed_position:
+                    x: 4510731.5
+                    y: 4510731.5
+                    z: 3488870.0
+                  emitter_position:
+                    x: 4520000.0
+                    y: 4520000.0
+                    z: 3500000.0
+                  frequency_mhz: 8400.0
+                  include_reference: true
+              geodetic_coordinates:
+                summary: Geodetic coordinates example
+                value:
+                  antenna_id: "antenna_2"
+                  feed_id: "s_band_feed"
+                  vehicle_position:
+                    x: -118.1234
+                    y: 34.5678
+                    z: 100.0
+                  vehicle_attitude:
+                    roll_deg: 0.0
+                    pitch_deg: 5.0
+                    yaw_deg: 180.0
+                  reflector_boresight:
+                    x: -117.0
+                    y: 35.0
+                    z: 400000.0
+                  feed_position:
+                    x: -118.124
+                    y: 34.568
+                    z: 105.0
+                  emitter_position:
+                    x: -117.0
+                    y: 35.0
+                    z: 400000.0
+                  frequency_mhz: 2200.0
+                  include_reference: false
+      responses:
+        '200':
+          description: Gain computation successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GainResponse'
+              examples:
+                partially_calibrated:
+                  summary: Partially calibrated antenna response
+                  value:
+                    antenna_id: "antenna_2"
+                    feed_id: "x_band_feed"
+                    gain_db: 41.2
+                    reference_gain_db: 43.5
+                    loss_db: 2.3
+                    geometry:
+                      feed_offset_meters:
+                        x: 0.05
+                        y: 0.02
+                        z: 0.01
+                      emitter_azimuth_deg: 185.5
+                      emitter_elevation_deg: 32.1
+                      beam_squint_deg: 0.15
+                    warnings:
+                      - "Antenna 'antenna_2' is partially calibrated. Accuracy estimate: ±1.5 dB"
+                      - "Query is outside calibrated region - using physics model extrapolation"
+                    metadata:
+                      computation_time_ms: 2.8
+                      extrapolated: true
+                    calibration_status:
+                      status: "partially_calibrated"
+                      accuracy_estimate_db: 1.5
+                      coverage:
+                        azimuth_range_deg: [0.0, 0.0]
+                        elevation_range_deg: [0.0, 0.0]
+                        frequency_range_mhz: [7100.0, 8500.0]
+                        num_measurements: 25
+                        is_boresight_only: true
+                      correction_applied: false
+                      parameters_source: "boresight_tuning"
+                uncalibrated:
+                  summary: Uncalibrated antenna response
+                  value:
+                    antenna_id: "antenna_3"
+                    feed_id: "x_band_feed"
+                    gain_db: 40.5
+                    reference_gain_db: 43.8
+                    loss_db: 3.3
+                    geometry:
+                      feed_offset_meters:
+                        x: 0.0
+                        y: 0.0
+                        z: 0.0
+                      emitter_azimuth_deg: 45.2
+                      emitter_elevation_deg: 78.9
+                    warnings:
+                      - "Antenna 'antenna_3' is uncalibrated (using design specifications). Absolute gain accuracy: ±3.0 dB, Loss accuracy: ±2.0 dB"
+                    metadata:
+                      computation_time_ms: 1.5
+                      extrapolated: false
+                    calibration_status:
+                      status: "uncalibrated"
+                      accuracy_estimate_db: 3.0
+                      loss_accuracy_estimate_db: 2.0
+                      correction_applied: false
+                      parameters_source: "design_specifications"
+        '400':
+          description: Invalid request parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalid_frequency:
+                  summary: Invalid frequency
+                  value:
+                    error: "ValidationError"
+                    message: "Frequency out of valid range [100, 50000] MHz"
+                    details:
+                      field: "frequency_mhz"
+                      value: 100000.0
+                invalid_coordinates:
+                  summary: Invalid coordinates
+                  value:
+                    error: "InvalidCoordinate"
+                    message: "Coordinates exceed Earth radius (|pos| > 10000 km)"
+                    details:
+                      param: "vehicle_position"
+        '404':
+          description: Antenna or feed not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                antenna_not_found:
+                  summary: Antenna not found
+                  value:
+                    error: "AntennaNotFound"
+                    message: "Antenna 'invalid_antenna' not found"
+                    details:
+                      antenna_id: "invalid_antenna"
+                feed_not_found:
+                  summary: Feed not found
+                  value:
+                    error: "FeedNotFound"
+                    message: "Feed 'invalid_feed' not found for antenna 'antenna_1'"
+                    details:
+                      antenna_id: "antenna_1"
+                      feed_id: "invalid_feed"
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/gain/batch:
+    post:
+      tags:
+        - gain
+      summary: Batch gain computation
+      description: |
+        Processes multiple gain computation requests in a single API call.
+        Automatically uses parallel processing for batches ≥5 requests.
+
+        Maximum batch size: 1000 evaluations.
+      operationId: computeGainBatch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchGainRequest'
+      responses:
+        '200':
+          description: Batch computation successful (may include partial failures)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchGainResponse'
+        '400':
+          description: Invalid batch request (e.g., exceeds size limit)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/heatmap:
+    post:
+      tags:
+        - heatmap
+      summary: Generate loss heatmap
+      description: |
+        Generates a 2D loss heatmap across antenna field of view.
+        Supports rectangular azimuth/elevation grids.
+
+        Loss is computed relative to peak gain for each grid point.
+        Maximum grid size: 100,000 points.
+      operationId: generateHeatmap
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HeatmapRequest'
+            examples:
+              rectangular_grid:
+                summary: Rectangular grid (73x46 = 3358 points)
+                value:
+                  antenna_id: "antenna_1"
+                  feed_id: "x_band_feed"
+                  vehicle_position:
+                    x: 4510731.123
+                    y: 4510731.456
+                    z: 3488865.789
+                  vehicle_attitude:
+                    w: 1.0
+                    x: 0.0
+                    y: 0.0
+                    z: 0.0
+                  reflector_boresight:
+                    x: 4510732.0
+                    y: 4510732.0
+                    z: 3488950.0
+                  feed_position:
+                    x: 4510731.5
+                    y: 4510731.5
+                    z: 3488870.0
+                  frequency_mhz: 8400.0
+                  grid_config:
+                    grid_type: "rectangular"
+                    azimuth_range_deg:
+                      min: 0.0
+                      max: 360.0
+                      step: 5.0
+                    elevation_range_deg:
+                      min: 0.0
+                      max: 90.0
+                      step: 2.0
+      responses:
+        '200':
+          description: Heatmap generation successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HeatmapResponse'
+        '400':
+          description: Invalid heatmap request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/antennas:
+    get:
+      tags:
+        - antennas
+      summary: List all available antennas
+      description: Returns list of all loaded antenna configurations with basic metadata.
+      operationId: listAntennas
+      responses:
+        '200':
+          description: List of antennas
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AntennaListResponse'
+
+  /api/v1/antennas/{id}:
+    get:
+      tags:
+        - antennas
+      summary: Get antenna details
+      description: Returns detailed information about a specific antenna including feeds, calibration status, and physical parameters.
+      operationId: getAntennaDetails
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Antenna ID
+          schema:
+            type: string
+          example: "antenna_1"
+      responses:
+        '200':
+          description: Antenna details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AntennaDetailsResponse'
+        '404':
+          description: Antenna not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/antennas/{id}/feeds:
+    get:
+      tags:
+        - antennas
+      summary: List feeds for antenna
+      description: Returns list of all feeds available for the specified antenna.
+      operationId: listFeeds
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Antenna ID
+          schema:
+            type: string
+          example: "antenna_1"
+      responses:
+        '200':
+          description: List of feeds
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  antenna_id:
+                    type: string
+                  feeds:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/FeedInfo'
+        '404':
+          description: Antenna not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /api/v1/antennas/{id}/feeds/{feed_id}:
+    get:
+      tags:
+        - antennas
+      summary: Get feed details
+      description: Returns detailed information about a specific feed.
+      operationId: getFeedDetails
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Antenna ID
+          schema:
+            type: string
+          example: "antenna_1"
+        - name: feed_id
+          in: path
+          required: true
+          description: Feed ID
+          schema:
+            type: string
+          example: "x_band_feed"
+      responses:
+        '200':
+          description: Feed details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FeedInfo'
+        '404':
+          description: Antenna or feed not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+  schemas:
+    Position3D:
+      type: object
+      description: |
+        3D position with automatic coordinate system detection:
+        - ECEF if |x| or |y| or |z| > 6400 km
+        - Geodetic otherwise (lon/lat degrees, alt meters)
+      required:
+        - x
+        - y
+        - z
+      properties:
+        x:
+          type: number
+          format: double
+          description: ECEF X (meters) OR longitude (degrees)
+        y:
+          type: number
+          format: double
+          description: ECEF Y (meters) OR latitude (degrees)
+        z:
+          type: number
+          format: double
+          description: ECEF Z (meters) OR altitude (meters)
+
+    Quaternion:
+      type: object
+      description: Quaternion attitude representation (must be normalized)
+      required:
+        - w
+        - x
+        - y
+        - z
+      properties:
+        w:
+          type: number
+          format: double
+        x:
+          type: number
+          format: double
+        y:
+          type: number
+          format: double
+        z:
+          type: number
+          format: double
+
+    EulerAngles:
+      type: object
+      description: Euler angles attitude representation
+      required:
+        - roll_deg
+        - pitch_deg
+        - yaw_deg
+      properties:
+        roll_deg:
+          type: number
+          format: double
+        pitch_deg:
+          type: number
+          format: double
+        yaw_deg:
+          type: number
+          format: double
+
+    GainRequest:
+      type: object
+      required:
+        - antenna_id
+        - feed_id
+        - vehicle_position
+        - vehicle_attitude
+        - reflector_boresight
+        - feed_position
+        - emitter_position
+        - frequency_mhz
+      properties:
+        antenna_id:
+          type: string
+          description: Antenna identifier
+        feed_id:
+          type: string
+          description: Feed identifier
+        vehicle_position:
+          $ref: '#/components/schemas/Position3D'
+        vehicle_attitude:
+          oneOf:
+            - $ref: '#/components/schemas/Quaternion'
+            - $ref: '#/components/schemas/EulerAngles'
+        reflector_boresight:
+          $ref: '#/components/schemas/Position3D'
+        feed_position:
+          $ref: '#/components/schemas/Position3D'
+        emitter_position:
+          $ref: '#/components/schemas/Position3D'
+        frequency_mhz:
+          type: number
+          format: double
+          minimum: 100
+          maximum: 50000
+        pointing_frequency_mhz:
+          type: number
+          format: double
+          description: Optional pointing frequency for beam squint correction
+        include_reference:
+          type: boolean
+          default: false
+          description: Include reference gain and loss calculation
+
+    GainResponse:
+      type: object
+      required:
+        - antenna_id
+        - feed_id
+        - gain_db
+        - geometry
+        - warnings
+        - metadata
+      properties:
+        antenna_id:
+          type: string
+        feed_id:
+          type: string
+        gain_db:
+          type: number
+          format: double
+        reference_gain_db:
+          type: number
+          format: double
+          nullable: true
+        loss_db:
+          type: number
+          format: double
+          nullable: true
+        geometry:
+          $ref: '#/components/schemas/GeometryInfo'
+        warnings:
+          type: array
+          items:
+            type: string
+        metadata:
+          $ref: '#/components/schemas/ComputationMetadata'
+        calibration_status:
+          $ref: '#/components/schemas/CalibrationStatusInfo'
+
+    GeometryInfo:
+      type: object
+      properties:
+        feed_offset_meters:
+          type: object
+          properties:
+            x:
+              type: number
+            y:
+              type: number
+            z:
+              type: number
+        emitter_azimuth_deg:
+          type: number
+        emitter_elevation_deg:
+          type: number
+        beam_squint_deg:
+          type: number
+          nullable: true
+
+    ComputationMetadata:
+      type: object
+      properties:
+        computation_time_ms:
+          type: number
+        coordinate_transform_ms:
+          type: number
+          nullable: true
+        physics_model_ms:
+          type: number
+          nullable: true
+        correction_surface_ms:
+          type: number
+          nullable: true
+        extrapolated:
+          type: boolean
+
+    CalibrationStatusInfo:
+      type: object
+      required:
+        - status
+        - accuracy_estimate_db
+        - correction_applied
+        - parameters_source
+      properties:
+        status:
+          type: string
+          enum:
+            - fully_calibrated
+            - partially_calibrated
+            - uncalibrated
+        accuracy_estimate_db:
+          type: number
+          description: Estimated absolute gain accuracy in dB
+        loss_accuracy_estimate_db:
+          type: number
+          nullable: true
+          description: Estimated loss accuracy (only for uncalibrated)
+        coverage:
+          $ref: '#/components/schemas/CoverageInfo'
+        correction_applied:
+          type: boolean
+        parameters_source:
+          type: string
+          enum:
+            - design_specifications
+            - boresight_tuning
+            - partial_tuning
+            - full_grid_tuning
+
+    CoverageInfo:
+      type: object
+      properties:
+        azimuth_range_deg:
+          type: array
+          items:
+            type: number
+          minItems: 2
+          maxItems: 2
+        elevation_range_deg:
+          type: array
+          items:
+            type: number
+          minItems: 2
+          maxItems: 2
+        frequency_range_mhz:
+          type: array
+          items:
+            type: number
+          minItems: 2
+          maxItems: 2
+        num_measurements:
+          type: integer
+        is_boresight_only:
+          type: boolean
+
+    BatchGainRequest:
+      type: object
+      required:
+        - evaluations
+      properties:
+        evaluations:
+          type: array
+          items:
+            $ref: '#/components/schemas/GainRequest'
+          maxItems: 1000
+
+    BatchGainResponse:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/GainResponse'
+        metadata:
+          type: object
+          properties:
+            total_computation_time_ms:
+              type: number
+            count:
+              type: integer
+            successful:
+              type: integer
+            failed:
+              type: integer
+
+    HeatmapRequest:
+      type: object
+      required:
+        - antenna_id
+        - feed_id
+        - vehicle_position
+        - vehicle_attitude
+        - reflector_boresight
+        - feed_position
+        - frequency_mhz
+        - grid_config
+      properties:
+        antenna_id:
+          type: string
+        feed_id:
+          type: string
+        vehicle_position:
+          $ref: '#/components/schemas/Position3D'
+        vehicle_attitude:
+          oneOf:
+            - $ref: '#/components/schemas/Quaternion'
+            - $ref: '#/components/schemas/EulerAngles'
+        reflector_boresight:
+          $ref: '#/components/schemas/Position3D'
+        feed_position:
+          $ref: '#/components/schemas/Position3D'
+        frequency_mhz:
+          type: number
+        pointing_frequency_mhz:
+          type: number
+          nullable: true
+        grid_config:
+          $ref: '#/components/schemas/GridConfig'
+
+    GridConfig:
+      type: object
+      required:
+        - grid_type
+      properties:
+        grid_type:
+          type: string
+          enum:
+            - rectangular
+            - h3
+        azimuth_range_deg:
+          type: object
+          properties:
+            min:
+              type: number
+            max:
+              type: number
+            step:
+              type: number
+        elevation_range_deg:
+          type: object
+          properties:
+            min:
+              type: number
+            max:
+              type: number
+            step:
+              type: number
+        h3_resolution:
+          type: integer
+          nullable: true
+        center_azimuth_deg:
+          type: number
+          nullable: true
+        center_elevation_deg:
+          type: number
+          nullable: true
+        field_of_view_deg:
+          type: number
+          nullable: true
+
+    HeatmapResponse:
+      type: object
+      properties:
+        antenna_id:
+          type: string
+        feed_id:
+          type: string
+        frequency_mhz:
+          type: number
+        grid:
+          $ref: '#/components/schemas/GridData'
+        warnings:
+          type: array
+          items:
+            type: string
+        metadata:
+          type: object
+          properties:
+            points_evaluated:
+              type: integer
+            computation_time_ms:
+              type: number
+            peak_gain_db:
+              type: number
+        calibration_status:
+          $ref: '#/components/schemas/CalibrationStatusInfo'
+
+    GridData:
+      type: object
+      properties:
+        grid_type:
+          type: string
+        azimuth_values:
+          type: array
+          items:
+            type: number
+        elevation_values:
+          type: array
+          items:
+            type: number
+        loss_db:
+          type: array
+          description: 2D array of loss values [elevation][azimuth]
+          items:
+            type: array
+            items:
+              type: number
+
+    AntennaListResponse:
+      type: object
+      properties:
+        antennas:
+          type: array
+          items:
+            $ref: '#/components/schemas/AntennaInfo'
+
+    AntennaInfo:
+      type: object
+      properties:
+        antenna_id:
+          type: string
+        name:
+          type: string
+        enabled:
+          type: boolean
+        feed_count:
+          type: integer
+        feeds:
+          type: array
+          items:
+            type: string
+
+    AntennaDetailsResponse:
+      type: object
+      properties:
+        antenna_id:
+          type: string
+        name:
+          type: string
+        calibration_status:
+          type: string
+        feeds:
+          type: array
+          items:
+            $ref: '#/components/schemas/FeedInfo'
+        physical_parameters:
+          $ref: '#/components/schemas/PhysicalParametersInfo'
+        validity_ranges:
+          $ref: '#/components/schemas/ValidityRangesInfo'
+        calibration_info:
+          $ref: '#/components/schemas/CalibrationInfo'
+        calibration_status_info:
+          $ref: '#/components/schemas/CalibrationStatusInfo'
+          nullable: true
+
+    FeedInfo:
+      type: object
+      properties:
+        feed_id:
+          type: string
+        name:
+          type: string
+        position:
+          type: array
+          items:
+            type: number
+          minItems: 3
+          maxItems: 3
+        q_factor:
+          type: number
+        phase_center_offset_m:
+          type: number
+        frequency_range:
+          type: array
+          items:
+            type: number
+          minItems: 2
+          maxItems: 2
+
+    PhysicalParametersInfo:
+      type: object
+      properties:
+        diameter_m:
+          type: number
+        f_over_d:
+          type: number
+        surface_rms_mm:
+          type: number
+        feed:
+          type: object
+          properties:
+            q_factor:
+              type: number
+            phase_center_offset_m:
+              type: number
+        mesh:
+          type: object
+          nullable: true
+          properties:
+            mesh_spacing_mm:
+              type: number
+            wire_diameter_mm:
+              type: number
+
+    ValidityRangesInfo:
+      type: object
+      properties:
+        azimuth:
+          type: array
+          items:
+            type: number
+          minItems: 2
+          maxItems: 2
+        elevation:
+          type: array
+          items:
+            type: number
+          minItems: 2
+          maxItems: 2
+        frequency:
+          type: array
+          items:
+            type: number
+          minItems: 2
+          maxItems: 2
+        temperature:
+          type: number
+
+    CalibrationInfo:
+      type: object
+      properties:
+        calibration_date:
+          type: string
+        format_version:
+          type: string
+        data_source:
+          type: string
+        rmse_db:
+          type: number
+        num_measurements:
+          type: integer
+        parameters_tuned:
+          type: boolean
+
+    HealthResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          example: "healthy"
+
+    StatusResponse:
+      type: object
+      properties:
+        status:
+          type: string
+        uptime_seconds:
+          type: number
+        version:
+          type: string
+        antenna_count:
+          type: integer
+        antenna_ids:
+          type: array
+          items:
+            type: string
+        memory_usage_mb:
+          type: number
+          nullable: true
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+          description: Error type identifier
+        message:
+          type: string
+          description: Human-readable error message
+        details:
+          type: object
+          description: Additional error details
+          additionalProperties: true

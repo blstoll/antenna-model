@@ -50,6 +50,17 @@ pub struct AntennaCalibration {
 
     /// Valid ranges for query parameters
     pub validity_ranges: ValidityRanges,
+
+    // ========== v2.0 Partial Calibration Support ==========
+    /// Calibration status indicating level of calibration data available (v2.0).
+    /// Optional for backward compatibility with existing .bin files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calibration_status: Option<CalibrationStatus>,
+
+    /// Calibration coverage metadata for partially calibrated antennas (v2.0).
+    /// Only present for PartiallyCalibrated status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calibration_coverage: Option<CalibrationCoverage>,
 }
 
 impl AntennaCalibration {
@@ -80,6 +91,11 @@ impl AntennaCalibration {
 
         // Validate validity ranges
         self.validity_ranges.validate()?;
+
+        // Validate calibration coverage if present
+        if let Some(ref coverage) = self.calibration_coverage {
+            coverage.validate()?;
+        }
 
         Ok(())
     }
@@ -133,6 +149,17 @@ pub struct CalibrationMetadata {
     /// Reference to antenna class for shared parameters (v2.0)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub antenna_class: Option<String>,
+
+    // ========== v2.0 Partial Calibration Support ==========
+    /// Source of physical parameters (v2.0 - partial calibration support)
+    /// Optional for backward compatibility with existing .bin files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parameters_source: Option<ParameterSource>,
+
+    /// Measurement density indicator (v2.0 - partial calibration support)
+    /// Optional for backward compatibility with existing .bin files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub measurement_density: Option<MeasurementDensity>,
 }
 
 impl CalibrationMetadata {
@@ -541,6 +568,258 @@ impl ValidityRanges {
     }
 }
 
+// ============================================================================
+// Calibration Status and Coverage Types (v2.0 - Partial Calibration Support)
+// ============================================================================
+
+/// Calibration status indicating the level of calibration data available.
+///
+/// This enum supports three calibration levels:
+/// 1. **Fully Calibrated** - Dense measurement grid with full correction surface
+/// 2. **Partially Calibrated** - Limited measurements (boresight or sparse grid)
+/// 3. **Uncalibrated** - Design specifications only, no measurements
+///
+/// Each status includes accuracy estimates to help users understand prediction quality.
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq)]
+pub enum CalibrationStatus {
+    /// Fully calibrated with dense measurement grid across azimuth, elevation, and frequency.
+    /// Provides highest accuracy (typically ±1 dB in main lobe and first sidelobe).
+    FullyCalibrated {
+        /// Expected accuracy in dB (typically ±1.0)
+        accuracy_estimate_db: f64,
+    },
+
+    /// Partially calibrated with limited measurement coverage.
+    /// May have boresight-only measurements or sparse spatial grid.
+    /// Accuracy varies by coverage: ±1-1.5 dB in-coverage, ±2-3 dB out-of-coverage.
+    PartiallyCalibrated {
+        /// Expected accuracy in dB (varies by coverage)
+        accuracy_estimate_db: f64,
+        /// Measurement coverage details
+        coverage: CalibrationCoverage,
+    },
+
+    /// Uncalibrated - uses design specifications only (no measurements).
+    /// Absolute gain accuracy is lower (±3-5 dB), but loss accuracy is better
+    /// (±2 dB) due to systematic error cancellation in subtraction.
+    Uncalibrated {
+        /// Expected absolute gain accuracy in dB (typically ±3.0)
+        accuracy_estimate_db: f64,
+        /// Expected loss (relative gain) accuracy in dB (typically ±2.0)
+        /// Better than absolute due to error cancellation
+        loss_accuracy_estimate_db: f64,
+    },
+}
+
+impl CalibrationStatus {
+    /// Returns the accuracy estimate in dB for this calibration status.
+    pub fn accuracy_estimate_db(&self) -> f64 {
+        match self {
+            CalibrationStatus::FullyCalibrated {
+                accuracy_estimate_db,
+            } => *accuracy_estimate_db,
+            CalibrationStatus::PartiallyCalibrated {
+                accuracy_estimate_db,
+                ..
+            } => *accuracy_estimate_db,
+            CalibrationStatus::Uncalibrated {
+                accuracy_estimate_db,
+                ..
+            } => *accuracy_estimate_db,
+        }
+    }
+
+    /// Returns true if this calibration has a correction surface.
+    pub fn has_correction_surface(&self) -> bool {
+        match self {
+            CalibrationStatus::FullyCalibrated { .. } => true,
+            CalibrationStatus::PartiallyCalibrated { coverage, .. } => {
+                coverage.has_correction_surface
+            }
+            CalibrationStatus::Uncalibrated { .. } => false,
+        }
+    }
+
+    /// Returns a human-readable status string.
+    pub fn status_string(&self) -> &str {
+        match self {
+            CalibrationStatus::FullyCalibrated { .. } => "fully_calibrated",
+            CalibrationStatus::PartiallyCalibrated { .. } => "partially_calibrated",
+            CalibrationStatus::Uncalibrated { .. } => "uncalibrated",
+        }
+    }
+}
+
+/// Measurement coverage for partially calibrated antennas.
+///
+/// Describes the spatial, frequency, and measurement density of partial calibration data.
+/// Used to determine whether queries are in-coverage (use correction surface) or
+/// out-of-coverage (physics model only).
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq)]
+pub struct CalibrationCoverage {
+    /// Azimuth coverage range in degrees (min, max)
+    /// For boresight-only: (0.0, 0.0)
+    pub azimuth_range: (f64, f64),
+
+    /// Elevation coverage range in degrees (min, max)
+    /// For boresight-only: (0.0, 0.0)
+    pub elevation_range: (f64, f64),
+
+    /// Frequency coverage range in MHz (min, max)
+    pub frequency_range: (f64, f64),
+
+    /// Total number of measurement points
+    pub num_measurements: usize,
+
+    /// Whether a correction surface was fitted to measurements
+    /// If false, only physical parameters were tuned
+    pub has_correction_surface: bool,
+}
+
+impl CalibrationCoverage {
+    /// Creates a new builder for constructing CalibrationCoverage.
+    pub fn builder() -> CalibrationCoverageBuilder {
+        CalibrationCoverageBuilder::default()
+    }
+
+    /// Checks if this is boresight-only coverage (single spatial point).
+    pub fn is_boresight_only(&self) -> bool {
+        self.azimuth_range.0 == self.azimuth_range.1
+            && self.elevation_range.0 == self.elevation_range.1
+    }
+
+    /// Checks if a query point is within the calibrated coverage.
+    pub fn contains(&self, azimuth: f64, elevation: f64, frequency: f64) -> bool {
+        azimuth >= self.azimuth_range.0
+            && azimuth <= self.azimuth_range.1
+            && elevation >= self.elevation_range.0
+            && elevation <= self.elevation_range.1
+            && frequency >= self.frequency_range.0
+            && frequency <= self.frequency_range.1
+    }
+
+    /// Validates that coverage parameters are well-formed.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        if self.azimuth_range.0 > self.azimuth_range.1 {
+            return Err(ValidationError::InvalidRange {
+                dimension: "azimuth".to_string(),
+                min: self.azimuth_range.0,
+                max: self.azimuth_range.1,
+            });
+        }
+
+        if self.elevation_range.0 > self.elevation_range.1 {
+            return Err(ValidationError::InvalidRange {
+                dimension: "elevation".to_string(),
+                min: self.elevation_range.0,
+                max: self.elevation_range.1,
+            });
+        }
+
+        if self.frequency_range.0 > self.frequency_range.1 {
+            return Err(ValidationError::InvalidRange {
+                dimension: "frequency".to_string(),
+                min: self.frequency_range.0,
+                max: self.frequency_range.1,
+            });
+        }
+
+        Ok(())
+    }
+}
+
+/// Source of physical antenna parameters.
+///
+/// Indicates how the physical parameters (surface RMS, q-factor, mesh properties)
+/// were determined. This helps users understand parameter confidence.
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq)]
+pub enum ParameterSource {
+    /// Parameters from design specifications (vendor data, CAD models)
+    /// Typical accuracy: ±20-30% on individual parameters
+    DesignSpecifications,
+
+    /// Parameters tuned from boresight measurements only
+    /// Better accuracy at boresight: ±5-10% on parameters
+    BoresightTuning {
+        /// Number of boresight measurements used for tuning
+        num_measurements: usize,
+    },
+
+    /// Parameters tuned from partial measurement grid
+    /// Good accuracy in-coverage: ±5-10% on parameters
+    PartialGridTuning {
+        /// Number of grid measurements used for tuning
+        num_measurements: usize,
+    },
+
+    /// Parameters tuned from full measurement grid
+    /// Best accuracy everywhere: ±3-5% on parameters
+    FullGridTuning {
+        /// Number of grid measurements used for tuning
+        num_measurements: usize,
+    },
+}
+
+impl ParameterSource {
+    /// Returns the number of measurements used (if any).
+    pub fn num_measurements(&self) -> Option<usize> {
+        match self {
+            ParameterSource::DesignSpecifications => None,
+            ParameterSource::BoresightTuning { num_measurements }
+            | ParameterSource::PartialGridTuning { num_measurements }
+            | ParameterSource::FullGridTuning { num_measurements } => Some(*num_measurements),
+        }
+    }
+
+    /// Returns true if parameters were tuned from measurements.
+    pub fn is_tuned(&self) -> bool {
+        !matches!(self, ParameterSource::DesignSpecifications)
+    }
+}
+
+/// Measurement density indicator.
+///
+/// Describes the spatial density of measurement data relative to the antenna beamwidth.
+/// Higher density provides better accuracy and supports finer correction surfaces.
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq)]
+pub enum MeasurementDensity {
+    /// No measurements (uncalibrated - design specs only)
+    None,
+
+    /// Boresight-only measurements (single spatial point, multiple frequencies)
+    BoresightOnly,
+
+    /// Sparse spatial sampling (2-5 measurement points per beamwidth)
+    /// Sufficient for parameter tuning, limited correction surface
+    Sparse {
+        /// Average measurement points per beamwidth
+        points_per_beam: f64,
+    },
+
+    /// Dense spatial sampling (>10 measurement points per beamwidth)
+    /// Supports high-quality correction surface
+    Dense {
+        /// Average measurement points per beamwidth
+        points_per_beam: f64,
+    },
+}
+
+impl MeasurementDensity {
+    /// Returns the measurement points per beamwidth (if applicable).
+    pub fn points_per_beam(&self) -> Option<f64> {
+        match self {
+            MeasurementDensity::Sparse { points_per_beam }
+            | MeasurementDensity::Dense { points_per_beam } => Some(*points_per_beam),
+            _ => None,
+        }
+    }
+
+    /// Returns true if measurements are available.
+    pub fn has_measurements(&self) -> bool {
+        !matches!(self, MeasurementDensity::None)
+    }
+}
+
 /// Errors that can occur during validation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ValidationError {
@@ -631,6 +910,8 @@ pub struct AntennaCalibrationBuilder {
     physical_config: Option<PhysicalAntennaConfig>,
     correction_surface: Option<BSplineModel4D>,
     validity_ranges: Option<ValidityRanges>,
+    calibration_status: Option<CalibrationStatus>,
+    calibration_coverage: Option<CalibrationCoverage>,
 }
 
 impl AntennaCalibrationBuilder {
@@ -664,6 +945,16 @@ impl AntennaCalibrationBuilder {
         self
     }
 
+    pub fn calibration_status(mut self, status: CalibrationStatus) -> Self {
+        self.calibration_status = Some(status);
+        self
+    }
+
+    pub fn calibration_coverage(mut self, coverage: CalibrationCoverage) -> Self {
+        self.calibration_coverage = Some(coverage);
+        self
+    }
+
     pub fn build(self) -> Result<AntennaCalibration, String> {
         Ok(AntennaCalibration {
             antenna_id: self.antenna_id.ok_or("antenna_id is required")?,
@@ -672,6 +963,8 @@ impl AntennaCalibrationBuilder {
             physical_config: self.physical_config.ok_or("physical_config is required")?,
             correction_surface: self.correction_surface,
             validity_ranges: self.validity_ranges.ok_or("validity_ranges is required")?,
+            calibration_status: self.calibration_status,
+            calibration_coverage: self.calibration_coverage,
         })
     }
 }
@@ -691,6 +984,8 @@ pub struct CalibrationMetadataBuilder {
     correction_improvement_db: Option<f64>,
     parameters_tuned: bool,
     antenna_class: Option<String>,
+    parameters_source: Option<ParameterSource>,
+    measurement_density: Option<MeasurementDensity>,
 }
 
 impl CalibrationMetadataBuilder {
@@ -754,6 +1049,16 @@ impl CalibrationMetadataBuilder {
         self
     }
 
+    pub fn parameters_source(mut self, source: ParameterSource) -> Self {
+        self.parameters_source = Some(source);
+        self
+    }
+
+    pub fn measurement_density(mut self, density: MeasurementDensity) -> Self {
+        self.measurement_density = Some(density);
+        self
+    }
+
     pub fn build(self) -> Result<CalibrationMetadata, String> {
         Ok(CalibrationMetadata {
             antenna_name: self.antenna_name.ok_or("antenna_name is required")?,
@@ -772,6 +1077,8 @@ impl CalibrationMetadataBuilder {
             correction_improvement_db: self.correction_improvement_db,
             parameters_tuned: self.parameters_tuned,
             antenna_class: self.antenna_class,
+            parameters_source: self.parameters_source,
+            measurement_density: self.measurement_density,
         })
     }
 }
@@ -1019,6 +1326,55 @@ impl PhysicalAntennaConfigBuilder {
             reflector: self.reflector.ok_or("reflector is required")?,
             feed: self.feed.ok_or("feed is required")?,
             mesh: self.mesh,
+        })
+    }
+}
+
+/// Builder for CalibrationCoverage.
+#[derive(Default)]
+pub struct CalibrationCoverageBuilder {
+    azimuth_range: Option<(f64, f64)>,
+    elevation_range: Option<(f64, f64)>,
+    frequency_range: Option<(f64, f64)>,
+    num_measurements: Option<usize>,
+    has_correction_surface: Option<bool>,
+}
+
+impl CalibrationCoverageBuilder {
+    pub fn azimuth_range(mut self, min: f64, max: f64) -> Self {
+        self.azimuth_range = Some((min, max));
+        self
+    }
+
+    pub fn elevation_range(mut self, min: f64, max: f64) -> Self {
+        self.elevation_range = Some((min, max));
+        self
+    }
+
+    pub fn frequency_range(mut self, min: f64, max: f64) -> Self {
+        self.frequency_range = Some((min, max));
+        self
+    }
+
+    pub fn num_measurements(mut self, num: usize) -> Self {
+        self.num_measurements = Some(num);
+        self
+    }
+
+    pub fn has_correction_surface(mut self, has_surface: bool) -> Self {
+        self.has_correction_surface = Some(has_surface);
+        self
+    }
+
+    pub fn build(self) -> Result<CalibrationCoverage, String> {
+        Ok(CalibrationCoverage {
+            azimuth_range: self.azimuth_range.ok_or("azimuth_range is required")?,
+            elevation_range: self.elevation_range.ok_or("elevation_range is required")?,
+            frequency_range: self.frequency_range.ok_or("frequency_range is required")?,
+            num_measurements: self
+                .num_measurements
+                .ok_or("num_measurements is required")?,
+            has_correction_surface: self.has_correction_surface.unwrap_or(false),
         })
     }
 }
@@ -1305,6 +1661,8 @@ mod tests {
             physical_config: physical_config.clone(),
             correction_surface: None,
             validity_ranges: ranges.clone(),
+            calibration_status: None,
+            calibration_coverage: None,
         };
         assert!(invalid_calibration.validate().is_err());
 
@@ -1316,6 +1674,8 @@ mod tests {
             physical_config: physical_config.clone(),
             correction_surface: None,
             validity_ranges: ranges.clone(),
+            calibration_status: None,
+            calibration_coverage: None,
         };
         assert!(invalid_calibration.validate().is_err());
 
@@ -1327,6 +1687,8 @@ mod tests {
             physical_config,
             correction_surface: None,
             validity_ranges: ranges,
+            calibration_status: None,
+            calibration_coverage: None,
         };
         assert!(valid_calibration.validate().is_ok());
     }
@@ -1427,5 +1789,328 @@ mod tests {
 
         assert_eq!(original, decoded);
         assert_eq!(decoded.feed_id, "primary");
+    }
+
+    // ============================================================================
+    // Tests for Partial Calibration Support (v2.0)
+    // ============================================================================
+
+    #[test]
+    fn test_calibration_status_fully_calibrated() {
+        let status = CalibrationStatus::FullyCalibrated {
+            accuracy_estimate_db: 1.0,
+        };
+
+        assert_eq!(status.accuracy_estimate_db(), 1.0);
+        assert!(status.has_correction_surface());
+        assert_eq!(status.status_string(), "fully_calibrated");
+    }
+
+    #[test]
+    fn test_calibration_status_partially_calibrated() {
+        let coverage = CalibrationCoverage {
+            azimuth_range: (0.0, 0.0),
+            elevation_range: (0.0, 0.0),
+            frequency_range: (7100.0, 8500.0),
+            num_measurements: 28,
+            has_correction_surface: true,
+        };
+
+        let status = CalibrationStatus::PartiallyCalibrated {
+            accuracy_estimate_db: 1.5,
+            coverage,
+        };
+
+        assert_eq!(status.accuracy_estimate_db(), 1.5);
+        assert!(status.has_correction_surface());
+        assert_eq!(status.status_string(), "partially_calibrated");
+    }
+
+    #[test]
+    fn test_calibration_status_uncalibrated() {
+        let status = CalibrationStatus::Uncalibrated {
+            accuracy_estimate_db: 3.0,
+            loss_accuracy_estimate_db: 2.0,
+        };
+
+        assert_eq!(status.accuracy_estimate_db(), 3.0);
+        assert!(!status.has_correction_surface());
+        assert_eq!(status.status_string(), "uncalibrated");
+    }
+
+    #[test]
+    fn test_calibration_coverage_builder() {
+        let coverage = CalibrationCoverage::builder()
+            .azimuth_range(0.0, 360.0)
+            .elevation_range(0.0, 90.0)
+            .frequency_range(7100.0, 8500.0)
+            .num_measurements(100)
+            .has_correction_surface(true)
+            .build()
+            .unwrap();
+
+        assert_eq!(coverage.azimuth_range, (0.0, 360.0));
+        assert_eq!(coverage.elevation_range, (0.0, 90.0));
+        assert_eq!(coverage.frequency_range, (7100.0, 8500.0));
+        assert_eq!(coverage.num_measurements, 100);
+        assert!(coverage.has_correction_surface);
+    }
+
+    #[test]
+    fn test_calibration_coverage_is_boresight_only() {
+        let boresight = CalibrationCoverage {
+            azimuth_range: (0.0, 0.0),
+            elevation_range: (0.0, 0.0),
+            frequency_range: (7100.0, 8500.0),
+            num_measurements: 28,
+            has_correction_surface: false,
+        };
+        assert!(boresight.is_boresight_only());
+
+        let limited = CalibrationCoverage {
+            azimuth_range: (0.0, 360.0),
+            elevation_range: (30.0, 60.0),
+            frequency_range: (7100.0, 8500.0),
+            num_measurements: 324,
+            has_correction_surface: true,
+        };
+        assert!(!limited.is_boresight_only());
+    }
+
+    #[test]
+    fn test_calibration_coverage_contains() {
+        let coverage = CalibrationCoverage {
+            azimuth_range: (0.0, 360.0),
+            elevation_range: (30.0, 60.0),
+            frequency_range: (7100.0, 8500.0),
+            num_measurements: 324,
+            has_correction_surface: true,
+        };
+
+        assert!(coverage.contains(45.0, 45.0, 8000.0));
+        assert!(!coverage.contains(45.0, 20.0, 8000.0)); // elevation too low
+        assert!(!coverage.contains(45.0, 45.0, 9000.0)); // frequency too high
+    }
+
+    #[test]
+    fn test_calibration_coverage_validate() {
+        let valid_coverage = CalibrationCoverage {
+            azimuth_range: (0.0, 360.0),
+            elevation_range: (0.0, 90.0),
+            frequency_range: (7100.0, 8500.0),
+            num_measurements: 100,
+            has_correction_surface: true,
+        };
+        assert!(valid_coverage.validate().is_ok());
+
+        let invalid_coverage = CalibrationCoverage {
+            azimuth_range: (360.0, 0.0), // Invalid: min > max
+            elevation_range: (0.0, 90.0),
+            frequency_range: (7100.0, 8500.0),
+            num_measurements: 100,
+            has_correction_surface: true,
+        };
+        assert!(invalid_coverage.validate().is_err());
+    }
+
+    #[test]
+    fn test_parameter_source_design_specifications() {
+        let source = ParameterSource::DesignSpecifications;
+        assert_eq!(source.num_measurements(), None);
+        assert!(!source.is_tuned());
+    }
+
+    #[test]
+    fn test_parameter_source_boresight_tuning() {
+        let source = ParameterSource::BoresightTuning {
+            num_measurements: 28,
+        };
+        assert_eq!(source.num_measurements(), Some(28));
+        assert!(source.is_tuned());
+    }
+
+    #[test]
+    fn test_parameter_source_partial_grid_tuning() {
+        let source = ParameterSource::PartialGridTuning {
+            num_measurements: 324,
+        };
+        assert_eq!(source.num_measurements(), Some(324));
+        assert!(source.is_tuned());
+    }
+
+    #[test]
+    fn test_parameter_source_full_grid_tuning() {
+        let source = ParameterSource::FullGridTuning {
+            num_measurements: 3312,
+        };
+        assert_eq!(source.num_measurements(), Some(3312));
+        assert!(source.is_tuned());
+    }
+
+    #[test]
+    fn test_measurement_density_none() {
+        let density = MeasurementDensity::None;
+        assert_eq!(density.points_per_beam(), None);
+        assert!(!density.has_measurements());
+    }
+
+    #[test]
+    fn test_measurement_density_boresight_only() {
+        let density = MeasurementDensity::BoresightOnly;
+        assert_eq!(density.points_per_beam(), None);
+        assert!(density.has_measurements());
+    }
+
+    #[test]
+    fn test_measurement_density_sparse() {
+        let density = MeasurementDensity::Sparse {
+            points_per_beam: 3.5,
+        };
+        assert_eq!(density.points_per_beam(), Some(3.5));
+        assert!(density.has_measurements());
+    }
+
+    #[test]
+    fn test_measurement_density_dense() {
+        let density = MeasurementDensity::Dense {
+            points_per_beam: 15.0,
+        };
+        assert_eq!(density.points_per_beam(), Some(15.0));
+        assert!(density.has_measurements());
+    }
+
+    #[test]
+    fn test_antenna_calibration_with_partial_calibration_fields() {
+        let metadata = CalibrationMetadata::builder()
+            .antenna_name("Test")
+            .calibration_date("2025-01-15")
+            .data_source("test.csv")
+            .rmse_db(0.5)
+            .r_squared(0.98)
+            .num_measurements(100)
+            .parameters_source(ParameterSource::BoresightTuning {
+                num_measurements: 28,
+            })
+            .measurement_density(MeasurementDensity::BoresightOnly)
+            .build()
+            .unwrap();
+
+        let physical_config = create_test_physical_config();
+
+        let ranges = ValidityRanges::builder()
+            .azimuth_range(0.0, 360.0)
+            .elevation_range(0.0, 90.0)
+            .frequency_range(8000.0, 8500.0)
+            .temperature(290.0)
+            .build()
+            .unwrap();
+
+        let coverage = CalibrationCoverage::builder()
+            .azimuth_range(0.0, 0.0)
+            .elevation_range(0.0, 0.0)
+            .frequency_range(7100.0, 8500.0)
+            .num_measurements(28)
+            .has_correction_surface(false)
+            .build()
+            .unwrap();
+
+        let status = CalibrationStatus::PartiallyCalibrated {
+            accuracy_estimate_db: 1.5,
+            coverage: coverage.clone(),
+        };
+
+        let calibration = AntennaCalibration::builder()
+            .antenna_id("test_antenna")
+            .feed_id("x_band")
+            .metadata(metadata)
+            .physical_config(physical_config)
+            .validity_ranges(ranges)
+            .calibration_status(status)
+            .calibration_coverage(coverage)
+            .build()
+            .unwrap();
+
+        assert!(calibration.validate().is_ok());
+        assert!(calibration.calibration_status.is_some());
+        assert!(calibration.calibration_coverage.is_some());
+    }
+
+    #[test]
+    fn test_serialization_backward_compatibility() {
+        // Test that old calibrations (without new fields) can still be deserialized
+        let metadata = CalibrationMetadata::builder()
+            .antenna_name("Test")
+            .calibration_date("2025-01-15")
+            .data_source("test.csv")
+            .rmse_db(0.5)
+            .r_squared(0.98)
+            .num_measurements(100)
+            .build()
+            .unwrap();
+
+        let physical_config = create_test_physical_config();
+
+        let ranges = ValidityRanges::builder()
+            .azimuth_range(0.0, 360.0)
+            .elevation_range(0.0, 90.0)
+            .frequency_range(8000.0, 8500.0)
+            .temperature(290.0)
+            .build()
+            .unwrap();
+
+        // Build calibration without new optional fields
+        let calibration = AntennaCalibration {
+            antenna_id: "test_antenna".to_string(),
+            feed_id: "primary".to_string(),
+            metadata,
+            physical_config,
+            correction_surface: None,
+            validity_ranges: ranges,
+            calibration_status: None,       // Old format - no status
+            calibration_coverage: None,     // Old format - no coverage
+        };
+
+        // Should still be valid
+        assert!(calibration.validate().is_ok());
+
+        // Should serialize/deserialize correctly
+        let config = bincode::config::standard();
+        let encoded = bincode::encode_to_vec(&calibration, config).unwrap();
+        let (decoded, _): (AntennaCalibration, usize) =
+            bincode::decode_from_slice(&encoded, config).unwrap();
+
+        assert_eq!(calibration, decoded);
+        assert!(decoded.calibration_status.is_none());
+        assert!(decoded.calibration_coverage.is_none());
+    }
+
+    #[test]
+    fn test_partial_calibration_serialization_round_trip() {
+        let coverage = CalibrationCoverage::builder()
+            .azimuth_range(0.0, 0.0)
+            .elevation_range(0.0, 0.0)
+            .frequency_range(7100.0, 8500.0)
+            .num_measurements(28)
+            .has_correction_surface(true)
+            .build()
+            .unwrap();
+
+        let status = CalibrationStatus::PartiallyCalibrated {
+            accuracy_estimate_db: 1.5,
+            coverage: coverage.clone(),
+        };
+
+        // Test bincode serialization
+        let config = bincode::config::standard();
+        let encoded = bincode::encode_to_vec(&status, config).unwrap();
+        let (decoded, _): (CalibrationStatus, usize) =
+            bincode::decode_from_slice(&encoded, config).unwrap();
+
+        assert_eq!(status, decoded);
+
+        // Test JSON serialization
+        let json = serde_json::to_string(&status).unwrap();
+        let decoded_json: CalibrationStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(status, decoded_json);
     }
 }

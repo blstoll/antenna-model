@@ -1,0 +1,32 @@
+{
+  "antenna_id": "dsn_34m_uncalibrated",
+  "feed_id": "x_band",
+  "vehicle_position": {
+    "x": 6500000.0,
+    "y": 100000.0,
+    "z": 200000.0
+  },
+  "vehicle_attitude": {
+    "w": 1.0,
+    "x": 0.0,
+    "y": 0.0,
+    "z": 0.0
+  },
+  "reflector_boresight": {
+    "x": 6500010.0,
+    "y": 100000.0,
+    "z": 200000.0
+  },
+  "feed_position": {
+    "x": 6500005.0,
+    "y": 100000.0,
+    "z": 200000.0
+  },
+  "emitter_position": {
+    "x": 7000000.0,
+    "y": 500000.0,
+    "z": 1000000.0
+  },
+  "frequency_mhz": 8450.0,
+  "include_reference": true
+}

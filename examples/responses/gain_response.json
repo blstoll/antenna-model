@@ -1,0 +1,30 @@
+{
+  "antenna_id": "dsn_34m_uncalibrated",
+  "feed_id": "x_band",
+  "gain_db": -3370985.117193787,
+  "reference_gain_db": 67.70242948159164,
+  "loss_db": 3371052.8196232687,
+  "geometry": {
+    "feed_offset_meters": {
+      "x": -5.0,
+      "y": 0.0,
+      "z": 0.0
+    },
+    "emitter_azimuth_deg": 38.65980825409009,
+    "emitter_elevation_deg": 51.32655062386467
+  },
+  "warnings": [
+    "Antenna 'dsn_34m_uncalibrated' is uncalibrated (using design specifications). Absolute gain accuracy: ±3.0 dB, Loss accuracy: ±2.0 dB"
+  ],
+  "metadata": {
+    "computation_time_ms": 0.0050420000000000005,
+    "extrapolated": false
+  },
+  "calibration_status": {
+    "status": "uncalibrated",
+    "accuracy_estimate_db": 3.0,
+    "loss_accuracy_estimate_db": 2.0,
+    "correction_applied": false,
+    "parameters_source": "design_specifications"
+  }
+}

@@ -11,6 +11,6 @@ pub use settings::{LogFormat, ServiceConfig};
 // Re-export all types for advanced usage
 #[allow(unused_imports)]
 pub use settings::{
-    AntennaConfig, AntennaConfigEntry, CalibrationConfig, LoggingConfig, PerformanceConfig,
-    ServerConfig,
+    AntennaConfig, AntennaConfigEntry, CalibrationConfig, FeedSpecConfig, LoggingConfig,
+    PerformanceConfig, ServerConfig,
 };

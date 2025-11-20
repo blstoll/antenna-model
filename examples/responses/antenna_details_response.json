@@ -1,0 +1,82 @@
+{
+  "id": "dsn_34m_uncalibrated",
+  "name": "DSN 34m - Uncalibrated - Ka-Band Feed",
+  "enabled": true,
+  "feeds": [
+    {
+      "id": "ka_band",
+      "position_offset": {
+        "x": 0.0,
+        "y": 0.15,
+        "z": 0.0
+      },
+      "frequency_range_mhz": [
+        2200.0,
+        32300.0
+      ],
+      "q_factor": 11.0
+    },
+    {
+      "id": "s_band",
+      "position_offset": {
+        "x": 0.0,
+        "y": 0.0,
+        "z": 0.0
+      },
+      "frequency_range_mhz": [
+        2200.0,
+        32300.0
+      ],
+      "q_factor": 8.5
+    },
+    {
+      "id": "x_band",
+      "position_offset": {
+        "x": 0.15,
+        "y": 0.0,
+        "z": 0.0
+      },
+      "frequency_range_mhz": [
+        2200.0,
+        32300.0
+      ],
+      "q_factor": 9.5
+    }
+  ],
+  "validity_ranges": {
+    "azimuth_deg": [
+      0.0,
+      360.0
+    ],
+    "elevation_deg": [
+      0.0,
+      90.0
+    ],
+    "frequency_mhz": [
+      2200.0,
+      32300.0
+    ],
+    "temperature_k": 290.0
+  },
+  "calibration": {
+    "date": "N/A",
+    "version": "2.0",
+    "source": "design_specifications",
+    "rmse_db": null,
+    "r_squared": null,
+    "num_measurements": 0
+  },
+  "physical_parameters": {
+    "diameter_m": 34.0,
+    "focal_length_m": 13.6,
+    "f_over_d_ratio": 0.4,
+    "surface_rms_mm": 0.25
+  },
+  "calibration_status": {
+    "status": "uncalibrated",
+    "accuracy_estimate_db": 3.0,
+    "loss_accuracy_estimate_db": 2.0,
+    "correction_applied": false,
+    "parameters_source": "design_specifications"
+  }
+}

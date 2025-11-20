@@ -1,9 +1,16 @@
 //! Gain Computation Service - Core Pipeline
 
-use crate::api::schemas::{GainRequest, GainResponse, GeometryInfo, ComputationMetadata};
+use crate::api::schemas::{
+    CalibrationStatusInfo, ComputationMetadata, GainRequest, GainResponse, GeometryInfo,
+};
 use crate::data::repository::CalibrationRepository;
+use crate::data::types::{CalibrationCoverage, CalibrationStatus};
 use crate::error::{AntennaModelError, Result};
-use crate::model::{compute_emitter_direction, compute_feed_offset, evaluate_correction, EClockConeCoordinates};
+use crate::model::{
+    apply_beam_squint_correction, compute_emitter_direction, compute_feed_position_from_pointing,
+    compute_gain_db, evaluate_correction, overall_efficiency, theoretical_max_gain,
+    wavelength_from_frequency, AntennaConfiguration, IntegrationParams,
+};
 use std::time::Instant;
 
 pub fn compute_gain_from_request(
@@ -13,17 +20,36 @@ pub fn compute_gain_from_request(
     let start = Instant::now();
     let mut warnings = Vec::new();
 
-    let feed_offset = compute_feed_offset(
+    // Compute feed offset for reporting
+    // Note: This represents the angular offset converted to physical displacement,
+    // not the distance between Earth positions
+    let (feed_az, feed_el) = compute_emitter_direction(
         &request.feed_position,
+        &request.vehicle_position,
+        &request.reflector_boresight,
+    )?;
+    let (refl_az, refl_el) = compute_emitter_direction(
         &request.reflector_boresight,
         &request.vehicle_position,
-        &request.vehicle_attitude,
+        &request.reflector_boresight,
     )?;
+
+    // The feed offset is the angular separation from boresight
+    let feed_offset_az = feed_az - refl_az;
+    let feed_offset_el = feed_el - refl_el;
+
+    // For reporting purposes, convert to a simple vector representation
+    // This is an approximate Cartesian representation of the angular offset
+    let feed_offset = crate::api::schemas::Vector3D::new(
+        feed_offset_az,
+        feed_offset_el,
+        (feed_offset_az * feed_offset_az + feed_offset_el * feed_offset_el).sqrt(),
+    );
 
     let (emitter_az, emitter_el) = compute_emitter_direction(
         &request.emitter_position,
         &request.vehicle_position,
-        &request.vehicle_attitude,
+        &request.reflector_boresight,
     )?;
 
     let calibration = repository
@@ -33,29 +59,168 @@ pub fn compute_gain_from_request(
             feed_id: request.feed_id.clone(),
         })?;
 
-    let wavelength_m = 299.792458 / request.frequency_mhz;
+    // Apply beam squint correction if pointing frequency differs from operating frequency
+    let pointing_freq = request
+        .pointing_frequency_mhz
+        .unwrap_or(request.frequency_mhz);
     let diameter_m = calibration.physical_config.reflector.diameter_m;
-    let max_gain_linear = 0.65 * (std::f64::consts::PI * diameter_m / wavelength_m).powi(2);
-    let max_gain_db = 10.0 * max_gain_linear.log10();
-    
-    let e_cone = EClockConeCoordinates::from_degrees(emitter_az, emitter_el);
-    let beamwidth_rad = 1.22 * wavelength_m / diameter_m;
-    let pointing_loss_db = -12.0 * (e_cone.e_cone / beamwidth_rad).powi(2);
-    let base_gain_db = max_gain_db + pointing_loss_db;
 
-    let mut correction_db = 0.0;
-    if let Some(ref correction_surface) = calibration.correction_surface {
-        let result = evaluate_correction(correction_surface, emitter_az, emitter_el, request.frequency_mhz, 290.0)?;
-        correction_db = result.correction_db;
-        warnings.extend(result.warnings);
+    let (corrected_az, corrected_el, squint_magnitude_deg) =
+        if (pointing_freq - request.frequency_mhz).abs() > 0.1 {
+            apply_beam_squint_correction(
+                emitter_az,
+                emitter_el,
+                pointing_freq,
+                request.frequency_mhz,
+                diameter_m,
+            )
+        } else {
+            (emitter_az, emitter_el, 0.0)
+        };
+
+    // Build AntennaConfiguration from calibration data
+    // Convert data types to model geometry types
+    use crate::model::{
+        FeedParameters as ModelFeedParams, FeedPosition, MeshParameters as ModelMeshParams,
+        ReflectorGeometry as ModelReflector,
+    };
+
+    let reflector = ModelReflector::builder()
+        .diameter(calibration.physical_config.reflector.diameter_m)
+        .focal_length(calibration.physical_config.reflector.focal_length_m)
+        .surface_rms(calibration.physical_config.reflector.surface_rms_mm / 1000.0) // mm to m
+        .build()
+        .map_err(|e| AntennaModelError::Generic(format!("Failed to build reflector: {}", e)))?;
+
+    // Compute physical feed position from API steering parameters
+    // The API's feed_position specifies where the feed is aimed (Earth target location)
+    // This computes the corresponding physical feed position in the reflector frame
+    let (feed_x, feed_y, feed_z) = compute_feed_position_from_pointing(
+        &request.feed_position,
+        &request.reflector_boresight,
+        &request.vehicle_position,
+        calibration.physical_config.reflector.focal_length_m,
+    )?;
+    let feed_position = FeedPosition::new(feed_x, feed_y, feed_z);
+
+    let feed = ModelFeedParams::builder()
+        .position(feed_position)
+        .q_factor(calibration.physical_config.feed.q_factor)
+        .phase_center_offset(calibration.physical_config.feed.phase_center_offset_m)
+        .build()
+        .map_err(|e| AntennaModelError::Generic(format!("Failed to build feed: {}", e)))?;
+
+    let mut config_builder = AntennaConfiguration::builder()
+        .id(&calibration.antenna_id)
+        .name(&calibration.metadata.antenna_name)
+        .reflector(reflector)
+        .feed(feed);
+
+    // Add mesh if present
+    if let Some(ref mesh_data) = calibration.physical_config.mesh {
+        let mesh = ModelMeshParams::builder()
+            .spacing(mesh_data.mesh_spacing_mm / 1000.0) // mm to m
+            .wire_diameter(mesh_data.wire_diameter_mm / 1000.0) // mm to m
+            .build()
+            .map_err(|e| AntennaModelError::Generic(format!("Failed to build mesh: {}", e)))?;
+        config_builder = config_builder.mesh(mesh);
     }
 
-    let final_gain_db = base_gain_db + correction_db;
+    let antenna_config = config_builder.build().map_err(|e| {
+        AntennaModelError::Generic(format!("Failed to build antenna configuration: {}", e))
+    })?;
+
+    // Use fast integration parameters for <100ms target
+    let integration_params = IntegrationParams::fast();
+
+    // Convert frequency from MHz to Hz for physics model
+    let frequency_hz = request.frequency_mhz * 1e6;
+
+    // PHYSICS MODEL: Compute gain using full aperture integration
+    // Note: theta and phi are in radians in spherical coordinates
+    // Our corrected_el uses the convention: elevation = 0° at boresight (Z-axis alignment)
+    // Physics model theta uses: theta = 0° at boresight (standard spherical coordinates)
+    // These conventions match, so direct conversion:
+    eprintln!(
+        "DEBUG: emitter_az={:.4}°, emitter_el={:.4}°",
+        emitter_az, emitter_el
+    );
+    eprintln!(
+        "DEBUG: corrected_az={:.4}°, corrected_el={:.4}°",
+        corrected_az, corrected_el
+    );
+    eprintln!(
+        "DEBUG: theta_rad={:.6}, phi_rad={:.6}",
+        corrected_el.to_radians(),
+        corrected_az.to_radians()
+    );
+    eprintln!(
+        "DEBUG: feed_position=({:.4}, {:.4}, {:.4})",
+        feed_x, feed_y, feed_z
+    );
+    let theta_rad = corrected_el.to_radians();
+    let phi_rad = corrected_az.to_radians();
+
+    let gain_physics = compute_gain_db(
+        theta_rad,
+        phi_rad,
+        &antenna_config,
+        frequency_hz,
+        &integration_params,
+    )?; // ComputationError automatically converts via #[from]
+
+    // Apply correction surface (if available and in coverage)
+    // Use corrected angles for coverage check and interpolation
+    let (correction_db, correction_applied) = match &calibration.correction_surface {
+        Some(correction)
+            if is_in_coverage(
+                &calibration.calibration_coverage,
+                corrected_az,
+                corrected_el,
+                request.frequency_mhz,
+            ) =>
+        {
+            let result = evaluate_correction(
+                correction,
+                corrected_az,
+                corrected_el,
+                request.frequency_mhz,
+                290.0,
+            )?;
+            warnings.extend(result.warnings);
+            (result.correction_db, true)
+        }
+        _ => (0.0, false),
+    };
+
+    let final_gain_db = gain_physics + correction_db;
+
+    // Compute reference gain if requested
     let (reference_gain_db, loss_db) = if request.include_reference {
-        (Some(max_gain_db), Some(max_gain_db - final_gain_db))
+        // Reference gain is theoretical maximum with efficiency factors (no pointing loss)
+        let wavelength_m = wavelength_from_frequency(frequency_hz);
+        let aperture_efficiency = overall_efficiency(&antenna_config, wavelength_m);
+        let theoretical_gain_linear =
+            theoretical_max_gain(diameter_m, wavelength_m, aperture_efficiency);
+        let reference_db = 10.0 * theoretical_gain_linear.log10();
+
+        // Loss is difference between reference and actual gain (without correction surface)
+        (Some(reference_db), Some(reference_db - final_gain_db))
     } else {
         (None, None)
     };
+
+    // Generate warnings based on calibration status (use corrected angles)
+    let calibration_warnings =
+        generate_calibration_warnings(&calibration, corrected_az, corrected_el, correction_applied);
+    warnings.extend(calibration_warnings);
+
+    // Build calibration status info
+    let calibration_status_info = calibration.calibration_status.as_ref().map(|status| {
+        let mut info = CalibrationStatusInfo::from(status);
+        info.correction_applied = correction_applied;
+        info
+    });
 
     Ok(GainResponse {
         antenna_id: request.antenna_id.clone(),
@@ -65,9 +230,13 @@ pub fn compute_gain_from_request(
         loss_db,
         geometry: GeometryInfo {
             feed_offset_meters: feed_offset,
-            emitter_azimuth_deg: emitter_az,
-            emitter_elevation_deg: emitter_el,
-            beam_squint_deg: None,
+            emitter_azimuth_deg: corrected_az,
+            emitter_elevation_deg: corrected_el,
+            beam_squint_deg: if squint_magnitude_deg > 0.001 {
+                Some(squint_magnitude_deg)
+            } else {
+                None
+            },
         },
         warnings,
         metadata: ComputationMetadata {
@@ -77,5 +246,531 @@ pub fn compute_gain_from_request(
             correction_surface_ms: None,
             extrapolated: false,
         },
+        calibration_status: calibration_status_info,
     })
+}
+
+/// Check if the query is within the calibrated coverage region.
+///
+/// For fully calibrated antennas (no coverage specified), always returns true.
+/// For partially calibrated antennas, checks if azimuth, elevation, and frequency
+/// are within the specified coverage ranges.
+/// For uncalibrated antennas (no coverage), returns false.
+fn is_in_coverage(
+    coverage: &Option<CalibrationCoverage>,
+    azimuth_deg: f64,
+    elevation_deg: f64,
+    frequency_mhz: f64,
+) -> bool {
+    match coverage {
+        Some(cov) => {
+            azimuth_deg >= cov.azimuth_range.0
+                && azimuth_deg <= cov.azimuth_range.1
+                && elevation_deg >= cov.elevation_range.0
+                && elevation_deg <= cov.elevation_range.1
+                && frequency_mhz >= cov.frequency_range.0
+                && frequency_mhz <= cov.frequency_range.1
+        }
+        None => false,
+    }
+}
+
+/// Generate warnings based on calibration status and query parameters.
+///
+/// Returns a vector of warning messages to be included in the response.
+fn generate_calibration_warnings(
+    calibration: &crate::data::types::AntennaCalibration,
+    azimuth_deg: f64,
+    elevation_deg: f64,
+    correction_applied: bool,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    // Get calibration status (default to FullyCalibrated if not specified for backward compatibility)
+    let status = calibration.calibration_status.as_ref();
+
+    match status {
+        Some(CalibrationStatus::Uncalibrated {
+            accuracy_estimate_db,
+            loss_accuracy_estimate_db,
+        }) => {
+            warnings.push(format!(
+                "Antenna '{}' is uncalibrated (using design specifications). \
+                 Absolute gain accuracy: ±{:.1} dB, Loss accuracy: ±{:.1} dB",
+                calibration.antenna_id, accuracy_estimate_db, loss_accuracy_estimate_db
+            ));
+        }
+        Some(CalibrationStatus::PartiallyCalibrated {
+            accuracy_estimate_db,
+            coverage,
+        }) => {
+            warnings.push(format!(
+                "Antenna '{}' is partially calibrated. Accuracy estimate: ±{:.1} dB",
+                calibration.antenna_id, accuracy_estimate_db
+            ));
+
+            // Check if query is outside calibrated spatial region (azimuth/elevation)
+            let in_spatial_coverage = azimuth_deg >= coverage.azimuth_range.0
+                && azimuth_deg <= coverage.azimuth_range.1
+                && elevation_deg >= coverage.elevation_range.0
+                && elevation_deg <= coverage.elevation_range.1;
+
+            if !in_spatial_coverage {
+                warnings.push(
+                    "Query is outside calibrated region - using physics model extrapolation"
+                        .to_string(),
+                );
+            }
+        }
+        Some(CalibrationStatus::FullyCalibrated { .. }) | None => {
+            // No calibration warnings for fully calibrated antennas
+        }
+    }
+
+    // Warn if correction surface exists but wasn't applied
+    if !correction_applied && calibration.correction_surface.is_some() {
+        warnings.push("Correction surface not applied (out of coverage)".to_string());
+    }
+
+    warnings
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::schemas::Position3D;
+    use crate::data::types::{
+        AntennaCalibration, CalibrationCoverage, CalibrationMetadata, CalibrationStatus,
+        FeedParameters, MeshParameters, PhysicalAntennaConfig, ReflectorGeometry, ValidityRanges,
+    };
+
+    fn create_test_calibration(status: CalibrationStatus) -> AntennaCalibration {
+        let metadata = CalibrationMetadata::builder()
+            .antenna_name("Test Antenna")
+            .calibration_date("2025-01-01T00:00:00Z")
+            .format_version("2.0")
+            .data_source("test")
+            .rmse_db(0.5)
+            .r_squared(0.99)
+            .num_measurements(1000)
+            .build()
+            .unwrap();
+
+        let mut builder = AntennaCalibration::builder()
+            .antenna_id("test_antenna")
+            .feed_id("test_feed")
+            .metadata(metadata)
+            .physical_config(PhysicalAntennaConfig {
+                reflector: ReflectorGeometry {
+                    diameter_m: 10.0,
+                    focal_length_m: 5.0,
+                    f_over_d_ratio: 0.5,
+                    surface_rms_mm: 0.5,
+                },
+                feed: FeedParameters {
+                    // Feed at focal point (0, 0, focal_length) in reflector frame
+                    position: (0.0, 0.0, 5.0),
+                    q_factor: 8.0,
+                    phase_center_offset_m: 0.0,
+                },
+                mesh: Some(MeshParameters {
+                    mesh_spacing_mm: 5.0,
+                    wire_diameter_mm: 0.5,
+                }),
+            })
+            .validity_ranges(ValidityRanges {
+                azimuth_min_max: (0.0, 360.0),
+                elevation_min_max: (0.0, 90.0),
+                frequency_min_max: (1000.0, 10000.0),
+                temperature_const: 290.0,
+            });
+
+        builder = builder.calibration_status(status.clone());
+
+        // Add coverage for partially calibrated
+        if let CalibrationStatus::PartiallyCalibrated { ref coverage, .. } = status {
+            builder = builder.calibration_coverage(coverage.clone());
+        }
+
+        builder.build().unwrap()
+    }
+
+    fn create_test_request() -> GainRequest {
+        GainRequest {
+            antenna_id: "test_antenna".to_string(),
+            feed_id: "test_feed".to_string(),
+            vehicle_position: Position3D::new(-118.0, 34.0, 100.0),
+            reflector_boresight: Position3D::new(-117.99, 34.01, 110.0), // 10m from vehicle
+            feed_position: Position3D::new(-117.99, 34.01, 123.6),       // Feed at focal point
+            emitter_position: Position3D::new(-117.0, 35.0, 400000.0),
+            frequency_mhz: 8400.0,
+            pointing_frequency_mhz: None,
+            include_reference: false,
+        }
+    }
+
+    #[test]
+    fn test_is_in_coverage_fully_covered() {
+        let coverage = Some(
+            CalibrationCoverage::builder()
+                .azimuth_range(0.0, 360.0)
+                .elevation_range(0.0, 90.0)
+                .frequency_range(8000.0, 9000.0)
+                .num_measurements(1000)
+                .has_correction_surface(true)
+                .build()
+                .unwrap(),
+        );
+
+        assert!(is_in_coverage(&coverage, 180.0, 45.0, 8400.0));
+    }
+
+    #[test]
+    fn test_is_in_coverage_outside_azimuth() {
+        let coverage = Some(
+            CalibrationCoverage::builder()
+                .azimuth_range(0.0, 90.0)
+                .elevation_range(0.0, 90.0)
+                .frequency_range(8000.0, 9000.0)
+                .num_measurements(100)
+                .has_correction_surface(true)
+                .build()
+                .unwrap(),
+        );
+
+        assert!(!is_in_coverage(&coverage, 180.0, 45.0, 8400.0));
+    }
+
+    #[test]
+    fn test_is_in_coverage_outside_elevation() {
+        let coverage = Some(
+            CalibrationCoverage::builder()
+                .azimuth_range(0.0, 360.0)
+                .elevation_range(0.0, 30.0)
+                .frequency_range(8000.0, 9000.0)
+                .num_measurements(100)
+                .has_correction_surface(true)
+                .build()
+                .unwrap(),
+        );
+
+        assert!(!is_in_coverage(&coverage, 180.0, 45.0, 8400.0));
+    }
+
+    #[test]
+    fn test_is_in_coverage_outside_frequency() {
+        let coverage = Some(
+            CalibrationCoverage::builder()
+                .azimuth_range(0.0, 360.0)
+                .elevation_range(0.0, 90.0)
+                .frequency_range(9000.0, 10000.0)
+                .num_measurements(100)
+                .has_correction_surface(true)
+                .build()
+                .unwrap(),
+        );
+
+        assert!(!is_in_coverage(&coverage, 180.0, 45.0, 8400.0));
+    }
+
+    #[test]
+    fn test_is_in_coverage_none() {
+        assert!(!is_in_coverage(&None, 180.0, 45.0, 8400.0));
+    }
+
+    #[test]
+    fn test_generate_warnings_uncalibrated() {
+        let calibration = create_test_calibration(CalibrationStatus::Uncalibrated {
+            accuracy_estimate_db: 3.0,
+            loss_accuracy_estimate_db: 2.0,
+        });
+
+        let warnings = generate_calibration_warnings(&calibration, 180.0, 45.0, false);
+
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("uncalibrated"));
+        assert!(warnings[0].contains("±3.0 dB"));
+        assert!(warnings[0].contains("±2.0 dB"));
+    }
+
+    #[test]
+    fn test_generate_warnings_partially_calibrated_in_coverage() {
+        let coverage = CalibrationCoverage::builder()
+            .azimuth_range(0.0, 360.0)
+            .elevation_range(0.0, 90.0)
+            .frequency_range(8000.0, 9000.0)
+            .num_measurements(500)
+            .has_correction_surface(true)
+            .build()
+            .unwrap();
+
+        let calibration = create_test_calibration(CalibrationStatus::PartiallyCalibrated {
+            accuracy_estimate_db: 1.5,
+            coverage: coverage.clone(),
+        });
+
+        let warnings = generate_calibration_warnings(&calibration, 180.0, 45.0, true);
+
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("partially calibrated"));
+        assert!(warnings[0].contains("±1.5 dB"));
+    }
+
+    #[test]
+    fn test_generate_warnings_partially_calibrated_out_of_coverage() {
+        let coverage = CalibrationCoverage::builder()
+            .azimuth_range(0.0, 90.0)
+            .elevation_range(0.0, 30.0)
+            .frequency_range(8000.0, 9000.0)
+            .num_measurements(100)
+            .has_correction_surface(true)
+            .build()
+            .unwrap();
+
+        let mut calibration = create_test_calibration(CalibrationStatus::PartiallyCalibrated {
+            accuracy_estimate_db: 1.5,
+            coverage: coverage.clone(),
+        });
+
+        // Add a dummy correction surface to trigger the "not applied" warning
+        calibration.correction_surface = Some(crate::data::types::BSplineModel4D {
+            coefficients: vec![0.0; 10],
+            shape: [2, 2, 2, 1],
+            knots_azimuth: vec![0.0, 360.0],
+            knots_elevation: vec![0.0, 90.0],
+            knots_frequency: vec![8000.0, 9000.0],
+            knots_temperature: vec![290.0],
+            spline_order: 3,
+        });
+
+        let warnings = generate_calibration_warnings(&calibration, 180.0, 45.0, false);
+
+        assert_eq!(warnings.len(), 3);
+        assert!(warnings[0].contains("partially calibrated"));
+        assert!(warnings[1].contains("outside calibrated region"));
+        assert!(warnings[2].contains("Correction surface not applied"));
+    }
+
+    #[test]
+    fn test_generate_warnings_fully_calibrated() {
+        let calibration = create_test_calibration(CalibrationStatus::FullyCalibrated {
+            accuracy_estimate_db: 1.0,
+        });
+
+        let warnings = generate_calibration_warnings(&calibration, 180.0, 45.0, true);
+
+        assert_eq!(warnings.len(), 0);
+    }
+
+    #[test]
+    fn test_generate_warnings_correction_not_applied() {
+        let mut calibration = create_test_calibration(CalibrationStatus::FullyCalibrated {
+            accuracy_estimate_db: 1.0,
+        });
+
+        // Add a dummy correction surface
+        calibration.correction_surface = Some(crate::data::types::BSplineModel4D {
+            coefficients: vec![0.0; 10],
+            shape: [2, 2, 2, 1],
+            knots_azimuth: vec![0.0, 360.0],
+            knots_elevation: vec![0.0, 90.0],
+            knots_frequency: vec![8000.0, 9000.0],
+            knots_temperature: vec![290.0],
+            spline_order: 3,
+        });
+
+        let warnings = generate_calibration_warnings(&calibration, 180.0, 45.0, false);
+
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("Correction surface not applied"));
+    }
+
+    #[test]
+    fn test_compute_gain_uncalibrated_antenna() {
+        let mut repo = CalibrationRepository::new();
+        let calibration = create_test_calibration(CalibrationStatus::Uncalibrated {
+            accuracy_estimate_db: 3.0,
+            loss_accuracy_estimate_db: 2.0,
+        });
+        repo.add_calibration(calibration);
+
+        let request = create_test_request();
+        let response = compute_gain_from_request(&request, &repo).unwrap();
+
+        // Should have gain computed (physics model)
+        assert!(!response.gain_db.is_nan());
+
+        // Should have calibration status
+        assert!(response.calibration_status.is_some());
+        let status = response.calibration_status.unwrap();
+        assert_eq!(status.status, "uncalibrated");
+        assert_eq!(status.accuracy_estimate_db, 3.0);
+        assert_eq!(status.loss_accuracy_estimate_db, Some(2.0));
+        assert!(!status.correction_applied);
+
+        // Should have warning about uncalibrated
+        assert!(!response.warnings.is_empty());
+        assert!(response.warnings.iter().any(|w| w.contains("uncalibrated")));
+    }
+
+    #[test]
+    fn test_compute_gain_uncalibrated_with_reference() {
+        let mut repo = CalibrationRepository::new();
+        let calibration = create_test_calibration(CalibrationStatus::Uncalibrated {
+            accuracy_estimate_db: 3.0,
+            loss_accuracy_estimate_db: 2.0,
+        });
+        repo.add_calibration(calibration);
+
+        let mut request = create_test_request();
+        request.include_reference = true;
+
+        let response = compute_gain_from_request(&request, &repo).unwrap();
+
+        // Should have reference gain and loss
+        assert!(response.reference_gain_db.is_some());
+        assert!(response.loss_db.is_some());
+
+        // Loss should be positive (gain < reference)
+        let loss = response.loss_db.unwrap();
+        assert!(loss >= 0.0);
+    }
+
+    #[test]
+    fn test_compute_gain_fully_calibrated() {
+        let mut repo = CalibrationRepository::new();
+        let calibration = create_test_calibration(CalibrationStatus::FullyCalibrated {
+            accuracy_estimate_db: 1.0,
+        });
+        repo.add_calibration(calibration);
+
+        let request = create_test_request();
+        let response = compute_gain_from_request(&request, &repo).unwrap();
+
+        // Should have gain computed
+        assert!(!response.gain_db.is_nan());
+
+        // Should have calibration status
+        assert!(response.calibration_status.is_some());
+        let status = response.calibration_status.unwrap();
+        assert_eq!(status.status, "fully_calibrated");
+        assert_eq!(status.accuracy_estimate_db, 1.0);
+
+        // Should NOT have warnings (fully calibrated)
+        assert!(response.warnings.is_empty());
+    }
+
+    #[test]
+    fn test_compute_gain_partially_calibrated_in_coverage() {
+        let mut repo = CalibrationRepository::new();
+
+        let coverage = CalibrationCoverage::builder()
+            .azimuth_range(0.0, 360.0)
+            .elevation_range(0.0, 90.0)
+            .frequency_range(8000.0, 9000.0)
+            .num_measurements(500)
+            .has_correction_surface(false)
+            .build()
+            .unwrap();
+
+        let calibration = create_test_calibration(CalibrationStatus::PartiallyCalibrated {
+            accuracy_estimate_db: 1.5,
+            coverage: coverage.clone(),
+        });
+        repo.add_calibration(calibration);
+
+        let request = create_test_request();
+        let response = compute_gain_from_request(&request, &repo).unwrap();
+
+        // Should have gain computed
+        assert!(!response.gain_db.is_nan());
+
+        // Should have calibration status
+        assert!(response.calibration_status.is_some());
+        let status = response.calibration_status.unwrap();
+        assert_eq!(status.status, "partially_calibrated");
+        assert_eq!(status.accuracy_estimate_db, 1.5);
+
+        // Should have warning about partial calibration
+        assert!(!response.warnings.is_empty());
+        assert!(response
+            .warnings
+            .iter()
+            .any(|w| w.contains("partially calibrated")));
+    }
+
+    #[test]
+    fn test_compute_gain_antenna_not_found() {
+        let repo = CalibrationRepository::new();
+        let request = create_test_request();
+        let result = compute_gain_from_request(&request, &repo);
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            AntennaModelError::FeedNotFound { .. }
+        ));
+    }
+
+    #[test]
+    fn test_backward_compatibility_no_calibration_status() {
+        let mut repo = CalibrationRepository::new();
+
+        // Create calibration without calibration_status (old format)
+        let metadata = CalibrationMetadata::builder()
+            .antenna_name("Test Antenna")
+            .calibration_date("2025-01-01T00:00:00Z")
+            .format_version("1.0")
+            .data_source("test")
+            .rmse_db(0.5)
+            .r_squared(0.99)
+            .num_measurements(1000)
+            .build()
+            .unwrap();
+
+        let calibration = AntennaCalibration::builder()
+            .antenna_id("test_antenna")
+            .feed_id("test_feed")
+            .metadata(metadata)
+            .physical_config(PhysicalAntennaConfig {
+                reflector: ReflectorGeometry {
+                    diameter_m: 10.0,
+                    focal_length_m: 5.0,
+                    f_over_d_ratio: 0.5,
+                    surface_rms_mm: 0.5,
+                },
+                feed: FeedParameters {
+                    // Feed at focal point (0, 0, focal_length) in reflector frame
+                    position: (0.0, 0.0, 5.0),
+                    q_factor: 8.0,
+                    phase_center_offset_m: 0.0,
+                },
+                mesh: Some(MeshParameters {
+                    mesh_spacing_mm: 5.0,
+                    wire_diameter_mm: 0.5,
+                }),
+            })
+            .validity_ranges(ValidityRanges {
+                azimuth_min_max: (0.0, 360.0),
+                elevation_min_max: (0.0, 90.0),
+                frequency_min_max: (1000.0, 10000.0),
+                temperature_const: 290.0,
+            })
+            .build()
+            .unwrap();
+
+        repo.add_calibration(calibration);
+
+        let request = create_test_request();
+        let response = compute_gain_from_request(&request, &repo).unwrap();
+
+        // Should still compute gain
+        assert!(!response.gain_db.is_nan());
+
+        // calibration_status should be None for backward compatibility
+        assert!(response.calibration_status.is_none());
+
+        // Should not have calibration warnings (treated as fully calibrated)
+        assert!(response.warnings.is_empty());
+    }
 }

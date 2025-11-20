@@ -1,0 +1,34 @@
+{
+  "_comment": "Example 1b: 5\u00b0 Offset - Feed and emitter co-located 5\u00b0 from boresight",
+  "_description": "Feed steered 5\u00b0 off-axis (lateral ~1.19m at focal plane). Emitter at ground location 5\u00b0 from boresight in same direction. Expected gain: 50-55 dBi (sidelobe region, -12 to -17 dB from peak)",
+  "_geodetic_satellite": {
+    "lon": -118.0,
+    "lat": 0.0,
+    "alt_km": 35786.0
+  },
+  "_notes": "Feed offset shows beam steering capability. Emitter aligned with steered beam.",
+  "antenna_id": "dsn_34m_uncalibrated",
+  "feed_id": "x_band",
+  "vehicle_position": {
+    "x": -19794863.29,
+    "y": -37228723.27,
+    "z": 0.0
+  },
+  "reflector_boresight": {
+    "x": -2485073.18,
+    "y": -4673742.90,
+    "z": 3546502.48
+  },
+  "feed_position": {
+    "x": -2000741.62,
+    "y": -5212110.11,
+    "z": 3073949.68
+  },
+  "emitter_position": {
+    "x": -2000741.62,
+    "y": -5212110.11,
+    "z": 3073949.68
+  },
+  "frequency_mhz": 8450.0,
+  "include_reference": true
+}

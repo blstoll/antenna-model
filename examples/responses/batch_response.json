@@ -1,0 +1,92 @@
+{
+  "results": [
+    {
+      "antenna_id": "dsn_34m_uncalibrated",
+      "feed_id": "x_band",
+      "gain_db": 67.70242948159164,
+      "geometry": {
+        "feed_offset_meters": {
+          "x": -5.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "emitter_azimuth_deg": 0.0,
+        "emitter_elevation_deg": 45.00000000000001
+      },
+      "warnings": [
+        "Antenna 'dsn_34m_uncalibrated' is uncalibrated (using design specifications). Absolute gain accuracy: ±3.0 dB, Loss accuracy: ±2.0 dB"
+      ],
+      "metadata": {
+        "computation_time_ms": 0.007542,
+        "extrapolated": false
+      },
+      "calibration_status": {
+        "status": "uncalibrated",
+        "accuracy_estimate_db": 3.0,
+        "loss_accuracy_estimate_db": 2.0,
+        "correction_applied": false,
+        "parameters_source": "design_specifications"
+      }
+    },
+    {
+      "antenna_id": "dsn_34m_uncalibrated",
+      "feed_id": "s_band",
+      "gain_db": 56.20894566482504,
+      "geometry": {
+        "feed_offset_meters": {
+          "x": -5.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "emitter_azimuth_deg": 0.0,
+        "emitter_elevation_deg": 45.00000000000001
+      },
+      "warnings": [
+        "Antenna 'dsn_34m_uncalibrated' is uncalibrated (using design specifications). Absolute gain accuracy: ±3.0 dB, Loss accuracy: ±2.0 dB"
+      ],
+      "metadata": {
+        "computation_time_ms": 0.001042,
+        "extrapolated": false
+      },
+      "calibration_status": {
+        "status": "uncalibrated",
+        "accuracy_estimate_db": 3.0,
+        "loss_accuracy_estimate_db": 2.0,
+        "correction_applied": false,
+        "parameters_source": "design_specifications"
+      }
+    },
+    {
+      "antenna_id": "gs_3.7m_uncalibrated",
+      "feed_id": "x_band_feed",
+      "gain_db": 47.400976710926585,
+      "geometry": {
+        "feed_offset_meters": {
+          "x": -5.0,
+          "y": 0.0,
+          "z": 0.0
+        },
+        "emitter_azimuth_deg": 0.0,
+        "emitter_elevation_deg": 45.00000000000001
+      },
+      "warnings": [
+        "Antenna 'gs_3.7m_uncalibrated' is uncalibrated (using design specifications). Absolute gain accuracy: ±3.0 dB, Loss accuracy: ±2.0 dB"
+      ],
+      "metadata": {
+        "computation_time_ms": 0.0015,
+        "extrapolated": false
+      },
+      "calibration_status": {
+        "status": "uncalibrated",
+        "accuracy_estimate_db": 3.0,
+        "loss_accuracy_estimate_db": 2.0,
+        "correction_applied": false,
+        "parameters_source": "design_specifications"
+      }
+    }
+  ],
+  "metadata": {
+    "total_computation_time_ms": 0.014834,
+    "count": 3
+  }
+}

@@ -6,14 +6,49 @@
 //! # 3D Coordinate System Support
 //!
 //! All 3D positions support automatic coordinate system detection:
-//! - **ECEF** (Earth-Centered Earth-Fixed): Detected when |x|, |y|, or |z| > 6400 km
+//! - **ECEF** (Earth-Centered Earth-Fixed): Detected when |x|, |y|, or |z| > 1000 km
 //! - **Geodetic**: Otherwise (x=longitude degrees, y=latitude degrees, z=altitude meters)
 //!
 //! # Multi-Feed Support
 //!
 //! Antennas can have multiple feeds, identified by composite `(antenna_id, feed_id)` pairs.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+use crate::data::types::{CalibrationCoverage, CalibrationStatus};
+
+/// Coordinate system type for 3D positions
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CoordinateSystem {
+    /// Earth-Centered Earth-Fixed coordinates (x, y, z in meters)
+    ECEF,
+    /// Geodetic coordinates (longitude degrees, latitude degrees, altitude meters)
+    Geodetic,
+}
+
+/// Custom serialization for f64 that handles NaN as null in JSON
+mod nan_as_null {
+    use super::*;
+
+    pub fn serialize<S>(value: &f64, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if value.is_nan() {
+            serializer.serialize_none()
+        } else {
+            serializer.serialize_f64(*value)
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<f64, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let opt: Option<f64> = Option::deserialize(deserializer)?;
+        Ok(opt.unwrap_or(f64::NAN))
+    }
+}
 
 // ============================================================================
 // Core Types
@@ -22,7 +57,7 @@ use serde::{Deserialize, Serialize};
 /// 3D position with automatic coordinate system detection.
 ///
 /// Supports two coordinate systems:
-/// - **ECEF** (Earth-Centered Earth-Fixed): When |x| > 6400 km OR |y| > 6400 km OR |z| > 6400 km
+/// - **ECEF** (Earth-Centered Earth-Fixed): When |x| > 1000 km OR |y| > 1000 km OR |z| > 1000 km
 ///   - x, y, z in meters
 /// - **Geodetic**: Otherwise
 ///   - x = longitude in degrees (-180 to 180)
@@ -32,14 +67,14 @@ use serde::{Deserialize, Serialize};
 /// # Examples
 ///
 /// ```
-/// # use antenna_model::api::schemas::Position3D;
-/// // ECEF coordinates (meters) - exceeds 6400 km threshold
-/// let ecef = Position3D::new(6500000.0, 100000.0, 200000.0);
-/// assert_eq!(ecef.coordinate_system(), "ECEF");
+/// # use antenna_model::api::schemas::{CoordinateSystem, Position3D};
+/// // ECEF coordinates (meters) - exceeds 1000 km threshold
+/// let ecef = Position3D::new(2485073.0, -4673742.0, 3546502.0);
+/// assert_eq!(ecef.coordinate_system(), CoordinateSystem::ECEF);
 ///
 /// // Geodetic coordinates (lon, lat degrees, alt meters)
 /// let geodetic = Position3D::new(-118.1234, 34.5678, 100.0);
-/// assert_eq!(geodetic.coordinate_system(), "Geodetic");
+/// assert_eq!(geodetic.coordinate_system(), CoordinateSystem::Geodetic);
 /// ```
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct Position3D {
@@ -52,8 +87,12 @@ pub struct Position3D {
 }
 
 impl Position3D {
-    /// Threshold for ECEF detection (6400 km in meters)
-    const ECEF_THRESHOLD_M: f64 = 6_400_000.0;
+    /// Threshold for ECEF detection (1000 km in meters)
+    ///
+    /// Geodetic coordinates use degrees for lon/lat (max ±180/±90) and meters for altitude (max ~1000 km).
+    /// ECEF coordinates are in meters from Earth center (Earth radius ~6371 km, so surface points ~6.37M).
+    /// Using 1M threshold provides clear separation: geodetic values are small, ECEF values are millions.
+    const ECEF_THRESHOLD_M: f64 = 1_000_000.0;
 
     /// Create a new Position3D
     pub fn new(x: f64, y: f64, z: f64) -> Self {
@@ -62,93 +101,26 @@ impl Position3D {
 
     /// Detect coordinate system based on magnitude.
     ///
-    /// Returns "ECEF" if any coordinate exceeds 6400 km, otherwise "Geodetic".
-    pub fn coordinate_system(&self) -> &'static str {
+    /// Returns `CoordinateSystem::ECEF` if any coordinate exceeds 1000 km, otherwise `CoordinateSystem::Geodetic`.
+    pub fn coordinate_system(&self) -> CoordinateSystem {
         if self.x.abs() > Self::ECEF_THRESHOLD_M
             || self.y.abs() > Self::ECEF_THRESHOLD_M
             || self.z.abs() > Self::ECEF_THRESHOLD_M
         {
-            "ECEF"
+            CoordinateSystem::ECEF
         } else {
-            "Geodetic"
+            CoordinateSystem::Geodetic
         }
     }
 
     /// Check if this is likely ECEF coordinates
     pub fn is_ecef(&self) -> bool {
-        self.coordinate_system() == "ECEF"
+        self.coordinate_system() == CoordinateSystem::ECEF
     }
 
     /// Check if this is likely Geodetic coordinates
     pub fn is_geodetic(&self) -> bool {
-        self.coordinate_system() == "Geodetic"
-    }
-}
-
-/// Quaternion representation of attitude/orientation.
-///
-/// Quaternion format: q = w + xi + yj + zk
-/// Should be normalized: |q| = 1
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
-pub struct Quaternion {
-    /// W component (scalar part)
-    pub w: f64,
-    /// X component (i)
-    pub x: f64,
-    /// Y component (j)
-    pub y: f64,
-    /// Z component (k)
-    pub z: f64,
-}
-
-impl Quaternion {
-    /// Create a new quaternion
-    pub fn new(w: f64, x: f64, y: f64, z: f64) -> Self {
-        Self { w, x, y, z }
-    }
-
-    /// Compute the magnitude of the quaternion
-    pub fn magnitude(&self) -> f64 {
-        (self.w * self.w + self.x * self.x + self.y * self.y + self.z * self.z).sqrt()
-    }
-
-    /// Check if quaternion is normalized (within tolerance)
-    pub fn is_normalized(&self, tolerance: f64) -> bool {
-        (self.magnitude() - 1.0).abs() < tolerance
-    }
-
-    /// Identity quaternion (no rotation)
-    pub fn identity() -> Self {
-        Self::new(1.0, 0.0, 0.0, 0.0)
-    }
-}
-
-/// Euler angles representation of attitude/orientation.
-///
-/// Convention: Roll-Pitch-Yaw (X-Y-Z rotation sequence)
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
-pub struct EulerAngles {
-    /// Roll angle in degrees (rotation about X axis)
-    pub roll_deg: f64,
-    /// Pitch angle in degrees (rotation about Y axis)
-    pub pitch_deg: f64,
-    /// Yaw angle in degrees (rotation about Z axis)
-    pub yaw_deg: f64,
-}
-
-impl EulerAngles {
-    /// Create new Euler angles
-    pub fn new(roll_deg: f64, pitch_deg: f64, yaw_deg: f64) -> Self {
-        Self {
-            roll_deg,
-            pitch_deg,
-            yaw_deg,
-        }
-    }
-
-    /// Zero rotation (no rotation)
-    pub fn zero() -> Self {
-        Self::new(0.0, 0.0, 0.0)
+        self.coordinate_system() == CoordinateSystem::Geodetic
     }
 }
 
@@ -182,7 +154,7 @@ impl Vector3D {
 /// Request for antenna gain computation from 3D geometry.
 ///
 /// Computes antenna gain given 3D positions of vehicle, reflector boresight,
-/// feed, and emitter, along with vehicle attitude and operating frequency.
+/// feed, and emitter, along with operating frequency.
 ///
 /// # Coordinate Systems
 ///
@@ -199,6 +171,12 @@ impl Vector3D {
 ///
 /// If `pointing_frequency_mhz` differs from `frequency_mhz`, beam squint
 /// correction is applied to account for frequency-dependent beam pointing.
+///
+/// # Orientation
+///
+/// The `reflector_boresight` position establishes the dish pointing direction.
+/// The vector from `vehicle_position` to `reflector_boresight` defines the
+/// boresight axis of the antenna coordinate frame.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct GainRequest {
     /// Antenna identifier
@@ -210,10 +188,11 @@ pub struct GainRequest {
     /// Vehicle position (ECEF or Geodetic, auto-detected)
     pub vehicle_position: Position3D,
 
-    /// Vehicle attitude (quaternion or Euler angles)
-    pub vehicle_attitude: Attitude,
-
     /// Reflector boresight position (ECEF or Geodetic)
+    ///
+    /// This position, together with `vehicle_position`, establishes the dish
+    /// pointing direction. The vector from vehicle to boresight defines the
+    /// antenna Z-axis.
     pub reflector_boresight: Position3D,
 
     /// Feed position (ECEF or Geodetic)
@@ -234,22 +213,10 @@ pub struct GainRequest {
     pub include_reference: bool,
 }
 
-/// Vehicle attitude (quaternion or Euler angles).
-///
-/// Use either quaternion OR Euler angles, not both.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
-#[serde(untagged)]
-pub enum Attitude {
-    /// Quaternion representation
-    Quaternion(Quaternion),
-    /// Euler angles representation
-    EulerAngles(EulerAngles),
-}
-
 /// Response from antenna gain computation.
 ///
 /// Contains computed gain, optional reference gain and loss, geometry information,
-/// warnings, and performance metadata.
+/// warnings, calibration status, and performance metadata.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct GainResponse {
     /// Antenna identifier
@@ -258,7 +225,8 @@ pub struct GainResponse {
     /// Feed identifier
     pub feed_id: String,
 
-    /// Computed gain in dB
+    /// Computed gain in dB (serialized as null when NaN for failed evaluations)
+    #[serde(with = "nan_as_null")]
     pub gain_db: f64,
 
     /// Reference gain in dB (if include_reference=true)
@@ -277,6 +245,11 @@ pub struct GainResponse {
 
     /// Computation metadata (timing, flags)
     pub metadata: ComputationMetadata,
+
+    /// Calibration status and accuracy information (v2.0)
+    /// Optional for backward compatibility - will be populated by service layer in Task 6.8
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub calibration_status: Option<CalibrationStatusInfo>,
 }
 
 /// Computed geometry information.
@@ -374,9 +347,6 @@ pub struct HeatmapRequest {
     /// Vehicle position (ECEF or Geodetic)
     pub vehicle_position: Position3D,
 
-    /// Vehicle attitude
-    pub vehicle_attitude: Attitude,
-
     /// Reflector boresight position (ECEF or Geodetic)
     pub reflector_boresight: Position3D,
 
@@ -464,6 +434,11 @@ pub struct HeatmapResponse {
 
     /// Heatmap metadata
     pub metadata: HeatmapMetadata,
+
+    /// Calibration status and accuracy information (v2.0)
+    /// Optional for backward compatibility - will be populated by service layer in Task 6.8
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub calibration_status: Option<CalibrationStatusInfo>,
 }
 
 /// Grid data for heatmap.
@@ -554,6 +529,11 @@ pub struct AntennaDetailsResponse {
 
     /// Physical parameters
     pub physical_parameters: PhysicalParametersInfo,
+
+    /// Calibration status and accuracy information (v2.0)
+    /// Optional for backward compatibility - will be populated by service layer in Task 6.8
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub calibration_status: Option<CalibrationStatusInfo>,
 }
 
 /// Information about a feed.
@@ -600,11 +580,13 @@ pub struct CalibrationInfo {
     /// Data source
     pub source: String,
 
-    /// Root mean squared error in dB
-    pub rmse_db: f64,
+    /// Root mean squared error in dB (None for uncalibrated antennas)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rmse_db: Option<f64>,
 
-    /// R² correlation coefficient
-    pub r_squared: f64,
+    /// R² correlation coefficient (None for uncalibrated antennas)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub r_squared: Option<f64>,
 
     /// Number of measurement points
     pub num_measurements: usize,
@@ -638,6 +620,117 @@ pub struct MeshInfo {
 
     /// Wire diameter in millimeters
     pub wire_diameter_mm: f64,
+}
+
+// ============================================================================
+// Calibration Status Information (v2.0 - Partial Calibration Support)
+// ============================================================================
+
+/// Calibration status information included in API responses.
+///
+/// Indicates the level of calibration data available and expected accuracy
+/// for antenna gain predictions. This information helps users understand
+/// the quality and reliability of the returned predictions.
+///
+/// # Status Levels
+///
+/// - **fully_calibrated**: Dense measurement grid with full correction surface (±1 dB)
+/// - **partially_calibrated**: Limited measurements (boresight or sparse grid) (±1-3 dB)
+/// - **uncalibrated**: Design specifications only, no measurements (±3-5 dB absolute, ±2 dB loss)
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct CalibrationStatusInfo {
+    /// Calibration status: "fully_calibrated", "partially_calibrated", or "uncalibrated"
+    pub status: String,
+
+    /// Expected accuracy estimate in dB
+    pub accuracy_estimate_db: f64,
+
+    /// Expected loss (relative gain) accuracy in dB (only for uncalibrated antennas)
+    /// Better than absolute accuracy due to systematic error cancellation
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub loss_accuracy_estimate_db: Option<f64>,
+
+    /// Measurement coverage information (only for partially calibrated antennas)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coverage: Option<CoverageInfo>,
+
+    /// Whether correction surface was applied to this result
+    pub correction_applied: bool,
+
+    /// Source of physical parameters: "measurement_tuned", "design_specifications", or "factory_calibrated"
+    pub parameters_source: String,
+}
+
+impl From<&CalibrationStatus> for CalibrationStatusInfo {
+    fn from(status: &CalibrationStatus) -> Self {
+        match status {
+            CalibrationStatus::FullyCalibrated {
+                accuracy_estimate_db,
+            } => CalibrationStatusInfo {
+                status: "fully_calibrated".to_string(),
+                accuracy_estimate_db: *accuracy_estimate_db,
+                loss_accuracy_estimate_db: None,
+                coverage: None,
+                correction_applied: false, // Will be updated by service layer
+                parameters_source: "measurement_tuned".to_string(),
+            },
+            CalibrationStatus::PartiallyCalibrated {
+                accuracy_estimate_db,
+                coverage,
+            } => CalibrationStatusInfo {
+                status: "partially_calibrated".to_string(),
+                accuracy_estimate_db: *accuracy_estimate_db,
+                loss_accuracy_estimate_db: None,
+                coverage: Some(CoverageInfo::from(coverage)),
+                correction_applied: false, // Will be updated by service layer
+                parameters_source: "measurement_tuned".to_string(),
+            },
+            CalibrationStatus::Uncalibrated {
+                accuracy_estimate_db,
+                loss_accuracy_estimate_db,
+            } => CalibrationStatusInfo {
+                status: "uncalibrated".to_string(),
+                accuracy_estimate_db: *accuracy_estimate_db,
+                loss_accuracy_estimate_db: Some(*loss_accuracy_estimate_db),
+                coverage: None,
+                correction_applied: false,
+                parameters_source: "design_specifications".to_string(),
+            },
+        }
+    }
+}
+
+/// Measurement coverage information for partially calibrated antennas.
+///
+/// Describes the spatial, frequency, and measurement density of calibration data.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct CoverageInfo {
+    /// Azimuth coverage range in degrees (min, max)
+    pub azimuth_range_deg: (f64, f64),
+
+    /// Elevation coverage range in degrees (min, max)
+    pub elevation_range_deg: (f64, f64),
+
+    /// Frequency coverage range in MHz (min, max)
+    pub frequency_range_mhz: (f64, f64),
+
+    /// Total number of measurement points
+    pub num_measurements: usize,
+
+    /// Whether this is boresight-only calibration (single spatial point)
+    pub is_boresight_only: bool,
+}
+
+impl From<&CalibrationCoverage> for CoverageInfo {
+    fn from(coverage: &CalibrationCoverage) -> Self {
+        CoverageInfo {
+            azimuth_range_deg: coverage.azimuth_range,
+            elevation_range_deg: coverage.elevation_range,
+            frequency_range_mhz: coverage.frequency_range,
+            num_measurements: coverage.num_measurements,
+            is_boresight_only: coverage.is_boresight_only(),
+        }
+    }
 }
 
 // ============================================================================
@@ -794,11 +887,6 @@ impl ErrorResponse {
         Self::new("InvalidCoordinate", reason.into()).with_field(param.into())
     }
 
-    /// Create invalid attitude error
-    pub fn invalid_attitude(reason: impl Into<String>) -> Self {
-        Self::new("InvalidAttitude", reason.into())
-    }
-
     /// Create coordinate transform error
     pub fn coordinate_transform_error(details: impl Into<String>) -> Self {
         Self::new("CoordinateTransformError", "Coordinate transformation failed")
@@ -827,26 +915,26 @@ mod tests {
 
     #[test]
     fn test_position3d_ecef_detection() {
-        // ECEF coordinates (large magnitude - exceeds 6400 km threshold)
-        let ecef = Position3D::new(6500000.0, 100000.0, 200000.0);
-        assert_eq!(ecef.coordinate_system(), "ECEF");
+        // ECEF coordinates (large magnitude) - typical Earth surface point
+        let ecef = Position3D::new(-2500000.0, -4500000.0, 3600000.0);
+        assert_eq!(ecef.coordinate_system(), CoordinateSystem::ECEF);
         assert!(ecef.is_ecef());
         assert!(!ecef.is_geodetic());
 
-        // Another ECEF example
-        let ecef2 = Position3D::new(100000.0, 6500000.0, 200000.0);
-        assert_eq!(ecef2.coordinate_system(), "ECEF");
+        // Another ECEF example - equator, prime meridian
+        let ecef2 = Position3D::new(6378137.0, 0.0, 0.0);
+        assert_eq!(ecef2.coordinate_system(), CoordinateSystem::ECEF);
 
-        // And another (Z coordinate exceeds threshold)
-        let ecef3 = Position3D::new(100000.0, 200000.0, 6500000.0);
-        assert_eq!(ecef3.coordinate_system(), "ECEF");
+        // And another (high altitude satellite)
+        let ecef3 = Position3D::new(10000000.0, 5000000.0, 2000000.0);
+        assert_eq!(ecef3.coordinate_system(), CoordinateSystem::ECEF);
     }
 
     #[test]
     fn test_position3d_geodetic_detection() {
         // Geodetic coordinates (small magnitude)
         let geodetic = Position3D::new(-118.1234, 34.5678, 100.0);
-        assert_eq!(geodetic.coordinate_system(), "Geodetic");
+        assert_eq!(geodetic.coordinate_system(), CoordinateSystem::Geodetic);
         assert!(!geodetic.is_ecef());
         assert!(geodetic.is_geodetic());
     }
@@ -854,16 +942,16 @@ mod tests {
     #[test]
     fn test_position3d_boundary_detection() {
         // Just below threshold - should be Geodetic
-        let below = Position3D::new(6_399_999.0, 0.0, 0.0);
-        assert_eq!(below.coordinate_system(), "Geodetic");
+        let below = Position3D::new(999_999.0, 0.0, 0.0);
+        assert_eq!(below.coordinate_system(), CoordinateSystem::Geodetic);
 
         // Just above threshold - should be ECEF
-        let above = Position3D::new(6_400_001.0, 0.0, 0.0);
-        assert_eq!(above.coordinate_system(), "ECEF");
+        let above = Position3D::new(1_000_001.0, 0.0, 0.0);
+        assert_eq!(above.coordinate_system(), CoordinateSystem::ECEF);
 
         // Negative coordinates
-        let negative = Position3D::new(-6_400_001.0, 0.0, 0.0);
-        assert_eq!(negative.coordinate_system(), "ECEF");
+        let negative = Position3D::new(-1_000_001.0, 0.0, 0.0);
+        assert_eq!(negative.coordinate_system(), CoordinateSystem::ECEF);
     }
 
     #[test]
@@ -872,65 +960,6 @@ mod tests {
         let json = serde_json::to_string(&pos).unwrap();
         let deserialized: Position3D = serde_json::from_str(&json).unwrap();
         assert_eq!(pos, deserialized);
-    }
-
-    // ========================================================================
-    // Quaternion Tests
-    // ========================================================================
-
-    #[test]
-    fn test_quaternion_magnitude() {
-        let q = Quaternion::new(1.0, 0.0, 0.0, 0.0);
-        assert_eq!(q.magnitude(), 1.0);
-
-        let q2 = Quaternion::new(0.5, 0.5, 0.5, 0.5);
-        assert!((q2.magnitude() - 1.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_quaternion_normalization_check() {
-        let normalized = Quaternion::new(1.0, 0.0, 0.0, 0.0);
-        assert!(normalized.is_normalized(0.01));
-
-        let not_normalized = Quaternion::new(2.0, 0.0, 0.0, 0.0);
-        assert!(!not_normalized.is_normalized(0.01));
-    }
-
-    #[test]
-    fn test_quaternion_identity() {
-        let id = Quaternion::identity();
-        assert_eq!(id.w, 1.0);
-        assert_eq!(id.x, 0.0);
-        assert_eq!(id.y, 0.0);
-        assert_eq!(id.z, 0.0);
-    }
-
-    #[test]
-    fn test_quaternion_serialization() {
-        let q = Quaternion::new(1.0, 0.0, 0.0, 0.0);
-        let json = serde_json::to_string(&q).unwrap();
-        let deserialized: Quaternion = serde_json::from_str(&json).unwrap();
-        assert_eq!(q, deserialized);
-    }
-
-    // ========================================================================
-    // EulerAngles Tests
-    // ========================================================================
-
-    #[test]
-    fn test_euler_angles_zero() {
-        let zero = EulerAngles::zero();
-        assert_eq!(zero.roll_deg, 0.0);
-        assert_eq!(zero.pitch_deg, 0.0);
-        assert_eq!(zero.yaw_deg, 0.0);
-    }
-
-    #[test]
-    fn test_euler_angles_serialization() {
-        let angles = EulerAngles::new(10.0, 20.0, 30.0);
-        let json = serde_json::to_string(&angles).unwrap();
-        let deserialized: EulerAngles = serde_json::from_str(&json).unwrap();
-        assert_eq!(angles, deserialized);
     }
 
     // ========================================================================
@@ -963,7 +992,6 @@ mod tests {
             antenna_id: "antenna_1".to_string(),
             feed_id: "x_band_feed".to_string(),
             vehicle_position: Position3D::new(4510731.123, 4510731.456, 3488865.789),
-            vehicle_attitude: Attitude::Quaternion(Quaternion::identity()),
             reflector_boresight: Position3D::new(4510732.0, 4510732.0, 3488950.0),
             feed_position: Position3D::new(4510731.5, 4510731.5, 3488870.0),
             emitter_position: Position3D::new(4520000.0, 4520000.0, 3500000.0),
@@ -984,8 +1012,7 @@ mod tests {
             antenna_id: "antenna_1".to_string(),
             feed_id: "x_band_feed".to_string(),
             vehicle_position: Position3D::new(-118.1234, 34.5678, 100.0),
-            vehicle_attitude: Attitude::EulerAngles(EulerAngles::new(0.0, 5.0, 180.0)),
-            reflector_boresight: Position3D::new(-117.0, 35.0, 400000.0),
+            reflector_boresight: Position3D::new(-118.1234, 34.5679, 110.0), // 10m above vehicle
             feed_position: Position3D::new(-118.124, 34.568, 105.0),
             emitter_position: Position3D::new(-117.0, 35.0, 400000.0),
             frequency_mhz: 8400.0,
@@ -1195,10 +1222,9 @@ mod tests {
             antenna_id: "antenna_1".to_string(),
             feed_id: "x_band_feed".to_string(),
             vehicle_position: Position3D::new(0.0, 0.0, 0.0),
-            vehicle_attitude: Attitude::Quaternion(Quaternion::identity()),
-            reflector_boresight: Position3D::new(0.0, 0.0, 0.0),
-            feed_position: Position3D::new(0.0, 0.0, 0.0),
-            emitter_position: Position3D::new(0.0, 0.0, 0.0),
+            reflector_boresight: Position3D::new(0.0, 0.0, 10.0), // 10m above vehicle
+            feed_position: Position3D::new(0.0, 0.0, 23.6), // 10m + 13.6m focal length
+            emitter_position: Position3D::new(100.0, 100.0, 100.0),
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: None,
             include_reference: false,
@@ -1210,11 +1236,313 @@ mod tests {
         assert!(json.contains("\"antenna_id\""));
         assert!(json.contains("\"feed_id\""));
         assert!(json.contains("\"vehicle_position\""));
-        assert!(json.contains("\"vehicle_attitude\""));
         assert!(json.contains("\"reflector_boresight\""));
         assert!(json.contains("\"feed_position\""));
         assert!(json.contains("\"emitter_position\""));
         assert!(json.contains("\"frequency_mhz\""));
         assert!(json.contains("\"include_reference\""));
+    }
+
+    // ========================================================================
+    // CalibrationStatusInfo Tests (v2.0 - Partial Calibration Support)
+    // ========================================================================
+
+    #[test]
+    fn test_calibration_status_info_from_fully_calibrated() {
+        use crate::data::types::CalibrationStatus;
+
+        let status = CalibrationStatus::FullyCalibrated {
+            accuracy_estimate_db: 1.0,
+        };
+
+        let info = CalibrationStatusInfo::from(&status);
+
+        assert_eq!(info.status, "fully_calibrated");
+        assert_eq!(info.accuracy_estimate_db, 1.0);
+        assert_eq!(info.loss_accuracy_estimate_db, None);
+        assert_eq!(info.coverage, None);
+        assert_eq!(info.correction_applied, false);
+        assert_eq!(info.parameters_source, "measurement_tuned");
+    }
+
+    #[test]
+    fn test_calibration_status_info_from_partially_calibrated() {
+        use crate::data::types::{CalibrationCoverage, CalibrationStatus};
+
+        let coverage = CalibrationCoverage {
+            azimuth_range: (0.0, 0.0),
+            elevation_range: (0.0, 0.0),
+            frequency_range: (2000.0, 2300.0),
+            num_measurements: 25,
+            has_correction_surface: true,
+        };
+
+        let status = CalibrationStatus::PartiallyCalibrated {
+            accuracy_estimate_db: 1.5,
+            coverage: coverage.clone(),
+        };
+
+        let info = CalibrationStatusInfo::from(&status);
+
+        assert_eq!(info.status, "partially_calibrated");
+        assert_eq!(info.accuracy_estimate_db, 1.5);
+        assert_eq!(info.loss_accuracy_estimate_db, None);
+        assert!(info.coverage.is_some());
+        assert_eq!(info.correction_applied, false);
+        assert_eq!(info.parameters_source, "measurement_tuned");
+
+        let coverage_info = info.coverage.unwrap();
+        assert_eq!(coverage_info.azimuth_range_deg, (0.0, 0.0));
+        assert_eq!(coverage_info.elevation_range_deg, (0.0, 0.0));
+        assert_eq!(coverage_info.frequency_range_mhz, (2000.0, 2300.0));
+        assert_eq!(coverage_info.num_measurements, 25);
+        assert!(coverage_info.is_boresight_only);
+    }
+
+    #[test]
+    fn test_calibration_status_info_from_uncalibrated() {
+        use crate::data::types::CalibrationStatus;
+
+        let status = CalibrationStatus::Uncalibrated {
+            accuracy_estimate_db: 3.0,
+            loss_accuracy_estimate_db: 2.0,
+        };
+
+        let info = CalibrationStatusInfo::from(&status);
+
+        assert_eq!(info.status, "uncalibrated");
+        assert_eq!(info.accuracy_estimate_db, 3.0);
+        assert_eq!(info.loss_accuracy_estimate_db, Some(2.0));
+        assert_eq!(info.coverage, None);
+        assert_eq!(info.correction_applied, false);
+        assert_eq!(info.parameters_source, "design_specifications");
+    }
+
+    #[test]
+    fn test_calibration_status_info_serialization_fully_calibrated() {
+        use crate::data::types::CalibrationStatus;
+
+        let status = CalibrationStatus::FullyCalibrated {
+            accuracy_estimate_db: 1.0,
+        };
+
+        let info = CalibrationStatusInfo::from(&status);
+        let json = serde_json::to_string(&info).unwrap();
+
+        assert!(json.contains("\"status\":\"fully_calibrated\""));
+        assert!(json.contains("\"accuracy_estimate_db\":1.0"));
+        assert!(!json.contains("loss_accuracy_estimate_db")); // Should be omitted
+        assert!(!json.contains("coverage")); // Should be omitted
+        assert!(json.contains("\"correction_applied\":false"));
+        assert!(json.contains("\"parameters_source\":\"measurement_tuned\""));
+
+        // Test deserialization
+        let deserialized: CalibrationStatusInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, info);
+    }
+
+    #[test]
+    fn test_calibration_status_info_serialization_partially_calibrated() {
+        use crate::data::types::{CalibrationCoverage, CalibrationStatus};
+
+        let coverage = CalibrationCoverage {
+            azimuth_range: (0.0, 360.0),
+            elevation_range: (0.0, 90.0),
+            frequency_range: (8000.0, 8500.0),
+            num_measurements: 1000,
+            has_correction_surface: true,
+        };
+
+        let status = CalibrationStatus::PartiallyCalibrated {
+            accuracy_estimate_db: 1.5,
+            coverage,
+        };
+
+        let info = CalibrationStatusInfo::from(&status);
+        let json = serde_json::to_string(&info).unwrap();
+
+        assert!(json.contains("\"status\":\"partially_calibrated\""));
+        assert!(json.contains("\"accuracy_estimate_db\":1.5"));
+        assert!(json.contains("\"coverage\""));
+        assert!(json.contains("\"azimuth_range_deg\""));
+        assert!(json.contains("\"num_measurements\":1000"));
+        assert!(json.contains("\"is_boresight_only\":false"));
+
+        // Test deserialization
+        let deserialized: CalibrationStatusInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.status, "partially_calibrated");
+        assert!(deserialized.coverage.is_some());
+    }
+
+    #[test]
+    fn test_calibration_status_info_serialization_uncalibrated() {
+        use crate::data::types::CalibrationStatus;
+
+        let status = CalibrationStatus::Uncalibrated {
+            accuracy_estimate_db: 3.0,
+            loss_accuracy_estimate_db: 2.0,
+        };
+
+        let info = CalibrationStatusInfo::from(&status);
+        let json = serde_json::to_string(&info).unwrap();
+
+        assert!(json.contains("\"status\":\"uncalibrated\""));
+        assert!(json.contains("\"accuracy_estimate_db\":3.0"));
+        assert!(json.contains("\"loss_accuracy_estimate_db\":2.0"));
+        assert!(!json.contains("\"coverage\"")); // Should be omitted
+        assert!(json.contains("\"parameters_source\":\"design_specifications\""));
+
+        // Test deserialization
+        let deserialized: CalibrationStatusInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, info);
+    }
+
+    #[test]
+    fn test_coverage_info_from_calibration_coverage() {
+        use crate::data::types::CalibrationCoverage;
+
+        let coverage = CalibrationCoverage {
+            azimuth_range: (0.0, 360.0),
+            elevation_range: (0.0, 90.0),
+            frequency_range: (2000.0, 2300.0),
+            num_measurements: 500,
+            has_correction_surface: true,
+        };
+
+        let info = CoverageInfo::from(&coverage);
+
+        assert_eq!(info.azimuth_range_deg, (0.0, 360.0));
+        assert_eq!(info.elevation_range_deg, (0.0, 90.0));
+        assert_eq!(info.frequency_range_mhz, (2000.0, 2300.0));
+        assert_eq!(info.num_measurements, 500);
+        assert!(!info.is_boresight_only);
+    }
+
+    #[test]
+    fn test_coverage_info_boresight_only_detection() {
+        use crate::data::types::CalibrationCoverage;
+
+        // Boresight only - single spatial point
+        let boresight_coverage = CalibrationCoverage {
+            azimuth_range: (0.0, 0.0),
+            elevation_range: (0.0, 0.0),
+            frequency_range: (2000.0, 2300.0),
+            num_measurements: 25,
+            has_correction_surface: false,
+        };
+
+        let boresight_info = CoverageInfo::from(&boresight_coverage);
+        assert!(boresight_info.is_boresight_only);
+
+        // Sparse grid - not boresight only
+        let sparse_coverage = CalibrationCoverage {
+            azimuth_range: (-5.0, 5.0),
+            elevation_range: (-5.0, 5.0),
+            frequency_range: (2000.0, 2300.0),
+            num_measurements: 100,
+            has_correction_surface: true,
+        };
+
+        let sparse_info = CoverageInfo::from(&sparse_coverage);
+        assert!(!sparse_info.is_boresight_only);
+    }
+
+    #[test]
+    fn test_coverage_info_serialization() {
+        use crate::data::types::CalibrationCoverage;
+
+        let coverage = CalibrationCoverage {
+            azimuth_range: (0.0, 360.0),
+            elevation_range: (0.0, 90.0),
+            frequency_range: (8000.0, 8500.0),
+            num_measurements: 1000,
+            has_correction_surface: true,
+        };
+
+        let info = CoverageInfo::from(&coverage);
+        let json = serde_json::to_string(&info).unwrap();
+
+        assert!(json.contains("\"azimuth_range_deg\":[0.0,360.0]"));
+        assert!(json.contains("\"elevation_range_deg\":[0.0,90.0]"));
+        assert!(json.contains("\"frequency_range_mhz\":[8000.0,8500.0]"));
+        assert!(json.contains("\"num_measurements\":1000"));
+        assert!(json.contains("\"is_boresight_only\":false"));
+
+        // Test deserialization
+        let deserialized: CoverageInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, info);
+    }
+
+    #[test]
+    fn test_gain_response_with_calibration_status() {
+        use crate::data::types::CalibrationStatus;
+
+        let status = CalibrationStatus::FullyCalibrated {
+            accuracy_estimate_db: 1.0,
+        };
+
+        let response = GainResponse {
+            antenna_id: "antenna_1".to_string(),
+            feed_id: "x_band".to_string(),
+            gain_db: 45.5,
+            reference_gain_db: Some(50.0),
+            loss_db: Some(4.5),
+            geometry: GeometryInfo {
+                feed_offset_meters: Vector3D::new(0.0, 0.0, 0.1),
+                emitter_azimuth_deg: 10.0,
+                emitter_elevation_deg: 45.0,
+                beam_squint_deg: None,
+            },
+            warnings: vec![],
+            metadata: ComputationMetadata {
+                computation_time_ms: 50.0,
+                coordinate_transform_ms: Some(10.0),
+                physics_model_ms: Some(30.0),
+                correction_surface_ms: Some(5.0),
+                extrapolated: false,
+            },
+            calibration_status: Some(CalibrationStatusInfo::from(&status)),
+        };
+
+        let json = serde_json::to_string(&response).unwrap();
+
+        assert!(json.contains("\"gain_db\":45.5"));
+        assert!(json.contains("\"calibration_status\""));
+        assert!(json.contains("\"status\":\"fully_calibrated\""));
+        assert!(json.contains("\"accuracy_estimate_db\":1.0"));
+
+        // Test deserialization
+        let deserialized: GainResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.antenna_id, "antenna_1");
+        assert_eq!(
+            deserialized.calibration_status.unwrap().status,
+            "fully_calibrated"
+        );
+    }
+
+    #[test]
+    fn test_gain_response_backward_compatibility_without_calibration_status() {
+        // Test that responses without calibration_status still deserialize correctly
+        let json = r#"{
+            "antenna_id": "antenna_1",
+            "feed_id": "x_band",
+            "gain_db": 45.5,
+            "geometry": {
+                "feed_offset_meters": {"x": 0.0, "y": 0.0, "z": 0.1},
+                "emitter_azimuth_deg": 10.0,
+                "emitter_elevation_deg": 45.0
+            },
+            "warnings": [],
+            "metadata": {
+                "computation_time_ms": 50.0,
+                "extrapolated": false
+            }
+        }"#;
+
+        let deserialized: GainResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(deserialized.antenna_id, "antenna_1");
+        assert_eq!(deserialized.feed_id, "x_band");
+        assert_eq!(deserialized.gain_db, 45.5);
+        assert!(deserialized.calibration_status.is_none()); // No calibration status in old format
     }
 }

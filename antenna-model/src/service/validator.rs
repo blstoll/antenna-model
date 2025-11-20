@@ -1,18 +1,14 @@
 //! Input Validation Layer
 //!
 //! Provides comprehensive validation for all API request types,
-//! including 3D coordinates, attitudes, frequencies, and grid configurations.
+//! including 3D coordinates, frequencies, and grid configurations.
 //!
 //! # Validation Rules
 //!
 //! - **Position Validation**:
-//!   - ECEF: |x|, |y|, |z| < 10,000 km (reasonable Earth vicinity)
-//!   - Geodetic: lon [-180, 180], lat [-90, 90], alt < 1,000 km
+//!   - ECEF: |x|, |y|, |z| < 400,000 km (allows HEO satellites)
+//!   - Geodetic: lon [-180, 180], lat [-90, 90], alt < 400,000 km
 //!   - NaN, Inf detection
-//!
-//! - **Attitude Validation**:
-//!   - Quaternion: magnitude H 1.0 (within 0.01 tolerance)
-//!   - Euler angles: roll, pitch, yaw in reasonable ranges
 //!
 //! - **Frequency Validation**:
 //!   - Operating frequency: [100, 50000] MHz (system spec)
@@ -23,8 +19,7 @@
 //!   - Feed ID exists for specified antenna
 
 use crate::api::schemas::{
-    Attitude, BatchGainRequest, EulerAngles, GainRequest, GridConfig, HeatmapRequest, Position3D,
-    Quaternion, RangeConfig,
+    BatchGainRequest, GainRequest, GridConfig, HeatmapRequest, Position3D, RangeConfig,
 };
 use crate::data::repository::CalibrationRepository;
 use crate::error::{ValidationError, ValidationResult};
@@ -33,8 +28,8 @@ use crate::error::{ValidationError, ValidationResult};
 // Constants
 // ============================================================================
 
-/// Maximum coordinate magnitude for ECEF (10,000 km in meters)
-const MAX_ECEF_MAGNITUDE_M: f64 = 10_000_000.0;
+/// Maximum coordinate magnitude for ECEF (400,000 km in meters, allows HEO satellites)
+const MAX_ECEF_MAGNITUDE_M: f64 = 400_000_000.0;
 
 /// Maximum geodetic longitude (degrees)
 const MAX_LONGITUDE_DEG: f64 = 180.0;
@@ -48,20 +43,14 @@ const MAX_LATITUDE_DEG: f64 = 90.0;
 /// Minimum geodetic latitude (degrees)
 const MIN_LATITUDE_DEG: f64 = -90.0;
 
-/// Maximum altitude (1000 km in meters)
-const MAX_ALTITUDE_M: f64 = 1_000_000.0;
+/// Maximum altitude (400,000 km in meters, allows HEO satellites)
+const MAX_ALTITUDE_M: f64 = 400_000_000.0;
 
 /// Minimum operating frequency (100 MHz per system spec)
 const MIN_FREQUENCY_MHZ: f64 = 100.0;
 
 /// Maximum operating frequency (50 GHz = 50,000 MHz per system spec)
 const MAX_FREQUENCY_MHZ: f64 = 50_000.0;
-
-/// Quaternion normalization tolerance
-const QUATERNION_NORM_TOLERANCE: f64 = 0.01;
-
-/// Maximum reasonable Euler angle magnitude (degrees)
-const MAX_EULER_ANGLE_DEG: f64 = 360.0;
 
 /// Maximum batch size
 const MAX_BATCH_SIZE: usize = 1000;
@@ -75,7 +64,7 @@ const MAX_HEATMAP_POINTS: usize = 100_000;
 
 /// Validate a gain computation request.
 ///
-/// Checks all fields including positions, attitude, frequencies, and
+/// Checks all fields including positions, frequencies, and
 /// verifies that the antenna/feed combination exists in the repository.
 ///
 /// # Arguments
@@ -98,9 +87,6 @@ pub fn validate_gain_request(
     validate_position(&request.reflector_boresight, "reflector_boresight")?;
     validate_position(&request.feed_position, "feed_position")?;
     validate_position(&request.emitter_position, "emitter_position")?;
-
-    // Validate attitude
-    validate_attitude(&request.vehicle_attitude)?;
 
     // Validate operating frequency
     validate_frequency(request.frequency_mhz, "frequency_mhz")?;
@@ -160,7 +146,7 @@ pub fn validate_batch_gain_request(
 
 /// Validate a heatmap generation request.
 ///
-/// Validates positions, attitude, frequency, grid configuration, and
+/// Validates positions, frequency, grid configuration, and
 /// ensures the total number of grid points doesn't exceed limits.
 ///
 /// # Arguments
@@ -182,9 +168,6 @@ pub fn validate_heatmap_request(
     validate_position(&request.vehicle_position, "vehicle_position")?;
     validate_position(&request.reflector_boresight, "reflector_boresight")?;
     validate_position(&request.feed_position, "feed_position")?;
-
-    // Validate attitude
-    validate_attitude(&request.vehicle_attitude)?;
 
     // Validate frequency
     validate_frequency(request.frequency_mhz, "frequency_mhz")?;
@@ -309,99 +292,6 @@ fn validate_geodetic_position(position: &Position3D, param_name: &str) -> Valida
 }
 
 // ============================================================================
-// Attitude Validation
-// ============================================================================
-
-/// Validate vehicle attitude (quaternion or Euler angles).
-fn validate_attitude(attitude: &Attitude) -> ValidationResult<()> {
-    match attitude {
-        Attitude::Quaternion(q) => validate_quaternion(q),
-        Attitude::EulerAngles(e) => validate_euler_angles(e),
-    }
-}
-
-/// Validate quaternion normalization.
-///
-/// Checks that quaternion magnitude is approximately 1.0 (within tolerance).
-fn validate_quaternion(q: &Quaternion) -> ValidationResult<()> {
-    // Check for NaN or Inf in components
-    if !q.w.is_finite() || !q.x.is_finite() || !q.y.is_finite() || !q.z.is_finite() {
-        return Err(ValidationError::InvalidValue {
-            param: "vehicle_attitude.quaternion".to_string(),
-            reason: "quaternion contains non-finite values (NaN or Inf)".to_string(),
-        });
-    }
-
-    // Check normalization
-    let magnitude = q.magnitude();
-    if !q.is_normalized(QUATERNION_NORM_TOLERANCE) {
-        return Err(ValidationError::InvalidValue {
-            param: "vehicle_attitude.quaternion".to_string(),
-            reason: format!(
-                "quaternion not normalized: magnitude = {:.4}, expected H 1.0 (tolerance = {})",
-                magnitude, QUATERNION_NORM_TOLERANCE
-            ),
-        });
-    }
-
-    Ok(())
-}
-
-/// Validate Euler angles.
-///
-/// Checks that angles are finite and within reasonable ranges.
-fn validate_euler_angles(e: &EulerAngles) -> ValidationResult<()> {
-    // Check for NaN or Inf
-    if !e.roll_deg.is_finite() {
-        return Err(ValidationError::InvalidValue {
-            param: "vehicle_attitude.roll_deg".to_string(),
-            reason: format!("value is not finite: {}", e.roll_deg),
-        });
-    }
-    if !e.pitch_deg.is_finite() {
-        return Err(ValidationError::InvalidValue {
-            param: "vehicle_attitude.pitch_deg".to_string(),
-            reason: format!("value is not finite: {}", e.pitch_deg),
-        });
-    }
-    if !e.yaw_deg.is_finite() {
-        return Err(ValidationError::InvalidValue {
-            param: "vehicle_attitude.yaw_deg".to_string(),
-            reason: format!("value is not finite: {}", e.yaw_deg),
-        });
-    }
-
-    // Check reasonable ranges (warn about extreme values, but don't reject)
-    // Roll, pitch, yaw can technically be any value, but very large values are suspicious
-    if e.roll_deg.abs() > MAX_EULER_ANGLE_DEG {
-        return Err(ValidationError::AngleOutOfRange {
-            angle_type: "roll".to_string(),
-            value: e.roll_deg,
-            min: -MAX_EULER_ANGLE_DEG,
-            max: MAX_EULER_ANGLE_DEG,
-        });
-    }
-    if e.pitch_deg.abs() > MAX_EULER_ANGLE_DEG {
-        return Err(ValidationError::AngleOutOfRange {
-            angle_type: "pitch".to_string(),
-            value: e.pitch_deg,
-            min: -MAX_EULER_ANGLE_DEG,
-            max: MAX_EULER_ANGLE_DEG,
-        });
-    }
-    if e.yaw_deg.abs() > MAX_EULER_ANGLE_DEG {
-        return Err(ValidationError::AngleOutOfRange {
-            angle_type: "yaw".to_string(),
-            value: e.yaw_deg,
-            min: -MAX_EULER_ANGLE_DEG,
-            max: MAX_EULER_ANGLE_DEG,
-        });
-    }
-
-    Ok(())
-}
-
-// ============================================================================
 // Frequency Validation
 // ============================================================================
 
@@ -417,9 +307,7 @@ fn validate_frequency(frequency_mhz: f64, param_name: &str) -> ValidationResult<
     }
 
     if !(MIN_FREQUENCY_MHZ..=MAX_FREQUENCY_MHZ).contains(&frequency_mhz) {
-        return Err(ValidationError::FrequencyOutOfRange {
-            frequency_mhz,
-        });
+        return Err(ValidationError::FrequencyOutOfRange { frequency_mhz });
     }
 
     Ok(())
@@ -515,10 +403,7 @@ fn validate_grid_config(grid_config: &GridConfig) -> ValidationResult<()> {
             if *h3_resolution > 15 {
                 return Err(ValidationError::InvalidGrid {
                     dimension: "h3_resolution".to_string(),
-                    reason: format!(
-                        "H3 resolution {} exceeds maximum 15",
-                        h3_resolution
-                    ),
+                    reason: format!("H3 resolution {} exceeds maximum 15", h3_resolution),
                 });
             }
 
@@ -576,10 +461,7 @@ fn validate_range_config(range: &RangeConfig, dimension: &str) -> ValidationResu
     if range.min >= range.max {
         return Err(ValidationError::InvalidGrid {
             dimension: dimension.to_string(),
-            reason: format!(
-                "min ({}) must be less than max ({})",
-                range.min, range.max
-            ),
+            reason: format!("min ({}) must be less than max ({})", range.min, range.max),
         });
     }
 
@@ -609,7 +491,6 @@ fn validate_range_config(range: &RangeConfig, dimension: &str) -> ValidationResu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::schemas::{Attitude, EulerAngles, Quaternion};
     use crate::data::repository::CalibrationRepository;
 
     // Helper to create a test repository with sample data
@@ -629,13 +510,10 @@ mod tests {
 
     #[test]
     fn test_validate_ecef_position_exceeds_max() {
-        let pos = Position3D::new(15_000_000.0, 0.0, 0.0);
+        let pos = Position3D::new(450_000_000.0, 0.0, 0.0);
         let result = validate_position(&pos, "test_pos");
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("exceeds maximum"));
+        assert!(result.unwrap_err().to_string().contains("exceeds maximum"));
     }
 
     #[test]
@@ -664,11 +542,11 @@ mod tests {
 
     #[test]
     fn test_validate_geodetic_position_invalid_altitude() {
-        let pos = Position3D::new(-118.0, 34.0, 2_000_000.0);
+        let pos = Position3D::new(-118.0, 34.0, 420_000_000.0);
         let result = validate_position(&pos, "test_pos");
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("altitude"));
+        assert!(err_msg.contains("test_pos.z"));
     }
 
     #[test]
@@ -683,65 +561,6 @@ mod tests {
     fn test_validate_position_infinity() {
         let pos = Position3D::new(f64::INFINITY, 0.0, 0.0);
         let result = validate_position(&pos, "test_pos");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not finite"));
-    }
-
-    // ========================================================================
-    // Attitude Validation Tests
-    // ========================================================================
-
-    #[test]
-    fn test_validate_quaternion_normalized() {
-        let q = Quaternion::new(1.0, 0.0, 0.0, 0.0);
-        let attitude = Attitude::Quaternion(q);
-        assert!(validate_attitude(&attitude).is_ok());
-    }
-
-    #[test]
-    fn test_validate_quaternion_not_normalized() {
-        let q = Quaternion::new(2.0, 0.0, 0.0, 0.0);
-        let attitude = Attitude::Quaternion(q);
-        let result = validate_attitude(&attitude);
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("not normalized"));
-    }
-
-    #[test]
-    fn test_validate_quaternion_nan() {
-        let q = Quaternion::new(f64::NAN, 0.0, 0.0, 0.0);
-        let attitude = Attitude::Quaternion(q);
-        let result = validate_attitude(&attitude);
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("non-finite values"));
-    }
-
-    #[test]
-    fn test_validate_euler_angles_valid() {
-        let e = EulerAngles::new(10.0, 20.0, 30.0);
-        let attitude = Attitude::EulerAngles(e);
-        assert!(validate_attitude(&attitude).is_ok());
-    }
-
-    #[test]
-    fn test_validate_euler_angles_extreme() {
-        let e = EulerAngles::new(500.0, 0.0, 0.0);
-        let attitude = Attitude::EulerAngles(e);
-        let result = validate_attitude(&attitude);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_validate_euler_angles_nan() {
-        let e = EulerAngles::new(f64::NAN, 0.0, 0.0);
-        let attitude = Attitude::EulerAngles(e);
-        let result = validate_attitude(&attitude);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not finite"));
     }
@@ -793,10 +612,7 @@ mod tests {
         let repo = create_test_repository();
         let result = validate_antenna_feed_exists("", "feed1", &repo);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("cannot be empty"));
+        assert!(result.unwrap_err().to_string().contains("cannot be empty"));
     }
 
     #[test]
@@ -804,10 +620,7 @@ mod tests {
         let repo = create_test_repository();
         let result = validate_antenna_feed_exists("antenna1", "", &repo);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("cannot be empty"));
+        assert!(result.unwrap_err().to_string().contains("cannot be empty"));
     }
 
     #[test]
@@ -961,7 +774,6 @@ mod tests {
                 antenna_id: "test".to_string(),
                 feed_id: "test_feed".to_string(),
                 vehicle_position: Position3D::new(0.0, 0.0, 0.0),
-                vehicle_attitude: Attitude::Quaternion(Quaternion::identity()),
                 reflector_boresight: Position3D::new(0.0, 0.0, 0.0),
                 feed_position: Position3D::new(0.0, 0.0, 0.0),
                 emitter_position: Position3D::new(0.0, 0.0, 0.0),

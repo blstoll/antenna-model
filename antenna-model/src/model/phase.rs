@@ -100,20 +100,28 @@ pub fn phase_path(
 
 /// Feed displacement phase (coma aberration)
 ///
-/// When the feed is displaced from the focal point, a coma aberration is introduced.
-/// This phase term models the wavefront distortion from feed displacement.
+/// When the feed is displaced from the focal point, aberrations are introduced including
+/// beam steering, coma (asymmetric sidelobes), and gain loss. This function computes the
+/// exact phase difference using full path-length analysis.
 ///
-/// # Formula (from design doc Section 2.2)
-/// ```text
-/// Ψ_feed_displacement = k·δ_feed·[ρ/(2f)]·[2·cos(α) - (ρ/(2f))·cos(2α-φ')]
-/// ```
+/// # Algorithm
 ///
-/// where:
-/// - δ_feed: Feed displacement magnitude from focal point
-/// - α: Angle of displacement direction in aperture plane
+/// Computes the actual path length difference between:
+/// - Path from ideal focal point to each aperture point on the parabolic surface
+/// - Path from displaced feed position to each aperture point
 ///
-/// This formula produces asymmetric patterns (coma lobes) characteristic of
-/// off-axis aberrations in parabolic reflectors.
+/// This naturally includes all orders of aberration:
+/// - First order (linear): Beam steering (θ ≈ δ/f)
+/// - Second order: Defocus/astigmatism effects
+/// - Third order: True coma with asymmetric sidelobes
+/// - Higher orders: Additional aberrations for large displacements
+///
+/// # Geometry
+///
+/// For a parabolic reflector with equation z = ρ²/(4f):
+/// - Aperture point in Cartesian: (x, y, z) where x = ρ·cos(φ'), y = ρ·sin(φ')
+/// - Ideal focus at: (0, 0, f)
+/// - Displaced feed at: (δ·cos(α), δ·sin(α), f)
 ///
 /// # Arguments
 /// - `rho`: Radial distance from axis in aperture plane (meters)
@@ -124,7 +132,12 @@ pub fn phase_path(
 /// - `k`: Wavenumber (radians/meter)
 ///
 /// # Returns
-/// Phase in radians
+/// Phase difference in radians (positive when displaced path is longer)
+///
+/// # References
+/// - Rusch & Potter, "Analysis of Reflector Antennas" (1970)
+/// - Love, "Electromagnetic Horn Antennas" (1976), Ch 10
+/// - Silver, "Microwave Antenna Theory and Design" (1949), Ch 12
 #[inline]
 pub fn phase_feed_displacement(
     rho: f64,
@@ -134,10 +147,29 @@ pub fn phase_feed_displacement(
     focal_length: f64,
     k: f64,
 ) -> f64 {
-    let normalized_rho = rho / (2.0 * focal_length);
-    let term1 = 2.0 * alpha.cos();
-    let term2 = normalized_rho * (2.0 * alpha - phi_prime).cos();
-    k * delta_feed * normalized_rho * (term1 - term2)
+    // Convert aperture point from polar to Cartesian coordinates
+    let x = rho * phi_prime.cos();
+    let y = rho * phi_prime.sin();
+
+    // Surface height on parabola: z = ρ²/(4f)
+    let z = rho * rho / (4.0 * focal_length);
+
+    // Feed displacement in Cartesian (lateral displacement in focal plane)
+    let dx = delta_feed * alpha.cos();
+    let dy = delta_feed * alpha.sin();
+
+    // Distance from focal point to surface point (ideal path)
+    // For parabola, all paths from focus to surface to aperture plane are equal,
+    // but we need the actual geometric distance for phase calculation
+    let dz = z - focal_length;
+    let path_ideal = (x * x + y * y + dz * dz).sqrt();
+
+    // Distance from displaced feed to surface point
+    let path_displaced = ((x - dx).powi(2) + (y - dy).powi(2) + dz * dz).sqrt();
+
+    // Phase difference: k × (displaced_path - ideal_path)
+    // Positive phase when displaced feed creates longer path
+    k * (path_displaced - path_ideal)
 }
 
 /// Surface error phase contribution
@@ -513,13 +545,150 @@ mod tests {
         // Should be non-zero for off-axis feed
         assert!(phase.abs() > 0.0);
 
-        // Formula: k·δ·[ρ/(2f)]·[2·cos(α) - (ρ/(2f))·cos(2α-φ')]
-        let normalized_rho = rho / (2.0 * focal_length);
-        let term1 = 2.0 * alpha.cos();
-        let term2 = normalized_rho * (2.0 * alpha - phi_prime).cos();
-        let expected = k * delta_feed * normalized_rho * (term1 - term2);
+        // For small displacements, phase should be approximately linear: Ψ ≈ k·δ·ρ/f·cos(φ'-α)
+        // The full path-length model gives slightly different values due to higher-order terms
+        let linear_approx = k * delta_feed * rho / focal_length * (phi_prime - alpha).cos();
 
-        assert!((phase - expected).abs() < EPSILON);
+        // Phase should be in the same ballpark as linear approximation (within 50%)
+        // but not exactly equal due to higher-order aberration terms
+        assert!(
+            (phase.abs() - linear_approx.abs()).abs() < linear_approx.abs() * 0.5,
+            "Phase {:.6} should be similar to linear approx {:.6}",
+            phase,
+            linear_approx
+        );
+    }
+
+    #[test]
+    fn test_phase_feed_displacement_symmetry() {
+        // Phase should be symmetric about the displacement direction
+        let focal_length = 17.0;
+        let k = wavenumber(0.03);
+        let rho = 5.0;
+        let delta_feed = 1.0;
+        let alpha = 0.0; // Displacement in +x direction
+
+        // Points at +phi_prime and -phi_prime should have equal magnitude phase
+        let phase_pos = phase_feed_displacement(rho, PI / 4.0, delta_feed, alpha, focal_length, k);
+        let phase_neg = phase_feed_displacement(rho, -PI / 4.0, delta_feed, alpha, focal_length, k);
+
+        assert!(
+            (phase_pos - phase_neg).abs() < 1e-10,
+            "Phase should be symmetric: +φ'={:.6}, -φ'={:.6}",
+            phase_pos,
+            phase_neg
+        );
+    }
+
+    #[test]
+    fn test_phase_feed_displacement_opposite_sides() {
+        // Points on opposite sides of the aperture (relative to displacement)
+        // should have opposite sign phases
+        let focal_length = 17.0;
+        let k = wavenumber(0.03);
+        let rho = 5.0;
+        let delta_feed = 1.0;
+        let alpha = 0.0; // Displacement in +x direction
+
+        // Point in +x direction (φ'=0) - displaced feed is closer
+        let phase_toward = phase_feed_displacement(rho, 0.0, delta_feed, alpha, focal_length, k);
+
+        // Point in -x direction (φ'=π) - displaced feed is farther
+        let phase_away = phase_feed_displacement(rho, PI, delta_feed, alpha, focal_length, k);
+
+        // Phases should have opposite signs
+        assert!(
+            phase_toward * phase_away < 0.0,
+            "Phases should have opposite signs: toward={:.6}, away={:.6}",
+            phase_toward,
+            phase_away
+        );
+
+        // Away should have larger magnitude (longer path)
+        assert!(
+            phase_away.abs() > phase_toward.abs(),
+            "Away phase {:.6} should be larger than toward {:.6}",
+            phase_away.abs(),
+            phase_toward.abs()
+        );
+    }
+
+    #[test]
+    fn test_phase_feed_displacement_at_center() {
+        // At the center of the aperture (ρ=0, vertex of parabola):
+        // - Surface point: (0, 0, 0)
+        // - Ideal focus: (0, 0, f)
+        // - Displaced feed: (δ, 0, f)
+        //
+        // Path from ideal: f
+        // Path from displaced: sqrt(δ² + f²)
+        // Difference: sqrt(δ² + f²) - f ≈ δ²/(2f) for small δ
+        let focal_length = 17.0;
+        let k = wavenumber(0.03);
+        let delta_feed = 1.0;
+        let alpha = 0.0;
+
+        let phase = phase_feed_displacement(0.0, 0.0, delta_feed, alpha, focal_length, k);
+
+        // Expected: k * (sqrt(δ² + f²) - f)
+        let expected = k * ((delta_feed.powi(2) + focal_length.powi(2)).sqrt() - focal_length);
+
+        assert!(
+            (phase - expected).abs() < 1e-6,
+            "Phase at center {:.6} should match expected {:.6}",
+            phase,
+            expected
+        );
+    }
+
+    #[test]
+    fn test_phase_feed_displacement_geometry_validation() {
+        // Validate the geometry calculation directly
+        let focal_length = 10.0;
+        let k = 1.0; // Use k=1 for easy calculation
+        let rho = 4.0; // Surface point at ρ=4
+        let phi_prime = 0.0; // On x-axis
+        let delta_feed = 1.0; // 1m displacement
+        let alpha = 0.0; // In +x direction
+
+        // Aperture point: (4, 0, z) where z = 16/(4*10) = 0.4
+        // Ideal focus: (0, 0, 10)
+        // Displaced feed: (1, 0, 10)
+        //
+        // Path from ideal: sqrt(16 + 0 + 92.16) = sqrt(108.16) ≈ 10.4
+        // Path from displaced: sqrt(9 + 0 + 92.16) = sqrt(101.16) ≈ 10.058
+
+        let phase = phase_feed_displacement(rho, phi_prime, delta_feed, alpha, focal_length, k);
+
+        // Expected: path_displaced - path_ideal ≈ 10.058 - 10.4 = -0.342
+        let expected = (101.16_f64).sqrt() - (108.16_f64).sqrt();
+
+        assert!(
+            (phase - expected).abs() < 1e-6,
+            "Phase {:.6} should match geometry calculation {:.6}",
+            phase,
+            expected
+        );
+    }
+
+    #[test]
+    fn test_phase_feed_displacement_increases_with_rho() {
+        // Phase magnitude should generally increase with ρ
+        let focal_length = 17.0;
+        let k = wavenumber(0.03);
+        let delta_feed = 1.0;
+        let alpha = 0.0;
+        let phi_prime = PI; // Away from displacement
+
+        let phase_small = phase_feed_displacement(2.0, phi_prime, delta_feed, alpha, focal_length, k);
+        let phase_large = phase_feed_displacement(8.0, phi_prime, delta_feed, alpha, focal_length, k);
+
+        assert!(
+            phase_large.abs() > phase_small.abs(),
+            "Phase at larger ρ ({:.6}) should exceed phase at smaller ρ ({:.6})",
+            phase_large.abs(),
+            phase_small.abs()
+        );
     }
 
     #[test]

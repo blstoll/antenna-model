@@ -1,0 +1,117 @@
+# Test Antenna Configuration for Integration Tests
+#
+# This configuration defines test antennas representing all calibration statuses.
+# These antennas use realistic physical parameters but are designed for testing.
+
+antennas:
+  # ==========================================================================
+  # UNCALIBRATED TEST ANTENNA
+  # ==========================================================================
+  - id: "test_uncalibrated"
+    name: "Test Uncalibrated Antenna"
+    calibration_status: "uncalibrated"
+    enabled: true
+
+    design_specs:
+      diameter_m: 3.7
+      focal_length_m: 1.85
+      f_over_d_ratio: 0.5
+      surface_rms_mm: 1.5
+
+      feeds:
+        - id: "x_band"
+          name: "X-Band Test Feed"
+          position: [0.0, 0.0, 0.0]
+          q_factor: 8.0
+          phase_center_offset_m: 0.0
+          frequency_range: [7100.0, 8500.0]
+
+        - id: "s_band"
+          name: "S-Band Test Feed"
+          position: [0.05, 0.0, 0.0]
+          q_factor: 7.0
+          phase_center_offset_m: 0.0
+          frequency_range: [2000.0, 2300.0]
+
+      mesh:
+        mesh_spacing_mm: 5.0
+        wire_diameter_mm: 0.5
+
+    validity_ranges:
+      azimuth_range: [0.0, 360.0]
+      elevation_range: [0.0, 90.0]
+      frequency_range: [2000.0, 8500.0]
+      temperature_k: 290.0
+
+    description: "Test antenna using design specifications only"
+
+  # ==========================================================================
+  # SMALL TEST ANTENNA (Simple Parameters)
+  # ==========================================================================
+  - id: "test_simple"
+    name: "Simple Test Antenna"
+    calibration_status: "uncalibrated"
+    enabled: true
+
+    design_specs:
+      diameter_m: 5.0
+      focal_length_m: 2.0
+      f_over_d_ratio: 0.4
+      surface_rms_mm: 1.0
+
+      feeds:
+        - id: "primary"
+          name: "Primary Test Feed"
+          position: [0.0, 0.0, 0.0]
+          q_factor: 8.0
+          phase_center_offset_m: 0.0
+          frequency_range: [8000.0, 8500.0]
+
+      mesh: null  # Solid reflector
+
+    validity_ranges:
+      azimuth_range: [0.0, 360.0]
+      elevation_range: [0.0, 90.0]
+      frequency_range: [8000.0, 8500.0]
+      temperature_k: 290.0
+
+    description: "Simple solid reflector for basic testing"
+
+  # ==========================================================================
+  # LARGE TEST ANTENNA (Multi-Feed)
+  # ==========================================================================
+  - id: "test_large"
+    name: "Large Multi-Band Test Antenna"
+    calibration_status: "uncalibrated"
+    enabled: true
+
+    design_specs:
+      diameter_m: 13.0
+      focal_length_m: 5.2
+      f_over_d_ratio: 0.4
+      surface_rms_mm: 0.5
+
+      feeds:
+        - id: "x_band"
+          name: "X-Band Feed"
+          position: [0.0, 0.0, 0.0]
+          q_factor: 9.0
+          phase_center_offset_m: 0.01
+          frequency_range: [7145.0, 7235.0]
+
+        - id: "ka_band"
+          name: "Ka-Band Feed"
+          position: [0.08, 0.0, 0.0]
+          q_factor: 10.0
+          phase_center_offset_m: 0.005
+          frequency_range: [25500.0, 27000.0]
+
+      mesh: null
+
+    validity_ranges:
+      azimuth_range: [0.0, 360.0]
+      elevation_range: [0.0, 90.0]
+      frequency_range: [7145.0, 27000.0]
+      temperature_k: 290.0
+
+    description: "Large antenna with multiple feeds for testing"
