@@ -168,7 +168,10 @@ pub async fn start_server_with_config(config: ServiceConfig) -> Result<(), std::
             repo
         }
         Err(e) => {
-            tracing::warn!("Failed to load calibration data: {}, starting with empty repository", e);
+            tracing::warn!(
+                "Failed to load calibration data: {}, starting with empty repository",
+                e
+            );
             CalibrationRepository::new()
         }
     };
@@ -244,17 +247,21 @@ pub async fn start_server(host: &str, port: u16) -> Result<(), std::io::Error> {
 /// the server to begin graceful shutdown.
 async fn shutdown_signal() {
     let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
+        if let Err(e) = signal::ctrl_c().await {
+            tracing::error!("Failed to install Ctrl+C handler: {}", e);
+        }
     };
 
     #[cfg(unix)]
     let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler")
-            .recv()
-            .await;
+        match signal::unix::signal(signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(e) => {
+                tracing::error!("Failed to install SIGTERM handler: {}", e);
+            }
+        }
     };
 
     #[cfg(not(unix))]
@@ -315,8 +322,8 @@ mod tests {
 
     #[test]
     fn test_app_state_uptime() {
-        use std::time::Duration;
         use std::thread::sleep;
+        use std::time::Duration;
 
         let state = AppState::with_defaults();
         let uptime1 = state.uptime_seconds();

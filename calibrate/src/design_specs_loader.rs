@@ -128,7 +128,8 @@ impl DesignSpecs {
         }
 
         // Validate reflector specs
-        self.reflector.validate()
+        self.reflector
+            .validate()
             .context("Invalid reflector specs")?;
 
         // Validate feed specs
@@ -151,8 +152,7 @@ impl DesignSpecs {
 
         // Validate mesh specs if present
         if let Some(ref mesh) = self.mesh {
-            mesh.validate()
-                .context("Invalid mesh specs")?;
+            mesh.validate().context("Invalid mesh specs")?;
         }
 
         Ok(())
@@ -180,18 +180,15 @@ impl DesignSpecs {
                 self.reflector.surface_rms_mm * 0.3,
                 self.reflector.surface_rms_mm * 3.0,
             ),
-            q_factor_range: (
-                feed.q_factor * 0.5,
-                feed.q_factor * 2.0,
-            ),
-            mesh_spacing_mm_range: self.mesh.as_ref().map(|m| (
-                m.mesh_spacing_mm * 0.5,
-                m.mesh_spacing_mm * 2.0,
-            )),
-            wire_diameter_mm_range: self.mesh.as_ref().map(|m| (
-                m.wire_diameter_mm * 0.5,
-                m.wire_diameter_mm * 2.0,
-            )),
+            q_factor_range: (feed.q_factor * 0.5, feed.q_factor * 2.0),
+            mesh_spacing_mm_range: self
+                .mesh
+                .as_ref()
+                .map(|m| (m.mesh_spacing_mm * 0.5, m.mesh_spacing_mm * 2.0)),
+            wire_diameter_mm_range: self
+                .mesh
+                .as_ref()
+                .map(|m| (m.wire_diameter_mm * 0.5, m.wire_diameter_mm * 2.0)),
         })
     }
 }
@@ -220,11 +217,17 @@ impl ReflectorSpecs {
         }
 
         if self.focal_length_m <= 0.0 {
-            anyhow::bail!("focal_length_m must be positive, got {}", self.focal_length_m);
+            anyhow::bail!(
+                "focal_length_m must be positive, got {}",
+                self.focal_length_m
+            );
         }
 
         if self.surface_rms_mm < 0.0 {
-            anyhow::bail!("surface_rms_mm must be non-negative, got {}", self.surface_rms_mm);
+            anyhow::bail!(
+                "surface_rms_mm must be non-negative, got {}",
+                self.surface_rms_mm
+            );
         }
 
         // Check f/D ratio is reasonable (typically 0.3 - 1.5)
@@ -284,11 +287,17 @@ impl MeshSpecs {
     /// Validate mesh specifications.
     fn validate(&self) -> Result<()> {
         if self.mesh_spacing_mm <= 0.0 {
-            anyhow::bail!("mesh_spacing_mm must be positive, got {}", self.mesh_spacing_mm);
+            anyhow::bail!(
+                "mesh_spacing_mm must be positive, got {}",
+                self.mesh_spacing_mm
+            );
         }
 
         if self.wire_diameter_mm <= 0.0 {
-            anyhow::bail!("wire_diameter_mm must be positive, got {}", self.wire_diameter_mm);
+            anyhow::bail!(
+                "wire_diameter_mm must be positive, got {}",
+                self.wire_diameter_mm
+            );
         }
 
         // Wire diameter should be less than mesh spacing
@@ -307,8 +316,8 @@ impl MeshSpecs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tempfile::NamedTempFile;
     use std::io::Write;
+    use tempfile::NamedTempFile;
 
     fn create_valid_design_specs_yaml() -> String {
         r#"
@@ -334,7 +343,8 @@ feeds:
 mesh:
   mesh_spacing_mm: 5.0
   wire_diameter_mm: 0.5
-"#.to_string()
+"#
+        .to_string()
     }
 
     #[test]
@@ -496,7 +506,10 @@ feeds:
 
         let result = DesignSpecs::load_from_file(temp_file.path());
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Duplicate feed_id"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Duplicate feed_id"));
     }
 
     #[test]

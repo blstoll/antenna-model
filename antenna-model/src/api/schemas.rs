@@ -889,8 +889,11 @@ impl ErrorResponse {
 
     /// Create coordinate transform error
     pub fn coordinate_transform_error(details: impl Into<String>) -> Self {
-        Self::new("CoordinateTransformError", "Coordinate transformation failed")
-            .with_details(details.into())
+        Self::new(
+            "CoordinateTransformError",
+            "Coordinate transformation failed",
+        )
+        .with_details(details.into())
     }
 
     /// Create computation error
@@ -1223,7 +1226,7 @@ mod tests {
             feed_id: "x_band_feed".to_string(),
             vehicle_position: Position3D::new(0.0, 0.0, 0.0),
             reflector_boresight: Position3D::new(0.0, 0.0, 10.0), // 10m above vehicle
-            feed_position: Position3D::new(0.0, 0.0, 23.6), // 10m + 13.6m focal length
+            feed_position: Position3D::new(0.0, 0.0, 23.6),       // 10m + 13.6m focal length
             emitter_position: Position3D::new(100.0, 100.0, 100.0),
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: None,

@@ -26,10 +26,50 @@ use std::f64::consts::PI;
 
 use crate::error::{ComputationError, ComputationResult};
 use crate::model::{
+    direct_path::compute_with_direct_path,
+    edge_cases::{
+        analyze_edge_cases, apply_gain_floor, apply_gain_floor_db, needs_adaptive_integration,
+        ComputationMode,
+    },
     geometry::{AntennaConfiguration, FeedParameters, FeedPosition, ReflectorGeometry},
     integration::{compute_far_field, IntegrationParams},
+    ray_trace::compute_gain_ray_trace,
     wavelength_from_frequency,
 };
+
+/// Result of gain computation including warnings
+///
+/// This struct bundles the computed gain value with any warnings generated
+/// during edge case analysis or the computation process.
+#[derive(Debug, Clone)]
+pub struct GainComputationResult {
+    /// Computed gain in linear units (or dB if from compute_gain_db)
+    pub gain: f64,
+
+    /// Warnings from edge case analysis and computation
+    pub warnings: Vec<String>,
+}
+
+/// Select integration parameters based on angle and configuration
+///
+/// Uses denser sampling near pattern nulls where rapid phase changes
+/// require higher accuracy.
+fn select_integration_params(
+    theta: f64,
+    phi: f64,
+    config: &AntennaConfiguration,
+    base_params: &IntegrationParams,
+) -> IntegrationParams {
+    if needs_adaptive_integration(theta, phi, config) {
+        tracing::debug!(
+            "Using adaptive integration (theta={:.3} rad, near null region)",
+            theta
+        );
+        base_params.with_adaptive_refinement()
+    } else {
+        base_params.clone()
+    }
+}
 
 /// Compute Ruze efficiency for surface errors
 ///
@@ -195,7 +235,7 @@ pub fn theoretical_max_gain(diameter: f64, wavelength: f64, aperture_efficiency:
 /// #     .reflector(reflector)
 /// #     .feed(feed)
 /// #     .build()?;
-/// let gain = compute_gain(
+/// let result = compute_gain(
 ///     0.0,                 // On-axis
 ///     0.0,
 ///     &config,
@@ -203,7 +243,7 @@ pub fn theoretical_max_gain(diameter: f64, wavelength: f64, aperture_efficiency:
 ///     &IntegrationParams::default(),
 /// )?;
 ///
-/// println!("Gain: {:.2} dB", 10.0 * gain.log10());
+/// println!("Gain: {:.2} dB", 10.0 * result.gain.log10());
 /// # Ok(())
 /// # }
 /// ```
@@ -213,39 +253,82 @@ pub fn compute_gain(
     config: &AntennaConfiguration,
     frequency_hz: f64,
     params: &IntegrationParams,
-) -> ComputationResult<f64> {
+) -> ComputationResult<GainComputationResult> {
     let wavelength = wavelength_from_frequency(frequency_hz);
 
+    // Analyze edge cases and select appropriate computation mode
+    let analysis = analyze_edge_cases(config, theta, phi);
+
+    // Log warnings from edge case analysis
+    for warning in &analysis.warnings {
+        tracing::warn!("{}", warning);
+    }
+
+    // Dispatch based on computation mode
+    let gain = match analysis.mode {
+        ComputationMode::StandardPhysicalOptics => {
+            compute_gain_standard(theta, phi, config, frequency_hz, wavelength, params)?
+        }
+        ComputationMode::HigherOrderAberrations => {
+            tracing::debug!(
+                "Using higher-order aberrations mode (feed offset ratio: {:.3})",
+                analysis.feed_offset_ratio
+            );
+            compute_gain_higher_order(theta, phi, config, frequency_hz, wavelength, params)?
+        }
+        ComputationMode::RayTracing => compute_gain_ray_tracing(theta, phi, config, wavelength)?,
+        ComputationMode::NearBoresightDirectPath => {
+            compute_gain_direct_path(theta, phi, config, frequency_hz, wavelength, params)?
+        }
+    };
+
+    // Apply gain floor for numerical stability
+    let gain = apply_gain_floor(gain);
+
+    Ok(GainComputationResult {
+        gain,
+        warnings: analysis.warnings,
+    })
+}
+
+/// Standard physical optics gain computation
+fn compute_gain_standard(
+    theta: f64,
+    phi: f64,
+    config: &AntennaConfiguration,
+    frequency_hz: f64,
+    wavelength: f64,
+    params: &IntegrationParams,
+) -> ComputationResult<f64> {
+    // Select integration parameters (adaptive near nulls)
+    let effective_params = select_integration_params(theta, phi, config, params);
+
     // Compute far-field electric field at the requested angle
-    let e_field = compute_far_field(theta, phi, config, frequency_hz, params)?;
+    let e_field = compute_far_field(theta, phi, config, frequency_hz, &effective_params)?;
 
     // Power is proportional to |E|²
     let field_magnitude_squared = e_field.norm_sqr();
 
     // Compute maximum possible on-axis field (ideal reference: feed at focus, ideal surface)
     // This gives us the reference for computing actual aperture efficiency
-    // NOTE: These unwrap() calls are safe because we're constructing from known-valid parameters
     let ideal_feed = FeedParameters::new(
         FeedPosition::at_focus(config.reflector.focal_length),
         config.feed.q_factor,
         config.feed.phase_center_offset,
         config.feed.asymmetry_factor,
-    )
-    .unwrap();
+    )?;
     let ideal_reflector = ReflectorGeometry::new(
         config.reflector.diameter,
         config.reflector.focal_length,
         0.0, // Ideal surface (no RMS error)
-    )
-    .unwrap();
+    )?;
     let ideal_config = AntennaConfiguration::new(
         format!("{}_ideal", config.id),
         format!("{} Ideal", config.name),
         ideal_reflector,
         ideal_feed,
         config.mesh.clone(), // Keep mesh parameters
-    )
-    .unwrap();
+    )?;
 
     // Compute ideal on-axis field for reference
     let e_ideal_on_axis = compute_far_field(0.0, 0.0, &ideal_config, frequency_hz, params)?;
@@ -271,9 +354,173 @@ pub fn compute_gain(
 
     // Final gain = theoretical maximum × efficiency × relative pattern
     // NOTE: relative_gain now includes efficiency loss from feed displacement
-    let gain = theoretical_gain * efficiency * relative_gain;
+    Ok(theoretical_gain * efficiency * relative_gain)
+}
 
-    Ok(gain)
+/// Higher-order aberrations gain computation for moderate feed offsets
+///
+/// Uses the same approach as standard physical optics but includes
+/// explicit Seidel aberration terms (astigmatism, field curvature, distortion)
+/// in the phase computation.
+fn compute_gain_higher_order(
+    theta: f64,
+    phi: f64,
+    config: &AntennaConfiguration,
+    frequency_hz: f64,
+    wavelength: f64,
+    params: &IntegrationParams,
+) -> ComputationResult<f64> {
+    // Select integration parameters (adaptive near nulls)
+    let effective_params = select_integration_params(theta, phi, config, params);
+
+    // Create integration params with higher-order aberrations enabled
+    let ho_params = IntegrationParams {
+        use_higher_order_aberrations: true,
+        ..effective_params
+    };
+
+    // Compute far-field electric field with higher-order aberrations
+    let e_field = compute_far_field(theta, phi, config, frequency_hz, &ho_params)?;
+
+    // Power is proportional to |E|²
+    let field_magnitude_squared = e_field.norm_sqr();
+
+    // Compute maximum possible on-axis field (ideal reference)
+    // NOTE: These unwrap() calls are safe because we're constructing from known-valid parameters
+    let ideal_feed = FeedParameters::new(
+        FeedPosition::at_focus(config.reflector.focal_length),
+        config.feed.q_factor,
+        config.feed.phase_center_offset,
+        config.feed.asymmetry_factor,
+    )?;
+    let ideal_reflector = ReflectorGeometry::new(
+        config.reflector.diameter,
+        config.reflector.focal_length,
+        0.0, // Ideal surface (no RMS error)
+    )?;
+    let ideal_config = AntennaConfiguration::new(
+        format!("{}_ideal", config.id),
+        format!("{} Ideal", config.name),
+        ideal_reflector,
+        ideal_feed,
+        config.mesh.clone(),
+    )?;
+
+    // Compute ideal on-axis field for reference (without higher-order aberrations)
+    let e_ideal_on_axis = compute_far_field(0.0, 0.0, &ideal_config, frequency_hz, params)?;
+    let ideal_on_axis_field = e_ideal_on_axis.norm_sqr();
+
+    // Relative gain (normalized to ideal on-axis)
+    let relative_gain = if ideal_on_axis_field > 1e-20 {
+        field_magnitude_squared / ideal_on_axis_field
+    } else {
+        return Err(ComputationError::NumericalInstability {
+            operation: "compute_gain_higher_order".to_string(),
+            reason: "Ideal on-axis field is zero or near-zero".to_string(),
+        });
+    };
+
+    // Apply efficiency corrections (Ruze and mesh)
+    let efficiency = overall_efficiency(config, wavelength);
+
+    // Compute absolute gain using theoretical maximum
+    let theoretical_gain = theoretical_max_gain(config.reflector.diameter, wavelength, 0.55);
+
+    // Final gain = theoretical maximum × efficiency × relative pattern
+    Ok(theoretical_gain * efficiency * relative_gain)
+}
+
+/// Ray tracing gain computation for large feed offsets
+fn compute_gain_ray_tracing(
+    theta: f64,
+    phi: f64,
+    config: &AntennaConfiguration,
+    wavelength: f64,
+) -> ComputationResult<f64> {
+    // Compute gain using ray tracing
+    let ray_gain_relative = compute_gain_ray_trace(config, theta, phi, wavelength);
+
+    // Ray tracing returns |E|², need to normalize and convert to absolute gain
+    // Use same normalization approach as standard computation
+    let on_axis_ray_gain = compute_gain_ray_trace(config, 0.0, 0.0, wavelength);
+
+    let relative_gain = if on_axis_ray_gain > 1e-20 {
+        ray_gain_relative / on_axis_ray_gain
+    } else {
+        return Err(ComputationError::NumericalInstability {
+            operation: "compute_gain_ray_tracing".to_string(),
+            reason: "On-axis ray trace field is zero or near-zero".to_string(),
+        });
+    };
+
+    // Apply efficiency corrections (Ruze and mesh)
+    let efficiency = overall_efficiency(config, wavelength);
+
+    // Compute absolute gain using theoretical maximum
+    let theoretical_gain = theoretical_max_gain(config.reflector.diameter, wavelength, 0.55);
+
+    // Final gain with ray-traced relative pattern
+    Ok(theoretical_gain * efficiency * relative_gain)
+}
+
+/// Direct path interference gain computation for near-boresight scenarios
+fn compute_gain_direct_path(
+    theta: f64,
+    phi: f64,
+    config: &AntennaConfiguration,
+    frequency_hz: f64,
+    wavelength: f64,
+    params: &IntegrationParams,
+) -> ComputationResult<f64> {
+    // Select integration parameters (adaptive near nulls)
+    let effective_params = select_integration_params(theta, phi, config, params);
+
+    // First compute the reflected field using standard physical optics
+    let e_reflected = compute_far_field(theta, phi, config, frequency_hz, &effective_params)?;
+
+    // Compute field with direct path interference
+    let result = compute_with_direct_path(config, theta, phi, wavelength, e_reflected);
+
+    // Use total field (reflected + direct) for gain computation
+    let field_magnitude_squared = result.total_field.norm_sqr();
+
+    // Compute ideal on-axis field for reference
+    let ideal_feed = FeedParameters::new(
+        FeedPosition::at_focus(config.reflector.focal_length),
+        config.feed.q_factor,
+        config.feed.phase_center_offset,
+        config.feed.asymmetry_factor,
+    )?;
+    let ideal_reflector = ReflectorGeometry::new(
+        config.reflector.diameter,
+        config.reflector.focal_length,
+        0.0,
+    )?;
+    let ideal_config = AntennaConfiguration::new(
+        format!("{}_ideal", config.id),
+        format!("{} Ideal", config.name),
+        ideal_reflector,
+        ideal_feed,
+        config.mesh.clone(),
+    )?;
+
+    let e_ideal_on_axis = compute_far_field(0.0, 0.0, &ideal_config, frequency_hz, params)?;
+    let ideal_on_axis_field = e_ideal_on_axis.norm_sqr();
+
+    let relative_gain = if ideal_on_axis_field > 1e-20 {
+        field_magnitude_squared / ideal_on_axis_field
+    } else {
+        return Err(ComputationError::NumericalInstability {
+            operation: "compute_gain_direct_path".to_string(),
+            reason: "Ideal on-axis field is zero or near-zero".to_string(),
+        });
+    };
+
+    // Apply efficiency corrections
+    let efficiency = overall_efficiency(config, wavelength);
+    let theoretical_gain = theoretical_max_gain(config.reflector.diameter, wavelength, 0.55);
+
+    Ok(theoretical_gain * efficiency * relative_gain)
 }
 
 /// Compute antenna gain in dB
@@ -288,24 +535,31 @@ pub fn compute_gain(
 /// - `params`: Integration parameters
 ///
 /// # Returns
-/// Gain in dB (dBi)
+/// Gain in dB (dBi) with warnings
 pub fn compute_gain_db(
     theta: f64,
     phi: f64,
     config: &AntennaConfiguration,
     frequency_hz: f64,
     params: &IntegrationParams,
-) -> ComputationResult<f64> {
-    let gain_linear = compute_gain(theta, phi, config, frequency_hz, params)?;
+) -> ComputationResult<GainComputationResult> {
+    let result = compute_gain(theta, phi, config, frequency_hz, params)?;
 
-    if gain_linear <= 0.0 {
+    // result.gain already has floor applied from compute_gain, but double-check
+    if result.gain <= 0.0 {
         return Err(ComputationError::NumericalInstability {
             operation: "compute_gain_db".to_string(),
-            reason: format!("Gain is non-positive: {}", gain_linear),
+            reason: format!("Gain is non-positive: {}", result.gain),
         });
     }
 
-    Ok(10.0 * gain_linear.log10())
+    let gain_db = 10.0 * result.gain.log10();
+
+    // Apply dB floor for numerical stability
+    Ok(GainComputationResult {
+        gain: apply_gain_floor_db(gain_db),
+        warnings: result.warnings,
+    })
 }
 
 /// Compute G/T ratio
@@ -378,7 +632,8 @@ pub fn compute_g_over_t(
         });
     }
 
-    let gain_db = compute_gain_db(theta, phi, config, frequency_hz, params)?;
+    let result = compute_gain_db(theta, phi, config, frequency_hz, params)?;
+    let gain_db = result.gain;
 
     // G/T in dB/K = G(dB) - 10·log₁₀(T)
     let g_over_t_db = gain_db - 10.0 * temperature_k.log10();
@@ -412,7 +667,8 @@ pub fn compute_beamwidth(
     params: &IntegrationParams,
 ) -> ComputationResult<f64> {
     // Get on-axis gain
-    let gain_peak = compute_gain_db(0.0, phi, config, frequency_hz, params)?;
+    let result_peak = compute_gain_db(0.0, phi, config, frequency_hz, params)?;
+    let gain_peak = result_peak.gain;
     let target_gain = gain_peak - gain_drop_db;
 
     // Binary search for beamwidth
@@ -424,7 +680,8 @@ pub fn compute_beamwidth(
 
     for _ in 0..MAX_ITERATIONS {
         let theta_mid = (theta_min + theta_max) / 2.0;
-        let gain_mid = compute_gain_db(theta_mid, phi, config, frequency_hz, params)?;
+        let result_mid = compute_gain_db(theta_mid, phi, config, frequency_hz, params)?;
+        let gain_mid = result_mid.gain;
 
         if (gain_mid - target_gain).abs() < 0.1 {
             // Found beamwidth within 0.1 dB
@@ -603,7 +860,8 @@ mod tests {
         let config = test_antenna();
         let params = IntegrationParams::fast();
 
-        let gain = compute_gain(0.0, 0.0, &config, 8.4e9, &params).unwrap();
+        let result = compute_gain(0.0, 0.0, &config, 8.4e9, &params).unwrap();
+        let gain = result.gain;
 
         // Gain should be positive
         assert!(gain > 0.0);
@@ -618,7 +876,8 @@ mod tests {
         let config = test_antenna();
         let params = IntegrationParams::fast();
 
-        let gain_db = compute_gain_db(0.0, 0.0, &config, 8.4e9, &params).unwrap();
+        let result = compute_gain_db(0.0, 0.0, &config, 8.4e9, &params).unwrap();
+        let gain_db = result.gain;
 
         // Gain should be reasonable (10-40 dB for 1m dish at X-band)
         assert!(gain_db > 10.0);
@@ -630,9 +889,11 @@ mod tests {
         let config = test_antenna();
         let params = IntegrationParams::fast();
 
-        let gain_on_axis = compute_gain_db(0.0, 0.0, &config, 8.4e9, &params).unwrap();
-        let gain_off_axis =
+        let result_on_axis = compute_gain_db(0.0, 0.0, &config, 8.4e9, &params).unwrap();
+        let gain_on_axis = result_on_axis.gain;
+        let result_off_axis =
             compute_gain_db(5.0_f64.to_radians(), 0.0, &config, 8.4e9, &params).unwrap();
+        let gain_off_axis = result_off_axis.gain;
 
         // Gain should decrease off-axis
         assert!(gain_off_axis < gain_on_axis);
@@ -673,5 +934,76 @@ mod tests {
         let hpbw_degrees = hpbw.to_degrees();
         assert!(hpbw_degrees > 0.5);
         assert!(hpbw_degrees < 10.0);
+    }
+
+    #[test]
+    fn test_adaptive_integration_selection() {
+        let config = test_antenna();
+        let base_params = IntegrationParams::default();
+
+        // Near boresight (theta < 0.1) - should not use adaptive
+        let params_near = select_integration_params(0.05, 0.0, &config, &base_params);
+        assert_eq!(params_near.min_rho_points, base_params.min_rho_points);
+        assert_eq!(params_near.min_phi_points, base_params.min_phi_points);
+
+        // Near null region (theta > 0.1) - should use adaptive (doubled points)
+        let params_null = select_integration_params(0.2, 0.0, &config, &base_params);
+        assert_eq!(params_null.min_rho_points, base_params.min_rho_points * 2);
+        assert_eq!(params_null.min_phi_points, base_params.min_phi_points * 2);
+        assert_eq!(params_null.max_rho_points, base_params.max_rho_points * 2);
+        assert_eq!(params_null.max_phi_points, base_params.max_phi_points * 2);
+        assert!(
+            (params_null.relative_tolerance - base_params.relative_tolerance / 2.0).abs() < 1e-10
+        );
+    }
+
+    #[test]
+    fn test_edge_case_warnings_propagation() {
+        use crate::model::geometry::FeedPosition;
+
+        // Create antenna with large feed offset to trigger warnings
+        let reflector = ReflectorGeometry::builder()
+            .diameter(1.0)
+            .focal_length(1.0)
+            .surface_rms(0.001)
+            .build()
+            .unwrap();
+
+        // Feed displaced by 0.4m (0.4f) - should trigger higher-order aberrations warning
+        let feed = FeedParameters::new(FeedPosition::new(0.4, 0.0, 1.0), 8.0, 0.0, 1.0).unwrap();
+
+        let config = AntennaConfiguration::builder()
+            .id("test_warnings")
+            .name("Test Warnings")
+            .reflector(reflector)
+            .feed(feed)
+            .build()
+            .unwrap();
+
+        let params = IntegrationParams::fast();
+
+        // Compute gain and check that warnings are included
+        let result = compute_gain_db(0.0, 0.0, &config, 8.4e9, &params).unwrap();
+
+        // Should have warnings about large feed offset
+        assert!(
+            !result.warnings.is_empty(),
+            "Expected warnings for large feed offset, but got none"
+        );
+
+        // Check that warning mentions feed offset
+        let has_offset_warning = result
+            .warnings
+            .iter()
+            .any(|w| w.contains("offset") || w.contains("aberration"));
+        assert!(
+            has_offset_warning,
+            "Expected warning about feed offset or aberrations, got: {:?}",
+            result.warnings
+        );
+
+        // Gain value should still be valid
+        assert!(result.gain > 0.0);
+        assert!(result.gain < 100.0); // Reasonable dB range
     }
 }

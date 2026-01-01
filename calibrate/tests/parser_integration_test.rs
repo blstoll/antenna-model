@@ -1,5 +1,5 @@
 /// Integration tests for measurement data parser
-use calibrate::parser::{parse_measurements_sync, MeasurementPoint, MeasurementData};
+use calibrate::parser::{parse_measurements_sync, MeasurementData, MeasurementPoint};
 
 #[test]
 fn test_parse_sample_measurements() {
@@ -100,7 +100,9 @@ fn test_main_lobe_sidelobe_classification() {
     let beamwidth = 2.0; // 2° beamwidth
 
     // Count main lobe vs sidelobe points
-    let main_lobe_count = data.points.iter()
+    let main_lobe_count = data
+        .points
+        .iter()
         .filter(|p| p.is_main_lobe(beamwidth))
         .count();
 
@@ -111,8 +113,10 @@ fn test_main_lobe_sidelobe_classification() {
     assert!(sidelobe_count > 0, "Should have sidelobe points");
 
     // Main lobe should be larger portion for this dataset
-    assert!(main_lobe_count > sidelobe_count / 2,
-            "Main lobe should be significant portion");
+    assert!(
+        main_lobe_count > sidelobe_count / 2,
+        "Main lobe should be significant portion"
+    );
 }
 
 #[test]

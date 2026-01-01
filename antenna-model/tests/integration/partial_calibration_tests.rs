@@ -17,7 +17,9 @@ use antenna_model::api::schemas::*;
 /// Test uncalibrated antenna returns calibration status
 #[tokio::test]
 async fn test_uncalibrated_antenna_status() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     let request = builders::uncalibrated_antenna_request();
 
@@ -48,7 +50,9 @@ async fn test_uncalibrated_antenna_status() {
 /// Test uncalibrated antenna generates appropriate warnings
 #[tokio::test]
 async fn test_uncalibrated_antenna_warnings() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     let request = builders::uncalibrated_antenna_request();
 
@@ -76,7 +80,9 @@ async fn test_uncalibrated_antenna_warnings() {
 /// Test uncalibrated antenna loss computation
 #[tokio::test]
 async fn test_uncalibrated_antenna_loss() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     let mut request = builders::uncalibrated_antenna_request();
     request.include_reference = true;
@@ -106,7 +112,9 @@ async fn test_uncalibrated_antenna_loss() {
 /// Test antenna details endpoint shows calibration status
 #[tokio::test]
 async fn test_antenna_details_calibration_status() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     let response: AntennaDetailsResponse = server
         .get("/api/v1/antennas/test_uncalibrated")
@@ -126,7 +134,9 @@ async fn test_antenna_details_calibration_status() {
 /// Test multi-feed antenna with different calibration per feed
 #[tokio::test]
 async fn test_multi_feed_mixed_calibration() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     // Test antenna with multiple feeds (all uncalibrated in test setup)
     let x_band_request = builders::multi_feed_request("x_band", 7200.0);
@@ -156,13 +166,15 @@ async fn test_multi_feed_mixed_calibration() {
 /// Test batch with mixed calibration statuses
 #[tokio::test]
 async fn test_batch_mixed_calibration() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     // Create batch with different antennas
     let mut request = BatchGainRequest {
         evaluations: vec![
-            builders::simple_gain_request_ecef(),        // test_simple
-            builders::uncalibrated_antenna_request(),    // test_uncalibrated
+            builders::simple_gain_request_ecef(),     // test_simple
+            builders::uncalibrated_antenna_request(), // test_uncalibrated
         ],
     };
 
@@ -191,7 +203,9 @@ async fn test_batch_mixed_calibration() {
 /// Test heatmap with uncalibrated antenna
 #[tokio::test]
 async fn test_heatmap_uncalibrated_antenna() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     let mut request = builders::simple_heatmap_request();
     request.antenna_id = "test_uncalibrated".to_string();
@@ -220,7 +234,9 @@ async fn test_heatmap_uncalibrated_antenna() {
 /// Test frequency range validation for uncalibrated antenna
 #[tokio::test]
 async fn test_uncalibrated_frequency_validation() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     let mut request = builders::uncalibrated_antenna_request();
     // Use frequency at edge of valid range
@@ -239,14 +255,18 @@ async fn test_uncalibrated_frequency_validation() {
 /// Test out-of-range frequency generates warning
 #[tokio::test]
 async fn test_out_of_range_frequency_warning() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     let mut request = builders::uncalibrated_antenna_request();
     // Use frequency outside valid range
     request.frequency_mhz = 9000.0; // Beyond X-band range (7100-8500)
 
     // Should still compute but with warning
-    let result = server.post::<GainResponse, _>("/api/v1/gain", &request).await;
+    let result = server
+        .post::<GainResponse, _>("/api/v1/gain", &request)
+        .await;
 
     // Depending on validation strictness, might error or succeed with warning
     match result {
@@ -268,7 +288,9 @@ async fn test_out_of_range_frequency_warning() {
 /// Test antenna list shows calibration statuses
 #[tokio::test]
 async fn test_antenna_list_calibration_info() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     let response: AntennaListResponse = server
         .get("/api/v1/antennas")
@@ -296,7 +318,9 @@ async fn test_antenna_list_calibration_info() {
 /// Test physics model computation for uncalibrated antenna
 #[tokio::test]
 async fn test_physics_model_computation() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     let request = builders::uncalibrated_antenna_request();
 
@@ -327,7 +351,9 @@ async fn test_physics_model_computation() {
 /// Test uncalibrated antenna with different frequencies
 #[tokio::test]
 async fn test_uncalibrated_frequency_sweep() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     let frequencies = vec![7100.0, 7500.0, 8000.0, 8400.0];
     let mut gains = Vec::new();
@@ -366,7 +392,9 @@ async fn test_uncalibrated_frequency_sweep() {
 /// Test calibration status includes coverage information
 #[tokio::test]
 async fn test_calibration_coverage_metadata() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     let response: AntennaDetailsResponse = server
         .get("/api/v1/antennas/test_uncalibrated")
@@ -387,7 +415,9 @@ async fn test_calibration_coverage_metadata() {
 /// Test loss computation consistency across antennas
 #[tokio::test]
 async fn test_loss_computation_consistency() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     // Compute loss for both calibrated and uncalibrated antennas
     let mut simple_request = builders::simple_gain_request_ecef();

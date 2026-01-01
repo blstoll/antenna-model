@@ -293,7 +293,10 @@ pub fn load_artifact<P: AsRef<Path>>(path: P) -> Result<CalibrationArtifact> {
     reader.read_exact(&mut len_bytes)?;
     let data_len = u64::from_le_bytes(len_bytes);
 
-    debug!("Loading {} bytes, expected checksum: {:#x}", data_len, expected_checksum);
+    debug!(
+        "Loading {} bytes, expected checksum: {:#x}",
+        data_len, expected_checksum
+    );
 
     // Read data
     let mut data = vec![0u8; data_len as usize];
@@ -323,14 +326,12 @@ pub fn load_artifact<P: AsRef<Path>>(path: P) -> Result<CalibrationArtifact> {
 }
 
 /// Export artifact metadata to JSON for inspection
-pub fn export_metadata_json<P: AsRef<Path>>(
-    artifact: &CalibrationArtifact,
-    path: P,
-) -> Result<()> {
-    let json = serde_json::to_string_pretty(&artifact.metadata)
-        .map_err(|e| SerializationError::InvalidArtifact {
+pub fn export_metadata_json<P: AsRef<Path>>(artifact: &CalibrationArtifact, path: P) -> Result<()> {
+    let json = serde_json::to_string_pretty(&artifact.metadata).map_err(|e| {
+        SerializationError::InvalidArtifact {
             reason: format!("JSON serialization failed: {}", e),
-        })?;
+        }
+    })?;
 
     std::fs::write(path, json)?;
     Ok(())
@@ -341,10 +342,11 @@ pub fn export_validation_json<P: AsRef<Path>>(
     artifact: &CalibrationArtifact,
     path: P,
 ) -> Result<()> {
-    let json = serde_json::to_string_pretty(&artifact.validation_report)
-        .map_err(|e| SerializationError::InvalidArtifact {
+    let json = serde_json::to_string_pretty(&artifact.validation_report).map_err(|e| {
+        SerializationError::InvalidArtifact {
             reason: format!("JSON serialization failed: {}", e),
-        })?;
+        }
+    })?;
 
     std::fs::write(path, json)?;
     Ok(())
@@ -510,9 +512,18 @@ mod tests {
         let loaded = load_artifact(path).expect("Failed to load artifact");
 
         // Verify
-        assert_eq!(loaded.antenna_config.antenna_id, artifact.antenna_config.antenna_id);
-        assert_eq!(loaded.metadata.num_measurement_points, artifact.metadata.num_measurement_points);
-        assert_eq!(loaded.correction_surface.coefficients.len(), artifact.correction_surface.coefficients.len());
+        assert_eq!(
+            loaded.antenna_config.antenna_id,
+            artifact.antenna_config.antenna_id
+        );
+        assert_eq!(
+            loaded.metadata.num_measurement_points,
+            artifact.metadata.num_measurement_points
+        );
+        assert_eq!(
+            loaded.correction_surface.coefficients.len(),
+            artifact.correction_surface.coefficients.len()
+        );
     }
 
     #[test]
@@ -533,7 +544,10 @@ mod tests {
 
         // Try to load - should fail with checksum error
         let result = load_artifact(path);
-        assert!(matches!(result, Err(SerializationError::ChecksumMismatch { .. })));
+        assert!(matches!(
+            result,
+            Err(SerializationError::ChecksumMismatch { .. })
+        ));
     }
 
     #[test]
@@ -548,7 +562,10 @@ mod tests {
 
         // Try to load - should fail with invalid magic number
         let result = load_artifact(path);
-        assert!(matches!(result, Err(SerializationError::InvalidMagicNumber { .. })));
+        assert!(matches!(
+            result,
+            Err(SerializationError::InvalidMagicNumber { .. })
+        ));
     }
 
     #[test]
@@ -564,7 +581,10 @@ mod tests {
 
         // Try to load - should fail with version mismatch
         let result = load_artifact(path);
-        assert!(matches!(result, Err(SerializationError::VersionMismatch { .. })));
+        assert!(matches!(
+            result,
+            Err(SerializationError::VersionMismatch { .. })
+        ));
     }
 
     #[test]

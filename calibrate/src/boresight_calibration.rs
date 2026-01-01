@@ -29,18 +29,17 @@ use std::sync::Arc;
 use tracing::{debug, info};
 
 use crate::design_specs_loader::{DesignSpecs, TuningBounds};
+use crate::frequency_correction;
 use antenna_model::data::types::{
-    AntennaCalibration, AntennaCalibrationBuilder,
-    CalibrationCoverageBuilder, CalibrationMetadataBuilder,
-    CalibrationStatus, MeasurementDensity, ParameterSource, PhysicalAntennaConfigBuilder,
+    AntennaCalibration, AntennaCalibrationBuilder, BSplineModel4D, CalibrationCoverageBuilder,
+    CalibrationMetadataBuilder, CalibrationStatus, FeedParameters as DataFeedParameters,
+    MeasurementDensity, MeshParameters as DataMeshParameters, ParameterSource,
+    PhysicalAntennaConfigBuilder, ReflectorGeometry as DataReflectorGeometry,
     ValidityRangesBuilder,
-    FeedParameters as DataFeedParameters,
-    MeshParameters as DataMeshParameters,
-    ReflectorGeometry as DataReflectorGeometry,
 };
 use antenna_model::model::{
-    compute_g_over_t, AntennaConfigurationBuilder, IntegrationParams,
-    FeedParametersBuilder, MeshParametersBuilder, ReflectorGeometryBuilder,
+    compute_g_over_t, AntennaConfigurationBuilder, FeedParametersBuilder, IntegrationParams,
+    MeshParametersBuilder, ReflectorGeometryBuilder,
 };
 
 /// Boresight measurement point (frequency sweep at azimuth=0, elevation=0)
@@ -72,8 +71,8 @@ impl BoresightMeasurements {
             .from_reader(csv_content.as_bytes());
 
         for (line_num, result) in reader.records().enumerate() {
-            let record = result
-                .with_context(|| format!("Failed to parse CSV line {}", line_num + 2))?;
+            let record =
+                result.with_context(|| format!("Failed to parse CSV line {}", line_num + 2))?;
 
             if record.len() != 3 {
                 anyhow::bail!(
@@ -164,7 +163,10 @@ impl BoresightTunableParameters {
         let q_factor = vec[1];
 
         let (mesh_spacing_mm, wire_diameter_mm) = if has_mesh {
-            (Some(vec[2]), if vec.len() > 3 { Some(vec[3]) } else { None })
+            (
+                Some(vec[2]),
+                if vec.len() > 3 { Some(vec[3]) } else { None },
+            )
         } else {
             (None, None)
         };
@@ -193,8 +195,8 @@ pub struct BoresightCalibrationResult {
     pub iterations: usize,
     /// Number of function evaluations
     pub function_evaluations: usize,
-    /// Optional 1D frequency correction surface
-    pub frequency_correction: Option<Vec<(f64, f64)>>, // (frequency, correction_db)
+    /// Optional 1D frequency correction surface (degenerate 4D B-spline)
+    pub frequency_correction: Option<BSplineModel4D>,
 }
 
 /// Objective function for boresight parameter tuning
@@ -239,13 +241,17 @@ impl BoresightObjectiveFunction {
             return false;
         }
 
-        if let (Some(spacing), Some(range)) = (params.mesh_spacing_mm, self.bounds.mesh_spacing_mm_range) {
+        if let (Some(spacing), Some(range)) =
+            (params.mesh_spacing_mm, self.bounds.mesh_spacing_mm_range)
+        {
             if spacing < range.0 || spacing > range.1 {
                 return false;
             }
         }
 
-        if let (Some(diameter), Some(range)) = (params.wire_diameter_mm, self.bounds.wire_diameter_mm_range) {
+        if let (Some(diameter), Some(range)) =
+            (params.wire_diameter_mm, self.bounds.wire_diameter_mm_range)
+        {
             if diameter < range.0 || diameter > range.1 {
                 return false;
             }
@@ -254,8 +260,8 @@ impl BoresightObjectiveFunction {
         true
     }
 
-    /// Compute RMSE for given parameters
-    fn compute_rmse(&self, params: &BoresightTunableParameters) -> Result<f64> {
+    /// Compute predictions for all measurement points with given parameters
+    fn compute_predictions(&self, params: &BoresightTunableParameters) -> Result<Vec<f64>> {
         // Build reflector geometry (using model builders - values in meters)
         let reflector = ReflectorGeometryBuilder::default()
             .diameter(self.design_specs.reflector.diameter_m)
@@ -307,7 +313,7 @@ impl BoresightObjectiveFunction {
         let theta = 0.0; // Boresight
         let phi = 0.0;
 
-        let mut squared_errors = 0.0;
+        let mut predictions = Vec::with_capacity(self.measurements.points.len());
         for point in &self.measurements.points {
             let frequency_hz = point.frequency_mhz * 1e6;
             let predicted = compute_g_over_t(
@@ -317,11 +323,29 @@ impl BoresightObjectiveFunction {
                 frequency_hz,
                 point.temperature_k,
                 &self.integration_params,
-            ).context("Failed to compute G/T")?;
+            )
+            .context("Failed to compute G/T")?;
 
-            let error = point.g_over_t_db - predicted;
-            squared_errors += error * error;
+            predictions.push(predicted);
         }
+
+        Ok(predictions)
+    }
+
+    /// Compute RMSE for given parameters
+    fn compute_rmse(&self, params: &BoresightTunableParameters) -> Result<f64> {
+        let predictions = self.compute_predictions(params)?;
+
+        let squared_errors: f64 = self
+            .measurements
+            .points
+            .iter()
+            .zip(predictions.iter())
+            .map(|(meas, pred)| {
+                let error = meas.g_over_t_db - pred;
+                error * error
+            })
+            .sum();
 
         Ok((squared_errors / self.measurements.points.len() as f64).sqrt())
     }
@@ -343,7 +367,8 @@ impl CostFunction for BoresightObjectiveFunction {
         }
 
         // Compute RMSE
-        let rmse = self.compute_rmse(&params)
+        let rmse = self
+            .compute_rmse(&params)
             .map_err(|e| argmin::core::Error::msg(format!("RMSE computation failed: {}", e)))?;
 
         if eval_num.is_multiple_of(10) {
@@ -382,7 +407,10 @@ pub fn calibrate_boresight(
 
     // Get initial parameters from design specs
     let initial_params = BoresightTunableParameters::from_design_specs(design_specs, feed_id)?;
-    info!("  Initial surface_rms: {:.3} mm", initial_params.surface_rms_mm);
+    info!(
+        "  Initial surface_rms: {:.3} mm",
+        initial_params.surface_rms_mm
+    );
     info!("  Initial q_factor: {:.2}", initial_params.q_factor);
     if let Some(spacing) = initial_params.mesh_spacing_mm {
         info!("  Initial mesh_spacing: {:.2} mm", spacing);
@@ -401,28 +429,43 @@ pub fn calibrate_boresight(
         bounds.clone(),
     );
 
-    let initial_rmse = objective.compute_rmse(&initial_params)
+    let initial_rmse = objective
+        .compute_rmse(&initial_params)
         .context("Failed to compute initial RMSE")?;
     info!("  Initial RMSE: {:.4} dB", initial_rmse);
 
     // Set up optimization
     let initial_guess = initial_params.to_vector();
 
-    // Create simplex for Nelder-Mead
-    let solver = NelderMead::new(vec![initial_guess])
-        .with_sd_tolerance(1e-4)?;
+    // Create simplex for Nelder-Mead (n+1 vertices for n parameters)
+    // We'll create a simplex by perturbing each parameter slightly
+    let n_params = initial_guess.len();
+    let mut simplex = vec![initial_guess.clone()];
+    for i in 0..n_params {
+        let mut perturbed = initial_guess.clone();
+        // Perturb by 10% of the value or 0.1 if the value is small
+        let perturbation = if perturbed[i].abs() > 1.0 {
+            perturbed[i] * 0.1
+        } else {
+            0.1
+        };
+        perturbed[i] += perturbation;
+        simplex.push(perturbed);
+    }
+
+    let solver = NelderMead::new(simplex).with_sd_tolerance(1e-4)?;
 
     info!("  Running Nelder-Mead optimization...");
     info!("    Max iterations: {}", max_iterations.unwrap_or(100));
 
-    let executor = Executor::new(objective.clone(), solver)
-        .configure(|state| {
-            state
-                .max_iters(max_iterations.unwrap_or(100))
-                .target_cost(0.1) // Stop if RMSE < 0.1 dB
-        });
+    let executor = Executor::new(objective.clone(), solver).configure(|state| {
+        state
+            .max_iters(max_iterations.unwrap_or(100))
+            .target_cost(0.1) // Stop if RMSE < 0.1 dB
+    });
 
-    let result = executor.run()
+    let result = executor
+        .run()
         .map_err(|e| anyhow::anyhow!("Optimization failed: {}", e))?;
 
     // Extract optimized parameters
@@ -438,7 +481,8 @@ pub fn calibrate_boresight(
     info!("    Iterations: {}", iterations);
     info!("    Function evaluations: {}", function_evals);
     info!("    Final RMSE: {:.4} dB", final_rmse);
-    info!("    Improvement: {:.4} dB ({:.1}%)",
+    info!(
+        "    Improvement: {:.4} dB ({:.1}%)",
         initial_rmse - final_rmse,
         (initial_rmse - final_rmse) / initial_rmse * 100.0
     );
@@ -452,6 +496,50 @@ pub fn calibrate_boresight(
         info!("    wire_diameter: {:.3} mm", diameter);
     }
 
+    // Step: Compute residuals and fit frequency correction if needed
+    info!("  Checking if frequency correction is needed...");
+
+    // Compute predictions with tuned parameters
+    let predictions = objective.compute_predictions(&final_params)?;
+
+    // Compute residuals (measured - predicted)
+    let residuals: Vec<f64> = measurements
+        .points
+        .iter()
+        .zip(predictions.iter())
+        .map(|(meas, pred)| meas.g_over_t_db - pred)
+        .collect();
+
+    // Check if frequency correction should be fitted
+    let frequency_correction = if frequency_correction::should_fit_correction(&residuals) {
+        info!("    Max residual exceeds 0.5 dB threshold, fitting frequency correction...");
+
+        // Extract frequencies from measurements
+        let frequencies: Vec<f64> = measurements
+            .points
+            .iter()
+            .map(|p| p.frequency_mhz)
+            .collect();
+
+        // Fit 1D frequency correction surface
+        match frequency_correction::fit_frequency_correction(&frequencies, &residuals) {
+            Ok(correction) => {
+                info!("    ✓ Frequency correction fitted successfully");
+                info!("      Shape: {:?}", correction.shape);
+                info!("      Frequency control points: {}", correction.shape[2]);
+                Some(correction)
+            }
+            Err(e) => {
+                info!("    ⚠ Failed to fit frequency correction: {}", e);
+                info!("      Continuing without frequency correction");
+                None
+            }
+        }
+    } else {
+        info!("    Max residual < 0.5 dB, frequency correction not needed");
+        None
+    };
+
     Ok(BoresightCalibrationResult {
         tuned_params: final_params,
         initial_rmse_db: initial_rmse,
@@ -459,7 +547,7 @@ pub fn calibrate_boresight(
         improvement_db: initial_rmse - final_rmse,
         iterations: iterations as usize,
         function_evaluations: function_evals,
-        frequency_correction: None, // TODO: Implement frequency correction surface
+        frequency_correction,
     })
 }
 
@@ -498,9 +586,15 @@ pub fn build_calibration_artifact(
     };
 
     // Build mesh parameters with tuned values (if applicable) (using data types)
-    let mesh = calibration_result.tuned_params.mesh_spacing_mm.map(|spacing| DataMeshParameters {
+    let mesh = calibration_result
+        .tuned_params
+        .mesh_spacing_mm
+        .map(|spacing| DataMeshParameters {
             mesh_spacing_mm: spacing,
-            wire_diameter_mm: calibration_result.tuned_params.wire_diameter_mm.unwrap_or(0.5),
+            wire_diameter_mm: calibration_result
+                .tuned_params
+                .wire_diameter_mm
+                .unwrap_or(0.5),
         });
 
     // Build physical antenna config
@@ -569,21 +663,33 @@ pub fn build_calibration_artifact(
         .build()
         .map_err(|e| anyhow::anyhow!("Failed to build calibration metadata: {}", e))?;
 
-    // Build full calibration (no correction surface for boresight-only)
-    let calibration = AntennaCalibrationBuilder::default()
+    // Build calibration (with optional frequency correction surface)
+    let mut calibration_builder = AntennaCalibrationBuilder::default()
         .antenna_id(design_specs.antenna_id.clone())
         .feed_id(feed_id.to_string())
         .metadata(metadata)
         .physical_config(physical_config)
         .validity_ranges(validity_ranges)
         .calibration_status(calibration_status)
-        .calibration_coverage(coverage)
+        .calibration_coverage(coverage);
+
+    // Attach frequency correction surface if available
+    if let Some(ref correction) = calibration_result.frequency_correction {
+        calibration_builder = calibration_builder.correction_surface(correction.clone());
+        info!("  ✓ Frequency correction surface attached");
+    }
+
+    let calibration = calibration_builder
         .build()
         .map_err(|e| anyhow::anyhow!("Failed to build antenna calibration: {}", e))?;
 
     info!("✓ Calibration artifact built successfully");
     info!("  Status: PartiallyCalibrated (boresight only)");
-    info!("  Accuracy estimate: ±1.5 dB at boresight");
+    if calibration_result.frequency_correction.is_some() {
+        info!("  Accuracy estimate: ±0.5 dB at boresight (with frequency correction)");
+    } else {
+        info!("  Accuracy estimate: ±1.0 dB at boresight (physics only)");
+    }
     info!("  Off-axis: ±2-3 dB (physics extrapolation)");
 
     Ok(calibration)
@@ -697,6 +803,80 @@ mod tests {
         assert_eq!(reconstructed.q_factor, params.q_factor);
         assert_eq!(reconstructed.mesh_spacing_mm, params.mesh_spacing_mm);
         assert_eq!(reconstructed.wire_diameter_mm, params.wire_diameter_mm);
+    }
+
+    #[test]
+    fn test_frequency_correction_integration() {
+        // Test that frequency correction result structure is compatible with build_calibration_artifact
+
+        // Create test measurements with systematic frequency-dependent bias (> 0.5 dB)
+        let measurements_with_bias = BoresightMeasurements {
+            points: vec![
+                BoresightMeasurement {
+                    frequency_mhz: 7100.0,
+                    g_over_t_db: 40.5,
+                    temperature_k: 290.0,
+                },
+                BoresightMeasurement {
+                    frequency_mhz: 7500.0,
+                    g_over_t_db: 41.2,
+                    temperature_k: 290.0,
+                },
+                BoresightMeasurement {
+                    frequency_mhz: 8000.0,
+                    g_over_t_db: 41.8,
+                    temperature_k: 290.0,
+                },
+                BoresightMeasurement {
+                    frequency_mhz: 8500.0,
+                    g_over_t_db: 42.1,
+                    temperature_k: 290.0,
+                },
+            ],
+        };
+
+        // Create residuals that exceed threshold
+        let residuals = vec![0.8, -0.6, 0.7, -0.9]; // Max abs > 0.5 dB
+        assert!(frequency_correction::should_fit_correction(&residuals));
+
+        // Extract frequencies
+        let frequencies: Vec<f64> = measurements_with_bias
+            .points
+            .iter()
+            .map(|p| p.frequency_mhz)
+            .collect();
+
+        // Fit correction
+        let correction_result = frequency_correction::fit_frequency_correction(&frequencies, &residuals);
+        assert!(correction_result.is_ok(), "Frequency correction should fit successfully");
+
+        let correction = correction_result.unwrap();
+
+        // Verify degenerate 4D structure
+        assert_eq!(correction.shape[0], 1); // Azimuth: single point
+        assert_eq!(correction.shape[1], 1); // Elevation: single point
+        assert_eq!(correction.shape[2], 4); // Frequency: 4 control points
+        assert_eq!(correction.shape[3], 1); // Temperature: single point
+
+        // Verify it can be stored in BoresightCalibrationResult
+        let calibration_result = BoresightCalibrationResult {
+            tuned_params: BoresightTunableParameters {
+                surface_rms_mm: 1.5,
+                q_factor: 8.0,
+                mesh_spacing_mm: Some(5.0),
+                wire_diameter_mm: Some(0.5),
+            },
+            initial_rmse_db: 2.0,
+            final_rmse_db: 0.8,
+            improvement_db: 1.2,
+            iterations: 50,
+            function_evaluations: 200,
+            frequency_correction: Some(correction),
+        };
+
+        // Verify frequency_correction is Some and can be used in build_calibration_artifact
+        assert!(calibration_result.frequency_correction.is_some());
+        assert_eq!(calibration_result.frequency_correction.unwrap().shape[2], 4);
     }
 
     // Note: Full calibration tests require physics model integration

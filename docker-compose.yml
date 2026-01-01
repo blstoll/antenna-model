@@ -1,0 +1,92 @@
+version: '3.8'
+
+services:
+  antenna-model:
+    image: antenna-model:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Optional build args for versioning
+        VERSION: ${VERSION:-0.1.0}
+    container_name: antenna-model-service
+
+    # Port mapping: host:container
+    ports:
+      - "3000:3000"
+
+    # Environment variables (override defaults from Dockerfile)
+    environment:
+      - SERVICE_HOST=0.0.0.0
+      - SERVICE_PORT=3000
+      - RUST_LOG=${RUST_LOG:-info}
+      - CONFIG_PATH=/app/config/service.yaml
+
+    # Volume mounts for development (optional, comment out for production-like testing)
+    # volumes:
+    #   - ./config:/app/config:ro
+    #   - ./calibration_data:/app/calibration_data:ro
+
+    # Health check using curl (requires adding curl to compose or using http check)
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+    # Resource limits (adjust based on performance requirements)
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+    # Restart policy
+    restart: unless-stopped
+
+    # Network configuration
+    networks:
+      - antenna-network
+
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Optional: Add a simple HTTP client container for testing
+  # Uncomment to include a testing container with curl/wget
+  # test-client:
+  #   image: curlimages/curl:latest
+  #   container_name: antenna-model-test-client
+  #   networks:
+  #     - antenna-network
+  #   command:
+  #     - /bin/sh
+  #     - -c
+  #     - |
+  #       echo "Waiting for service to be ready..."
+  #       sleep 5
+  #       echo "Testing /health endpoint..."
+  #       curl -f http://antenna-model:3000/health || exit 1
+  #       echo "Testing /status endpoint..."
+  #       curl -f http://antenna-model:3000/status || exit 1
+  #       echo "All tests passed!"
+  #   depends_on:
+  #     antenna-model:
+  #       condition: service_healthy
+
+networks:
+  antenna-network:
+    driver: bridge
+    name: antenna-model-network
+
+# Optional: Named volumes for persistent data (if needed in future)
+# volumes:
+#   calibration-data:
+#     driver: local

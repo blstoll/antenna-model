@@ -11,6 +11,13 @@
 //! - Validation and quality metrics
 //! - Calibration artifact generation and serialization
 
+// Compiler and linter configuration
+#![deny(unsafe_code)]
+// Allow missing docs for internal calibration tool details
+#![allow(missing_docs, missing_debug_implementations)]
+// Allow unwrap/expect in calibration tool (CLI, not production service)
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 pub mod antenna_config;
 pub mod boresight_calibration;
 pub mod correction_surface;
@@ -40,22 +47,20 @@ pub use parser::{
 };
 
 pub use validator::{
-    validate_calibration, ValidationConfig, ValidationReport, CrossValidationResults,
-    OutlierPoint, FrequencyBandStats, AngularRegionStats, ValidationError,
+    validate_calibration, AngularRegionStats, CrossValidationResults, FrequencyBandStats,
+    OutlierPoint, ValidationConfig, ValidationError, ValidationReport,
 };
 
 pub use serializer::{
-    save_artifact, load_artifact, export_metadata_json, export_validation_json,
-    CalibrationArtifact, ArtifactMetadata, SerializationError, artifact_format_info,
+    artifact_format_info, export_metadata_json, export_validation_json, load_artifact,
+    save_artifact, ArtifactMetadata, CalibrationArtifact, SerializationError,
 };
 
-pub use design_specs_loader::{
-    DesignSpecs, FeedSpecs, MeshSpecs, ReflectorSpecs, TuningBounds,
-};
+pub use design_specs_loader::{DesignSpecs, FeedSpecs, MeshSpecs, ReflectorSpecs, TuningBounds};
 
 pub use boresight_calibration::{
-    calibrate_boresight, build_calibration_artifact, BoresightMeasurement,
-    BoresightMeasurements, BoresightTunableParameters, BoresightCalibrationResult,
+    build_calibration_artifact, calibrate_boresight, BoresightCalibrationResult,
+    BoresightMeasurement, BoresightMeasurements, BoresightTunableParameters,
 };
 
 pub use frequency_correction::{

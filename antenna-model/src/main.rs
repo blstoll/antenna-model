@@ -82,7 +82,10 @@ fn load_configuration() -> ServiceConfig {
         }
         Err(e) => {
             // Log warning and use defaults if config file is missing or invalid
-            eprintln!("Warning: Failed to load configuration from {}: {}", config_path, e);
+            eprintln!(
+                "Warning: Failed to load configuration from {}: {}",
+                config_path, e
+            );
             eprintln!("Using default configuration values");
             ServiceConfig::with_defaults()
         }

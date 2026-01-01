@@ -486,10 +486,7 @@ impl AntennaConfigEntry {
                 if self.calibration_file.is_none() {
                     return Err(ConfigError::InvalidValue {
                         key: format!("antenna.{}.calibration_file", self.id),
-                        reason: format!(
-                            "{} antennas require a calibration_file",
-                            status
-                        ),
+                        reason: format!("{} antennas require a calibration_file", status),
                     });
                 }
             }
@@ -613,21 +610,30 @@ impl FeedSpecConfig {
 
         if self.q_factor < 0.0 || self.q_factor > 20.0 {
             return Err(ConfigError::InvalidValue {
-                key: format!("antenna.{}.design_specs.feed.{}.q_factor", antenna_id, self.id),
+                key: format!(
+                    "antenna.{}.design_specs.feed.{}.q_factor",
+                    antenna_id, self.id
+                ),
                 reason: "must be between 0 and 20".to_string(),
             });
         }
 
         if self.frequency_range[0] >= self.frequency_range[1] {
             return Err(ConfigError::InvalidValue {
-                key: format!("antenna.{}.design_specs.feed.{}.frequency_range", antenna_id, self.id),
+                key: format!(
+                    "antenna.{}.design_specs.feed.{}.frequency_range",
+                    antenna_id, self.id
+                ),
                 reason: "min frequency must be less than max frequency".to_string(),
             });
         }
 
         if self.frequency_range[0] <= 0.0 {
             return Err(ConfigError::InvalidValue {
-                key: format!("antenna.{}.design_specs.feed.{}.frequency_range", antenna_id, self.id),
+                key: format!(
+                    "antenna.{}.design_specs.feed.{}.frequency_range",
+                    antenna_id, self.id
+                ),
                 reason: "frequencies must be positive".to_string(),
             });
         }
@@ -676,14 +682,20 @@ impl CalibrationCoverageConfig {
 
         if self.elevation_range[0] > self.elevation_range[1] {
             return Err(ConfigError::InvalidValue {
-                key: format!("antenna.{}.calibration_coverage.elevation_range", antenna_id),
+                key: format!(
+                    "antenna.{}.calibration_coverage.elevation_range",
+                    antenna_id
+                ),
                 reason: "min must be <= max".to_string(),
             });
         }
 
         if self.frequency_range[0] > self.frequency_range[1] {
             return Err(ConfigError::InvalidValue {
-                key: format!("antenna.{}.calibration_coverage.frequency_range", antenna_id),
+                key: format!(
+                    "antenna.{}.calibration_coverage.frequency_range",
+                    antenna_id
+                ),
                 reason: "min must be <= max".to_string(),
             });
         }
@@ -888,10 +900,16 @@ antennas:
         assert_eq!(config.antennas.len(), 2);
         assert_eq!(config.antennas[0].id, "antenna_1");
         assert!(config.antennas[0].enabled);
-        assert_eq!(config.antennas[0].calibration_file, Some("antenna_1.bin".to_string()));
+        assert_eq!(
+            config.antennas[0].calibration_file,
+            Some("antenna_1.bin".to_string())
+        );
         assert_eq!(config.antennas[1].id, "antenna_2");
         assert!(!config.antennas[1].enabled);
-        assert_eq!(config.antennas[1].calibration_file, Some("antenna_2.bin".to_string()));
+        assert_eq!(
+            config.antennas[1].calibration_file,
+            Some("antenna_2.bin".to_string())
+        );
 
         let enabled = config.enabled_antennas();
         assert_eq!(enabled.len(), 1);
@@ -910,7 +928,7 @@ antennas:
                 AntennaConfigEntry {
                     id: "antenna_1".to_string(),
                     name: "Antenna 1".to_string(),
-                    calibration_status: None,  // Defaults to fully_calibrated
+                    calibration_status: None, // Defaults to fully_calibrated
                     calibration_file: Some("antenna_1.bin".to_string()),
                     calibration_coverage: None,
                     design_specs: None,
@@ -1330,8 +1348,11 @@ antennas:
                     // Validate that enabled uncalibrated antennas have design_specs
                     for antenna in config.enabled_antennas() {
                         if antenna.get_calibration_status() == "uncalibrated" {
-                            assert!(antenna.design_specs.is_some(),
-                                "Uncalibrated antenna {} missing design_specs", antenna.id);
+                            assert!(
+                                antenna.design_specs.is_some(),
+                                "Uncalibrated antenna {} missing design_specs",
+                                antenna.id
+                            );
                         }
                     }
                 }

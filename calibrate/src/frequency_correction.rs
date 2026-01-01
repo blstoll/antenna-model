@@ -121,10 +121,7 @@ pub fn should_fit_correction(residuals: &[f64]) -> bool {
 /// let correction = fit_frequency_correction(&frequencies, &residuals).unwrap();
 /// assert_eq!(correction.shape, [1, 1, 4, 1]);
 /// ```
-pub fn fit_frequency_correction(
-    frequencies: &[f64],
-    residuals: &[f64],
-) -> Result<BSplineModel4D> {
+pub fn fit_frequency_correction(frequencies: &[f64], residuals: &[f64]) -> Result<BSplineModel4D> {
     // Validate inputs
     validate_inputs(frequencies, residuals)?;
 
@@ -472,7 +469,13 @@ mod tests {
         assert_eq!(bspline.knots_frequency[1], bspline.knots_frequency[2]);
 
         let n = bspline.knots_frequency.len();
-        assert_eq!(bspline.knots_frequency[n - 1], bspline.knots_frequency[n - 2]);
-        assert_eq!(bspline.knots_frequency[n - 2], bspline.knots_frequency[n - 3]);
+        assert_eq!(
+            bspline.knots_frequency[n - 1],
+            bspline.knots_frequency[n - 2]
+        );
+        assert_eq!(
+            bspline.knots_frequency[n - 2],
+            bspline.knots_frequency[n - 3]
+        );
     }
 }

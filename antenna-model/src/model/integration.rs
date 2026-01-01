@@ -31,9 +31,9 @@ use std::f64::consts::PI;
 
 use crate::error::{ComputationError, ComputationResult};
 use crate::model::{
-    coordinates::ApertureCoordinates, geometry::AntennaConfiguration,
-    illumination::illumination_amplitude, phase::phase_total, wavelength_from_frequency,
-    wavenumber,
+    coordinates::ApertureCoordinates, edge_cases::higher_order_aberrations,
+    geometry::AntennaConfiguration, illumination::illumination_amplitude, phase::phase_total,
+    wavelength_from_frequency, wavenumber,
 };
 
 /// Complex integration result
@@ -75,6 +75,12 @@ pub struct IntegrationParams {
 
     /// Maximum number of refinement iterations
     pub max_iterations: usize,
+
+    /// Include higher-order Seidel aberrations in phase computation
+    ///
+    /// When true, adds astigmatism, field curvature, and distortion terms
+    /// for feeds with moderate offsets (0.3f - 0.5f).
+    pub use_higher_order_aberrations: bool,
 }
 
 impl Default for IntegrationParams {
@@ -87,6 +93,7 @@ impl Default for IntegrationParams {
             relative_tolerance: 1e-4, // 0.01% relative error
             absolute_tolerance: 1e-8, // Absolute error floor
             max_iterations: 5,        // Refinement iteration limit
+            use_higher_order_aberrations: false,
         }
     }
 }
@@ -102,6 +109,7 @@ impl IntegrationParams {
             relative_tolerance: 1e-3,
             absolute_tolerance: 1e-7,
             max_iterations: 3,
+            use_higher_order_aberrations: false,
         }
     }
 
@@ -115,6 +123,28 @@ impl IntegrationParams {
             relative_tolerance: 1e-6,
             absolute_tolerance: 1e-10,
             max_iterations: 8,
+            use_higher_order_aberrations: false,
+        }
+    }
+
+    /// Enable higher-order aberrations for moderate feed offsets
+    pub fn with_higher_order_aberrations(mut self) -> Self {
+        self.use_higher_order_aberrations = true;
+        self
+    }
+
+    /// Create adaptive integration parameters with doubled sampling density
+    ///
+    /// Used near pattern nulls where rapid phase changes require finer sampling
+    /// to maintain numerical accuracy.
+    pub fn with_adaptive_refinement(&self) -> Self {
+        Self {
+            min_rho_points: self.min_rho_points * 2,
+            max_rho_points: self.max_rho_points * 2,
+            min_phi_points: self.min_phi_points * 2,
+            max_phi_points: self.max_phi_points * 2,
+            relative_tolerance: self.relative_tolerance / 2.0, // Tighter tolerance
+            ..self.clone()
         }
     }
 }
@@ -212,27 +242,52 @@ pub fn integrate_aperture(
     let mut previous_result = Complex64::new(0.0, 0.0);
     let mut num_evaluations = 0;
 
-    // Adaptive refinement loop
+    // Adaptive refinement loop: progressively refine the integration grid
+    // until the result converges or we reach the maximum grid density.
+    //
+    // Strategy:
+    // 1. Start with coarse grid (min_rho_points × min_phi_points)
+    // 2. Compute integral with current grid
+    // 3. Compare with previous iteration to estimate error
+    // 4. If converged, return; otherwise refine grid by 50% and repeat
+    // 5. Stop when grid reaches maximum size or convergence achieved
     for iteration in 0..params.max_iterations {
-        // Perform integration with current grid size
+        // Perform 2D integration using composite Simpson's rule
+        // on the current grid (n_rho × n_phi points)
         let (result, evals) = integrate_2d_simpson(
-            theta, phi, config, k, wavelength, 0.0, rho_max, phi_min, phi_max, n_rho, n_phi,
+            theta,
+            phi,
+            config,
+            k,
+            wavelength,
+            0.0,       // rho starts at aperture center
+            rho_max,   // rho extends to aperture edge (D/2)
+            phi_min,   // azimuthal angle: 0
+            phi_max,   // azimuthal angle: 2π (full circle)
+            n_rho,
+            n_phi,
+            params.use_higher_order_aberrations,
         );
 
         num_evaluations += evals;
 
-        // Check convergence (except on first iteration)
+        // Check convergence by comparing with previous iteration
+        // (skip on first iteration since we have no previous result)
         if iteration > 0 {
+            // Compute difference between current and previous result
             let difference = (result - previous_result).norm();
             let magnitude = result.norm();
 
+            // Calculate relative error (or absolute if magnitude is too small)
+            // This handles both large and small field values correctly
             let relative_error = if magnitude > params.absolute_tolerance {
                 difference / magnitude
             } else {
                 difference
             };
 
-            // Converged?
+            // Convergence test: relative error < tolerance OR absolute difference < tolerance
+            // We use OR because for very small fields, absolute error is more meaningful
             if relative_error < params.relative_tolerance || difference < params.absolute_tolerance
             {
                 return Ok(IntegrationResult {
@@ -243,13 +298,17 @@ pub fn integrate_aperture(
             }
         }
 
+        // Store current result for next iteration's convergence check
         previous_result = result;
 
-        // Refine grid for next iteration
+        // Refine grid for next iteration: increase both dimensions by 50%
+        // (grid grows from min → max over iterations)
+        // Clamp to maximum to avoid unbounded growth
         n_rho = (n_rho * 3 / 2).min(params.max_rho_points);
         n_phi = (n_phi * 3 / 2).min(params.max_phi_points);
 
-        // Stop if we've hit maximum grid size
+        // If we've reached maximum grid size in both dimensions,
+        // stop refinement (we can't improve further)
         if n_rho >= params.max_rho_points && n_phi >= params.max_phi_points {
             break;
         }
@@ -285,6 +344,7 @@ fn integrate_2d_simpson(
     phi_max: f64,
     n_rho: usize,
     n_phi: usize,
+    use_higher_order_aberrations: bool,
 ) -> (Complex64, usize) {
     // Ensure odd number of points for Simpson's rule
     let n_rho = if n_rho.is_multiple_of(2) {
@@ -317,8 +377,16 @@ fn integrate_2d_simpson(
             let rho_weight = simpson_weight(i, n_rho);
 
             // Evaluate integrand
-            let integrand_value =
-                aperture_integrand(rho, phi_prime, theta, phi, config, k, wavelength);
+            let integrand_value = aperture_integrand(
+                rho,
+                phi_prime,
+                theta,
+                phi,
+                config,
+                k,
+                wavelength,
+                use_higher_order_aberrations,
+            );
 
             num_evaluations += 1;
 
@@ -379,6 +447,7 @@ fn simpson_weight(i: usize, n: usize) -> f64 {
 /// # Returns
 /// Complex integrand value
 #[inline]
+#[allow(clippy::too_many_arguments)]
 fn aperture_integrand(
     rho: f64,
     phi_prime: f64,
@@ -387,6 +456,7 @@ fn aperture_integrand(
     config: &AntennaConfiguration,
     k: f64,
     _wavelength: f64,
+    use_higher_order_aberrations: bool,
 ) -> Complex64 {
     // Calculate illumination amplitude
     let amplitude =
@@ -409,13 +479,25 @@ fn aperture_integrand(
     let mesh_spacing = config.mesh.as_ref().map_or(0.0, |m| m.spacing);
 
     // Surface error at this point (ρ, φ')
-    // TODO: Implement proper surface error model (Zernike, measured surface, etc.)
-    // For now, use ideal surface (0.0). The Ruze efficiency factor handles
-    // the statistical effect of surface RMS on overall gain.
+    //
+    // FUTURE ENHANCEMENT: Spatially-varying surface error model
+    // Currently uses ideal surface (surface_error = 0.0) for all aperture points.
+    // The Ruze efficiency factor in pattern.rs handles the statistical effect
+    // of surface RMS on overall gain, which is sufficient for most applications.
+    //
+    // For higher fidelity modeling of specific antennas with measured surface maps:
+    // - Option 1: Zernike polynomial expansion of measured surface
+    // - Option 2: Interpolate from measured surface map (x, y, z points)
+    // - Option 3: Use correction surface from calibration (already implemented)
+    //
+    // Rationale for current approach:
+    // - Calibration correction surface (B-spline) captures measured deviations
+    // - Ruze statistical model is accurate for random surface errors
+    // - Explicit surface modeling adds complexity with marginal accuracy gain
     let surface_error = 0.0;
 
     // Calculate total phase
-    let total_phase = phase_total(
+    let mut total_phase = phase_total(
         aperture,
         theta,
         phi,
@@ -427,6 +509,19 @@ fn aperture_integrand(
         mesh_spacing,
         k,
     );
+
+    // Add higher-order Seidel aberrations if enabled
+    // These include astigmatism, field curvature, and distortion terms
+    if use_higher_order_aberrations && feed_displacement > 0.0 {
+        total_phase += higher_order_aberrations(
+            rho,
+            phi_prime,
+            feed_displacement,
+            feed_displacement_angle,
+            config.reflector.focal_length,
+            k,
+        );
+    }
 
     // Combine: A(ρ,φ') · exp(j·Ψ)
     let phase_factor = Complex64::new(0.0, total_phase).exp();
@@ -558,7 +653,7 @@ mod tests {
         let k = wavenumber(wavelength);
 
         // On-axis (θ=0, φ=0), center of aperture (ρ=0)
-        let integrand = aperture_integrand(0.0, 0.0, 0.0, 0.0, &config, k, wavelength);
+        let integrand = aperture_integrand(0.0, 0.0, 0.0, 0.0, &config, k, wavelength, false);
 
         // At center, amplitude should be near maximum, phase should be well-defined
         assert!(integrand.norm() > 0.0);
@@ -575,9 +670,17 @@ mod tests {
         let rho = 0.2;
         let theta = 0.1;
 
-        let integrand_0 = aperture_integrand(rho, 0.0, theta, 0.0, &config, k, wavelength);
-        let integrand_90 =
-            aperture_integrand(rho, PI / 2.0, theta, PI / 2.0, &config, k, wavelength);
+        let integrand_0 = aperture_integrand(rho, 0.0, theta, 0.0, &config, k, wavelength, false);
+        let integrand_90 = aperture_integrand(
+            rho,
+            PI / 2.0,
+            theta,
+            PI / 2.0,
+            &config,
+            k,
+            wavelength,
+            false,
+        );
 
         // Magnitudes should be equal due to symmetry
         assert!((integrand_0.norm() - integrand_90.norm()).abs() < 1e-6);
@@ -721,6 +824,7 @@ mod tests {
             2.0 * PI, // phi_max
             17,       // n_rho (odd)
             33,       // n_phi (odd)
+            false,    // use_higher_order_aberrations
         );
 
         // Should produce non-zero result

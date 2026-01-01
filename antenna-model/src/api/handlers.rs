@@ -4,7 +4,7 @@
 
 use crate::api::schemas::{
     BatchGainRequest, BatchGainResponse, CalibrationStatusInfo, ErrorResponse, GainRequest,
-    GainResponse, HeatmapRequest, HeatmapResponse, HealthResponse, StatusResponse,
+    GainResponse, HealthResponse, HeatmapRequest, HeatmapResponse, StatusResponse,
 };
 use crate::api::AppState;
 use crate::service::{compute_gain_from_request, evaluate_batch, generate_heatmap, validator};
@@ -226,8 +226,12 @@ pub async fn compute_gain(
 
             // Map errors to appropriate HTTP status codes and create error response
             let (status_code, error_type) = match &e {
-                crate::error::AntennaModelError::FeedNotFound { .. } => (StatusCode::NOT_FOUND, "feed_not_found"),
-                crate::error::AntennaModelError::InvalidCoordinate { .. } => (StatusCode::BAD_REQUEST, "invalid_coordinate"),
+                crate::error::AntennaModelError::FeedNotFound { .. } => {
+                    (StatusCode::NOT_FOUND, "feed_not_found")
+                }
+                crate::error::AntennaModelError::InvalidCoordinate { .. } => {
+                    (StatusCode::BAD_REQUEST, "invalid_coordinate")
+                }
                 _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
             };
 
@@ -525,7 +529,10 @@ pub async fn list_antennas(
         }
     }
 
-    info!(antenna_count = antennas.len(), "Antenna list request successful");
+    info!(
+        antenna_count = antennas.len(),
+        "Antenna list request successful"
+    );
     Ok(Json(crate::api::schemas::AntennaListResponse { antennas }))
 }
 
@@ -588,7 +595,12 @@ pub async fn get_antenna_details(
     let calibration = state
         .repository
         .get_calibration(&antenna_id, first_feed_id)
-        .expect("Feed should exist");
+        .ok_or_else(|| {
+            poem::Error::from_string(
+                format!("Antenna {}/{} not found", antenna_id, first_feed_id),
+                StatusCode::NOT_FOUND,
+            )
+        })?;
 
     // Build feed information for all feeds
     let mut feeds = Vec::new();
@@ -626,14 +638,15 @@ pub async fn get_antenna_details(
     };
 
     // Build physical parameters
-    let mesh_info = calibration
-        .physical_config
-        .mesh
-        .as_ref()
-        .map(|mesh| crate::api::schemas::MeshInfo {
-            mesh_spacing_mm: mesh.mesh_spacing_mm,
-            wire_diameter_mm: mesh.wire_diameter_mm,
-        });
+    let mesh_info =
+        calibration
+            .physical_config
+            .mesh
+            .as_ref()
+            .map(|mesh| crate::api::schemas::MeshInfo {
+                mesh_spacing_mm: mesh.mesh_spacing_mm,
+                wire_diameter_mm: mesh.wire_diameter_mm,
+            });
 
     let physical_parameters = crate::api::schemas::PhysicalParametersInfo {
         diameter_m: calibration.physical_config.reflector.diameter_m,

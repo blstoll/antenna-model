@@ -244,6 +244,7 @@ pub fn phase_mesh(mesh_spacing: f64, theta_incident: f64, k: f64) -> f64 {
 ///
 /// # Returns
 /// Total phase in radians
+#[inline]
 #[allow(clippy::too_many_arguments)]
 pub fn phase_total(
     aperture: ApertureCoordinates,
@@ -311,6 +312,7 @@ pub trait SurfaceErrorModel {
 }
 
 /// Ideal surface (no errors)
+#[derive(Debug, Clone, Copy)]
 pub struct IdealSurface;
 
 impl SurfaceErrorModel for IdealSurface {
@@ -327,6 +329,7 @@ impl SurfaceErrorModel for IdealSurface {
 ///
 /// Models random surface deviations with Gaussian distribution.
 /// Useful for Monte Carlo simulations and testing.
+#[derive(Debug, Clone)]
 pub struct GaussianSurface {
     /// RMS surface deviation (meters)
     pub rms: f64,
@@ -389,6 +392,7 @@ impl SurfaceErrorModel for GaussianSurface {
 /// - Spherical (Z8): Spherical aberration
 ///
 /// This is a simplified implementation supporting up to 5th order.
+#[derive(Debug, Clone)]
 pub struct ZernikeSurface {
     /// Zernike coefficients (meters)
     /// Index corresponds to Noll ordering
@@ -680,8 +684,10 @@ mod tests {
         let alpha = 0.0;
         let phi_prime = PI; // Away from displacement
 
-        let phase_small = phase_feed_displacement(2.0, phi_prime, delta_feed, alpha, focal_length, k);
-        let phase_large = phase_feed_displacement(8.0, phi_prime, delta_feed, alpha, focal_length, k);
+        let phase_small =
+            phase_feed_displacement(2.0, phi_prime, delta_feed, alpha, focal_length, k);
+        let phase_large =
+            phase_feed_displacement(8.0, phi_prime, delta_feed, alpha, focal_length, k);
 
         assert!(
             phase_large.abs() > phase_small.abs(),

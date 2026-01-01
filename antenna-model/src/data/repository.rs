@@ -80,11 +80,8 @@ impl CalibrationRepository {
         );
 
         // Load antenna configuration
-        let antenna_config = AntennaConfig::from_file(
-            config
-                .antenna_config_file
-                .to_string_lossy().as_ref(),
-        )?;
+        let antenna_config =
+            AntennaConfig::from_file(config.antenna_config_file.to_string_lossy().as_ref())?;
 
         let enabled_antennas = antenna_config.enabled_antennas();
         info!(
@@ -106,10 +103,7 @@ impl CalibrationRepository {
                     if config.fail_fast {
                         return Err(e);
                     } else {
-                        warn!(
-                            "Failed to load antenna '{}': {}",
-                            entry.id, e
-                        );
+                        warn!("Failed to load antenna '{}': {}", entry.id, e);
                         error_count += 1;
                     }
                 }
@@ -200,14 +194,12 @@ impl CalibrationRepository {
         &mut self,
         entry: &AntennaConfigEntry,
     ) -> Result<usize, DataError> {
-        let design = entry.design_specs.as_ref().ok_or_else(|| {
-            DataError::ConfigurationError {
-                reason: format!(
-                    "Uncalibrated antenna '{}' requires design_specs",
-                    entry.id
-                ),
-            }
-        })?;
+        let design = entry
+            .design_specs
+            .as_ref()
+            .ok_or_else(|| DataError::ConfigurationError {
+                reason: format!("Uncalibrated antenna '{}' requires design_specs", entry.id),
+            })?;
 
         let mut loaded_count = 0;
 
@@ -319,11 +311,7 @@ impl CalibrationRepository {
     /// # Returns
     /// * `Some(AntennaCalibration)` - Calibration found
     /// * `None` - No calibration for this antenna-feed combination
-    pub fn get_calibration(
-        &self,
-        antenna_id: &str,
-        feed_id: &str,
-    ) -> Option<AntennaCalibration> {
+    pub fn get_calibration(&self, antenna_id: &str, feed_id: &str) -> Option<AntennaCalibration> {
         let data = self.data.read();
         data.get(antenna_id)
             .and_then(|feeds| feeds.get(feed_id))
@@ -375,11 +363,7 @@ impl CalibrationRepository {
     /// # Returns
     /// * `Some(ValidityRanges)` - Validity ranges found
     /// * `None` - No calibration for this antenna-feed combination
-    pub fn get_validity_ranges(
-        &self,
-        antenna_id: &str,
-        feed_id: &str,
-    ) -> Option<ValidityRanges> {
+    pub fn get_validity_ranges(&self, antenna_id: &str, feed_id: &str) -> Option<ValidityRanges> {
         self.get_calibration(antenna_id, feed_id)
             .map(|cal| cal.validity_ranges)
     }
@@ -946,10 +930,7 @@ antennas:
         let x_band = repo.get_calibration("antenna_multi", "x_band").unwrap();
         assert_eq!(x_band.physical_config.feed.position.0, 0.0);
         assert_eq!(x_band.physical_config.feed.q_factor, 8.5);
-        assert_eq!(
-            x_band.physical_config.feed.phase_center_offset_m,
-            0.01
-        );
+        assert_eq!(x_band.physical_config.feed.phase_center_offset_m, 0.01);
         assert_eq!(x_band.validity_ranges.frequency_min_max, (8000.0, 8500.0));
 
         let ka_band = repo.get_calibration("antenna_multi", "ka_band").unwrap();
@@ -1139,7 +1120,9 @@ antennas:
         assert!(repo.has_calibration("antenna_uncalibrated", "primary"));
 
         // Verify calibrated antenna
-        let cal_calibrated = repo.get_calibration("antenna_calibrated", "x_band").unwrap();
+        let cal_calibrated = repo
+            .get_calibration("antenna_calibrated", "x_band")
+            .unwrap();
         assert!(cal_calibrated.calibration_status.is_none()); // Old format
 
         // Verify uncalibrated antenna

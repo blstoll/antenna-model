@@ -28,8 +28,8 @@ use crate::antenna_config::{AntennaClass, ParameterBounds, TunableParameters};
 use crate::parser::MeasurementData;
 use antenna_model::model::{
     compute_g_over_t, AntennaConfiguration as PhysicsConfig, AntennaConfigurationBuilder,
-    EClockConeCoordinates, FeedParametersBuilder, IntegrationParams,
-    MeshParametersBuilder, ReflectorGeometryBuilder,
+    EClockConeCoordinates, FeedParametersBuilder, IntegrationParams, MeshParametersBuilder,
+    ReflectorGeometryBuilder,
 };
 
 /// Parameters to tune during optimization
@@ -158,7 +158,8 @@ impl ObjectiveFunction {
             .context("Failed to build reflector geometry")?;
 
         // Build feed parameters (at focal point for on-axis configuration)
-        let focal_length = self.antenna_class.geometry.diameter_m * self.antenna_class.geometry.f_over_d;
+        let focal_length =
+            self.antenna_class.geometry.diameter_m * self.antenna_class.geometry.f_over_d;
         let feed = FeedParametersBuilder::default()
             .at_focus(focal_length)
             .q_factor(self.antenna_class.feed.q_factor)
@@ -207,7 +208,9 @@ impl ObjectiveFunction {
             }
         }
         if let Some(diameter) = wire_diameter_mm {
-            if diameter < self.bounds.wire_diameter_mm.0 || diameter > self.bounds.wire_diameter_mm.1 {
+            if diameter < self.bounds.wire_diameter_mm.0
+                || diameter > self.bounds.wire_diameter_mm.1
+            {
                 return Ok(1e10);
             }
         }
@@ -383,7 +386,10 @@ pub fn tune_parameters(
     let solver = NelderMead::new(vec![initial_params]).with_sd_tolerance(1e-6)?;
 
     // Run optimization
-    info!("Running Nelder-Mead optimization (max {} iterations)", max_iters);
+    info!(
+        "Running Nelder-Mead optimization (max {} iterations)",
+        max_iters
+    );
     let result = Executor::new(objective.clone(), solver)
         .configure(|state| state.max_iters(max_iters))
         .run()
@@ -466,10 +472,10 @@ mod tests {
     fn create_synthetic_measurements() -> MeasurementData {
         // Create a few measurement points near boresight
         let points = vec![
-            MeasurementPoint::new(0.0, 0.0, 8400.0, 41.0, 50.0),   // On-axis
-            MeasurementPoint::new(0.0, 0.5, 8400.0, 40.5, 50.0),   // Slight off-axis
-            MeasurementPoint::new(90.0, 0.5, 8400.0, 40.5, 50.0),  // Different clock
-            MeasurementPoint::new(0.0, 1.0, 8400.0, 39.8, 50.0),   // Further off-axis
+            MeasurementPoint::new(0.0, 0.0, 8400.0, 41.0, 50.0), // On-axis
+            MeasurementPoint::new(0.0, 0.5, 8400.0, 40.5, 50.0), // Slight off-axis
+            MeasurementPoint::new(90.0, 0.5, 8400.0, 40.5, 50.0), // Different clock
+            MeasurementPoint::new(0.0, 1.0, 8400.0, 39.8, 50.0), // Further off-axis
             MeasurementPoint::new(180.0, 1.5, 8400.0, 38.5, 50.0), // Sidelobe region
         ];
 

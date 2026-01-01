@@ -14,12 +14,11 @@ use antenna_model::api::schemas::*;
 /// Test health endpoint
 #[tokio::test]
 async fn test_health_endpoint() {
-    let server = TestServer::start().await.expect("Failed to start test server");
-
-    let response: HealthResponse = server
-        .get("/health")
+    let server = TestServer::start()
         .await
-        .expect("Health check failed");
+        .expect("Failed to start test server");
+
+    let response: HealthResponse = server.get("/health").await.expect("Health check failed");
 
     assert_eq!(response.status, "healthy");
 
@@ -29,12 +28,11 @@ async fn test_health_endpoint() {
 /// Test ready endpoint
 #[tokio::test]
 async fn test_ready_endpoint() {
-    let server = TestServer::start().await.expect("Failed to start test server");
-
-    let response: HealthResponse = server
-        .get("/ready")
+    let server = TestServer::start()
         .await
-        .expect("Readiness check failed");
+        .expect("Failed to start test server");
+
+    let response: HealthResponse = server.get("/ready").await.expect("Readiness check failed");
 
     assert_eq!(response.status, "ready");
 
@@ -44,12 +42,11 @@ async fn test_ready_endpoint() {
 /// Test status endpoint
 #[tokio::test]
 async fn test_status_endpoint() {
-    let server = TestServer::start().await.expect("Failed to start test server");
-
-    let response: StatusResponse = server
-        .get("/status")
+    let server = TestServer::start()
         .await
-        .expect("Status check failed");
+        .expect("Failed to start test server");
+
+    let response: StatusResponse = server.get("/status").await.expect("Status check failed");
 
     assert!(!response.version.is_empty());
     // Uptime should be reasonable (u64 is always >= 0, so just check it's set)
@@ -66,7 +63,9 @@ async fn test_status_endpoint() {
 /// Test single gain computation with ECEF coordinates
 #[tokio::test]
 async fn test_single_gain_computation_ecef() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     let request = builders::simple_gain_request_ecef();
 
@@ -98,7 +97,9 @@ async fn test_single_gain_computation_ecef() {
 /// Test single gain computation with Geodetic coordinates
 #[tokio::test]
 async fn test_single_gain_computation_geodetic() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     let request = builders::simple_gain_request_geodetic();
 
@@ -131,12 +132,16 @@ async fn test_single_gain_computation_geodetic() {
 /// Test gain computation with invalid antenna ID
 #[tokio::test]
 async fn test_gain_computation_invalid_antenna() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     let mut request = builders::simple_gain_request_ecef();
     request.antenna_id = "nonexistent_antenna".to_string();
 
-    let result = server.post::<GainResponse, _>("/api/v1/gain", &request).await;
+    let result = server
+        .post::<GainResponse, _>("/api/v1/gain", &request)
+        .await;
 
     assert!(result.is_err(), "Expected error for invalid antenna");
 
@@ -146,12 +151,16 @@ async fn test_gain_computation_invalid_antenna() {
 /// Test gain computation with invalid feed ID
 #[tokio::test]
 async fn test_gain_computation_invalid_feed() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     let mut request = builders::simple_gain_request_ecef();
     request.feed_id = "nonexistent_feed".to_string();
 
-    let result = server.post::<GainResponse, _>("/api/v1/gain", &request).await;
+    let result = server
+        .post::<GainResponse, _>("/api/v1/gain", &request)
+        .await;
 
     assert!(result.is_err(), "Expected error for invalid feed");
 
@@ -161,7 +170,9 @@ async fn test_gain_computation_invalid_feed() {
 /// Test batch gain computation
 #[tokio::test]
 async fn test_batch_gain_computation() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     let request = builders::simple_batch_request(10);
 
@@ -187,7 +198,9 @@ async fn test_batch_gain_computation() {
 /// Test batch with partial failures
 #[tokio::test]
 async fn test_batch_with_failures() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     let mut request = builders::simple_batch_request(5);
     // Make one request invalid
@@ -211,7 +224,9 @@ async fn test_batch_with_failures() {
 /// Test empty batch request
 #[tokio::test]
 async fn test_empty_batch() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     let request = BatchGainRequest {
         evaluations: vec![],
@@ -232,7 +247,9 @@ async fn test_empty_batch() {
 /// Test batch size limit
 #[tokio::test]
 async fn test_batch_size_limit() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     // Create batch exceeding limit (1000)
     let request = builders::simple_batch_request(1001);
@@ -252,7 +269,9 @@ async fn test_batch_size_limit() {
 /// Test heatmap generation (rectangular grid)
 #[tokio::test]
 async fn test_heatmap_generation_rectangular() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     let request = builders::simple_heatmap_request();
 
@@ -279,7 +298,9 @@ async fn test_heatmap_generation_rectangular() {
 /// Test heatmap with small grid
 #[tokio::test]
 async fn test_heatmap_small_grid() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     let mut request = builders::simple_heatmap_request();
     // 3x3 grid
@@ -310,7 +331,9 @@ async fn test_heatmap_small_grid() {
 /// Test antenna list endpoint
 #[tokio::test]
 async fn test_list_antennas() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     let response: AntennaListResponse = server
         .get("/api/v1/antennas")
@@ -321,9 +344,11 @@ async fn test_list_antennas() {
 
     // Should have test antennas
     let antenna_ids: Vec<String> = response.antennas.iter().map(|a| a.id.clone()).collect();
-    assert!(antenna_ids.contains(&"test_simple".to_string()) ||
-            antenna_ids.contains(&"test_uncalibrated".to_string()),
-            "Expected test antennas to be loaded");
+    assert!(
+        antenna_ids.contains(&"test_simple".to_string())
+            || antenna_ids.contains(&"test_uncalibrated".to_string()),
+        "Expected test antennas to be loaded"
+    );
 
     server.shutdown().await;
 }
@@ -331,7 +356,9 @@ async fn test_list_antennas() {
 /// Test antenna details endpoint
 #[tokio::test]
 async fn test_get_antenna_details() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     let response: AntennaDetailsResponse = server
         .get("/api/v1/antennas/test_simple")
@@ -350,7 +377,9 @@ async fn test_get_antenna_details() {
 /// Test antenna details for nonexistent antenna
 #[tokio::test]
 async fn test_get_antenna_details_not_found() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     let result = server
         .get::<AntennaDetailsResponse>("/api/v1/antennas/nonexistent")
@@ -364,7 +393,9 @@ async fn test_get_antenna_details_not_found() {
 /// Test list feeds for antenna
 #[tokio::test]
 async fn test_list_feeds() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     // The endpoint returns { "feeds": [...] }, not a direct array
     let response: serde_json::Value = server
@@ -385,7 +416,9 @@ async fn test_list_feeds() {
 /// Test feed details endpoint
 #[tokio::test]
 async fn test_get_feed_details() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     let response: FeedInfo = server
         .get("/api/v1/antennas/test_simple/feeds/primary")
@@ -402,7 +435,9 @@ async fn test_get_feed_details() {
 /// Test feed details for nonexistent feed
 #[tokio::test]
 async fn test_get_feed_details_not_found() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     let result = server
         .get::<FeedInfo>("/api/v1/antennas/test_simple/feeds/nonexistent")
@@ -416,7 +451,9 @@ async fn test_get_feed_details_not_found() {
 /// Test multi-feed antenna
 #[tokio::test]
 async fn test_multi_feed_antenna() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     // Test large antenna with multiple feeds
     let x_band_request = builders::multi_feed_request("x_band", 7200.0);

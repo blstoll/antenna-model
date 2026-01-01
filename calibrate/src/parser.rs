@@ -397,9 +397,7 @@ async fn fetch_from_s3(s3_url: &str) -> Result<String> {
     let key = url_parts[1];
 
     // Create S3 client
-    let config = aws_config::defaults(BehaviorVersion::latest())
-        .load()
-        .await;
+    let config = aws_config::defaults(BehaviorVersion::latest()).load().await;
     let client = S3Client::new(&config);
 
     // Fetch object
@@ -455,7 +453,11 @@ pub fn create_sample_csv<P: AsRef<Path>>(path: P, num_points: usize) -> Result<(
         let base_g_over_t = 41.5; // Peak G/T
         let g_over_t = base_g_over_t - gain_loss;
 
-        writeln!(file, "{},{},{},{},{}", e_clock, e_cone, freq, g_over_t, temperature_k)?;
+        writeln!(
+            file,
+            "{},{},{},{},{}",
+            e_clock, e_cone, freq, g_over_t, temperature_k
+        )?;
     }
 
     Ok(())

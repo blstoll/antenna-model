@@ -89,29 +89,59 @@ pub fn evaluate_correction(
     temperature_k: f64,
 ) -> Result<CorrectionResult> {
     // Validate inputs
-    if !azimuth_deg.is_finite() || !elevation_deg.is_finite() || !frequency_mhz.is_finite() || !temperature_k.is_finite() {
+    if !azimuth_deg.is_finite()
+        || !elevation_deg.is_finite()
+        || !frequency_mhz.is_finite()
+        || !temperature_k.is_finite()
+    {
         return Err(ComputationError::InterpolationFailed {
             azimuth: azimuth_deg,
             elevation: elevation_deg,
             frequency: frequency_mhz,
             temperature: temperature_k,
             reason: "Non-finite input value".to_string(),
-        }.into());
+        }
+        .into());
     }
 
     // Find knot span indices for each dimension
-    let (az_idx, az_extrapolated) = find_knot_span(&model.knots_azimuth, azimuth_deg, model.spline_order);
-    let (el_idx, el_extrapolated) = find_knot_span(&model.knots_elevation, elevation_deg, model.spline_order);
-    let (freq_idx, freq_extrapolated) = find_knot_span(&model.knots_frequency, frequency_mhz, model.spline_order);
-    let (temp_idx, temp_extrapolated) = find_knot_span(&model.knots_temperature, temperature_k, model.spline_order);
+    let (az_idx, az_extrapolated) =
+        find_knot_span(&model.knots_azimuth, azimuth_deg, model.spline_order);
+    let (el_idx, el_extrapolated) =
+        find_knot_span(&model.knots_elevation, elevation_deg, model.spline_order);
+    let (freq_idx, freq_extrapolated) =
+        find_knot_span(&model.knots_frequency, frequency_mhz, model.spline_order);
+    let (temp_idx, temp_extrapolated) =
+        find_knot_span(&model.knots_temperature, temperature_k, model.spline_order);
 
-    let any_extrapolated = az_extrapolated || el_extrapolated || freq_extrapolated || temp_extrapolated;
+    let any_extrapolated =
+        az_extrapolated || el_extrapolated || freq_extrapolated || temp_extrapolated;
 
     // Evaluate B-spline basis functions for each dimension
-    let az_basis = evaluate_basis_functions(&model.knots_azimuth, az_idx, azimuth_deg, model.spline_order);
-    let el_basis = evaluate_basis_functions(&model.knots_elevation, el_idx, elevation_deg, model.spline_order);
-    let freq_basis = evaluate_basis_functions(&model.knots_frequency, freq_idx, frequency_mhz, model.spline_order);
-    let temp_basis = evaluate_basis_functions(&model.knots_temperature, temp_idx, temperature_k, model.spline_order);
+    let az_basis = evaluate_basis_functions(
+        &model.knots_azimuth,
+        az_idx,
+        azimuth_deg,
+        model.spline_order,
+    );
+    let el_basis = evaluate_basis_functions(
+        &model.knots_elevation,
+        el_idx,
+        elevation_deg,
+        model.spline_order,
+    );
+    let freq_basis = evaluate_basis_functions(
+        &model.knots_frequency,
+        freq_idx,
+        frequency_mhz,
+        model.spline_order,
+    );
+    let temp_basis = evaluate_basis_functions(
+        &model.knots_temperature,
+        temp_idx,
+        temperature_k,
+        model.spline_order,
+    );
 
     // Perform tensor product interpolation
     let correction_db = tensor_product_interpolation(
@@ -256,25 +286,29 @@ fn tensor_product_interpolation(
     // Iterate over local support of basis functions
     for i_temp in 0..order {
         // Compute coefficient index with saturating subtraction to avoid underflow
-        let temp_coeff_idx = ((temp_idx + i_temp).saturating_sub(order - 1)).min(n_temp.saturating_sub(1));
+        let temp_coeff_idx =
+            ((temp_idx + i_temp).saturating_sub(order - 1)).min(n_temp.saturating_sub(1));
         if temp_coeff_idx >= n_temp {
             continue;
         }
 
         for i_freq in 0..order {
-            let freq_coeff_idx = ((freq_idx + i_freq).saturating_sub(order - 1)).min(n_freq.saturating_sub(1));
+            let freq_coeff_idx =
+                ((freq_idx + i_freq).saturating_sub(order - 1)).min(n_freq.saturating_sub(1));
             if freq_coeff_idx >= n_freq {
                 continue;
             }
 
             for i_el in 0..order {
-                let el_coeff_idx = ((el_idx + i_el).saturating_sub(order - 1)).min(n_el.saturating_sub(1));
+                let el_coeff_idx =
+                    ((el_idx + i_el).saturating_sub(order - 1)).min(n_el.saturating_sub(1));
                 if el_coeff_idx >= n_el {
                     continue;
                 }
 
                 for i_az in 0..order {
-                    let az_coeff_idx = ((az_idx + i_az).saturating_sub(order - 1)).min(n_az.saturating_sub(1));
+                    let az_coeff_idx =
+                        ((az_idx + i_az).saturating_sub(order - 1)).min(n_az.saturating_sub(1));
                     if az_coeff_idx >= n_az {
                         continue;
                     }
@@ -288,11 +322,13 @@ fn tensor_product_interpolation(
                             "Coefficient index {} out of bounds (length {})",
                             flat_idx,
                             coefficients.len()
-                        )).into());
+                        ))
+                        .into());
                     }
 
                     let coeff = coefficients[flat_idx];
-                    let weight = az_basis[i_az] * el_basis[i_el] * freq_basis[i_freq] * temp_basis[i_temp];
+                    let weight =
+                        az_basis[i_az] * el_basis[i_el] * freq_basis[i_freq] * temp_basis[i_temp];
 
                     result += weight * coeff;
                 }
@@ -412,13 +448,21 @@ mod tests {
         let result = evaluate_correction(&model, 5.0, 10.0, 8500.0, 290.0).unwrap();
 
         // Should return a finite correction (B-spline interpolation of constant 1.0 should be reasonable)
-        assert!(result.correction_db.is_finite(), "Correction should be finite, got {}", result.correction_db);
+        assert!(
+            result.correction_db.is_finite(),
+            "Correction should be finite, got {}",
+            result.correction_db
+        );
         assert!(!result.extrapolated);
         assert!(result.warnings.is_empty());
 
         // With all coefficients = 1.0, the weighted sum should be close to 1.0
         // but may not be exactly 1.0 due to the boundary knot structure
-        assert!(result.correction_db.abs() < 5.0, "Correction {} should be reasonable magnitude", result.correction_db);
+        assert!(
+            result.correction_db.abs() < 5.0,
+            "Correction {} should be reasonable magnitude",
+            result.correction_db
+        );
     }
 
     #[test]

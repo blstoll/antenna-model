@@ -1,0 +1,18 @@
+apiVersion: v2
+name: antenna-model
+description: A Helm chart for Antenna Model Service - Physical Optics Computation Engine
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - antenna
+  - physical-optics
+  - gain-modeling
+  - satellite-communications
+home: https://github.com/your-org/antenna-model
+sources:
+  - https://github.com/your-org/antenna-model
+maintainers:
+  - name: Antenna Model Team
+    email: team@example.com
+icon: https://example.com/icon.png

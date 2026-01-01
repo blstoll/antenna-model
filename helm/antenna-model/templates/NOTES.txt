@@ -1,0 +1,52 @@
+Thank you for installing {{ .Chart.Name }}.
+
+Your release is named {{ .Release.Name }}.
+
+To learn more about the release, try:
+
+  $ helm status {{ .Release.Name }}
+  $ helm get all {{ .Release.Name }}
+
+{{- if .Values.ingress.enabled }}
+
+The application is accessible via Ingress at:
+{{- range .Values.ingress.hosts }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}{{ range .paths }}{{ .path }}{{ end }}
+{{- end }}
+
+{{- else if contains "LoadBalancer" .Values.service.type }}
+
+The application is accessible via LoadBalancer.
+Get the application URL by running these commands:
+
+  NOTE: It may take a few minutes for the LoadBalancer IP to be available.
+  You can watch the status by running 'kubectl get svc -w {{ include "antenna-model.fullname" . }}'
+
+  export SERVICE_IP=$(kubectl get svc --namespace {{ .Release.Namespace }} {{ include "antenna-model.fullname" . }} -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+  echo http://$SERVICE_IP:{{ .Values.service.port }}
+
+{{- else if contains "ClusterIP" .Values.service.type }}
+
+The application is accessible within the cluster at:
+
+  {{ include "antenna-model.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
+
+To access from outside the cluster, run these commands:
+
+  export POD_NAME=$(kubectl get pods --namespace {{ .Release.Namespace }} -l "app.kubernetes.io/name={{ include "antenna-model.name" . }},app.kubernetes.io/instance={{ .Release.Name }}" -o jsonpath="{.items[0].metadata.name}")
+  kubectl --namespace {{ .Release.Namespace }} port-forward $POD_NAME 3000:3000
+
+Then visit http://127.0.0.1:3000 to access the API.
+
+{{- end }}
+
+API Endpoints:
+  Health Check:  GET  /health
+  Ready Check:   GET  /ready
+  Service Status: GET  /status
+  Gain Compute:  POST /api/v1/gain
+  Batch Compute: POST /api/v1/gain/batch
+  Heatmap:       POST /api/v1/heatmap
+  Antennas List: GET  /api/v1/antennas
+
+Documentation: See the project README and API documentation for usage examples.

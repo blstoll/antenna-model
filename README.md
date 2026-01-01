@@ -4,18 +4,37 @@ A high-performance antenna gain modeling system for parabolic dish antennas with
 
 ## Overview
 
-This service implements a sophisticated 4D B-spline interpolation engine to model antenna performance across:
-- Azimuth (0-360 degrees)
-- Elevation (0-90 degrees)
-- Frequency (100 MHz - 50 GHz)
-- Temperature (constant in current implementation)
+This service implements a **hybrid physical optics + correction surface model** for parabolic dish antenna performance prediction. The system combines:
+
+1. **Physical Optics Computation Engine**: Aperture integration with phase functions (path, coma aberration, surface error, mesh effects) providing physics-based gain predictions
+2. **Optional Correction Surface**: 4D B-spline interpolation (azimuth, elevation, frequency, temperature) for residual error corrections when calibration data is available
+
+The hybrid approach enables graceful degradation from fully calibrated antennas (±1 dB accuracy) to uncalibrated antennas using design specifications only (±2 dB loss accuracy).
 
 **Key Features:**
-- High accuracy: ±1 dB for main lobe and first sidelobe
-- Low latency: 50-100ms p95 response time
-- REST API with batch processing and heatmap generation
-- Kubernetes-native deployment
-- Production-ready with comprehensive monitoring and observability
+- **Flexible Calibration**: Support for fully calibrated, partially calibrated (boresight), and uncalibrated antennas
+- **High Accuracy**: ±1 dB for fully calibrated antennas, graceful degradation for partial/uncalibrated
+- **Low Latency**: 50-100ms p95 response time for single queries
+- **REST API**: Comprehensive endpoints with batch processing and heatmap generation
+- **3D Coordinate Support**: Auto-detection of ECEF vs Geodetic coordinates
+- **Kubernetes-native**: Production-ready with health probes and structured logging
+- **Multi-feed Support**: Multiple feeds per antenna with independent calibrations
+
+## Calibration Statuses
+
+The service supports three calibration levels with graceful accuracy degradation:
+
+| Status | Accuracy (Absolute) | Accuracy (Loss) | Test Time | Use Case |
+|--------|-------------------|-----------------|-----------|----------|
+| **Fully Calibrated** | ±1 dB | ±1 dB | ~8 hours | Production operations, high-precision analysis |
+| **Partially Calibrated (Boresight)** | ±1 dB @ boresight<br>±2-3 dB off-axis | ±1-2 dB | ~1 hour | Rapid commissioning, boresight verification |
+| **Uncalibrated (Design Specs)** | ±3-5 dB | ±2 dB | 0 hours | Loss analysis, planning, design validation |
+
+**Key Insight:** Loss (relative gain) has better accuracy than absolute gain for uncalibrated antennas (±2 dB vs ±3-5 dB) due to systematic error cancellation when comparing two pointing directions.
+
+**Upgrade Path:** Antennas can be incrementally upgraded: Uncalibrated → Boresight → Fully Calibrated, with each step providing a valid calibration artifact.
+
+**See also:** [Calibration Workflow Guide](docs/calibration-workflow-guide.md) for detailed workflows and examples.
 
 ## Project Structure
 
@@ -80,13 +99,48 @@ CONFIG_PATH=/path/to/config.toml cargo run --release --bin antenna-model
 
 ### Using the Calibration Tool
 
+#### Boresight Calibration (Fast Mode)
+
+For rapid commissioning with ~1 hour test time:
+
 ```bash
-# Generate calibration artifacts from measurement data
+# Generate boresight-calibrated artifact from frequency sweep at boresight
 cargo run --release --bin calibrate -- \
-  --input measurements/antenna_1.csv \
+  --calibration-mode boresight \
+  --input measurements/boresight_xband.csv \
+  --design-specs design_specs/antenna_1.yaml \
+  --output calibration_data/antenna_1_xband_boresight.bin \
+  --antenna-id antenna_1 \
+  --feed-id x_band \
+  --verbose
+```
+
+See [examples/README_boresight.md](examples/README_boresight.md) for measurement format and detailed usage.
+
+#### Full Grid Calibration
+
+For production-grade accuracy with ~8 hour test time:
+
+```bash
+# Generate fully-calibrated artifact from dense measurement grid
+cargo run --release --bin calibrate -- \
+  --calibration-mode full \
+  --input measurements/antenna_1_full_grid.csv \
   --output calibration_data/antenna_1.bin \
   --antenna-id antenna_1 \
+  --feed-id x_band \
   --validate
+```
+
+#### Uncalibrated Antenna (Design Specs Only)
+
+No calibration tool needed - configure directly in `calibration_data/antennas.yaml`:
+
+```yaml
+[[antennas]]
+antenna_id = "antenna_3"
+calibration_status = "uncalibrated"
+design_specs_path = "design_specs/antenna_3.yaml"
 ```
 
 ## API Usage
@@ -108,7 +162,14 @@ Response:
 ```json
 {
   "antenna_id": "antenna_1",
+  "feed_id": "x_band",
   "g_over_t_db": 41.2,
+  "calibration_status": {
+    "status": "fully_calibrated",
+    "accuracy_estimate_db": 1.0,
+    "correction_applied": true,
+    "parameters_source": "measurement_tuned"
+  },
   "warnings": [],
   "metadata": {
     "computation_time_ms": 1.2,
@@ -116,6 +177,8 @@ Response:
   }
 }
 ```
+
+**Note:** For partially calibrated or uncalibrated antennas, the response includes additional calibration status information. See [examples/README.md](examples/README.md) for complete examples of all calibration statuses.
 
 ### Batch Evaluation
 
@@ -448,9 +511,12 @@ We welcome contributions! Please see [docs/development/contributing.md](docs/dev
 
 ## References
 
+- [Calibration Workflow Guide](docs/calibration-workflow-guide.md) - Complete workflows for all calibration levels
 - [Design Document](docs/antenna-model-design-doc.md) - Detailed physical models and mathematical formulation
 - [Architecture Document](docs/architecture.md) - System architecture and deployment
 - [Implementation Plan](docs/implementation-plan.md) - Sprint-by-sprint development plan
+- [Boresight Calibration Examples](examples/README_boresight.md) - Boresight calibration tool usage
+- [API Examples](examples/README.md) - API request/response examples for all calibration statuses
 - [API Documentation](http://localhost:3000/api/docs) - Interactive API documentation (when service is running)
 
 ## Contact

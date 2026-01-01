@@ -36,7 +36,7 @@ fn create_test_calibration(antenna_id: &str, feed_id: &str) -> AntennaCalibratio
                 surface_rms_mm: 0.5,
             },
             feed: FeedParameters {
-                position: (0.0, 0.0, 13.6), // Nominal position at focal point
+                position: (0.0, 0.0, 0.0), // Zero offset from focal point
                 q_factor: 10.0,
                 phase_center_offset_m: 0.0,
             },
@@ -85,11 +85,20 @@ fn test_feed_steering_perfect_alignment() {
     println!("Gain: {:.2} dBi", response.gain_db);
     println!("Reference: {:.2} dBi", response.reference_gain_db.unwrap());
     println!("Loss: {:.2} dB", response.loss_db.unwrap());
-    println!("Emitter elevation: {:.4}°", response.geometry.emitter_elevation_deg);
+    println!(
+        "Emitter elevation: {:.4}°",
+        response.geometry.emitter_elevation_deg
+    );
 
     // Verify results
-    assert!(response.gain_db > 66.0, "Gain should be near theoretical maximum (~67 dBi)");
-    assert!(response.gain_db < 68.0, "Gain should not exceed theoretical maximum");
+    assert!(
+        response.gain_db > 66.0,
+        "Gain should be near theoretical maximum (~67 dBi)"
+    );
+    assert!(
+        response.gain_db < 68.0,
+        "Gain should not exceed theoretical maximum"
+    );
 
     // Emitter elevation should be very small (nearly at boresight)
     assert!(
@@ -125,7 +134,10 @@ fn test_feed_steering_large_offset() {
     println!("Gain: {:.2} dBi", response.gain_db);
     println!("Reference: {:.2} dBi", response.reference_gain_db.unwrap());
     println!("Loss: {:.2} dB", response.loss_db.unwrap());
-    println!("Emitter elevation: {:.4}°", response.geometry.emitter_elevation_deg);
+    println!(
+        "Emitter elevation: {:.4}°",
+        response.geometry.emitter_elevation_deg
+    );
 
     // With large feed offset, gain should be significantly reduced
     // Feed aberrations (coma) should reduce gain by several dB
@@ -187,7 +199,10 @@ fn test_feed_steering_produces_different_gains() {
     println!("\n=== Feed Steering Comparison ===");
     println!("Feed at boresight:  {:.2} dBi", response1.gain_db);
     println!("Feed offset:        {:.2} dBi", response2.gain_db);
-    println!("Difference:         {:.2} dB", response1.gain_db - response2.gain_db);
+    println!(
+        "Difference:         {:.2} dB",
+        response1.gain_db - response2.gain_db
+    );
 
     // The two scenarios MUST produce different gains
     // This is the core bug fix - previously both produced the same gain

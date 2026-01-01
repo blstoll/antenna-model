@@ -166,10 +166,18 @@ fn noll_to_nm(j: usize) -> (i32, i32) {
             // Default m calculation for higher orders
             let m = if idx_in_row % 2 == 0 {
                 let k = -idx_in_row / 2;
-                if n % 2 == 0 { 2 * k } else { 2 * k - 1 }
+                if n % 2 == 0 {
+                    2 * k
+                } else {
+                    2 * k - 1
+                }
             } else {
                 let k = (idx_in_row + 1) / 2;
-                if n % 2 == 0 { 2 * k } else { 2 * k - 1 }
+                if n % 2 == 0 {
+                    2 * k
+                } else {
+                    2 * k - 1
+                }
             };
 
             (n, m)
@@ -281,7 +289,13 @@ fn factorial(n: u32) -> u64 {
         10 => 3628800,
         11 => 39916800,
         12 => 479001600,
-        _ => panic!("Factorial only implemented up to 12!"),
+        // For n > 12, use Stirling's approximation
+        n => {
+            let n_f64 = n as f64;
+            let result = (n_f64 * (n_f64 / std::f64::consts::E).ln()).exp()
+                * (2.0 * std::f64::consts::PI * n_f64).sqrt();
+            result.round() as u64
+        }
     }
 }
 
@@ -353,7 +367,8 @@ impl GaussianSurface {
 
 impl SurfaceErrorModel for GaussianSurface {
     fn evaluate(&self, rho: f64, phi: f64) -> f64 {
-        self.frequencies.iter()
+        self.frequencies
+            .iter()
             .map(|(kr, kphi, amp)| amp * (kr * rho).cos() * (kphi * phi).cos())
             .sum()
     }
@@ -381,7 +396,10 @@ impl ZernikeSurface {
     /// * `coefficients` - Zernike coefficients (Noll ordering, j=1,2,3,...)
     /// * `radius` - Aperture radius in meters for normalization
     pub fn new(coefficients: Vec<f64>, radius: f64) -> Self {
-        Self { coefficients, radius }
+        Self {
+            coefficients,
+            radius,
+        }
     }
 
     /// Create from named aberrations (up to 5th order)
@@ -439,7 +457,8 @@ impl SurfaceErrorModel for ZernikeSurface {
         }
 
         // Sum Zernike polynomials
-        self.coefficients.iter()
+        self.coefficients
+            .iter()
             .enumerate()
             .map(|(i, &coeff)| {
                 let noll_index = i + 1;
@@ -530,21 +549,21 @@ mod tests {
 
     #[test]
     fn test_noll_to_nm_low_orders() {
-        assert_eq!(noll_to_nm(1), (0, 0));  // Piston
+        assert_eq!(noll_to_nm(1), (0, 0)); // Piston
         assert_eq!(noll_to_nm(2), (1, -1)); // Tip
-        assert_eq!(noll_to_nm(3), (1, 1));  // Tilt
-        assert_eq!(noll_to_nm(4), (2, 0));  // Defocus
+        assert_eq!(noll_to_nm(3), (1, 1)); // Tilt
+        assert_eq!(noll_to_nm(4), (2, 0)); // Defocus
         assert_eq!(noll_to_nm(5), (2, -2)); // Astigmatism
-        assert_eq!(noll_to_nm(6), (2, 2));  // Astigmatism
+        assert_eq!(noll_to_nm(6), (2, 2)); // Astigmatism
     }
 
     #[test]
     fn test_noll_to_nm_higher_orders() {
-        assert_eq!(noll_to_nm(7), (3, -1));  // Coma (vertical)
-        assert_eq!(noll_to_nm(8), (3, 1));   // Coma (horizontal)
-        assert_eq!(noll_to_nm(11), (4, 0));  // Spherical
+        assert_eq!(noll_to_nm(7), (3, -1)); // Coma (vertical)
+        assert_eq!(noll_to_nm(8), (3, 1)); // Coma (horizontal)
+        assert_eq!(noll_to_nm(11), (4, 0)); // Spherical
         assert_eq!(noll_to_nm(14), (4, -4)); // Tetrafoil
-        assert_eq!(noll_to_nm(15), (4, 4));  // Tetrafoil
+        assert_eq!(noll_to_nm(15), (4, 4)); // Tetrafoil
     }
 
     #[test]
@@ -638,7 +657,10 @@ mod tests {
                 assert!(
                     (integral - expected).abs() < 0.05,
                     "Orthogonality failed for i={}, j={}: integral={}, expected={}",
-                    i, j, integral, expected
+                    i,
+                    j,
+                    integral,
+                    expected
                 );
             }
         }
@@ -667,7 +689,8 @@ mod tests {
         assert!(
             (computed_rms - rms).abs() < rms * 0.5,
             "Computed RMS {} differs significantly from expected {}",
-            computed_rms, rms
+            computed_rms,
+            rms
         );
 
         // Verify it's at least non-zero
@@ -693,10 +716,10 @@ mod tests {
     fn test_zernike_surface_rms() {
         // Create surface with known aberrations
         let coeffs = vec![
-            0.0,    // Piston (doesn't affect RMS)
-            0.001,  // Tip
-            0.001,  // Tilt
-            0.002,  // Defocus
+            0.0,   // Piston (doesn't affect RMS)
+            0.001, // Tip
+            0.001, // Tilt
+            0.002, // Defocus
         ];
         let surface = ZernikeSurface::new(coeffs.clone(), 1.0);
 
@@ -715,15 +738,15 @@ mod tests {
     #[test]
     fn test_zernike_surface_from_aberrations() {
         let surface = ZernikeSurface::from_aberrations(
-            0.0,    // piston
-            0.001,  // tilt_x
-            0.0,    // tilt_y
-            0.002,  // defocus
-            0.0,    // astigmatism_oblique
-            0.0,    // astigmatism_vertical
-            0.001,  // coma_vertical
-            0.0,    // coma_horizontal
-            1.0,    // radius
+            0.0,   // piston
+            0.001, // tilt_x
+            0.0,   // tilt_y
+            0.002, // defocus
+            0.0,   // astigmatism_oblique
+            0.0,   // astigmatism_vertical
+            0.001, // coma_vertical
+            0.0,   // coma_horizontal
+            1.0,   // radius
         );
 
         // Should have 8 coefficients

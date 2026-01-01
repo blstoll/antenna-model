@@ -92,54 +92,73 @@ pub fn ray_trace_aperture(
     let mut total_rays = 0;
     let mut rays_hit = 0;
 
-    // Sample aperture in polar coordinates
+    // Ray Tracing Aperture Sampling Strategy:
+    //
+    // We sample the aperture in polar coordinates (ρ, φ') and trace geometric rays
+    // from the feed to each aperture point. This differs from traditional ray tracing
+    // where we might trace rays from the feed in all directions - instead, we sample
+    // the destination (aperture) and compute the ray that connects feed to that point.
+    //
+    // DESIGN NOTE: This "aperture sampling" approach simplifies computation because:
+    // 1. All sampled points are guaranteed to lie on the reflector (no intersection test)
+    // 2. We directly integrate over the aperture (matching physical optics formulation)
+    // 3. Spillover is implicit: rays with large incidence angles contribute less
+    //
+    // FUTURE ENHANCEMENT (referenced in test TODO at line 314):
+    // True spillover modeling would trace rays from feed in all directions and check
+    // which rays hit the reflector vs. spill over the edge. This would give more
+    // accurate spillover predictions for large feed offsets, but adds complexity.
     for i_rho in 0..num_radial {
         for i_phi in 0..num_azimuthal {
-            // Aperture coordinates
+            // Sample aperture point in polar coordinates (ρ, φ')
+            // Use cell-centered sampling: ρ at cell midpoint for better accuracy
             let rho = (diameter / 2.0) * ((i_rho as f64 + 0.5) / num_radial as f64);
             let phi_prime = 2.0 * PI * (i_phi as f64) / num_azimuthal as f64;
 
-            // Aperture point in Cartesian coordinates
+            // Convert aperture coordinates to Cartesian (x, y, z)
+            // z(ρ) follows parabolic surface equation: z = ρ²/(4f)
             let x_ap = rho * phi_prime.cos();
             let y_ap = rho * phi_prime.sin();
             let z_ap = rho.powi(2) / (4.0 * focal_length); // Parabolic surface
 
             total_rays += 1;
 
-            // Trace ray from feed to aperture point
-            let ray = trace_ray_to_aperture(
-                feed_pos,
-                (x_ap, y_ap, z_ap),
-                focal_length,
-                diameter,
-            );
+            // Trace geometric ray from feed position to this aperture point
+            // Returns ray path length, incidence angle, and whether it "hits" the reflector
+            let ray = trace_ray_to_aperture(feed_pos, (x_ap, y_ap, z_ap), focal_length, diameter);
 
+            // Skip rays that spill over (though in aperture sampling, this is rare)
             if !ray.hits_reflector {
-                continue; // Spillover
+                continue; // Spillover - this ray misses the reflector
             }
 
             rays_hit += 1;
 
-            // Feed illumination at this aperture point
+            // Compute feed illumination amplitude at this aperture point
+            // Uses cos^q pattern based on angle from feed to aperture point
             let illumination = illumination_amplitude(rho, phi_prime, &config.feed, focal_length);
 
-            // Phase: path length difference
-            // Reference point: on-axis focal point
+            // Phase accumulation (geometric optics approach):
+            //
+            // 1. Path length phase: difference between actual ray path and reference path
+            //    Reference: on-axis ray from focal point (path length = z_ap)
             let reference_path = z_ap; // On-axis ray path to aperture
-
-            // Actual path from offset feed
             let path_diff = ray.path_length - reference_path;
 
-            // Far-field phase contribution: path to observation direction
-            let far_field_path = x_ap * far_field_dir.0 + y_ap * far_field_dir.1 + z_ap * far_field_dir.2;
+            // 2. Far-field phase: projection of aperture point onto far-field direction
+            //    This accounts for the wavefront tilt in the far field
+            let far_field_path =
+                x_ap * far_field_dir.0 + y_ap * far_field_dir.1 + z_ap * far_field_dir.2;
 
-            // Total phase
+            // 3. Total phase = k * (path difference - far field projection)
             let total_phase = wavenumber * (path_diff - far_field_path);
 
-            // Aperture area element (polar coordinates)
-            let d_area = rho * (diameter / (2.0 * num_radial as f64)) * (2.0 * PI / num_azimuthal as f64);
+            // Aperture area element in polar coordinates: dA = ρ dρ dφ'
+            // Discretized for numerical integration
+            let d_area =
+                rho * (diameter / (2.0 * num_radial as f64)) * (2.0 * PI / num_azimuthal as f64);
 
-            // Contribution to field
+            // Accumulate complex field contribution: amplitude × exp(j·phase)
             let contribution = Complex64::from_polar(illumination * d_area, total_phase);
             field_sum += contribution;
         }
@@ -255,7 +274,6 @@ pub fn compute_gain_ray_trace(
     let result = ray_trace_aperture(config, theta, phi, wavelength, 64, 128);
 
     // Gain is proportional to |E|²
-    
 
     // Need to normalize to on-axis gain for relative measurement
     // For absolute gain, would multiply by theoretical aperture efficiency
@@ -265,7 +283,7 @@ pub fn compute_gain_ray_trace(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::geometry::{ReflectorGeometry, FeedParameters};
+    use crate::model::geometry::{FeedParameters, ReflectorGeometry};
 
     fn test_antenna(e_cone_deg: f64) -> AntennaConfiguration {
         use crate::model::coordinates::EClockConeCoordinates;

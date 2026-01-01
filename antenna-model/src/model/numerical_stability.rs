@@ -290,13 +290,7 @@ mod tests {
         let null_angle = 1.22 * wavelength / diameter;
 
         // Near null should increase sampling
-        let params_near = adaptive_integration_params(
-            null_angle,
-            0.0,
-            wavelength,
-            diameter,
-            &base,
-        );
+        let params_near = adaptive_integration_params(null_angle, 0.0, wavelength, diameter, &base);
 
         assert!(params_near.min_rho_points > base.min_rho_points);
     }
@@ -310,10 +304,7 @@ mod tests {
         // Far from null should keep base params
         let params_far = adaptive_integration_params(
             0.01, // Very small angle
-            0.0,
-            wavelength,
-            diameter,
-            &base,
+            0.0, wavelength, diameter, &base,
         );
 
         assert_eq!(params_far.min_rho_points, base.min_rho_points);
@@ -358,10 +349,18 @@ mod tests {
         let first_null = 1.22 * wavelength / diameter;
 
         // Below threshold: false
-        assert!(!strongly_needs_adaptive(0.5 * first_null, wavelength, diameter));
+        assert!(!strongly_needs_adaptive(
+            0.5 * first_null,
+            wavelength,
+            diameter
+        ));
 
         // Above threshold: true
-        assert!(strongly_needs_adaptive(1.0 * first_null, wavelength, diameter));
+        assert!(strongly_needs_adaptive(
+            1.0 * first_null,
+            wavelength,
+            diameter
+        ));
     }
 
     #[test]

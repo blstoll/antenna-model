@@ -39,7 +39,9 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-use crate::correction_surface::{CorrectionSurface, CorrectionSurfaceError, CorrectionSurfaceParams};
+use crate::correction_surface::{
+    CorrectionSurface, CorrectionSurfaceError, CorrectionSurfaceParams,
+};
 use crate::parser::MeasurementPoint;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -118,10 +120,10 @@ impl Default for ValidationConfig {
             main_lobe_beamwidths: 3.0,
             first_sidelobe_max_deg: 10.0,
             frequency_bands: vec![
-                (100.0, 1000.0),     // VHF/UHF
-                (1000.0, 3000.0),    // L/S band
-                (3000.0, 12000.0),   // C/X band
-                (12000.0, 50000.0),  // Ku/Ka/V band
+                (100.0, 1000.0),    // VHF/UHF
+                (1000.0, 3000.0),   // L/S band
+                (3000.0, 12000.0),  // C/X band
+                (12000.0, 50000.0), // Ku/Ka/V band
             ],
             main_lobe_target_db: 1.0,
             first_sidelobe_target_db: 1.0,
@@ -276,11 +278,8 @@ pub fn validate_calibration(
     let num_points = measurements.len();
 
     // Compute corrected predictions
-    let corrected_predictions = compute_corrected_predictions(
-        measurements,
-        model_predictions,
-        correction_surface,
-    )?;
+    let corrected_predictions =
+        compute_corrected_predictions(measurements, model_predictions, correction_surface)?;
 
     // Extract measured values
     let measured: Vec<f64> = measurements.iter().map(|m| m.g_over_t_db).collect();
@@ -328,7 +327,11 @@ pub fn validate_calibration(
         main_lobe_max_error,
         main_lobe_rmse,
         config.main_lobe_target_db,
-        if main_lobe_meets_target { "PASS" } else { "FAIL" }
+        if main_lobe_meets_target {
+            "PASS"
+        } else {
+            "FAIL"
+        }
     );
 
     // First sidelobe statistics
@@ -342,7 +345,11 @@ pub fn validate_calibration(
         first_sidelobe_max_error,
         first_sidelobe_rmse,
         config.first_sidelobe_target_db,
-        if first_sidelobe_meets_target { "PASS" } else { "FAIL" }
+        if first_sidelobe_meets_target {
+            "PASS"
+        } else {
+            "FAIL"
+        }
     );
 
     // Identify outliers
@@ -355,7 +362,10 @@ pub fn validate_calibration(
     let num_outliers = outliers.len();
 
     if num_outliers > 0 {
-        warn!("Found {} outliers (error > {:.1} dB)", num_outliers, config.outlier_threshold_db);
+        warn!(
+            "Found {} outliers (error > {:.1} dB)",
+            num_outliers, config.outlier_threshold_db
+        );
     }
 
     // Frequency band analysis
@@ -366,10 +376,7 @@ pub fn validate_calibration(
     );
 
     // Angular region analysis
-    let angular_region_analysis = analyze_by_angular_region(
-        measurements,
-        &corrected_predictions,
-    );
+    let angular_region_analysis = analyze_by_angular_region(measurements, &corrected_predictions);
 
     // Cross-validation (if requested)
     let cross_validation = if config.num_folds > 1 {
@@ -383,8 +390,7 @@ pub fn validate_calibration(
     };
 
     // Overall assessment
-    let meets_accuracy_requirements =
-        main_lobe_meets_target && first_sidelobe_meets_target;
+    let meets_accuracy_requirements = main_lobe_meets_target && first_sidelobe_meets_target;
 
     if meets_accuracy_requirements {
         info!("✓ Calibration meets accuracy requirements (<1 dB in main lobe and first sidelobe)");
@@ -432,11 +438,8 @@ fn compute_corrected_predictions(
     let mut corrected = Vec::with_capacity(measurements.len());
 
     for (meas, &model_pred) in measurements.iter().zip(model_predictions.iter()) {
-        let correction = correction_surface.evaluate(
-            meas.frequency_mhz,
-            meas.e_cone_deg,
-            meas.e_clock_deg,
-        )?;
+        let correction =
+            correction_surface.evaluate(meas.frequency_mhz, meas.e_cone_deg, meas.e_clock_deg)?;
         corrected.push(model_pred + correction);
     }
 
@@ -553,7 +556,11 @@ fn identify_outliers(
     let (main_lobe_indices, first_sidelobe_indices) =
         classify_points_by_region(measurements, config);
 
-    for (i, (meas, &pred)) in measurements.iter().zip(corrected_predictions.iter()).enumerate() {
+    for (i, (meas, &pred)) in measurements
+        .iter()
+        .zip(corrected_predictions.iter())
+        .enumerate()
+    {
         let error = (meas.g_over_t_db - pred).abs();
 
         if error > threshold_db {
@@ -689,7 +696,10 @@ fn perform_cross_validation(
         return Err(ValidationError::InvalidParameter {
             param: "num_folds".to_string(),
             value: num_folds.to_string(),
-            reason: format!("Cannot have more folds ({}) than data points ({})", num_folds, n),
+            reason: format!(
+                "Cannot have more folds ({}) than data points ({})",
+                num_folds, n
+            ),
         });
     }
 
@@ -743,7 +753,12 @@ fn perform_cross_validation(
         let test_measured: Vec<f64> = test_measurements.iter().map(|m| m.g_over_t_db).collect();
         let fold_rmse = compute_rmse(&test_measured, &test_corrected);
 
-        debug!("Fold {}: RMSE = {:.3} dB ({} test points)", fold + 1, fold_rmse, test_measurements.len());
+        debug!(
+            "Fold {}: RMSE = {:.3} dB ({} test points)",
+            fold + 1,
+            fold_rmse,
+            test_measurements.len()
+        );
         fold_rmse_values.push(fold_rmse);
     }
 
@@ -754,8 +769,14 @@ fn perform_cross_validation(
         .sum::<f64>()
         / num_folds as f64;
     let std_rmse = variance.sqrt();
-    let min_rmse = fold_rmse_values.iter().copied().fold(f64::INFINITY, f64::min);
-    let max_rmse = fold_rmse_values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let min_rmse = fold_rmse_values
+        .iter()
+        .copied()
+        .fold(f64::INFINITY, f64::min);
+    let max_rmse = fold_rmse_values
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
 
     info!(
         "Cross-validation complete: mean RMSE = {:.3} ± {:.3} dB (min: {:.3}, max: {:.3})",
@@ -788,16 +809,40 @@ impl ValidationReport {
 
         s.push_str("Model Performance:\n");
         s.push_str("------------------\n");
-        s.push_str(&format!("Model-only RMSE:        {:.3} dB\n", self.model_only_rmse));
-        s.push_str(&format!("Model-only max error:   {:.3} dB\n", self.model_only_max_error));
-        s.push_str(&format!("Model-only R²:          {:.4}\n\n", self.model_only_r_squared));
+        s.push_str(&format!(
+            "Model-only RMSE:        {:.3} dB\n",
+            self.model_only_rmse
+        ));
+        s.push_str(&format!(
+            "Model-only max error:   {:.3} dB\n",
+            self.model_only_max_error
+        ));
+        s.push_str(&format!(
+            "Model-only R²:          {:.4}\n\n",
+            self.model_only_r_squared
+        ));
 
-        s.push_str(&format!("Corrected RMSE:         {:.3} dB\n", self.corrected_rmse));
-        s.push_str(&format!("Corrected max error:    {:.3} dB\n", self.corrected_max_error));
-        s.push_str(&format!("Corrected R²:           {:.4}\n\n", self.corrected_r_squared));
+        s.push_str(&format!(
+            "Corrected RMSE:         {:.3} dB\n",
+            self.corrected_rmse
+        ));
+        s.push_str(&format!(
+            "Corrected max error:    {:.3} dB\n",
+            self.corrected_max_error
+        ));
+        s.push_str(&format!(
+            "Corrected R²:           {:.4}\n\n",
+            self.corrected_r_squared
+        ));
 
-        s.push_str(&format!("RMSE improvement:       {:.1}%\n", self.rmse_improvement_percent));
-        s.push_str(&format!("Max error improvement:  {:.1}%\n\n", self.max_error_improvement_percent));
+        s.push_str(&format!(
+            "RMSE improvement:       {:.1}%\n",
+            self.rmse_improvement_percent
+        ));
+        s.push_str(&format!(
+            "Max error improvement:  {:.1}%\n\n",
+            self.max_error_improvement_percent
+        ));
 
         s.push_str("Regional Analysis:\n");
         s.push_str("------------------\n");
@@ -806,33 +851,59 @@ impl ValidationReport {
             self.main_lobe_num_points
         ));
         s.push_str(&format!("  RMSE:       {:.3} dB\n", self.main_lobe_rmse));
-        s.push_str(&format!("  Max error:  {:.3} dB\n", self.main_lobe_max_error));
+        s.push_str(&format!(
+            "  Max error:  {:.3} dB\n",
+            self.main_lobe_max_error
+        ));
         s.push_str(&format!(
             "  Target:     ≤1.0 dB [{}]\n\n",
-            if self.main_lobe_meets_target { "PASS" } else { "FAIL" }
+            if self.main_lobe_meets_target {
+                "PASS"
+            } else {
+                "FAIL"
+            }
         ));
 
         s.push_str(&format!(
             "First sidelobe ({} points):\n",
             self.first_sidelobe_num_points
         ));
-        s.push_str(&format!("  RMSE:       {:.3} dB\n", self.first_sidelobe_rmse));
-        s.push_str(&format!("  Max error:  {:.3} dB\n", self.first_sidelobe_max_error));
+        s.push_str(&format!(
+            "  RMSE:       {:.3} dB\n",
+            self.first_sidelobe_rmse
+        ));
+        s.push_str(&format!(
+            "  Max error:  {:.3} dB\n",
+            self.first_sidelobe_max_error
+        ));
         s.push_str(&format!(
             "  Target:     ≤1.0 dB [{}]\n\n",
-            if self.first_sidelobe_meets_target { "PASS" } else { "FAIL" }
+            if self.first_sidelobe_meets_target {
+                "PASS"
+            } else {
+                "FAIL"
+            }
         ));
 
         if self.num_outliers > 0 {
-            s.push_str(&format!("Outliers (error >1 dB): {} points\n\n", self.num_outliers));
+            s.push_str(&format!(
+                "Outliers (error >1 dB): {} points\n\n",
+                self.num_outliers
+            ));
         }
 
         if let Some(ref cv) = self.cross_validation {
             s.push_str("Cross-Validation:\n");
             s.push_str("------------------\n");
             s.push_str(&format!("{}-fold cross-validation\n", cv.num_folds));
-            s.push_str(&format!("Mean RMSE:  {:.3} ± {:.3} dB\n", cv.mean_rmse, cv.std_rmse));
-            s.push_str(&format!("Range:      {:.3} - {:.3} dB\n\n", cv.min_rmse, cv.max_rmse));
+            s.push_str(&format!(
+                "Mean RMSE:  {:.3} ± {:.3} dB\n",
+                cv.mean_rmse, cv.std_rmse
+            ));
+            s.push_str(&format!(
+                "Range:      {:.3} - {:.3} dB\n\n",
+                cv.min_rmse, cv.max_rmse
+            ));
         }
 
         s.push_str("=================================================\n");

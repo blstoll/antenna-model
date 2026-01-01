@@ -1,0 +1,49 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "antenna-model.fullname" . }}-config
+  labels:
+    {{- include "antenna-model.labels" . | nindent 4 }}
+data:
+  service.yaml: |
+    # Antenna Model Service Configuration
+    service:
+      host: {{ .Values.config.service.host | quote }}
+      port: {{ .Values.config.service.port }}
+      request_timeout_seconds: {{ .Values.config.service.request_timeout_seconds }}
+      max_request_body_size_bytes: {{ .Values.config.service.max_request_body_size_bytes }}
+
+    logging:
+      level: {{ .Values.config.logging.level | quote }}
+      format: {{ .Values.config.logging.format | quote }}
+      request_logging: {{ .Values.config.logging.request_logging }}
+
+    data:
+      calibration_data_dir: {{ .Values.config.data.calibration_data_dir | quote }}
+      antennas_config_file: {{ .Values.config.data.antennas_config_file | quote }}
+
+    computation:
+      default_integration_mode: {{ .Values.config.computation.default_integration_mode | quote }}
+      parallel_batch_threshold: {{ .Values.config.computation.parallel_batch_threshold }}
+      max_batch_size: {{ .Values.config.computation.max_batch_size }}
+
+    health:
+      enabled: {{ .Values.config.health.enabled }}
+      detailed_status: {{ .Values.config.health.detailed_status }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "antenna-model.fullname" . }}-calibration
+  labels:
+    {{- include "antenna-model.labels" . | nindent 4 }}
+data:
+  {{- if .Values.calibrationData.useExistingConfigMap }}
+  # Using existing ConfigMap: {{ .Values.calibrationData.existingConfigMapName }}
+  {{- else }}
+  antennas.yaml: |
+    # Antenna configurations
+    # In production, mount this from persistent storage or object storage
+    antennas:
+      {{- toYaml .Values.calibrationData.antennas | nindent 6 }}
+  {{- end }}

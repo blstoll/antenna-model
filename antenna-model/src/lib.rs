@@ -3,6 +3,16 @@
 //! This library provides the core functionality for the antenna model service,
 //! including REST API server, B-spline interpolation, and calibration data management.
 
+// Compiler and linter configuration
+#![deny(unsafe_code)]
+// Warn about unwrap/expect/panic in production code, but allow in tests
+#![cfg_attr(
+    not(test),
+    deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)
+)]
+// Allow missing docs for builder patterns and internal implementation details
+#![allow(missing_docs, missing_debug_implementations)]
+
 pub mod api;
 pub mod config;
 pub mod data;

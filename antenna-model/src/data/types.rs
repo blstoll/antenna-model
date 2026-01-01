@@ -2066,8 +2066,8 @@ mod tests {
             physical_config,
             correction_surface: None,
             validity_ranges: ranges,
-            calibration_status: None,       // Old format - no status
-            calibration_coverage: None,     // Old format - no coverage
+            calibration_status: None,   // Old format - no status
+            calibration_coverage: None, // Old format - no coverage
         };
 
         // Should still be valid

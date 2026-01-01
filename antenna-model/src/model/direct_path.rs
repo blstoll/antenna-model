@@ -61,13 +61,7 @@ pub fn compute_with_direct_path(
     let feed_pos = get_feed_position(config);
 
     // Compute direct path contribution
-    let direct_field = compute_direct_path_field(
-        feed_pos,
-        theta,
-        phi,
-        wavelength,
-        &config.feed,
-    );
+    let direct_field = compute_direct_path_field(feed_pos, theta, phi, wavelength, &config.feed);
 
     // Total field is coherent sum
     let total_field = reflected_field + direct_field;
@@ -146,11 +140,8 @@ fn compute_direct_path_field(
 
     // Phase: path from feed position to far field
     // At far field distance r >> D, phase ≈ k · (feed_pos · obs_dir)
-    let phase = wavenumber * (
-        feed_pos.0 * obs_dir.0 +
-        feed_pos.1 * obs_dir.1 +
-        feed_pos.2 * obs_dir.2
-    );
+    let phase =
+        wavenumber * (feed_pos.0 * obs_dir.0 + feed_pos.1 * obs_dir.1 + feed_pos.2 * obs_dir.2);
 
     // Amplitude scaling (1/r dependence absorbed in normalization)
     // Direct path is typically much weaker than reflected path for well-designed antennas
@@ -192,11 +183,10 @@ pub fn should_include_direct_path(config: &AntennaConfiguration, theta: f64) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::geometry::{ReflectorGeometry, FeedParameters, FeedPosition};
     use crate::model::coordinates::EClockConeCoordinates;
+    use crate::model::geometry::{FeedParameters, FeedPosition, ReflectorGeometry};
 
     fn test_antenna(e_cone_deg: f64) -> AntennaConfiguration {
-
         let focal_length = 0.5;
         let ecc = EClockConeCoordinates::from_degrees(e_cone_deg, 0.0);
         let (x, y, z) = ecc.to_feed_position(focal_length);
@@ -245,13 +235,7 @@ mod tests {
         // Dummy reflected field
         let reflected_field = Complex64::new(1.0, 0.0);
 
-        let result = compute_with_direct_path(
-            &config,
-            0.0,
-            0.0,
-            wavelength,
-            reflected_field,
-        );
+        let result = compute_with_direct_path(&config, 0.0, 0.0, wavelength, reflected_field);
 
         // Direct field should be non-zero
         assert!(result.direct_field.norm() > 0.0);
@@ -267,13 +251,7 @@ mod tests {
 
         let reflected_field = Complex64::new(1.0, 0.0);
 
-        let result = compute_with_direct_path(
-            &config,
-            0.0,
-            0.0,
-            wavelength,
-            reflected_field,
-        );
+        let result = compute_with_direct_path(&config, 0.0, 0.0, wavelength, reflected_field);
 
         // Interference factor should be defined
         assert!(result.interference_factor > 0.0);
@@ -309,21 +287,11 @@ mod tests {
 
         let reflected_field = Complex64::new(1.0, 0.0);
 
-        let result_on_axis = compute_with_direct_path(
-            &config,
-            0.0,
-            0.0,
-            wavelength,
-            reflected_field,
-        );
+        let result_on_axis =
+            compute_with_direct_path(&config, 0.0, 0.0, wavelength, reflected_field);
 
-        let result_off_axis = compute_with_direct_path(
-            &config,
-            0.05,
-            0.0,
-            wavelength,
-            reflected_field,
-        );
+        let result_off_axis =
+            compute_with_direct_path(&config, 0.05, 0.0, wavelength, reflected_field);
 
         // Direct field should decrease with angle (feed pattern effect)
         // Note: May not always be true due to phase effects, but generally expected
@@ -346,13 +314,7 @@ mod tests {
         let wavelength = 0.035;
         let feed_pos = get_feed_position(&config);
 
-        let direct_field = compute_direct_path_field(
-            feed_pos,
-            0.0,
-            0.0,
-            wavelength,
-            &config.feed,
-        );
+        let direct_field = compute_direct_path_field(feed_pos, 0.0, 0.0, wavelength, &config.feed);
 
         // On-axis feed at origin: direct field should be minimal/zero
         // (pattern is maximum but no offset phase)
@@ -368,21 +330,10 @@ mod tests {
         let reflected_in_phase = Complex64::new(1.0, 0.0);
         let reflected_out_phase = Complex64::new(-1.0, 0.0);
 
-        let result_in = compute_with_direct_path(
-            &config,
-            0.0,
-            0.0,
-            wavelength,
-            reflected_in_phase,
-        );
+        let result_in = compute_with_direct_path(&config, 0.0, 0.0, wavelength, reflected_in_phase);
 
-        let result_out = compute_with_direct_path(
-            &config,
-            0.0,
-            0.0,
-            wavelength,
-            reflected_out_phase,
-        );
+        let result_out =
+            compute_with_direct_path(&config, 0.0, 0.0, wavelength, reflected_out_phase);
 
         // Different interference patterns expected
         assert!((result_in.interference_factor - result_out.interference_factor).abs() > 0.01);

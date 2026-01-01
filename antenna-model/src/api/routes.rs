@@ -19,7 +19,7 @@
 use crate::api::handlers;
 use crate::api::middleware::{ErrorHandler, RequestId, RequestLogger, RequestSizeTracker};
 use crate::api::AppState;
-use poem::{get, post, middleware::Tracing, Endpoint, EndpointExt, Route};
+use poem::{get, middleware::Tracing, post, Endpoint, EndpointExt, Route};
 use std::sync::Arc;
 
 /// Create all API routes with production-grade middleware
@@ -42,30 +42,31 @@ use std::sync::Arc;
 pub fn create_routes(state: Arc<AppState>) -> impl Endpoint {
     Route::new()
         // Health and status endpoints (Sprint 5, Task 5.3)
-        .at("/health", get(handlers::health))      // Liveness probe
-        .at("/ready", get(handlers::ready))        // Readiness probe
-        .at("/status", get(handlers::status))      // Detailed status
-
+        .at("/health", get(handlers::health)) // Liveness probe
+        .at("/ready", get(handlers::ready)) // Readiness probe
+        .at("/status", get(handlers::status)) // Detailed status
         // Gain computation endpoints (Sprint 5, Task 5.5; Sprint 6, Task 6.1)
         .at("/api/v1/gain", post(handlers::compute_gain))
         .at("/api/v1/gain/batch", post(handlers::compute_gain_batch))
-
         // Heatmap endpoint (Sprint 6, Task 6.2)
         .at("/api/v1/heatmap", post(handlers::generate_heatmap_endpoint))
-
         // Antenna listing and details endpoints (Sprint 6, Task 6.3)
         .at("/api/v1/antennas", get(handlers::list_antennas))
         .at("/api/v1/antennas/:id", get(handlers::get_antenna_details))
-        .at("/api/v1/antennas/:id/feeds", get(handlers::list_antenna_feeds))
-        .at("/api/v1/antennas/:id/feeds/:feed_id", get(handlers::get_feed_details))
-
+        .at(
+            "/api/v1/antennas/:id/feeds",
+            get(handlers::list_antenna_feeds),
+        )
+        .at(
+            "/api/v1/antennas/:id/feeds/:feed_id",
+            get(handlers::get_feed_details),
+        )
         // Apply middleware stack (innermost to outermost)
-        .with(Tracing)  // Built-in poem tracing
-        .with(RequestId)  // Generate unique request IDs
-        .with(RequestLogger)  // Comprehensive logging with timing
-        .with(ErrorHandler)  // Consistent error handling
-        .with(RequestSizeTracker::new())  // Track request/response sizes
-
+        .with(Tracing) // Built-in poem tracing
+        .with(RequestId) // Generate unique request IDs
+        .with(RequestLogger) // Comprehensive logging with timing
+        .with(ErrorHandler) // Consistent error handling
+        .with(RequestSizeTracker::new()) // Track request/response sizes
         // Attach application state
         .data(state)
 }
@@ -92,8 +93,14 @@ pub fn create_routes_with_size_limits(
         .at("/api/v1/heatmap", post(handlers::generate_heatmap_endpoint))
         .at("/api/v1/antennas", get(handlers::list_antennas))
         .at("/api/v1/antennas/:id", get(handlers::get_antenna_details))
-        .at("/api/v1/antennas/:id/feeds", get(handlers::list_antenna_feeds))
-        .at("/api/v1/antennas/:id/feeds/:feed_id", get(handlers::get_feed_details))
+        .at(
+            "/api/v1/antennas/:id/feeds",
+            get(handlers::list_antenna_feeds),
+        )
+        .at(
+            "/api/v1/antennas/:id/feeds/:feed_id",
+            get(handlers::get_feed_details),
+        )
         .with(Tracing)
         .with(RequestId)
         .with(RequestLogger)
@@ -891,7 +898,10 @@ mod tests {
         let app = create_routes(state);
         let cli = TestClient::new(app);
 
-        let response = cli.get("/api/v1/antennas/uncalibrated_antenna").send().await;
+        let response = cli
+            .get("/api/v1/antennas/uncalibrated_antenna")
+            .send()
+            .await;
         response.assert_status_is_ok();
 
         let body = response.json().await;
@@ -905,9 +915,15 @@ mod tests {
         let calibration_status = json_value.get("calibration_status").object();
         assert_eq!(calibration_status.get("status").string(), "uncalibrated");
         assert_eq!(calibration_status.get("accuracy_estimate_db").f64(), 3.0);
-        assert_eq!(calibration_status.get("loss_accuracy_estimate_db").f64(), 2.0);
+        assert_eq!(
+            calibration_status.get("loss_accuracy_estimate_db").f64(),
+            2.0
+        );
         assert_eq!(calibration_status.get("correction_applied").bool(), false);
-        assert_eq!(calibration_status.get("parameters_source").string(), "design_specifications");
+        assert_eq!(
+            calibration_status.get("parameters_source").string(),
+            "design_specifications"
+        );
     }
 
     #[tokio::test]
@@ -990,22 +1006,37 @@ mod tests {
         let app = create_routes(state);
         let cli = TestClient::new(app);
 
-        let response = cli.get("/api/v1/antennas/partially_calibrated_antenna").send().await;
+        let response = cli
+            .get("/api/v1/antennas/partially_calibrated_antenna")
+            .send()
+            .await;
         response.assert_status_is_ok();
 
         let body = response.json().await;
         let json_value = body.value().object();
 
         // Check basic antenna info
-        assert_eq!(json_value.get("id").string(), "partially_calibrated_antenna");
-        assert_eq!(json_value.get("name").string(), "Test Partially Calibrated Antenna");
+        assert_eq!(
+            json_value.get("id").string(),
+            "partially_calibrated_antenna"
+        );
+        assert_eq!(
+            json_value.get("name").string(),
+            "Test Partially Calibrated Antenna"
+        );
 
         // Check calibration status
         let calibration_status = json_value.get("calibration_status").object();
-        assert_eq!(calibration_status.get("status").string(), "partially_calibrated");
+        assert_eq!(
+            calibration_status.get("status").string(),
+            "partially_calibrated"
+        );
         assert_eq!(calibration_status.get("accuracy_estimate_db").f64(), 1.5);
         assert_eq!(calibration_status.get("correction_applied").bool(), false);
-        assert_eq!(calibration_status.get("parameters_source").string(), "measurement_tuned");
+        assert_eq!(
+            calibration_status.get("parameters_source").string(),
+            "measurement_tuned"
+        );
 
         // Check coverage info
         let coverage = calibration_status.get("coverage").object();
@@ -1084,7 +1115,10 @@ mod tests {
         let app = create_routes(state);
         let cli = TestClient::new(app);
 
-        let response = cli.get("/api/v1/antennas/fully_calibrated_antenna").send().await;
+        let response = cli
+            .get("/api/v1/antennas/fully_calibrated_antenna")
+            .send()
+            .await;
         response.assert_status_is_ok();
 
         let body = response.json().await;
@@ -1092,14 +1126,23 @@ mod tests {
 
         // Check basic antenna info
         assert_eq!(json_value.get("id").string(), "fully_calibrated_antenna");
-        assert_eq!(json_value.get("name").string(), "Test Fully Calibrated Antenna");
+        assert_eq!(
+            json_value.get("name").string(),
+            "Test Fully Calibrated Antenna"
+        );
 
         // Check calibration status
         let calibration_status = json_value.get("calibration_status").object();
-        assert_eq!(calibration_status.get("status").string(), "fully_calibrated");
+        assert_eq!(
+            calibration_status.get("status").string(),
+            "fully_calibrated"
+        );
         assert_eq!(calibration_status.get("accuracy_estimate_db").f64(), 1.0);
         assert_eq!(calibration_status.get("correction_applied").bool(), false);
-        assert_eq!(calibration_status.get("parameters_source").string(), "measurement_tuned");
+        assert_eq!(
+            calibration_status.get("parameters_source").string(),
+            "measurement_tuned"
+        );
     }
 
     #[tokio::test]

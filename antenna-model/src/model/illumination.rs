@@ -191,6 +191,7 @@ pub fn feed_angle(rho: f64, phi_prime: f64, feed_pos: &FeedPosition, focal_lengt
 /// let amp = illumination_amplitude(0.0, 0.0, &feed_params, 1.0);
 /// // Note: might not be exactly 1.0 due to geometry, but should be close
 /// ```
+#[inline]
 pub fn illumination_amplitude(
     rho: f64,
     phi_prime: f64,

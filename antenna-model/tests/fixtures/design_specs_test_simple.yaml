@@ -1,0 +1,22 @@
+# Design Specifications for Simple Test Antenna
+# Solid reflector, single feed
+
+antenna_id: "test_simple"
+antenna_name: "Simple Test Antenna"
+
+# Reflector geometry
+reflector:
+  diameter_m: 5.0
+  focal_length_m: 2.0
+  surface_rms_mm: 1.0
+
+# Feed configurations
+feeds:
+  - feed_id: "primary"
+    name: "Primary Test Feed"
+    position: [0.0, 0.0, 0.0]
+    q_factor: 8.0
+    phase_center_offset_m: 0.0
+    frequency_range: [8000.0, 8500.0]
+
+# No mesh (solid reflector)

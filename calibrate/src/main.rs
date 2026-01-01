@@ -6,22 +6,35 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use std::path::PathBuf;
-use tracing::{info, warn, error, debug};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::{fmt, EnvFilter};
 
 use calibrate::{
-    parse_measurements, tune_parameters, fit_correction_surface, validate_calibration,
-    save_artifact, export_metadata_json, export_validation_json,
-    AntennaClassRegistry, AntennaConfiguration, CorrectionSurfaceParams,
-    ValidationConfig, TuningMode, TunableParameters, CalibrationArtifact, ArtifactMetadata,
-    MeasurementPoint,
+    build_calibration_artifact,
     // Boresight calibration imports
-    calibrate_boresight, build_calibration_artifact, BoresightMeasurements, DesignSpecs,
+    calibrate_boresight,
+    export_metadata_json,
+    export_validation_json,
+    fit_correction_surface,
+    parse_measurements,
+    save_artifact,
+    tune_parameters,
+    validate_calibration,
+    AntennaClassRegistry,
+    AntennaConfiguration,
+    ArtifactMetadata,
+    BoresightMeasurements,
+    CalibrationArtifact,
+    CorrectionSurfaceParams,
+    DesignSpecs,
+    MeasurementPoint,
+    TunableParameters,
+    TuningMode,
+    ValidationConfig,
 };
 
 use antenna_model::model::{
-    compute_g_over_t, AntennaConfigurationBuilder,
-    FeedParametersBuilder, IntegrationParams,
+    compute_g_over_t, AntennaConfigurationBuilder, FeedParametersBuilder, IntegrationParams,
     MeshParametersBuilder, ReflectorGeometryBuilder,
 };
 
@@ -33,11 +46,10 @@ use antenna_model::model::{
 #[command(version = "0.1.0")]
 #[command(about = "Antenna calibration tool - generate calibration artifacts from measurements", long_about = None)]
 struct Args {
-    /// Calibration mode: full, boresight, or partial
+    /// Calibration mode: full or boresight
     ///
     /// - full: Full grid calibration from dense measurements (default)
     /// - boresight: Boresight-only calibration from frequency sweep at az=0, el=0
-    /// - partial: Partial grid calibration (future support)
     #[arg(long, default_value = "full")]
     calibration_mode: String,
 
@@ -132,12 +144,21 @@ fn compute_model_predictions(
     antenna_class: &calibrate::AntennaClass,
     tunable_params: &TunableParameters,
 ) -> Result<Vec<f64>> {
-    info!("Computing physics model predictions for {} points...", measurements.len());
+    info!(
+        "Computing physics model predictions for {} points...",
+        measurements.len()
+    );
 
     // Get effective parameters
-    let surface_rms_mm = tunable_params.surface_rms_mm.unwrap_or(antenna_class.surface.rms_mm);
-    let mesh_spacing_mm = tunable_params.mesh_spacing_mm.unwrap_or(antenna_class.mesh.spacing_mm);
-    let wire_diameter_mm = tunable_params.mesh_wire_diameter_mm.unwrap_or(antenna_class.mesh.wire_diameter_mm);
+    let surface_rms_mm = tunable_params
+        .surface_rms_mm
+        .unwrap_or(antenna_class.surface.rms_mm);
+    let mesh_spacing_mm = tunable_params
+        .mesh_spacing_mm
+        .unwrap_or(antenna_class.mesh.spacing_mm);
+    let wire_diameter_mm = tunable_params
+        .mesh_wire_diameter_mm
+        .unwrap_or(antenna_class.mesh.wire_diameter_mm);
 
     // Build reflector geometry
     let reflector = ReflectorGeometryBuilder::default()
@@ -200,8 +221,11 @@ fn compute_model_predictions(
             frequency_hz,
             temperature_k,
             &integration_params,
-        ).context(format!("Failed to compute G/T for point {}: freq={} MHz, e_cone={}, e_clock={}",
-            idx, point.frequency_mhz, point.e_cone_deg, point.e_clock_deg))?;
+        )
+        .context(format!(
+            "Failed to compute G/T for point {}: freq={} MHz, e_cone={}, e_clock={}",
+            idx, point.frequency_mhz, point.e_cone_deg, point.e_clock_deg
+        ))?;
 
         predictions.push(predicted_g_over_t);
     }
@@ -217,11 +241,14 @@ async fn run_boresight_calibration(args: Args) -> Result<()> {
     info!("Antenna ID: {}", args.antenna_id);
 
     // Validate required parameters
-    let feed_id = args.feed_id.as_ref()
+    let feed_id = args
+        .feed_id
+        .as_ref()
         .ok_or_else(|| anyhow::anyhow!("--feed-id is required for boresight calibration mode"))?;
 
-    let design_specs_path = args.design_specs.as_ref()
-        .ok_or_else(|| anyhow::anyhow!("--design-specs is required for boresight calibration mode"))?;
+    let design_specs_path = args.design_specs.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("--design-specs is required for boresight calibration mode")
+    })?;
 
     info!("Feed ID: {}", feed_id);
     info!("Input: {}", args.input.display());
@@ -234,11 +261,15 @@ async fn run_boresight_calibration(args: Args) -> Result<()> {
         .context("Failed to load design specifications")?;
 
     info!("  ✓ Loaded design specs for {}", design_specs.antenna_name);
-    info!("    Diameter: {:.1}m, f/D: {:.4}",
+    info!(
+        "    Diameter: {:.1}m, f/D: {:.4}",
         design_specs.reflector.diameter_m,
         design_specs.f_over_d_ratio()
     );
-    info!("    Initial surface RMS: {:.3} mm", design_specs.reflector.surface_rms_mm);
+    info!(
+        "    Initial surface RMS: {:.3} mm",
+        design_specs.reflector.surface_rms_mm
+    );
 
     // Step 2: Parse boresight measurements
     info!("Step 2/4: Parsing boresight measurements...");
@@ -259,7 +290,8 @@ async fn run_boresight_calibration(args: Args) -> Result<()> {
         feed_id,
         &measurements,
         Some(args.max_tuning_iterations),
-    ).context("Boresight calibration failed")?;
+    )
+    .context("Boresight calibration failed")?;
 
     info!("  ✓ Boresight calibration complete");
 
@@ -273,10 +305,12 @@ async fn run_boresight_calibration(args: Args) -> Result<()> {
         &measurements,
         &calibration_result,
         data_source,
-    ).context("Failed to build calibration artifact")?;
+    )
+    .context("Failed to build calibration artifact")?;
 
     // Validate the artifact
-    calibration.validate()
+    calibration
+        .validate()
         .context("Calibration artifact failed validation")?;
 
     // Serialize and save
@@ -287,7 +321,8 @@ async fn run_boresight_calibration(args: Args) -> Result<()> {
         .with_context(|| format!("Failed to write artifact to {}", args.output.display()))?;
 
     let file_size = std::fs::metadata(&args.output)?.len();
-    info!("  ✓ Artifact saved: {} ({:.2} KB)",
+    info!(
+        "  ✓ Artifact saved: {} ({:.2} KB)",
         args.output.display(),
         file_size as f64 / 1024.0
     );
@@ -309,15 +344,28 @@ async fn run_boresight_calibration(args: Args) -> Result<()> {
     info!("  Calibration mode: Boresight (PartiallyCalibrated)");
     info!("  Measurements: {}", measurements.points.len());
     info!("  Frequency range: {:.1} - {:.1} MHz", freq_min, freq_max);
-    info!("  Initial RMSE: {:.4} dB (design specs)", calibration_result.initial_rmse_db);
-    info!("  Final RMSE: {:.4} dB (tuned)", calibration_result.final_rmse_db);
-    info!("  Improvement: {:.4} dB ({:.1}%)",
+    info!(
+        "  Initial RMSE: {:.4} dB (design specs)",
+        calibration_result.initial_rmse_db
+    );
+    info!(
+        "  Final RMSE: {:.4} dB (tuned)",
+        calibration_result.final_rmse_db
+    );
+    info!(
+        "  Improvement: {:.4} dB ({:.1}%)",
         calibration_result.improvement_db,
         (calibration_result.improvement_db / calibration_result.initial_rmse_db) * 100.0
     );
     info!("  Tuned parameters:");
-    info!("    surface_rms: {:.3} mm", calibration_result.tuned_params.surface_rms_mm);
-    info!("    q_factor: {:.2}", calibration_result.tuned_params.q_factor);
+    info!(
+        "    surface_rms: {:.3} mm",
+        calibration_result.tuned_params.surface_rms_mm
+    );
+    info!(
+        "    q_factor: {:.2}",
+        calibration_result.tuned_params.q_factor
+    );
     if let Some(spacing) = calibration_result.tuned_params.mesh_spacing_mm {
         info!("    mesh_spacing: {:.2} mm", spacing);
     }
@@ -344,26 +392,30 @@ async fn run_calibration(args: Args) -> Result<()> {
         .await
         .context("Failed to parse measurement data")?;
 
-    let estimated_beamwidth_deg = 70.0 / measurements.points.first()
-        .map(|p| p.frequency_mhz / 1000.0)
-        .unwrap_or(1.0); // Estimate beamwidth for 1m diameter antenna
+    let estimated_beamwidth_deg = 70.0
+        / measurements
+            .points
+            .first()
+            .map(|p| p.frequency_mhz / 1000.0)
+            .unwrap_or(1.0); // Estimate beamwidth for 1m diameter antenna
     let quality_report = measurements.quality_report(estimated_beamwidth_deg);
 
     info!("  ✓ Parsed {} measurements", measurements.points.len());
-    info!("  Coverage: {} unique frequencies",
+    info!(
+        "  Coverage: {} unique frequencies",
         quality_report.unique_frequencies
     );
-    info!("  Frequency range: {:.1} - {:.1} MHz",
-        quality_report.frequency_range.0,
-        quality_report.frequency_range.1
+    info!(
+        "  Frequency range: {:.1} - {:.1} MHz",
+        quality_report.frequency_range.0, quality_report.frequency_range.1
     );
-    info!("  E-cone range: {:.1} - {:.1} deg",
-        quality_report.e_cone_range.0,
-        quality_report.e_cone_range.1
+    info!(
+        "  E-cone range: {:.1} - {:.1} deg",
+        quality_report.e_cone_range.0, quality_report.e_cone_range.1
     );
-    info!("  Main lobe points: {}, sidelobe points: {}",
-        quality_report.main_lobe_points,
-        quality_report.sidelobe_points
+    info!(
+        "  Main lobe points: {}, sidelobe points: {}",
+        quality_report.main_lobe_points, quality_report.sidelobe_points
     );
 
     if quality_report.outlier_count > 0 {
@@ -380,21 +432,30 @@ async fn run_calibration(args: Args) -> Result<()> {
         .context(format!("Antenna class '{}' not found", args.antenna_class))?;
 
     info!("  ✓ Loaded class: {}", class.description);
-    info!("    Diameter: {:.1}m, f/D: {:.4}", class.geometry.diameter_m, class.geometry.f_over_d);
+    info!(
+        "    Diameter: {:.1}m, f/D: {:.4}",
+        class.geometry.diameter_m, class.geometry.f_over_d
+    );
 
     // Step 3: Create antenna configuration with optional tuning
     let mut tunable_params = TunableParameters::default_from_class();
 
     if args.tune_parameters {
         info!("Step 3/6: Tuning physical parameters...");
-        info!("  Running parameter optimization (max {} iterations)...", args.max_tuning_iterations);
+        info!(
+            "  Running parameter optimization (max {} iterations)...",
+            args.max_tuning_iterations
+        );
 
         let tuning_mode = match args.tuning_mode.as_str() {
             "surface-only" => TuningMode::SurfaceRmsOnly,
             "surface-and-mesh" => TuningMode::SurfaceAndMeshSpacing,
             "all" => TuningMode::All,
             _ => {
-                warn!("Unknown tuning mode '{}', using 'surface-only'", args.tuning_mode);
+                warn!(
+                    "Unknown tuning mode '{}', using 'surface-only'",
+                    args.tuning_mode
+                );
                 TuningMode::SurfaceRmsOnly
             }
         };
@@ -412,13 +473,17 @@ async fn run_calibration(args: Args) -> Result<()> {
         info!("  ✓ Parameter tuning complete");
         info!("    Initial RMSE: {:.4} dB", tuning_result.initial_rmse_db);
         info!("    Final RMSE: {:.4} dB", tuning_result.final_rmse_db);
-        info!("    Improvement: {:.4} dB ({:.1}%)",
+        info!(
+            "    Improvement: {:.4} dB ({:.1}%)",
             tuning_result.improvement_db,
             (tuning_result.improvement_db / tuning_result.initial_rmse_db) * 100.0
         );
         info!("    Iterations: {}", tuning_result.iterations);
 
-        info!("    Tuned surface_rms: {:.3} mm", tuning_result.surface_rms_mm);
+        info!(
+            "    Tuned surface_rms: {:.3} mm",
+            tuning_result.surface_rms_mm
+        );
         if let Some(spacing) = tuning_result.mesh_spacing_mm {
             info!("    Tuned mesh_spacing: {:.2} mm", spacing);
         }
@@ -439,11 +504,14 @@ async fn run_calibration(args: Args) -> Result<()> {
 
     // Step 4: Compute model predictions
     info!("Step 4/6: Computing model predictions...");
-    let model_predictions = compute_model_predictions(&measurements.points, class, &tunable_params)?;
+    let model_predictions =
+        compute_model_predictions(&measurements.points, class, &tunable_params)?;
 
     // Compute initial model-only RMSE
     let model_only_rmse = {
-        let squared_errors: f64 = measurements.points.iter()
+        let squared_errors: f64 = measurements
+            .points
+            .iter()
             .zip(model_predictions.iter())
             .map(|(m, p)| {
                 let error = m.g_over_t_db - p;
@@ -467,22 +535,25 @@ async fn run_calibration(args: Args) -> Result<()> {
         regularization: 1e-3,
         adaptive_knots: true,
         cross_validation_folds: if args.validate { args.cv_folds } else { 0 },
-        min_knot_spacing_frequency: 50.0,  // 50 MHz minimum spacing
-        min_knot_spacing_econe: 2.0,       // 2 degrees minimum spacing
-        min_knot_spacing_eclock: 5.0,      // 5 degrees minimum spacing
+        min_knot_spacing_frequency: 50.0, // 50 MHz minimum spacing
+        min_knot_spacing_econe: 2.0,      // 2 degrees minimum spacing
+        min_knot_spacing_eclock: 5.0,     // 5 degrees minimum spacing
     };
 
-    let correction_surface = fit_correction_surface(
-        &measurements.points,
-        &model_predictions,
-        &surface_params,
-    )?;
+    let correction_surface =
+        fit_correction_surface(&measurements.points, &model_predictions, &surface_params)?;
 
     info!("  ✓ Correction surface fitted");
     info!("    RMSE: {:.4} dB", correction_surface.fit_stats.rmse_db);
-    info!("    Max residual: {:.4} dB", correction_surface.fit_stats.max_residual_db);
+    info!(
+        "    Max residual: {:.4} dB",
+        correction_surface.fit_stats.max_residual_db
+    );
     info!("    R²: {:.6}", correction_surface.fit_stats.r_squared);
-    info!("    Improvement: {:.1}%", correction_surface.fit_stats.improvement_percent);
+    info!(
+        "    Improvement: {:.1}%",
+        correction_surface.fit_stats.improvement_percent
+    );
 
     // Step 6: Validation
     info!("Step 6/6: Running validation...");
@@ -491,7 +562,7 @@ async fn run_calibration(args: Args) -> Result<()> {
         num_folds: args.cv_folds,
         main_lobe_beamwidths: 1.0,
         first_sidelobe_max_deg: 5.0,
-        frequency_bands: vec![],  // Use default bands
+        frequency_bands: vec![], // Use default bands
         main_lobe_target_db: 1.0,
         first_sidelobe_target_db: 1.0,
         outlier_threshold_db: 3.0,
@@ -506,27 +577,37 @@ async fn run_calibration(args: Args) -> Result<()> {
     )?;
 
     info!("  ✓ Validation complete");
-    info!("    Corrected RMSE: {:.4} dB", validation_report.corrected_rmse);
-    info!("    Main lobe max error: {:.4} dB", validation_report.main_lobe_max_error);
-    info!("    First sidelobe max error: {:.4} dB", validation_report.first_sidelobe_max_error);
-    info!("    Outliers: {} ({:.1}%)",
+    info!(
+        "    Corrected RMSE: {:.4} dB",
+        validation_report.corrected_rmse
+    );
+    info!(
+        "    Main lobe max error: {:.4} dB",
+        validation_report.main_lobe_max_error
+    );
+    info!(
+        "    First sidelobe max error: {:.4} dB",
+        validation_report.first_sidelobe_max_error
+    );
+    info!(
+        "    Outliers: {} ({:.1}%)",
         validation_report.outliers.len(),
         validation_report.outliers.len() as f64 / measurements.points.len() as f64 * 100.0
     );
 
     if !validation_report.main_lobe_meets_target {
-        warn!("  ⚠ Main lobe accuracy target not met ({:.4} dB > {:.4} dB)",
-            validation_report.main_lobe_max_error,
-            validation_config.main_lobe_target_db
+        warn!(
+            "  ⚠ Main lobe accuracy target not met ({:.4} dB > {:.4} dB)",
+            validation_report.main_lobe_max_error, validation_config.main_lobe_target_db
         );
     } else {
         info!("  ✓ Main lobe meets accuracy target");
     }
 
     if !validation_report.first_sidelobe_meets_target {
-        warn!("  ⚠ First sidelobe accuracy target not met ({:.4} dB > {:.4} dB)",
-            validation_report.first_sidelobe_max_error,
-            validation_config.first_sidelobe_target_db
+        warn!(
+            "  ⚠ First sidelobe accuracy target not met ({:.4} dB > {:.4} dB)",
+            validation_report.first_sidelobe_max_error, validation_config.first_sidelobe_target_db
         );
     } else {
         info!("  ✓ First sidelobe meets accuracy target");
@@ -535,7 +616,10 @@ async fn run_calibration(args: Args) -> Result<()> {
     // Print cross-validation results if available
     if let Some(cv) = &validation_report.cross_validation {
         info!("  Cross-validation results:");
-        info!("    Mean RMSE: {:.4} dB (± {:.4} dB)", cv.mean_rmse, cv.std_rmse);
+        info!(
+            "    Mean RMSE: {:.4} dB (± {:.4} dB)",
+            cv.mean_rmse, cv.std_rmse
+        );
         info!("    Range: [{:.4}, {:.4}] dB", cv.min_rmse, cv.max_rmse);
     }
 
@@ -552,17 +636,20 @@ async fn run_calibration(args: Args) -> Result<()> {
             parameters_tuned: args.tune_parameters,
             num_measurement_points: measurements.points.len(),
             tool_version: env!("CARGO_PKG_VERSION").to_string(),
-            notes: Some(format!("Calibrated with class: {}, R²={:.6}", class.class_id, correction_surface.fit_stats.r_squared)),
+            notes: Some(format!(
+                "Calibrated with class: {}, R²={:.6}",
+                class.class_id, correction_surface.fit_stats.r_squared
+            )),
             frequency_range: quality_report.frequency_range,
             angular_range: quality_report.e_cone_range,
         },
     };
 
-    save_artifact(&artifact, &args.output)
-        .context("Failed to save calibration artifact")?;
+    save_artifact(&artifact, &args.output).context("Failed to save calibration artifact")?;
 
     let file_size = std::fs::metadata(&args.output)?.len();
-    info!("  ✓ Artifact saved: {} ({:.2} KB)",
+    info!(
+        "  ✓ Artifact saved: {} ({:.2} KB)",
         args.output.display(),
         file_size as f64 / 1024.0
     );
@@ -587,12 +674,35 @@ async fn run_calibration(args: Args) -> Result<()> {
     info!("Summary:");
     info!("  Antenna ID: {}", args.antenna_id);
     info!("  Measurements: {}", measurements.points.len());
-    info!("  Parameter tuning: {}", if args.tune_parameters { "yes" } else { "no" });
+    info!(
+        "  Parameter tuning: {}",
+        if args.tune_parameters { "yes" } else { "no" }
+    );
     info!("  Model-only RMSE: {:.4} dB", model_only_rmse);
-    info!("  Corrected RMSE: {:.4} dB", artifact.validation_report.corrected_rmse);
-    info!("  Improvement: {:.1}%", artifact.validation_report.rmse_improvement_percent);
-    info!("  Main lobe target met: {}", if artifact.validation_report.main_lobe_meets_target { "yes" } else { "no" });
-    info!("  First sidelobe target met: {}", if artifact.validation_report.first_sidelobe_meets_target { "yes" } else { "no" });
+    info!(
+        "  Corrected RMSE: {:.4} dB",
+        artifact.validation_report.corrected_rmse
+    );
+    info!(
+        "  Improvement: {:.1}%",
+        artifact.validation_report.rmse_improvement_percent
+    );
+    info!(
+        "  Main lobe target met: {}",
+        if artifact.validation_report.main_lobe_meets_target {
+            "yes"
+        } else {
+            "no"
+        }
+    );
+    info!(
+        "  First sidelobe target met: {}",
+        if artifact.validation_report.first_sidelobe_meets_target {
+            "yes"
+        } else {
+            "no"
+        }
+    );
     info!("  Output artifact: {}", args.output.display());
 
     Ok(())
@@ -621,14 +731,9 @@ async fn main() {
     let result = match args.calibration_mode.as_str() {
         "full" => run_calibration(args).await,
         "boresight" => run_boresight_calibration(args).await,
-        "partial" => {
-            error!("Partial calibration mode is not yet implemented");
-            error!("Please use --calibration-mode=full or --calibration-mode=boresight");
-            std::process::exit(1);
-        }
         mode => {
             error!("Unknown calibration mode: {}", mode);
-            error!("Valid modes: full, boresight, partial");
+            error!("Valid modes: full, boresight");
             std::process::exit(1);
         }
     };

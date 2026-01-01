@@ -107,8 +107,8 @@ pub struct CorrectionSurfaceParams {
 
     /// Minimum spacing between knots (prevents overfitting)
     pub min_knot_spacing_frequency: f64, // MHz
-    pub min_knot_spacing_econe: f64,     // degrees
-    pub min_knot_spacing_eclock: f64,    // degrees
+    pub min_knot_spacing_econe: f64,  // degrees
+    pub min_knot_spacing_eclock: f64, // degrees
 }
 
 impl Default for CorrectionSurfaceParams {
@@ -121,9 +121,9 @@ impl Default for CorrectionSurfaceParams {
             regularization: 1e-6,
             adaptive_knots: true,
             cross_validation_folds: 5,
-            min_knot_spacing_frequency: 50.0,  // 50 MHz
-            min_knot_spacing_econe: 2.0,       // 2 degrees
-            min_knot_spacing_eclock: 5.0,      // 5 degrees
+            min_knot_spacing_frequency: 50.0, // 50 MHz
+            min_knot_spacing_econe: 2.0,      // 2 degrees
+            min_knot_spacing_eclock: 5.0,     // 5 degrees
         }
     }
 }
@@ -258,7 +258,10 @@ pub fn fit_correction_surface(
 
     // Generate knot vectors
     let knots_freq = generate_knot_vector(
-        &residuals.iter().map(|r| r.frequency_mhz).collect::<Vec<_>>(),
+        &residuals
+            .iter()
+            .map(|r| r.frequency_mhz)
+            .collect::<Vec<_>>(),
         params.num_knots_frequency,
         params.spline_order,
         params.adaptive_knots,
@@ -421,11 +424,7 @@ fn bspline_basis(i: usize, k: usize, t: f64, knots: &[f64]) -> f64 {
 /// Evaluate all non-zero B-spline basis functions at a point
 ///
 /// Returns a vector of (index, value) pairs for non-zero basis functions
-fn evaluate_basis_functions(
-    t: f64,
-    knots: &[f64],
-    order: usize,
-) -> Vec<(usize, f64)> {
+fn evaluate_basis_functions(t: f64, knots: &[f64], order: usize) -> Vec<(usize, f64)> {
     let n_basis = knots.len() - order;
     let mut results = Vec::new();
 
@@ -541,9 +540,7 @@ fn generate_uniform_knots(min: f64, max: f64, num_knots: usize) -> Vec<f64> {
     }
 
     let step = (max - min) / (num_knots + 1) as f64;
-    (1..=num_knots)
-        .map(|i| min + i as f64 * step)
-        .collect()
+    (1..=num_knots).map(|i| min + i as f64 * step).collect()
 }
 
 /// Generate adaptive knots based on data density
@@ -682,11 +679,12 @@ fn fit_bspline_coefficients(
     }
 
     // Solve the system
-    let coefficients = normal_matrix.solve_into(btr).map_err(|e| {
-        CorrectionSurfaceError::SingularMatrix {
-            reason: format!("Failed to solve normal equations: {:?}", e),
-        }
-    })?;
+    let coefficients =
+        normal_matrix
+            .solve_into(btr)
+            .map_err(|e| CorrectionSurfaceError::SingularMatrix {
+                reason: format!("Failed to solve normal equations: {:?}", e),
+            })?;
 
     Ok(coefficients.to_vec())
 }
@@ -705,15 +703,12 @@ impl CorrectionSurface {
     ///
     /// # Returns
     /// Correction value in dB to add to the model prediction
-    pub fn evaluate(
-        &self,
-        frequency_mhz: f64,
-        e_cone_deg: f64,
-        e_clock_deg: f64,
-    ) -> Result<f64> {
-        let basis_freq = evaluate_basis_functions(frequency_mhz, &self.knots_frequency, self.spline_order);
+    pub fn evaluate(&self, frequency_mhz: f64, e_cone_deg: f64, e_clock_deg: f64) -> Result<f64> {
+        let basis_freq =
+            evaluate_basis_functions(frequency_mhz, &self.knots_frequency, self.spline_order);
         let basis_cone = evaluate_basis_functions(e_cone_deg, &self.knots_econe, self.spline_order);
-        let basis_clock = evaluate_basis_functions(e_clock_deg, &self.knots_eclock, self.spline_order);
+        let basis_clock =
+            evaluate_basis_functions(e_clock_deg, &self.knots_eclock, self.spline_order);
 
         let [n_freq, n_cone, _n_clock] = self.shape;
         let mut correction = 0.0;
@@ -765,7 +760,10 @@ fn compute_fit_statistics(
     }
 
     let rmse = compute_rmse(&corrected_residuals);
-    let r_squared = compute_r_squared(&residuals.iter().map(|r| r.residual_db).collect::<Vec<_>>(), &corrected_residuals);
+    let r_squared = compute_r_squared(
+        &residuals.iter().map(|r| r.residual_db).collect::<Vec<_>>(),
+        &corrected_residuals,
+    );
     let improvement = if initial_rmse > 0.0 {
         ((initial_rmse - rmse) / initial_rmse) * 100.0
     } else {
@@ -824,7 +822,11 @@ fn cross_validate(residuals: &[ResidualPoint], params: &CorrectionSurfaceParams)
 
     for fold in 0..k {
         let start = fold * fold_size;
-        let end = if fold == k - 1 { n } else { (fold + 1) * fold_size };
+        let end = if fold == k - 1 {
+            n
+        } else {
+            (fold + 1) * fold_size
+        };
 
         // Split into training and validation sets
         let mut training = Vec::new();
@@ -855,11 +857,16 @@ fn cross_validate(residuals: &[ResidualPoint], params: &CorrectionSurfaceParams)
         let training_predictions = vec![0.0; training.len()]; // Zero mean for residuals
 
         // Fit surface on training fold
-        let surface = fit_correction_surface(&training_measurements, &training_predictions, params)?;
+        let surface =
+            fit_correction_surface(&training_measurements, &training_predictions, params)?;
 
         // Evaluate on validation fold
         for val_res in &validation {
-            let correction = surface.evaluate(val_res.frequency_mhz, val_res.e_cone_deg, val_res.e_clock_deg)?;
+            let correction = surface.evaluate(
+                val_res.frequency_mhz,
+                val_res.e_cone_deg,
+                val_res.e_clock_deg,
+            )?;
             let error = val_res.residual_db - correction;
             cv_errors.push(error);
         }

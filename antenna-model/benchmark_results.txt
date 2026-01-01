@@ -1,0 +1,963 @@
+    Finished `bench` profile [optimized] target(s) in 0.24s
+     Running unittests src/lib.rs (/Users/effnish/workspace/ai_coding/antenna_model/target/release/deps/antenna_model-0ef3d8e9439748bb)
+
+running 466 tests
+test api::handlers::tests::test_app_state_antenna_ids ... ignored
+test api::handlers::tests::test_app_state_initial_uptime ... ignored
+test api::handlers::tests::test_app_state_memory_usage ... ignored
+test api::handlers::tests::test_app_state_readiness ... ignored
+test api::handlers::tests::test_app_state_uptime ... ignored
+test api::handlers::tests::test_app_state_version ... ignored
+test api::middleware::tests::test_error_handler ... ignored
+test api::middleware::tests::test_middleware_chain_order ... ignored
+test api::middleware::tests::test_request_id_generation ... ignored
+test api::middleware::tests::test_request_id_propagation ... ignored
+test api::middleware::tests::test_request_logger_error ... ignored
+test api::middleware::tests::test_request_logger_success ... ignored
+test api::middleware::tests::test_request_size_tracker ... ignored
+test api::middleware::tests::test_timing_measurement ... ignored
+test api::routes::tests::test_all_endpoints_present ... ignored
+test api::routes::tests::test_antenna_details_backward_compatibility_without_status ... ignored
+test api::routes::tests::test_antenna_details_with_fully_calibrated_status ... ignored
+test api::routes::tests::test_antenna_details_with_partially_calibrated_status ... ignored
+test api::routes::tests::test_antenna_details_with_uncalibrated_status ... ignored
+test api::routes::tests::test_antenna_endpoints_with_empty_repository ... ignored
+test api::routes::tests::test_antenna_without_mesh ... ignored
+test api::routes::tests::test_concurrent_requests ... ignored
+test api::routes::tests::test_get_antenna_details ... ignored
+test api::routes::tests::test_get_antenna_details_not_found ... ignored
+test api::routes::tests::test_get_feed_details ... ignored
+test api::routes::tests::test_get_feed_details_antenna_not_found ... ignored
+test api::routes::tests::test_get_feed_details_feed_not_found ... ignored
+test api::routes::tests::test_health_route ... ignored
+test api::routes::tests::test_health_route_always_succeeds ... ignored
+test api::routes::tests::test_invalid_route_returns_404 ... ignored
+test api::routes::tests::test_list_antenna_feeds ... ignored
+test api::routes::tests::test_list_antenna_feeds_not_found ... ignored
+test api::routes::tests::test_list_antennas ... ignored
+test api::routes::tests::test_middleware_stack_integration ... ignored
+test api::routes::tests::test_multi_feed_antenna_support ... ignored
+test api::routes::tests::test_readiness_transitions ... ignored
+test api::routes::tests::test_ready_route_when_not_ready ... ignored
+test api::routes::tests::test_ready_route_when_ready ... ignored
+test api::routes::tests::test_request_id_in_response ... ignored
+test api::routes::tests::test_request_id_propagation ... ignored
+test api::routes::tests::test_routes_with_custom_size_limits ... ignored
+test api::routes::tests::test_status_route ... ignored
+test api::routes::tests::test_status_route_multiple_calls ... ignored
+test api::routes::tests::test_status_route_with_antennas ... ignored
+test api::schemas::tests::test_calibration_status_info_from_fully_calibrated ... ignored
+test api::schemas::tests::test_calibration_status_info_from_partially_calibrated ... ignored
+test api::schemas::tests::test_calibration_status_info_from_uncalibrated ... ignored
+test api::schemas::tests::test_calibration_status_info_serialization_fully_calibrated ... ignored
+test api::schemas::tests::test_calibration_status_info_serialization_partially_calibrated ... ignored
+test api::schemas::tests::test_calibration_status_info_serialization_uncalibrated ... ignored
+test api::schemas::tests::test_coverage_info_boresight_only_detection ... ignored
+test api::schemas::tests::test_coverage_info_from_calibration_coverage ... ignored
+test api::schemas::tests::test_coverage_info_serialization ... ignored
+test api::schemas::tests::test_error_response_antenna_not_found ... ignored
+test api::schemas::tests::test_error_response_basic ... ignored
+test api::schemas::tests::test_error_response_feed_not_found ... ignored
+test api::schemas::tests::test_error_response_invalid_parameter ... ignored
+test api::schemas::tests::test_error_response_serialization ... ignored
+test api::schemas::tests::test_error_response_with_details ... ignored
+test api::schemas::tests::test_error_response_with_field ... ignored
+test api::schemas::tests::test_field_naming_snake_case ... ignored
+test api::schemas::tests::test_gain_request_field_naming ... ignored
+test api::schemas::tests::test_gain_request_serialization ... ignored
+test api::schemas::tests::test_gain_request_with_euler_angles ... ignored
+test api::schemas::tests::test_gain_response_backward_compatibility_without_calibration_status ... ignored
+test api::schemas::tests::test_gain_response_with_calibration_status ... ignored
+test api::schemas::tests::test_grid_config_h3_serialization ... ignored
+test api::schemas::tests::test_grid_config_rectangular_serialization ... ignored
+test api::schemas::tests::test_health_response_healthy ... ignored
+test api::schemas::tests::test_health_response_serialization ... ignored
+test api::schemas::tests::test_position3d_boundary_detection ... ignored
+test api::schemas::tests::test_position3d_ecef_detection ... ignored
+test api::schemas::tests::test_position3d_geodetic_detection ... ignored
+test api::schemas::tests::test_position3d_serialization ... ignored
+test api::schemas::tests::test_range_config_num_points ... ignored
+test api::schemas::tests::test_range_config_zero_step ... ignored
+test api::schemas::tests::test_status_response_deserialization ... ignored
+test api::schemas::tests::test_status_response_ok_constructor ... ignored
+test api::schemas::tests::test_status_response_serialization ... ignored
+test api::schemas::tests::test_status_response_with_antennas ... ignored
+test api::schemas::tests::test_status_response_with_memory ... ignored
+test api::schemas::tests::test_vector3d_serialization ... ignored
+test api::schemas::tests::test_vector3d_zero ... ignored
+test api::tests::test_app_state_bind_address ... ignored
+test api::tests::test_app_state_clone ... ignored
+test api::tests::test_app_state_creation ... ignored
+test api::tests::test_app_state_uptime ... ignored
+test api::tests::test_app_state_with_custom_config ... ignored
+test api::tests::test_shutdown_cleanup ... ignored
+test config::settings::tests::test_antenna_config_from_yaml ... ignored
+test config::settings::tests::test_antenna_config_validation ... ignored
+test config::settings::tests::test_antenna_with_validity_ranges ... ignored
+test config::settings::tests::test_backward_compatibility_old_format ... ignored
+test config::settings::tests::test_bind_address ... ignored
+test config::settings::tests::test_calibrated_without_file_fails ... ignored
+test config::settings::tests::test_design_specs_validation_invalid_diameter ... ignored
+test config::settings::tests::test_design_specs_validation_no_feeds ... ignored
+test config::settings::tests::test_feed_validation_invalid_q_factor ... ignored
+test config::settings::tests::test_invalid_calibration_status ... ignored
+test config::settings::tests::test_log_format_serialization ... ignored
+test config::settings::tests::test_mesh_validation_wire_too_large ... ignored
+test config::settings::tests::test_parse_real_antennas_yaml ... ignored
+test config::settings::tests::test_partially_calibrated_antenna_with_coverage ... ignored
+test config::settings::tests::test_service_config_defaults ... ignored
+test config::settings::tests::test_service_config_from_yaml ... ignored
+test config::settings::tests::test_service_config_validation ... ignored
+test config::settings::tests::test_uncalibrated_antenna_config ... ignored
+test config::settings::tests::test_uncalibrated_antenna_multi_feed ... ignored
+test config::settings::tests::test_uncalibrated_antenna_with_mesh ... ignored
+test config::settings::tests::test_uncalibrated_without_design_specs_fails ... ignored
+test data::loader::tests::test_load_calibration_artifact_file_not_found ... ignored
+test data::loader::tests::test_load_calibration_artifact_invalid_data ... ignored
+test data::loader::tests::test_load_calibration_artifact_success ... ignored
+test data::loader::tests::test_validate_calibration_invalid_elevation_range ... ignored
+test data::loader::tests::test_validate_calibration_success ... ignored
+test data::loader::tests::test_validate_calibration_with_correction_surface ... ignored
+test data::repository::tests::test_add_calibration ... ignored
+test data::repository::tests::test_add_multiple_antennas ... ignored
+test data::repository::tests::test_add_multiple_feeds_same_antenna ... ignored
+test data::repository::tests::test_backward_compatibility_explicit_uncalibrated ... ignored
+test data::repository::tests::test_get_antenna_config ... ignored
+test data::repository::tests::test_get_calibration ... ignored
+test data::repository::tests::test_get_calibration_not_found ... ignored
+test data::repository::tests::test_get_correction_surface ... ignored
+test data::repository::tests::test_get_validity_ranges ... ignored
+test data::repository::tests::test_has_calibration ... ignored
+test data::repository::tests::test_list_antennas ... ignored
+test data::repository::tests::test_list_feeds ... ignored
+test data::repository::tests::test_list_feeds_empty ... ignored
+test data::repository::tests::test_load_from_config ... ignored
+test data::repository::tests::test_load_from_config_fail_fast ... ignored
+test data::repository::tests::test_load_from_config_fail_fast_uncalibrated ... ignored
+test data::repository::tests::test_load_from_config_with_disabled_antenna ... ignored
+test data::repository::tests::test_load_mixed_calibrated_and_uncalibrated ... ignored
+test data::repository::tests::test_load_uncalibrated_antenna_multi_feed ... ignored
+test data::repository::tests::test_load_uncalibrated_antenna_single_feed ... ignored
+test data::repository::tests::test_load_uncalibrated_antenna_with_mesh ... ignored
+test data::repository::tests::test_load_uncalibrated_antenna_with_validity_ranges ... ignored
+test data::repository::tests::test_load_uncalibrated_missing_design_specs ... ignored
+test data::repository::tests::test_repository_clone ... ignored
+test data::repository::tests::test_repository_new ... ignored
+test data::repository::tests::test_uncalibrated_antenna_list_operations ... ignored
+test data::types::tests::test_antenna_calibration_builder ... ignored
+test data::types::tests::test_antenna_calibration_validate ... ignored
+test data::types::tests::test_antenna_calibration_with_partial_calibration_fields ... ignored
+test data::types::tests::test_bspline_model_builder ... ignored
+test data::types::tests::test_bspline_model_validate ... ignored
+test data::types::tests::test_calibration_coverage_builder ... ignored
+test data::types::tests::test_calibration_coverage_contains ... ignored
+test data::types::tests::test_calibration_coverage_is_boresight_only ... ignored
+test data::types::tests::test_calibration_coverage_validate ... ignored
+test data::types::tests::test_calibration_metadata_builder ... ignored
+test data::types::tests::test_calibration_status_fully_calibrated ... ignored
+test data::types::tests::test_calibration_status_partially_calibrated ... ignored
+test data::types::tests::test_calibration_status_uncalibrated ... ignored
+test data::types::tests::test_is_non_decreasing ... ignored
+test data::types::tests::test_measurement_density_boresight_only ... ignored
+test data::types::tests::test_measurement_density_dense ... ignored
+test data::types::tests::test_measurement_density_none ... ignored
+test data::types::tests::test_measurement_density_sparse ... ignored
+test data::types::tests::test_parameter_source_boresight_tuning ... ignored
+test data::types::tests::test_parameter_source_design_specifications ... ignored
+test data::types::tests::test_parameter_source_full_grid_tuning ... ignored
+test data::types::tests::test_parameter_source_partial_grid_tuning ... ignored
+test data::types::tests::test_partial_calibration_serialization_round_trip ... ignored
+test data::types::tests::test_serialization_backward_compatibility ... ignored
+test data::types::tests::test_serialization_round_trip ... ignored
+test data::types::tests::test_serialization_round_trip_json ... ignored
+test data::types::tests::test_validity_ranges_builder ... ignored
+test data::types::tests::test_validity_ranges_contains ... ignored
+test data::types::tests::test_validity_ranges_validate ... ignored
+test error::tests::test_api_error_classification ... ignored
+test error::tests::test_api_error_status_codes ... ignored
+test error::tests::test_computation_error_display ... ignored
+test error::tests::test_config_error_display ... ignored
+test error::tests::test_data_error_display ... ignored
+test error::tests::test_error_chain_preservation ... ignored
+test error::tests::test_error_context_helper ... ignored
+test error::tests::test_error_context_with_closure ... ignored
+test error::tests::test_error_conversion_computation_to_api ... ignored
+test error::tests::test_error_conversion_data_to_api ... ignored
+test error::tests::test_error_conversion_validation_to_api ... ignored
+test error::tests::test_error_debug_format ... ignored
+test error::tests::test_io_error_conversion ... ignored
+test error::tests::test_multiple_error_conversions ... ignored
+test error::tests::test_result_type_aliases ... ignored
+test error::tests::test_validation_error_display ... ignored
+test model::coordinates::tests::test_aperture_coordinates_cartesian_conversion ... ignored
+test model::coordinates::tests::test_azel_to_far_field ... ignored
+test model::coordinates::tests::test_e_clock_cone_feed_displacement_on_axis ... ignored
+test model::coordinates::tests::test_e_clock_cone_feed_displacement_small_angle ... ignored
+test model::coordinates::tests::test_e_clock_cone_feed_position ... ignored
+test model::coordinates::tests::test_e_clock_cone_roundtrip ... ignored
+test model::coordinates::tests::test_e_clock_cone_to_far_field ... ignored
+test model::coordinates::tests::test_far_field_direction_vector ... ignored
+test model::coordinates::tests::test_feed_displacement_formula ... ignored
+test model::coordinates::tests::test_from_azimuth_elevation_5deg_offset_physical_displacement ... ignored
+test model::coordinates::tests::test_from_azimuth_elevation_azimuth_direction ... ignored
+test model::coordinates::tests::test_from_azimuth_elevation_boresight_gives_focal_point ... ignored
+test model::coordinates::tests::test_from_azimuth_elevation_feed_position_roundtrip ... ignored
+test model::coordinates::tests::test_from_azimuth_elevation_matches_direct_construction ... ignored
+test model::coordinates::tests::test_from_azimuth_elevation_polar_angle_convention ... ignored
+test model::coordinates::tests::test_normalize_angle ... ignored
+test model::coordinates::tests::test_normalize_angle_symmetric ... ignored
+test model::coordinates_3d::tests::test_antenna_frame_to_spherical_along_axes ... ignored
+test model::coordinates_3d::tests::test_antenna_frame_to_spherical_origin_error ... ignored
+test model::coordinates_3d::tests::test_beam_squint_correction_applied ... ignored
+test model::coordinates_3d::tests::test_beam_squint_large_frequency_difference ... ignored
+test model::coordinates_3d::tests::test_beam_squint_no_correction_same_frequency ... ignored
+test model::coordinates_3d::tests::test_beam_squint_no_displacement ... ignored
+test model::coordinates_3d::tests::test_coordinate_detection_boundary ... ignored
+test model::coordinates_3d::tests::test_coordinate_detection_ecef ... ignored
+test model::coordinates_3d::tests::test_coordinate_detection_geodetic ... ignored
+test model::coordinates_3d::tests::test_ecef_to_geodetic_roundtrip ... ignored
+test model::coordinates_3d::tests::test_full_pipeline_geodetic_to_spherical ... ignored
+test model::coordinates_3d::tests::test_geodetic_to_ecef_equator_prime_meridian ... ignored
+test model::coordinates_3d::tests::test_geodetic_to_ecef_north_pole ... ignored
+test model::coordinates_3d::tests::test_geodetic_to_ecef_with_altitude ... ignored
+test model::coordinates_3d::tests::test_validate_ecef_invalid_magnitude ... ignored
+test model::coordinates_3d::tests::test_validate_ecef_nan ... ignored
+test model::coordinates_3d::tests::test_validate_geodetic_out_of_range ... ignored
+test model::correction_interpolator::tests::test_correction_result_builder ... ignored
+test model::correction_interpolator::tests::test_evaluate_basis_functions_order_2 ... ignored
+test model::correction_interpolator::tests::test_evaluate_basis_functions_order_3 ... ignored
+test model::correction_interpolator::tests::test_evaluate_correction_extrapolation ... ignored
+test model::correction_interpolator::tests::test_evaluate_correction_invalid_input ... ignored
+test model::correction_interpolator::tests::test_evaluate_correction_simple ... ignored
+test model::correction_interpolator::tests::test_find_knot_span_boundaries ... ignored
+test model::correction_interpolator::tests::test_find_knot_span_extrapolation ... ignored
+test model::correction_interpolator::tests::test_find_knot_span_interior ... ignored
+test model::direct_path::tests::test_constructive_destructive_interference ... ignored
+test model::direct_path::tests::test_direct_field_decreases_off_axis ... ignored
+test model::direct_path::tests::test_direct_path_field_on_boresight ... ignored
+test model::direct_path::tests::test_direct_path_zero_for_on_axis ... ignored
+test model::direct_path::tests::test_feed_position_extraction ... ignored
+test model::direct_path::tests::test_interference_factor ... ignored
+test model::direct_path::tests::test_offset_far_from_boresight_no_direct_path ... ignored
+test model::direct_path::tests::test_offset_near_boresight_has_direct_path ... ignored
+test model::direct_path::tests::test_on_axis_no_direct_path ... ignored
+test model::direct_path::tests::test_path_difference ... ignored
+test model::edge_cases::tests::test_adaptive_integration_needed ... ignored
+test model::edge_cases::tests::test_gain_floor_db ... ignored
+test model::edge_cases::tests::test_gain_floor_linear ... ignored
+test model::edge_cases::tests::test_higher_order_aberrations_nonzero ... ignored
+test model::edge_cases::tests::test_higher_order_aberrations_zero_offset ... ignored
+test model::edge_cases::tests::test_large_offset_ray_tracing ... ignored
+test model::edge_cases::tests::test_mode_selection_priority ... ignored
+test model::edge_cases::tests::test_moderate_offset_higher_order ... ignored
+test model::edge_cases::tests::test_near_boresight_direct_path ... ignored
+test model::edge_cases::tests::test_offset_calculation_e_cone ... ignored
+test model::edge_cases::tests::test_offset_calculation_on_axis ... ignored
+test model::edge_cases::tests::test_on_axis_standard_mode ... ignored
+test model::edge_cases::tests::test_small_offset_standard_mode ... ignored
+test model::edge_cases::tests::test_spillover_estimation ... ignored
+test model::geometry::tests::test_antenna_configuration_builder ... ignored
+test model::geometry::tests::test_antenna_configuration_valid ... ignored
+test model::geometry::tests::test_feed_parameters_builder ... ignored
+test model::geometry::tests::test_feed_parameters_valid ... ignored
+test model::geometry::tests::test_feed_position_at_focus ... ignored
+test model::geometry::tests::test_feed_position_displacement ... ignored
+test model::geometry::tests::test_large_feed_offset_detection ... ignored
+test model::geometry::tests::test_mesh_parameters_invalid_wire_too_large ... ignored
+test model::geometry::tests::test_mesh_parameters_valid ... ignored
+test model::geometry::tests::test_mesh_transparency ... ignored
+test model::geometry::tests::test_reflector_geometry_builder ... ignored
+test model::geometry::tests::test_reflector_geometry_invalid_diameter ... ignored
+test model::geometry::tests::test_reflector_geometry_invalid_focal_length ... ignored
+test model::geometry::tests::test_reflector_geometry_valid ... ignored
+test model::illumination::tests::test_cos_q_pattern_higher_q_more_focused ... ignored
+test model::illumination::tests::test_cos_q_pattern_negative_angles ... ignored
+test model::illumination::tests::test_cos_q_pattern_on_axis ... ignored
+test model::illumination::tests::test_cos_q_pattern_values ... ignored
+test model::illumination::tests::test_cos_q_pattern_zero_at_90_deg ... ignored
+test model::illumination::tests::test_edge_taper_always_negative ... ignored
+test model::illumination::tests::test_edge_taper_reasonable_values ... ignored
+test model::illumination::tests::test_feed_angle_centered_on_axis ... ignored
+test model::illumination::tests::test_feed_angle_geometry ... ignored
+test model::illumination::tests::test_feed_angle_offset_feed ... ignored
+test model::illumination::tests::test_illumination_amplitude_asymmetric ... ignored
+test model::illumination::tests::test_illumination_amplitude_azimuthal_symmetry ... ignored
+test model::illumination::tests::test_illumination_amplitude_symmetric ... ignored
+test model::illumination::tests::test_phase_center_offset_increases_off_axis ... ignored
+test model::illumination::tests::test_phase_center_offset_magnitude ... ignored
+test model::illumination::tests::test_phase_center_offset_sign ... ignored
+test model::illumination::tests::test_phase_center_offset_zero_on_axis ... ignored
+test model::illumination::tests::test_q_factor_from_taper_roundtrip ... ignored
+test model::illumination::tests::test_q_factor_from_taper_typical_values ... ignored
+test model::integration::tests::test_aperture_integrand_on_axis ... ignored
+test model::integration::tests::test_aperture_integrand_symmetry ... ignored
+test model::integration::tests::test_compute_far_field ... ignored
+test model::integration::tests::test_far_field_normalization ... ignored
+test model::integration::tests::test_integrate_aperture_convergence ... ignored
+test model::integration::tests::test_integrate_aperture_invalid_inputs ... ignored
+test model::integration::tests::test_integrate_aperture_off_axis ... ignored
+test model::integration::tests::test_integrate_aperture_on_axis ... ignored
+test model::integration::tests::test_integration_2d_simpson_basic ... ignored
+test model::integration::tests::test_integration_params_default ... ignored
+test model::integration::tests::test_integration_params_fast ... ignored
+test model::integration::tests::test_integration_params_high_accuracy ... ignored
+test model::integration::tests::test_pattern_decreases_off_axis ... ignored
+test model::integration::tests::test_simpson_weight ... ignored
+test model::mesh::tests::test_angle_correction_grazing ... ignored
+test model::mesh::tests::test_angle_correction_normal_incidence ... ignored
+test model::mesh::tests::test_angle_correction_oblique ... ignored
+test model::mesh::tests::test_basic_transparency_high_frequency ... ignored
+test model::mesh::tests::test_basic_transparency_low_frequency ... ignored
+test model::mesh::tests::test_basic_transparency_transition ... ignored
+test model::mesh::tests::test_combined_ruze_and_mesh_comment ... ignored
+test model::mesh::tests::test_cutoff_wavelength ... ignored
+test model::mesh::tests::test_edge_cases ... ignored
+test model::mesh::tests::test_effective_cutoff_with_wire_diameter ... ignored
+test model::mesh::tests::test_frequency_sweep ... ignored
+test model::mesh::tests::test_mesh_efficiency_high_frequency ... ignored
+test model::mesh::tests::test_mesh_efficiency_low_frequency ... ignored
+test model::mesh::tests::test_mesh_efficiency_simple ... ignored
+test model::mesh::tests::test_mesh_reflection_coefficient ... ignored
+test model::mesh::tests::test_mesh_transparency_with_angle_normal ... ignored
+test model::mesh::tests::test_mesh_transparency_with_angle_oblique ... ignored
+test model::mesh::tests::test_polarization_effects ... ignored
+test model::mesh::tests::test_transparency_wire_diameter_effect ... ignored
+test model::mesh::tests::test_transparency_with_diameter_vs_basic ... ignored
+test model::numerical_stability::tests::test_adaptive_integration_far_from_null ... ignored
+test model::numerical_stability::tests::test_adaptive_integration_near_null ... ignored
+test model::numerical_stability::tests::test_bessel_i0_known_values ... ignored
+test model::numerical_stability::tests::test_kaiser_taper ... ignored
+test model::numerical_stability::tests::test_kaiser_window_beta_effect ... ignored
+test model::numerical_stability::tests::test_kaiser_window_endpoints ... ignored
+test model::numerical_stability::tests::test_smooth_step ... ignored
+test model::numerical_stability::tests::test_smooth_to_floor_above_transition ... ignored
+test model::numerical_stability::tests::test_smooth_to_floor_below_floor ... ignored
+test model::numerical_stability::tests::test_smooth_to_floor_in_transition ... ignored
+test model::numerical_stability::tests::test_strongly_needs_adaptive ... ignored
+test model::numerical_stability::tests::test_unwrap_phase_no_wrap ... ignored
+test model::numerical_stability::tests::test_unwrap_phase_with_wrap ... ignored
+test model::pattern::tests::test_adaptive_integration_selection ... ignored
+test model::pattern::tests::test_compute_beamwidth ... ignored
+test model::pattern::tests::test_compute_g_over_t ... ignored
+test model::pattern::tests::test_compute_g_over_t_invalid_temperature ... ignored
+test model::pattern::tests::test_compute_gain_db_reasonable ... ignored
+test model::pattern::tests::test_compute_gain_positive ... ignored
+test model::pattern::tests::test_edge_case_warnings_propagation ... ignored
+test model::pattern::tests::test_gain_decreases_off_axis ... ignored
+test model::pattern::tests::test_mesh_transparency_above_cutoff ... ignored
+test model::pattern::tests::test_mesh_transparency_at_cutoff ... ignored
+test model::pattern::tests::test_mesh_transparency_below_cutoff ... ignored
+test model::pattern::tests::test_overall_efficiency_no_mesh ... ignored
+test model::pattern::tests::test_overall_efficiency_with_mesh ... ignored
+test model::pattern::tests::test_ruze_efficiency_frequency_dependence ... ignored
+test model::pattern::tests::test_ruze_efficiency_large_error ... ignored
+test model::pattern::tests::test_ruze_efficiency_perfect_surface ... ignored
+test model::pattern::tests::test_ruze_efficiency_small_error ... ignored
+test model::pattern::tests::test_theoretical_max_gain ... ignored
+test model::phase::tests::test_angle_of_incidence ... ignored
+test model::phase::tests::test_gaussian_surface ... ignored
+test model::phase::tests::test_ideal_surface ... ignored
+test model::phase::tests::test_phase_feed_displacement_at_center ... ignored
+test model::phase::tests::test_phase_feed_displacement_geometry_validation ... ignored
+test model::phase::tests::test_phase_feed_displacement_increases_with_rho ... ignored
+test model::phase::tests::test_phase_feed_displacement_nonzero ... ignored
+test model::phase::tests::test_phase_feed_displacement_opposite_sides ... ignored
+test model::phase::tests::test_phase_feed_displacement_symmetry ... ignored
+test model::phase::tests::test_phase_feed_displacement_zero ... ignored
+test model::phase::tests::test_phase_mesh_small_spacing ... ignored
+test model::phase::tests::test_phase_path_off_axis ... ignored
+test model::phase::tests::test_phase_path_on_axis ... ignored
+test model::phase::tests::test_phase_surface_error_nonzero ... ignored
+test model::phase::tests::test_phase_surface_error_zero ... ignored
+test model::phase::tests::test_phase_total_ideal_on_axis ... ignored
+test model::phase::tests::test_phase_total_with_all_contributions ... ignored
+test model::phase::tests::test_wavelength_from_frequency ... ignored
+test model::phase::tests::test_wavenumber ... ignored
+test model::phase::tests::test_zernike_surface_piston ... ignored
+test model::phase::tests::test_zernike_surface_tilt ... ignored
+test model::ray_trace::tests::test_compute_gain_decreases_off_axis ... ignored
+test model::ray_trace::tests::test_feed_position_offset ... ignored
+test model::ray_trace::tests::test_feed_position_on_axis ... ignored
+test model::ray_trace::tests::test_incidence_angle_on_axis ... ignored
+test model::ray_trace::tests::test_large_offset_spillover ... ignored
+test model::ray_trace::tests::test_off_axis_reduced_gain ... ignored
+test model::ray_trace::tests::test_on_axis_ray_trace ... ignored
+test model::ray_trace::tests::test_ray_hits_reflector ... ignored
+test model::ray_trace::tests::test_ray_spillover ... ignored
+test model::ray_trace::tests::test_ray_trace_sampling_consistency ... ignored
+test model::surface::tests::test_compute_surface_rms_ideal ... ignored
+test model::surface::tests::test_gaussian_surface_rms ... ignored
+test model::surface::tests::test_ideal_surface ... ignored
+test model::surface::tests::test_noll_to_nm_higher_orders ... ignored
+test model::surface::tests::test_noll_to_nm_low_orders ... ignored
+test model::surface::tests::test_ruze_efficiency_frequency_dependence ... ignored
+test model::surface::tests::test_ruze_efficiency_large_error ... ignored
+test model::surface::tests::test_ruze_efficiency_perfect_surface ... ignored
+test model::surface::tests::test_ruze_efficiency_small_error ... ignored
+test model::surface::tests::test_zernike_defocus ... ignored
+test model::surface::tests::test_zernike_index ... ignored
+test model::surface::tests::test_zernike_orthogonality ... ignored
+test model::surface::tests::test_zernike_piston ... ignored
+test model::surface::tests::test_zernike_surface ... ignored
+test model::surface::tests::test_zernike_surface_from_aberrations ... ignored
+test model::surface::tests::test_zernike_surface_rms ... ignored
+test model::surface::tests::test_zernike_tip_tilt ... ignored
+test service::batch::tests::test_all_failures ... ignored
+test service::batch::tests::test_batch_metadata_accuracy ... ignored
+test service::batch::tests::test_batch_performance_timing ... ignored
+test service::batch::tests::test_batch_size_limit_exceeded ... ignored
+test service::batch::tests::test_batch_with_reference_gain ... ignored
+test service::batch::tests::test_create_error_response ... ignored
+test service::batch::tests::test_empty_batch ... ignored
+test service::batch::tests::test_large_batch_parallel ... ignored
+test service::batch::tests::test_parallel_vs_sequential_threshold ... ignored
+test service::batch::tests::test_partial_failures ... ignored
+test service::batch::tests::test_single_evaluation_batch ... ignored
+test service::batch::tests::test_small_batch_sequential ... ignored
+test service::evaluator::tests::test_backward_compatibility_no_calibration_status ... ignored
+test service::evaluator::tests::test_compute_gain_antenna_not_found ... ignored
+test service::evaluator::tests::test_compute_gain_fully_calibrated ... ignored
+test service::evaluator::tests::test_compute_gain_partially_calibrated_in_coverage ... ignored
+test service::evaluator::tests::test_compute_gain_uncalibrated_antenna ... ignored
+test service::evaluator::tests::test_compute_gain_uncalibrated_with_reference ... ignored
+test service::evaluator::tests::test_generate_warnings_correction_not_applied ... ignored
+test service::evaluator::tests::test_generate_warnings_fully_calibrated ... ignored
+test service::evaluator::tests::test_generate_warnings_partially_calibrated_in_coverage ... ignored
+test service::evaluator::tests::test_generate_warnings_partially_calibrated_out_of_coverage ... ignored
+test service::evaluator::tests::test_generate_warnings_uncalibrated ... ignored
+test service::evaluator::tests::test_is_in_coverage_fully_covered ... ignored
+test service::evaluator::tests::test_is_in_coverage_none ... ignored
+test service::evaluator::tests::test_is_in_coverage_outside_azimuth ... ignored
+test service::evaluator::tests::test_is_in_coverage_outside_elevation ... ignored
+test service::evaluator::tests::test_is_in_coverage_outside_frequency ... ignored
+test service::heatmap::tests::test_compute_emitter_position_from_angles_ecef ... ignored
+test service::heatmap::tests::test_compute_emitter_position_from_angles_geodetic ... ignored
+test service::heatmap::tests::test_compute_emitter_position_horizon ... ignored
+test service::heatmap::tests::test_compute_emitter_position_zenith ... ignored
+test service::heatmap::tests::test_generate_rectangular_grid_single_point ... ignored
+test service::heatmap::tests::test_generate_rectangular_grid_small ... ignored
+test service::heatmap::tests::test_generate_rectangular_grid_typical ... ignored
+test service::heatmap::tests::test_grid_generation_boundary_values ... ignored
+test service::heatmap::tests::test_grid_too_large ... ignored
+test service::heatmap::tests::test_h3_grid_not_implemented ... ignored
+test service::heatmap::tests::test_max_grid_points ... ignored
+test service::heatmap::tests::test_parallel_threshold ... ignored
+test service::validator::tests::test_validate_antenna_feed_empty_antenna_id ... ignored
+test service::validator::tests::test_validate_antenna_feed_empty_feed_id ... ignored
+test service::validator::tests::test_validate_antenna_feed_not_found ... ignored
+test service::validator::tests::test_validate_batch_empty ... ignored
+test service::validator::tests::test_validate_batch_exceeds_limit ... ignored
+test service::validator::tests::test_validate_ecef_position_exceeds_max ... ignored
+test service::validator::tests::test_validate_ecef_position_valid ... ignored
+test service::validator::tests::test_validate_frequency_nan ... ignored
+test service::validator::tests::test_validate_frequency_too_high ... ignored
+test service::validator::tests::test_validate_frequency_too_low ... ignored
+test service::validator::tests::test_validate_frequency_valid ... ignored
+test service::validator::tests::test_validate_geodetic_position_invalid_altitude ... ignored
+test service::validator::tests::test_validate_geodetic_position_invalid_latitude ... ignored
+test service::validator::tests::test_validate_geodetic_position_invalid_longitude ... ignored
+test service::validator::tests::test_validate_geodetic_position_valid ... ignored
+test service::validator::tests::test_validate_h3_grid_invalid_elevation ... ignored
+test service::validator::tests::test_validate_h3_grid_invalid_fov ... ignored
+test service::validator::tests::test_validate_h3_grid_invalid_resolution ... ignored
+test service::validator::tests::test_validate_h3_grid_valid ... ignored
+test service::validator::tests::test_validate_position_infinity ... ignored
+test service::validator::tests::test_validate_position_nan ... ignored
+test service::validator::tests::test_validate_range_config_nan ... ignored
+test service::validator::tests::test_validate_rectangular_grid_invalid_range ... ignored
+test service::validator::tests::test_validate_rectangular_grid_negative_step ... ignored
+test service::validator::tests::test_validate_rectangular_grid_too_many_points ... ignored
+test service::validator::tests::test_validate_rectangular_grid_valid ... ignored
+
+test result: ok. 0 passed; 0 failed; 466 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (/Users/effnish/workspace/ai_coding/antenna_model/target/release/deps/antenna_model-e7f0aca0c25216f0)
+
+running 2 tests
+test tests::test_load_configuration_default ... ignored
+test tests::test_load_configuration_with_env ... ignored
+
+test result: ok. 0 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running benches/aperture_integration_benchmarks.rs (/Users/effnish/workspace/ai_coding/antenna_model/target/release/deps/aperture_integration_benchmarks-6163675a0cb7b25c)
+Gnuplot not found, using plotters backend
+Benchmarking integration_params/boresight/fast
+Benchmarking integration_params/boresight/fast: Warming up for 3.0000 s
+Benchmarking integration_params/boresight/fast: Collecting 100 samples in estimated 7.4854 s (15k iterations)
+Benchmarking integration_params/boresight/fast: Analyzing
+integration_params/boresight/fast
+                        time:   [488.34 µs 492.34 µs 498.57 µs]
+Found 5 outliers among 100 measurements (5.00%)
+  2 (2.00%) low mild
+  3 (3.00%) high severe
+Benchmarking integration_params/boresight/default
+Benchmarking integration_params/boresight/default: Warming up for 3.0000 s
+Benchmarking integration_params/boresight/default: Collecting 100 samples in estimated 5.3519 s (1200 iterations)
+Benchmarking integration_params/boresight/default: Analyzing
+integration_params/boresight/default
+                        time:   [4.4615 ms 4.4890 ms 4.5370 ms]
+Found 2 outliers among 100 measurements (2.00%)
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+Benchmarking integration_params/boresight/high_accuracy
+Benchmarking integration_params/boresight/high_accuracy: Warming up for 3.0000 s
+Benchmarking integration_params/boresight/high_accuracy: Collecting 100 samples in estimated 5.2906 s (300 iterations)
+Benchmarking integration_params/boresight/high_accuracy: Analyzing
+integration_params/boresight/high_accuracy
+                        time:   [17.643 ms 17.775 ms 17.986 ms]
+Found 8 outliers among 100 measurements (8.00%)
+  4 (4.00%) high mild
+  4 (4.00%) high severe
+
+Benchmarking antenna_sizes/size/small_7.3m
+Benchmarking antenna_sizes/size/small_7.3m: Warming up for 3.0000 s
+Benchmarking antenna_sizes/size/small_7.3m: Collecting 100 samples in estimated 5.3399 s (1200 iterations)
+Benchmarking antenna_sizes/size/small_7.3m: Analyzing
+antenna_sizes/size/small_7.3m
+                        time:   [4.4853 ms 4.5330 ms 4.5937 ms]
+Found 17 outliers among 100 measurements (17.00%)
+  8 (8.00%) high mild
+  9 (9.00%) high severe
+Benchmarking antenna_sizes/size/standard_34m
+Benchmarking antenna_sizes/size/standard_34m: Warming up for 3.0000 s
+Benchmarking antenna_sizes/size/standard_34m: Collecting 100 samples in estimated 5.3502 s (1200 iterations)
+Benchmarking antenna_sizes/size/standard_34m: Analyzing
+antenna_sizes/size/standard_34m
+                        time:   [4.4234 ms 4.4520 ms 4.5019 ms]
+Found 5 outliers among 100 measurements (5.00%)
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+Benchmarking antenna_sizes/size/large_70m
+Benchmarking antenna_sizes/size/large_70m: Warming up for 3.0000 s
+Benchmarking antenna_sizes/size/large_70m: Collecting 100 samples in estimated 5.3519 s (1200 iterations)
+Benchmarking antenna_sizes/size/large_70m: Analyzing
+antenna_sizes/size/large_70m
+                        time:   [4.5194 ms 4.5709 ms 4.6454 ms]
+Found 4 outliers among 100 measurements (4.00%)
+  1 (1.00%) high mild
+  3 (3.00%) high severe
+
+Benchmarking frequency_range/band/L-band_1.5GHz
+Benchmarking frequency_range/band/L-band_1.5GHz: Warming up for 3.0000 s
+Benchmarking frequency_range/band/L-band_1.5GHz: Collecting 100 samples in estimated 7.3771 s (15k iterations)
+Benchmarking frequency_range/band/L-band_1.5GHz: Analyzing
+frequency_range/band/L-band_1.5GHz
+                        time:   [484.84 µs 488.43 µs 493.01 µs]
+Found 9 outliers among 100 measurements (9.00%)
+  4 (4.00%) high mild
+  5 (5.00%) high severe
+Benchmarking frequency_range/band/S-band_2.3GHz
+Benchmarking frequency_range/band/S-band_2.3GHz: Warming up for 3.0000 s
+Benchmarking frequency_range/band/S-band_2.3GHz: Collecting 100 samples in estimated 7.4256 s (15k iterations)
+Benchmarking frequency_range/band/S-band_2.3GHz: Analyzing
+frequency_range/band/S-band_2.3GHz
+                        time:   [486.52 µs 490.24 µs 495.54 µs]
+Found 10 outliers among 100 measurements (10.00%)
+  2 (2.00%) low mild
+  4 (4.00%) high mild
+  4 (4.00%) high severe
+Benchmarking frequency_range/band/C-band_6.0GHz
+Benchmarking frequency_range/band/C-band_6.0GHz: Warming up for 3.0000 s
+Benchmarking frequency_range/band/C-band_6.0GHz: Collecting 100 samples in estimated 7.3215 s (15k iterations)
+Benchmarking frequency_range/band/C-band_6.0GHz: Analyzing
+frequency_range/band/C-band_6.0GHz
+                        time:   [476.44 µs 479.19 µs 483.33 µs]
+Found 5 outliers among 100 measurements (5.00%)
+  2 (2.00%) high mild
+  3 (3.00%) high severe
+Benchmarking frequency_range/band/X-band_8.4GHz
+Benchmarking frequency_range/band/X-band_8.4GHz: Warming up for 3.0000 s
+Benchmarking frequency_range/band/X-band_8.4GHz: Collecting 100 samples in estimated 5.0029 s (10k iterations)
+Benchmarking frequency_range/band/X-band_8.4GHz: Analyzing
+frequency_range/band/X-band_8.4GHz
+                        time:   [488.59 µs 491.47 µs 496.57 µs]
+Found 6 outliers among 100 measurements (6.00%)
+  1 (1.00%) low mild
+  4 (4.00%) high mild
+  1 (1.00%) high severe
+Benchmarking frequency_range/band/Ku-band_14GHz
+Benchmarking frequency_range/band/Ku-band_14GHz: Warming up for 3.0000 s
+Benchmarking frequency_range/band/Ku-band_14GHz: Collecting 100 samples in estimated 5.0023 s (10k iterations)
+Benchmarking frequency_range/band/Ku-band_14GHz: Analyzing
+frequency_range/band/Ku-band_14GHz
+                        time:   [487.24 µs 488.23 µs 489.33 µs]
+Found 7 outliers among 100 measurements (7.00%)
+  5 (5.00%) high mild
+  2 (2.00%) high severe
+Benchmarking frequency_range/band/Ka-band_32GHz
+Benchmarking frequency_range/band/Ka-band_32GHz: Warming up for 3.0000 s
+Benchmarking frequency_range/band/Ka-band_32GHz: Collecting 100 samples in estimated 7.4599 s (15k iterations)
+Benchmarking frequency_range/band/Ka-band_32GHz: Analyzing
+frequency_range/band/Ka-band_32GHz
+                        time:   [487.23 µs 490.74 µs 496.32 µs]
+Found 9 outliers among 100 measurements (9.00%)
+  5 (5.00%) high mild
+  4 (4.00%) high severe
+
+Benchmarking angular_coverage/angle_deg/0.0
+Benchmarking angular_coverage/angle_deg/0.0: Warming up for 3.0000 s
+Benchmarking angular_coverage/angle_deg/0.0: Collecting 100 samples in estimated 7.4924 s (15k iterations)
+Benchmarking angular_coverage/angle_deg/0.0: Analyzing
+angular_coverage/angle_deg/0.0
+                        time:   [484.08 µs 488.39 µs 495.58 µs]
+Found 7 outliers among 100 measurements (7.00%)
+  3 (3.00%) high mild
+  4 (4.00%) high severe
+Benchmarking angular_coverage/angle_deg/0.5
+Benchmarking angular_coverage/angle_deg/0.5: Warming up for 3.0000 s
+Benchmarking angular_coverage/angle_deg/0.5: Collecting 100 samples in estimated 5.0204 s (10k iterations)
+Benchmarking angular_coverage/angle_deg/0.5: Analyzing
+angular_coverage/angle_deg/0.5
+                        time:   [493.35 µs 494.69 µs 496.16 µs]
+Found 6 outliers among 100 measurements (6.00%)
+  2 (2.00%) low mild
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+Benchmarking angular_coverage/angle_deg/1.0
+Benchmarking angular_coverage/angle_deg/1.0: Warming up for 3.0000 s
+Benchmarking angular_coverage/angle_deg/1.0: Collecting 100 samples in estimated 5.0519 s (10k iterations)
+Benchmarking angular_coverage/angle_deg/1.0: Analyzing
+angular_coverage/angle_deg/1.0
+                        time:   [492.17 µs 494.00 µs 496.69 µs]
+Found 10 outliers among 100 measurements (10.00%)
+  5 (5.00%) high mild
+  5 (5.00%) high severe
+Benchmarking angular_coverage/angle_deg/2.0
+Benchmarking angular_coverage/angle_deg/2.0: Warming up for 3.0000 s
+Benchmarking angular_coverage/angle_deg/2.0: Collecting 100 samples in estimated 5.0989 s (10k iterations)
+Benchmarking angular_coverage/angle_deg/2.0: Analyzing
+angular_coverage/angle_deg/2.0
+                        time:   [497.49 µs 502.23 µs 510.83 µs]
+Found 4 outliers among 100 measurements (4.00%)
+  1 (1.00%) low mild
+  1 (1.00%) high mild
+  2 (2.00%) high severe
+Benchmarking angular_coverage/angle_deg/5.0
+Benchmarking angular_coverage/angle_deg/5.0: Warming up for 3.0000 s
+Benchmarking angular_coverage/angle_deg/5.0: Collecting 100 samples in estimated 5.0261 s (10k iterations)
+Benchmarking angular_coverage/angle_deg/5.0: Analyzing
+angular_coverage/angle_deg/5.0
+                        time:   [494.79 µs 498.72 µs 505.81 µs]
+Found 7 outliers among 100 measurements (7.00%)
+  3 (3.00%) low mild
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+Benchmarking angular_coverage/angle_deg/10.0
+Benchmarking angular_coverage/angle_deg/10.0: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 6.2s, enable flat sampling, or reduce sample count to 60.
+Benchmarking angular_coverage/angle_deg/10.0: Collecting 100 samples in estimated 6.1877 s (5050 iterations)
+Benchmarking angular_coverage/angle_deg/10.0: Analyzing
+angular_coverage/angle_deg/10.0
+                        time:   [1.2142 ms 1.2237 ms 1.2402 ms]
+Found 7 outliers among 100 measurements (7.00%)
+  3 (3.00%) high mild
+  4 (4.00%) high severe
+Benchmarking angular_coverage/angle_deg/20.0
+Benchmarking angular_coverage/angle_deg/20.0: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 6.2s, enable flat sampling, or reduce sample count to 60.
+Benchmarking angular_coverage/angle_deg/20.0: Collecting 100 samples in estimated 6.1758 s (5050 iterations)
+Benchmarking angular_coverage/angle_deg/20.0: Analyzing
+angular_coverage/angle_deg/20.0
+                        time:   [1.2114 ms 1.2243 ms 1.2433 ms]
+Found 7 outliers among 100 measurements (7.00%)
+  5 (5.00%) high mild
+  2 (2.00%) high severe
+
+Benchmarking gain_output_format/linear_gain
+Benchmarking gain_output_format/linear_gain: Warming up for 3.0000 s
+Benchmarking gain_output_format/linear_gain: Collecting 100 samples in estimated 7.4545 s (15k iterations)
+Benchmarking gain_output_format/linear_gain: Analyzing
+gain_output_format/linear_gain
+                        time:   [491.36 µs 493.89 µs 497.14 µs]
+Found 8 outliers among 100 measurements (8.00%)
+  4 (4.00%) high mild
+  4 (4.00%) high severe
+Benchmarking gain_output_format/gain_db
+Benchmarking gain_output_format/gain_db: Warming up for 3.0000 s
+Benchmarking gain_output_format/gain_db: Collecting 100 samples in estimated 5.0174 s (10k iterations)
+Benchmarking gain_output_format/gain_db: Analyzing
+gain_output_format/gain_db
+                        time:   [491.81 µs 495.96 µs 503.22 µs]
+Found 4 outliers among 100 measurements (4.00%)
+  3 (3.00%) high mild
+  1 (1.00%) high severe
+
+Benchmarking convergence/easy_boresight
+Benchmarking convergence/easy_boresight: Warming up for 3.0000 s
+
+Warning: Unable to complete 50 samples in 5.0s. You may wish to increase target time to 5.8s, enable flat sampling, or reduce sample count to 30.
+Benchmarking convergence/easy_boresight: Collecting 50 samples in estimated 5.7946 s (1275 iterations)
+Benchmarking convergence/easy_boresight: Analyzing
+convergence/easy_boresight
+                        time:   [4.4886 ms 4.5307 ms 4.6049 ms]
+Found 2 outliers among 50 measurements (4.00%)
+  1 (2.00%) high mild
+  1 (2.00%) high severe
+Benchmarking convergence/moderate_sidelobe
+Benchmarking convergence/moderate_sidelobe: Warming up for 3.0000 s
+
+Warning: Unable to complete 50 samples in 5.0s. You may wish to increase target time to 5.8s, enable flat sampling, or reduce sample count to 30.
+Benchmarking convergence/moderate_sidelobe: Collecting 50 samples in estimated 5.7628 s (1275 iterations)
+Benchmarking convergence/moderate_sidelobe: Analyzing
+convergence/moderate_sidelobe
+                        time:   [4.4987 ms 4.5222 ms 4.5593 ms]
+Found 4 outliers among 50 measurements (8.00%)
+  2 (4.00%) high mild
+  2 (4.00%) high severe
+Benchmarking convergence/hard_near_null
+Benchmarking convergence/hard_near_null: Warming up for 3.0000 s
+Benchmarking convergence/hard_near_null: Collecting 50 samples in estimated 5.0723 s (450 iterations)
+Benchmarking convergence/hard_near_null: Analyzing
+convergence/hard_near_null
+                        time:   [11.161 ms 11.261 ms 11.428 ms]
+Found 2 outliers among 50 measurements (4.00%)
+  1 (2.00%) high mild
+  1 (2.00%) high severe
+
+Benchmarking memory_stability_sustained_load
+Benchmarking memory_stability_sustained_load: Warming up for 3.0000 s
+Benchmarking memory_stability_sustained_load: Collecting 100 samples in estimated 9.9819 s (200 iterations)
+Benchmarking memory_stability_sustained_load: Analyzing
+memory_stability_sustained_load
+                        time:   [49.347 ms 49.592 ms 49.971 ms]
+Found 8 outliers among 100 measurements (8.00%)
+  5 (5.00%) high mild
+  3 (3.00%) high severe
+
+     Running benches/computation_modes.rs (/Users/effnish/workspace/ai_coding/antenna_model/target/release/deps/computation_modes-15e402dedf906284)
+Gnuplot not found, using plotters backend
+Benchmarking standard_physical_optics/on_axis/fast
+Benchmarking standard_physical_optics/on_axis/fast: Warming up for 3.0000 s
+Benchmarking standard_physical_optics/on_axis/fast: Collecting 100 samples in estimated 7.4749 s (15k iterations)
+Benchmarking standard_physical_optics/on_axis/fast: Analyzing
+standard_physical_optics/on_axis/fast
+                        time:   [492.26 µs 498.08 µs 505.29 µs]
+                        change: [−18.307% −13.494% −8.9122%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 8 outliers among 100 measurements (8.00%)
+  3 (3.00%) high mild
+  5 (5.00%) high severe
+Benchmarking standard_physical_optics/off_axis_5deg/fast
+Benchmarking standard_physical_optics/off_axis_5deg/fast: Warming up for 3.0000 s
+Benchmarking standard_physical_optics/off_axis_5deg/fast: Collecting 100 samples in estimated 5.0883 s (10k iterations)
+Benchmarking standard_physical_optics/off_axis_5deg/fast: Analyzing
+standard_physical_optics/off_axis_5deg/fast
+                        time:   [498.55 µs 501.91 µs 506.10 µs]
+                        change: [−15.021% −11.905% −8.8267%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 4 outliers among 100 measurements (4.00%)
+  1 (1.00%) high mild
+  3 (3.00%) high severe
+Benchmarking standard_physical_optics/on_axis/default
+Benchmarking standard_physical_optics/on_axis/default: Warming up for 3.0000 s
+Benchmarking standard_physical_optics/on_axis/default: Collecting 100 samples in estimated 5.0751 s (1100 iterations)
+Benchmarking standard_physical_optics/on_axis/default: Analyzing
+standard_physical_optics/on_axis/default
+                        time:   [4.5942 ms 4.6201 ms 4.6537 ms]
+                        change: [−10.704% −7.3862% −4.2813%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 7 outliers among 100 measurements (7.00%)
+  3 (3.00%) high mild
+  4 (4.00%) high severe
+Benchmarking standard_physical_optics/off_axis_5deg/default
+Benchmarking standard_physical_optics/off_axis_5deg/default: Warming up for 3.0000 s
+Benchmarking standard_physical_optics/off_axis_5deg/default: Collecting 100 samples in estimated 5.0972 s (1100 iterations)
+Benchmarking standard_physical_optics/off_axis_5deg/default: Analyzing
+standard_physical_optics/off_axis_5deg/default
+                        time:   [4.5992 ms 4.6299 ms 4.6803 ms]
+                        change: [−7.9464% −5.0084% −2.4156%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 6 outliers among 100 measurements (6.00%)
+  2 (2.00%) low mild
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+Benchmarking standard_physical_optics/on_axis/high_accuracy
+Benchmarking standard_physical_optics/on_axis/high_accuracy: Warming up for 3.0000 s
+Benchmarking standard_physical_optics/on_axis/high_accuracy: Collecting 100 samples in estimated 5.3831 s (300 iterations)
+Benchmarking standard_physical_optics/on_axis/high_accuracy: Analyzing
+standard_physical_optics/on_axis/high_accuracy
+                        time:   [18.024 ms 18.148 ms 18.349 ms]
+                        change: [−15.852% −12.372% −9.0036%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high severe
+Benchmarking standard_physical_optics/off_axis_5deg/high_accuracy
+Benchmarking standard_physical_optics/off_axis_5deg/high_accuracy: Warming up for 3.0000 s
+Benchmarking standard_physical_optics/off_axis_5deg/high_accuracy: Collecting 100 samples in estimated 5.4947 s (300 iterations)
+Benchmarking standard_physical_optics/off_axis_5deg/high_accuracy: Analyzing
+standard_physical_optics/off_axis_5deg/high_accuracy
+                        time:   [18.175 ms 18.303 ms 18.505 ms]
+                        change: [−13.769% −10.575% −7.4917%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 11 outliers among 100 measurements (11.00%)
+  4 (4.00%) low mild
+  2 (2.00%) high mild
+  5 (5.00%) high severe
+
+Benchmarking higher_order_aberrations/moderate_offset/fast
+Benchmarking higher_order_aberrations/moderate_offset/fast: Warming up for 3.0000 s
+Benchmarking higher_order_aberrations/moderate_offset/fast: Collecting 100 samples in estimated 6.1999 s (10k iterations)
+Benchmarking higher_order_aberrations/moderate_offset/fast: Analyzing
+higher_order_aberrations/moderate_offset/fast
+                        time:   [608.71 µs 610.21 µs 611.75 µs]
+                        change: [−13.499% −10.568% −7.7801%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 7 outliers among 100 measurements (7.00%)
+  5 (5.00%) high mild
+  2 (2.00%) high severe
+Benchmarking higher_order_aberrations/moderate_offset/default
+Benchmarking higher_order_aberrations/moderate_offset/default: Warming up for 3.0000 s
+Benchmarking higher_order_aberrations/moderate_offset/default: Collecting 100 samples in estimated 5.2047 s (900 iterations)
+Benchmarking higher_order_aberrations/moderate_offset/default: Analyzing
+higher_order_aberrations/moderate_offset/default
+                        time:   [5.6392 ms 5.6530 ms 5.6680 ms]
+                        change: [−12.734% −9.5996% −6.5134%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 8 outliers among 100 measurements (8.00%)
+  6 (6.00%) high mild
+  2 (2.00%) high severe
+
+Benchmarking ray_tracing/large_offset/0deg
+Benchmarking ray_tracing/large_offset/0deg: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 6.0s, enable flat sampling, or reduce sample count to 60.
+Benchmarking ray_tracing/large_offset/0deg: Collecting 100 samples in estimated 6.0022 s (5050 iterations)
+Benchmarking ray_tracing/large_offset/0deg: Analyzing
+ray_tracing/large_offset/0deg
+                        time:   [1.1731 ms 1.1830 ms 1.2003 ms]
+                        change: [−14.438% −10.671% −7.2540%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 6 outliers among 100 measurements (6.00%)
+  4 (4.00%) high mild
+  2 (2.00%) high severe
+Benchmarking ray_tracing/large_offset/1deg
+Benchmarking ray_tracing/large_offset/1deg: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 5.9s, enable flat sampling, or reduce sample count to 60.
+Benchmarking ray_tracing/large_offset/1deg: Collecting 100 samples in estimated 5.9373 s (5050 iterations)
+Benchmarking ray_tracing/large_offset/1deg: Analyzing
+ray_tracing/large_offset/1deg
+                        time:   [1.1716 ms 1.1760 ms 1.1825 ms]
+                        change: [−16.725% −9.6347% −3.3268%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 5 outliers among 100 measurements (5.00%)
+  2 (2.00%) high mild
+  3 (3.00%) high severe
+Benchmarking ray_tracing/large_offset/5deg
+Benchmarking ray_tracing/large_offset/5deg: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 6.0s, enable flat sampling, or reduce sample count to 60.
+Benchmarking ray_tracing/large_offset/5deg: Collecting 100 samples in estimated 5.9638 s (5050 iterations)
+Benchmarking ray_tracing/large_offset/5deg: Analyzing
+ray_tracing/large_offset/5deg
+                        time:   [1.1727 ms 1.1809 ms 1.1952 ms]
+                        change: [−8.4157% −5.4972% −2.7572%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 2 outliers among 100 measurements (2.00%)
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+
+Benchmarking direct_path/near_boresight/fast
+Benchmarking direct_path/near_boresight/fast: Warming up for 3.0000 s
+Benchmarking direct_path/near_boresight/fast: Collecting 100 samples in estimated 5.5983 s (10k iterations)
+Benchmarking direct_path/near_boresight/fast: Analyzing
+direct_path/near_boresight/fast
+                        time:   [551.34 µs 555.55 µs 561.79 µs]
+                        change: [−5.0989% −3.1263% −1.2749%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 5 outliers among 100 measurements (5.00%)
+  2 (2.00%) high mild
+  3 (3.00%) high severe
+Benchmarking direct_path/near_boresight/default
+Benchmarking direct_path/near_boresight/default: Warming up for 3.0000 s
+Benchmarking direct_path/near_boresight/default: Collecting 100 samples in estimated 5.0638 s (1000 iterations)
+Benchmarking direct_path/near_boresight/default: Analyzing
+direct_path/near_boresight/default
+                        time:   [5.0184 ms 5.0529 ms 5.1118 ms]
+                        change: [−13.588% −10.022% −6.4701%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 5 outliers among 100 measurements (5.00%)
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+
+Benchmarking compute_gain_db
+Benchmarking compute_gain_db: Warming up for 3.0000 s
+Benchmarking compute_gain_db: Collecting 100 samples in estimated 5.0175 s (10k iterations)
+Benchmarking compute_gain_db: Analyzing
+compute_gain_db         time:   [494.62 µs 496.89 µs 499.99 µs]
+                        change: [−11.346% −7.5003% −4.0245%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 8 outliers among 100 measurements (8.00%)
+  2 (2.00%) low mild
+  2 (2.00%) high mild
+  4 (4.00%) high severe
+
+Benchmarking adaptive_integration/no_adaptive
+Benchmarking adaptive_integration/no_adaptive: Warming up for 3.0000 s
+Benchmarking adaptive_integration/no_adaptive: Collecting 100 samples in estimated 5.0745 s (1100 iterations)
+Benchmarking adaptive_integration/no_adaptive: Analyzing
+adaptive_integration/no_adaptive
+                        time:   [4.5794 ms 4.6126 ms 4.6679 ms]
+                        change: [−11.099% −7.6425% −4.2035%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 6 outliers among 100 measurements (6.00%)
+  4 (4.00%) high mild
+  2 (2.00%) high severe
+Benchmarking adaptive_integration/with_adaptive
+Benchmarking adaptive_integration/with_adaptive: Warming up for 3.0000 s
+Benchmarking adaptive_integration/with_adaptive: Collecting 100 samples in estimated 5.6289 s (500 iterations)
+Benchmarking adaptive_integration/with_adaptive: Analyzing
+adaptive_integration/with_adaptive
+                        time:   [11.120 ms 11.149 ms 11.188 ms]
+                        change: [−10.430% −7.5259% −4.7418%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 6 outliers among 100 measurements (6.00%)
+  4 (4.00%) high mild
+  2 (2.00%) high severe
+
+Benchmarking mode_comparison/StandardPhysicalOptics
+Benchmarking mode_comparison/StandardPhysicalOptics: Warming up for 3.0000 s
+Benchmarking mode_comparison/StandardPhysicalOptics: Collecting 50 samples in estimated 5.0279 s (10k iterations)
+Benchmarking mode_comparison/StandardPhysicalOptics: Analyzing
+mode_comparison/StandardPhysicalOptics
+                        time:   [490.92 µs 492.29 µs 493.81 µs]
+                        change: [−7.6798% −2.4791% +7.5913%] (p = 0.55 > 0.05)
+                        No change in performance detected.
+Found 4 outliers among 50 measurements (8.00%)
+  4 (8.00%) high severe
+Benchmarking mode_comparison/HigherOrderAberrations
+Benchmarking mode_comparison/HigherOrderAberrations: Warming up for 3.0000 s
+Benchmarking mode_comparison/HigherOrderAberrations: Collecting 50 samples in estimated 5.4203 s (8925 iterations)
+Benchmarking mode_comparison/HigherOrderAberrations: Analyzing
+mode_comparison/HigherOrderAberrations
+                        time:   [601.66 µs 603.18 µs 604.80 µs]
+                        change: [−16.539% −10.514% −6.0009%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 5 outliers among 50 measurements (10.00%)
+  2 (4.00%) high mild
+  3 (6.00%) high severe
+Benchmarking mode_comparison/RayTracing
+Benchmarking mode_comparison/RayTracing: Warming up for 3.0000 s
+Benchmarking mode_comparison/RayTracing: Collecting 50 samples in estimated 5.8609 s (5100 iterations)
+Benchmarking mode_comparison/RayTracing: Analyzing
+mode_comparison/RayTracing
+                        time:   [1.1433 ms 1.1490 ms 1.1562 ms]
+                        change: [−20.658% −14.497% −9.1120%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 6 outliers among 50 measurements (12.00%)
+  1 (2.00%) high mild
+  5 (10.00%) high severe
+Benchmarking mode_comparison/NearBoresightDirectPath
+Benchmarking mode_comparison/NearBoresightDirectPath: Warming up for 3.0000 s
+Benchmarking mode_comparison/NearBoresightDirectPath: Collecting 50 samples in estimated 5.6716 s (10k iterations)
+Benchmarking mode_comparison/NearBoresightDirectPath: Analyzing
+mode_comparison/NearBoresightDirectPath
+                        time:   [552.09 µs 558.39 µs 566.22 µs]
+                        change: [−10.583% −6.7274% −3.4031%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 4 outliers among 50 measurements (8.00%)
+  1 (2.00%) high mild
+  3 (6.00%) high severe
+

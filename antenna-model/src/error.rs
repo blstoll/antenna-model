@@ -55,10 +55,7 @@ pub enum AntennaModelError {
 
     /// Feed not found
     #[error("feed '{feed_id}' not found for antenna '{antenna_id}'")]
-    FeedNotFound {
-        antenna_id: String,
-        feed_id: String,
-    },
+    FeedNotFound { antenna_id: String, feed_id: String },
 
     /// Feature not implemented
     #[error("feature not implemented: {feature}")]
@@ -264,40 +261,63 @@ pub enum ComputationError {
 
     /// Invalid knot vector
     #[error("invalid knot vector for dimension {dimension}: {reason}")]
-    InvalidKnotVector { dimension: String, reason: String },
+    InvalidKnotVector {
+        /// Dimension name (e.g., "azimuth", "elevation")
+        dimension: String,
+        /// Reason for invalidity
+        reason: String,
+    },
 
     /// Invalid coefficient dimensions
     #[error("coefficient dimensions mismatch: expected {expected:?}, got {actual:?}")]
     DimensionMismatch {
+        /// Expected dimensions
         expected: Vec<usize>,
+        /// Actual dimensions
         actual: Vec<usize>,
     },
 
     /// Spline order not supported
     #[error("spline order {order} not supported (must be between 1 and 5)")]
-    UnsupportedSplineOrder { order: u8 },
+    UnsupportedSplineOrder {
+        /// The unsupported spline order
+        order: u8,
+    },
 
     /// Insufficient data points
     #[error(
         "insufficient data points in dimension {dimension}: need at least {required}, got {actual}"
     )]
     InsufficientDataPoints {
+        /// Dimension name (e.g., "azimuth", "elevation")
         dimension: String,
+        /// Required number of data points
         required: usize,
+        /// Actual number of data points
         actual: usize,
     },
 
     /// Matrix operation failed
     #[error("matrix operation failed in {operation}: {reason}")]
-    MatrixOperationFailed { operation: String, reason: String },
+    MatrixOperationFailed {
+        /// Operation that failed
+        operation: String,
+        /// Reason for failure
+        reason: String,
+    },
 
     /// Interpolation failed
     #[error("interpolation failed at point ({azimuth}, {elevation}, {frequency}, {temperature}): {reason}")]
     InterpolationFailed {
+        /// Azimuth angle in degrees
         azimuth: f64,
+        /// Elevation angle in degrees
         elevation: f64,
+        /// Frequency in Hz
         frequency: f64,
+        /// Temperature in Kelvin
         temperature: f64,
+        /// Reason for failure
         reason: String,
     },
 
@@ -313,26 +333,53 @@ pub enum ComputationError {
 pub enum ConfigError {
     /// Configuration file not found
     #[error("configuration file not found: {path}")]
-    FileNotFound { path: String },
+    FileNotFound {
+        /// Path to the configuration file
+        path: String,
+    },
 
     /// Configuration parse error
     #[error("failed to parse configuration from {path}: {reason}")]
-    ParseError { path: String, reason: String },
+    ParseError {
+        /// Path to the configuration file
+        path: String,
+        /// Reason for parse failure
+        reason: String,
+    },
 
     /// Invalid configuration value
     #[error("invalid configuration value for '{key}': {reason}")]
-    InvalidValue { key: String, reason: String },
+    InvalidValue {
+        /// Configuration key
+        key: String,
+        /// Reason for invalidity
+        reason: String,
+    },
 
     /// Missing required configuration
     #[error("missing required configuration: {key}")]
-    MissingRequired { key: String },
+    MissingRequired {
+        /// Configuration key that is missing
+        key: String,
+    },
 
     /// Environment variable error
     #[error("invalid environment variable {var}: {reason}")]
-    InvalidEnvironmentVariable { var: String, reason: String },
+    InvalidEnvironmentVariable {
+        /// Environment variable name
+        var: String,
+        /// Reason for invalidity
+        reason: String,
+    },
 }
 
 // Conversion implementations for common error types
+
+impl From<ValidationError> for ComputationError {
+    fn from(err: ValidationError) -> Self {
+        ComputationError::InvalidModelState(err.to_string())
+    }
+}
 
 impl From<bincode::error::EncodeError> for DataError {
     fn from(err: bincode::error::EncodeError) -> Self {
@@ -412,9 +459,13 @@ impl From<AntennaModelError> for ApiError {
             AntennaModelError::CoordinateTransformError { details } => {
                 ApiError::InternalError(format!("coordinate transformation error: {}", details))
             }
-            AntennaModelError::FeedNotFound { antenna_id, feed_id } => {
-                ApiError::NotFound(format!("feed '{}' not found for antenna '{}'", feed_id, antenna_id))
-            }
+            AntennaModelError::FeedNotFound {
+                antenna_id,
+                feed_id,
+            } => ApiError::NotFound(format!(
+                "feed '{}' not found for antenna '{}'",
+                feed_id, antenna_id
+            )),
             AntennaModelError::NotImplemented { feature } => {
                 ApiError::UnprocessableEntity(format!("feature not implemented: {}", feature))
             }
@@ -422,12 +473,8 @@ impl From<AntennaModelError> for ApiError {
             AntennaModelError::Api(api_err) => api_err,
             AntennaModelError::Validation(val_err) => val_err.into(),
             AntennaModelError::Computation(comp_err) => comp_err.into(),
-            AntennaModelError::Config(conf_err) => {
-                ApiError::InternalError(conf_err.to_string())
-            }
-            AntennaModelError::Io(io_err) => {
-                ApiError::InternalError(io_err.to_string())
-            }
+            AntennaModelError::Config(conf_err) => ApiError::InternalError(conf_err.to_string()),
+            AntennaModelError::Io(io_err) => ApiError::InternalError(io_err.to_string()),
             AntennaModelError::Generic(msg) => ApiError::InternalError(msg),
         }
     }
@@ -729,7 +776,7 @@ mod tests {
         }
 
         fn computation_operation() -> ComputationResult<f64> {
-            Ok(3.14)
+            Ok(std::f64::consts::PI)
         }
 
         assert!(data_operation().is_ok());

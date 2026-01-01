@@ -267,10 +267,10 @@ mod tests {
         GainRequest {
             antenna_id: antenna_id.to_string(),
             feed_id: feed_id.to_string(),
-            vehicle_position: Position3D::new(42164137.0, 0.0, 0.0),           // GEO at (lon=0, lat=0)
-            reflector_boresight: Position3D::new(42164127.0, 0.0, 0.0),        // 10m toward Earth
-            feed_position: Position3D::new(42164132.0, 0.0, 0.0),              // Feed at ~5m from vehicle (near focus)
-            emitter_position: Position3D::new(6378137.0, 0.0, 0.0),            // Ground station at equator
+            vehicle_position: Position3D::new(42164137.0, 0.0, 0.0), // GEO at (lon=0, lat=0)
+            reflector_boresight: Position3D::new(42164127.0, 0.0, 0.0), // 10m toward Earth
+            feed_position: Position3D::new(42164132.0, 0.0, 0.0), // Feed at ~5m from vehicle (near focus)
+            emitter_position: Position3D::new(6378137.0, 0.0, 0.0), // Ground station at equator
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: None,
             include_reference: false,

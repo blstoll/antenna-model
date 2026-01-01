@@ -41,17 +41,19 @@ pub fn load_calibration_artifact<P: AsRef<Path>>(path: P) -> Result<AntennaCalib
 
     // Deserialize using bincode
     let config = config::standard();
-    let (calibration, _): (AntennaCalibration, usize) =
-        bincode::decode_from_slice(&bytes, config).map_err(|e| DataError::LoadError {
+    let (calibration, _): (AntennaCalibration, usize) = bincode::decode_from_slice(&bytes, config)
+        .map_err(|e| DataError::LoadError {
             path: path.display().to_string(),
             reason: format!("Failed to deserialize calibration data: {}", e),
         })?;
 
     // Validate the calibration
-    calibration.validate().map_err(|e| DataError::ValidationError {
-        path: path.display().to_string(),
-        reason: e.to_string(),
-    })?;
+    calibration
+        .validate()
+        .map_err(|e| DataError::ValidationError {
+            path: path.display().to_string(),
+            reason: e.to_string(),
+        })?;
 
     // Log summary
     info!(
@@ -112,10 +114,12 @@ pub fn load_calibration_artifact<P: AsRef<Path>>(path: P) -> Result<AntennaCalib
 /// * `Err(DataError)` - Validation failed
 pub fn validate_calibration(calibration: &AntennaCalibration) -> Result<(), DataError> {
     // Basic validation (already done in load, but can be called separately)
-    calibration.validate().map_err(|e| DataError::ValidationError {
-        path: format!("{}:{}", calibration.antenna_id, calibration.feed_id),
-        reason: e.to_string(),
-    })?;
+    calibration
+        .validate()
+        .map_err(|e| DataError::ValidationError {
+            path: format!("{}:{}", calibration.antenna_id, calibration.feed_id),
+            reason: e.to_string(),
+        })?;
 
     // Additional validation checks
 

@@ -1,0 +1,24 @@
+# Rust formatting configuration for antenna-model workspace
+# Ensures consistent code style across the project
+# Note: Only stable features are used; nightly features are commented out
+
+max_width = 100
+hard_tabs = false
+edition = "2021"
+use_small_heuristics = "Default"
+
+# Formatting preferences (stable)
+newline_style = "Unix"
+
+# Nightly-only features (commented out for stable Rust):
+# indent_style = "Block"
+# wrap_comments = true
+# format_code_in_doc_comments = true
+# normalize_comments = true
+# normalize_doc_attributes = true
+# imports_granularity = "Crate"
+# group_imports = "StdExternalCrate"
+# fn_single_line = false
+# where_single_line = false
+# control_brace_style = "AlwaysSameLine"
+# format_strings = true

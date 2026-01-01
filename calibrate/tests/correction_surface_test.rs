@@ -31,9 +31,7 @@ fn generate_synthetic_measurements(n: usize) -> Vec<MeasurementPoint> {
 
                 // Synthetic G/T value with a known pattern
                 // G/T = 40 + 0.001*(freq - 8200) - 0.1*cone + 0.05*sin(clock/180*π)
-                let g_over_t = 40.0
-                    + 0.001 * (freq - 8200.0)
-                    - 0.1 * cone
+                let g_over_t = 40.0 + 0.001 * (freq - 8200.0) - 0.1 * cone
                     + 0.05 * (clock / 180.0 * std::f64::consts::PI).sin();
 
                 measurements.push(MeasurementPoint {
@@ -56,9 +54,8 @@ fn generate_model_predictions(measurements: &[MeasurementPoint], error_magnitude
         .iter()
         .map(|m| {
             // Model is off by a systematic error that depends on position
-            let error = error_magnitude
-                * (m.frequency_mhz / 1000.0).sin()
-                * (m.e_cone_deg / 10.0).cos();
+            let error =
+                error_magnitude * (m.frequency_mhz / 1000.0).sin() * (m.e_cone_deg / 10.0).cos();
             m.g_over_t_db - error
         })
         .collect()
@@ -319,12 +316,19 @@ fn test_regularization_effect() {
     };
 
     let surface_with_reg = fit_correction_surface(&measurements, &predictions, &params_with_reg);
-    assert!(surface_with_reg.is_ok(), "Fitting with regularization should succeed");
+    assert!(
+        surface_with_reg.is_ok(),
+        "Fitting with regularization should succeed"
+    );
 
     let rmse_with_reg = surface_with_reg.unwrap().fit_stats.rmse_db;
 
     // Regularization should still produce a good fit
-    assert!(rmse_with_reg < 1.0, "Regularized fit should be good: {}", rmse_with_reg);
+    assert!(
+        rmse_with_reg < 1.0,
+        "Regularized fit should be good: {}",
+        rmse_with_reg
+    );
 
     // Test with different regularization value
     let params_high_reg = CorrectionSurfaceParams {
@@ -333,7 +337,10 @@ fn test_regularization_effect() {
     };
 
     let surface_high_reg = fit_correction_surface(&measurements, &predictions, &params_high_reg);
-    assert!(surface_high_reg.is_ok(), "Fitting with high regularization should succeed");
+    assert!(
+        surface_high_reg.is_ok(),
+        "Fitting with high regularization should succeed"
+    );
 }
 
 #[test]
@@ -360,10 +367,7 @@ fn test_insufficient_data_error() {
     let params = CorrectionSurfaceParams::default();
 
     let result = fit_correction_surface(&measurements, &predictions, &params);
-    assert!(
-        result.is_err(),
-        "Should fail with insufficient data"
-    );
+    assert!(result.is_err(), "Should fail with insufficient data");
 }
 
 #[test]

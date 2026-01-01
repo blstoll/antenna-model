@@ -11,6 +11,8 @@
 //! - Design doc Section 3.1 (Edge Cases)
 //! - Hopkins, H.H. "Wave Theory of Aberrations"
 
+use tracing::info;
+
 use crate::model::geometry::AntennaConfiguration;
 use std::f64::consts::PI;
 
@@ -91,6 +93,12 @@ pub fn analyze_edge_cases(
     // Calculate feed offset magnitude
     let (offset_mag, offset_ratio) = calculate_feed_offset(config);
 
+    // Debug output for feed offset analysis
+    info!(
+        "Edge case analysis: offset_mag={:.4}m, offset_ratio={:.4}, focal_length={:.4}m",
+        offset_mag, offset_ratio, config.reflector.focal_length
+    );
+
     // Check if near boresight
     let is_near_boresight = theta < NEAR_BORESIGHT_THRESHOLD;
 
@@ -126,9 +134,8 @@ pub fn analyze_edge_cases(
     }
 
     if has_direct_path {
-        warnings.push(
-            "Near-boresight with offset feed: direct path interference modeled.".to_string()
-        );
+        warnings
+            .push("Near-boresight with offset feed: direct path interference modeled.".to_string());
     }
 
     EdgeCaseAnalysis {
@@ -162,12 +169,28 @@ fn select_computation_mode(
     // Priority: direct path > ray tracing > higher-order > standard
 
     if has_direct_path {
+        info!(
+            "Near boresight direct path edge case detected (offset_ratio={:.3})",
+            offset_ratio
+        );
         ComputationMode::NearBoresightDirectPath
     } else if offset_ratio > SEVERE_OFFSET_THRESHOLD {
+        info!(
+            "Severe offset threshold detected ({:.3} > {:.1}), switching to ray-tracing",
+            offset_ratio, SEVERE_OFFSET_THRESHOLD
+        );
         ComputationMode::RayTracing
     } else if offset_ratio > LARGE_OFFSET_THRESHOLD {
+        info!(
+            "Large offset threshold detected ({:.3} > {:.1}), computing higher-order aberrations",
+            offset_ratio, LARGE_OFFSET_THRESHOLD
+        );
         ComputationMode::HigherOrderAberrations
     } else {
+        info!(
+            "Using standard physical optics (offset_ratio={:.3} <= threshold={:.1})",
+            offset_ratio, LARGE_OFFSET_THRESHOLD
+        );
         ComputationMode::StandardPhysicalOptics
     }
 }
@@ -275,15 +298,14 @@ pub fn higher_order_aberrations(
     let delta_norm = delta_feed / focal_length;
 
     // Astigmatism (proportional to δ²·ρ²)
-    let astigmatism = wavenumber * delta_norm.powi(2) * rho_norm.powi(2)
-        * (2.0 * phi_prime - 2.0 * alpha).cos();
+    let astigmatism =
+        wavenumber * delta_norm.powi(2) * rho_norm.powi(2) * (2.0 * phi_prime - 2.0 * alpha).cos();
 
     // Field curvature (proportional to δ²·ρ²)
     let field_curvature = wavenumber * delta_norm.powi(2) * rho_norm.powi(2) / 2.0;
 
     // Distortion (proportional to δ³·ρ³)
-    let distortion = wavenumber * delta_norm.powi(3) * rho_norm.powi(3)
-        * (phi_prime - alpha).cos();
+    let distortion = wavenumber * delta_norm.powi(3) * rho_norm.powi(3) * (phi_prime - alpha).cos();
 
     astigmatism + field_curvature + distortion
 }
@@ -301,11 +323,7 @@ pub fn higher_order_aberrations(
 ///
 /// # Returns
 /// True if adaptive integration is recommended
-pub fn needs_adaptive_integration(
-    theta: f64,
-    _phi: f64,
-    config: &AntennaConfiguration,
-) -> bool {
+pub fn needs_adaptive_integration(theta: f64, _phi: f64, config: &AntennaConfiguration) -> bool {
     // Estimate angular position of first null
     // For uniformly illuminated aperture: θ_null ≈ 1.22·λ/D
     // For tapered illumination, multiplier depends on q-factor
@@ -331,7 +349,7 @@ pub fn needs_adaptive_integration(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::geometry::{ReflectorGeometry, FeedParameters, FeedPosition};
+    use crate::model::geometry::{FeedParameters, FeedPosition, ReflectorGeometry};
 
     fn test_antenna_on_axis() -> AntennaConfiguration {
         let focal_length = 0.5;
@@ -442,7 +460,11 @@ mod tests {
         let spillover_on_axis = estimate_spillover(&config_on_axis);
 
         // On-axis should have low spillover for f/D=0.5, q=8
-        assert!(spillover_on_axis < 0.05, "On-axis spillover: {}", spillover_on_axis);
+        assert!(
+            spillover_on_axis < 0.05,
+            "On-axis spillover: {}",
+            spillover_on_axis
+        );
 
         let config_offset = test_antenna_offset(20.0);
         let spillover_offset = estimate_spillover(&config_offset);

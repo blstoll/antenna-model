@@ -220,6 +220,224 @@ The Antenna Model Service is a high-accuracy antenna loss modeling system deploy
 - Log loaded antenna configurations with calibration status
 - Support composite `(antenna_id, feed_id)` lookups
 
+### 3.6 Calibration Status Architecture
+
+The system supports three calibration levels with graceful accuracy degradation, enabling incremental investment in testing effort.
+
+#### 3.6.1 Calibration Levels Overview
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                  Calibration Status Architecture                 │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│  ┌──────────────────┐      ┌──────────────────┐      ┌────────┐ │
+│  │  Uncalibrated    │  ->  │ Partially        │  ->  │ Fully  │ │
+│  │  (Design Specs)  │      │ Calibrated       │      │ Calib. │ │
+│  └──────────────────┘      │ (Boresight)      │      └────────┘ │
+│                            └──────────────────┘                  │
+│                                                                  │
+│  Physics Model             Physics + Parameter    Physics +     │
+│  (Design Parameters)       Tuning                 Correction    │
+│                                                   Surface        │
+│                                                                  │
+│  Test Time: 0 hours        Test Time: ~1 hour    ~8 hours       │
+│  Accuracy: ±3-5 dB abs     ±1.5 dB boresight     ±1 dB          │
+│            ±2 dB loss      ±2-3 dB off-axis      everywhere     │
+│                            ±1-2 dB loss                          │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+**Key Insight:** Loss (relative gain) has better accuracy than absolute gain for uncalibrated/partially calibrated antennas due to systematic error cancellation.
+
+#### 3.6.2 CalibrationStatus Data Model
+
+The system uses an enum to represent calibration levels with associated metadata:
+
+```rust
+pub enum CalibrationStatus {
+    FullyCalibrated {
+        accuracy_estimate_db: f64,  // Typically ±1.0 dB
+    },
+
+    PartiallyCalibrated {
+        accuracy_estimate_db: f64,          // ±1.0-1.5 dB (coverage-dependent)
+        coverage: CalibrationCoverage,      // Spatial/frequency coverage
+    },
+
+    Uncalibrated {
+        accuracy_estimate_db: f64,           // ±3-5 dB (absolute gain)
+        loss_accuracy_estimate_db: f64,      // ±2 dB (better than absolute)
+    },
+}
+
+pub struct CalibrationCoverage {
+    pub azimuth_range: (f64, f64),      // Coverage in degrees
+    pub elevation_range: (f64, f64),    // Coverage in degrees
+    pub frequency_range: (f64, f64),    // Coverage in MHz
+    pub num_measurements: usize,        // Measurement points
+    pub has_correction_surface: bool,   // Whether correction surface fitted
+}
+```
+
+**Coverage Scenarios:**
+- **Boresight-only**: `azimuth_range: (0, 0), elevation_range: (0, 0)` with frequency sweep
+- **Partial grid**: Limited spatial/frequency coverage (e.g., azimuth [0, 180], elevation [30, 60])
+- **Full coverage**: Complete field of view (azimuth [0, 360], elevation [0, 90])
+
+#### 3.6.3 Accuracy Estimation
+
+| Calibration Status | Absolute Gain | Loss (Relative) | Data Required |
+|-------------------|---------------|-----------------|---------------|
+| **Fully Calibrated** | ±1.0 dB | ±1.0 dB | Dense grid (500-3000 pts) + correction surface |
+| **Partially (in-coverage)** | ±1.0-1.5 dB | ±1.0-1.5 dB | Boresight (10-50 pts) or sparse grid + parameter tuning |
+| **Partially (out-of-coverage)** | ±2-3 dB | ±2-3 dB | Physics extrapolation from partial measurements |
+| **Uncalibrated** | ±3-5 dB | ±2 dB | Design specifications only |
+
+**Error Cancellation in Uncalibrated Mode:**
+When computing loss (relative gain between two pointing directions), systematic errors in physical parameters cancel:
+- Surface RMS error affects both directions → cancels
+- Feed q-factor error affects both directions → cancels
+- Mesh transparency affects both directions → cancels
+
+Result: Uncalibrated loss accuracy (±2 dB) significantly better than absolute gain (±3-5 dB).
+
+#### 3.6.4 Service Layer Integration
+
+**Coverage Checking:**
+```rust
+fn is_in_coverage(
+    coverage: &Option<CalibrationCoverage>,
+    azimuth_deg: f64,
+    elevation_deg: f64,
+    frequency_mhz: f64,
+) -> bool {
+    match coverage {
+        Some(cov) => cov.contains(azimuth_deg, elevation_deg, frequency_mhz),
+        None => false,  // Uncalibrated: no coverage
+    }
+}
+```
+
+**Correction Surface Application:**
+Correction surface is applied only when:
+1. Correction surface exists in calibration data
+2. Query is within calibrated coverage region
+
+```rust
+let correction_applied = calibration.correction_surface.is_some()
+    && is_in_coverage(&calibration.calibration_coverage, az, el, freq);
+
+let final_gain_db = if correction_applied {
+    physics_gain_db + interpolate_correction(...)
+} else {
+    physics_gain_db  // Physics model only
+};
+```
+
+**Accuracy Adjustment:**
+For partially calibrated antennas, accuracy estimate varies by query location:
+- In-coverage: Use coverage-specific accuracy (typically ±1.0-1.5 dB)
+- Out-of-coverage: Degrade to physics extrapolation accuracy (±2-3 dB)
+
+#### 3.6.5 Warning Generation by Status
+
+**Uncalibrated Antennas:**
+```
+"Antenna 'antenna_id' is uncalibrated (using design specifications).
+ Absolute gain accuracy: ±4.0 dB, Loss accuracy: ±2.0 dB"
+```
+- Always present for uncalibrated antennas
+- Informs about accuracy limitations
+- Recommends using loss values for comparative analysis
+
+**Partially Calibrated Antennas:**
+```
+"Antenna 'antenna_id' is partially calibrated. Accuracy estimate: ±1.5 dB"
+"Query is outside calibrated region - using physics model extrapolation"
+```
+- Main warning indicates partial calibration
+- Additional warning if query outside coverage
+- Accuracy estimate may vary by query location
+
+**Fully Calibrated:**
+- No calibration warnings (backward compatible)
+- Only extrapolation warnings if query outside validity ranges
+
+#### 3.6.6 API Response Augmentation
+
+All gain computation endpoints include `CalibrationStatusInfo`:
+
+```rust
+pub struct CalibrationStatusInfo {
+    pub status: String,                           // "fully_calibrated", "partially_calibrated", "uncalibrated"
+    pub accuracy_estimate_db: f64,               // Expected accuracy for this query
+    pub loss_accuracy_estimate_db: Option<f64>,  // For uncalibrated only
+    pub coverage: Option<CoverageInfo>,          // For partially calibrated only
+    pub correction_applied: bool,                // Whether correction surface was used
+    pub parameters_source: String,               // "measurement_tuned", "boresight_tuned", "design_specifications"
+}
+```
+
+**Field Presence:**
+- `loss_accuracy_estimate_db`: Only for uncalibrated (loss is more accurate than absolute)
+- `coverage`: Only for partially calibrated (describes measurement coverage)
+- `correction_applied`: Updated during evaluation based on actual application
+
+**Backward Compatibility:**
+- `calibration_status` field is `Option<CalibrationStatusInfo>` in responses
+- Serialization skips `None` values
+- Old API clients receive responses without this field (forward compatible)
+- New clients should check presence and use accuracy estimates
+
+#### 3.6.7 Client Interpretation Guidelines
+
+**Using Uncalibrated Antennas:**
+- **Recommended**: Use loss (relative gain) for comparative analysis (±2 dB accuracy)
+- **Not Recommended**: Rely on absolute gain predictions (±3-5 dB uncertainty)
+- **Use Cases**: Loss heatmaps, path planning, design validation
+
+**Using Partially Calibrated Antennas:**
+- **Check coverage**: Use `coverage` field to determine if query is in calibrated region
+- **In-coverage**: Accuracy similar to fully calibrated (±1.0-1.5 dB)
+- **Out-of-coverage**: Physics extrapolation (±2-3 dB)
+- **Upgrade Path**: Consider full calibration if off-axis accuracy critical
+
+**Using Fully Calibrated Antennas:**
+- **Highest accuracy**: ±1 dB everywhere in calibrated region
+- **Correction surface**: Applied automatically when query in coverage
+- **Production use**: Recommended for operational deployments
+
+#### 3.6.8 Calibration Upgrade Workflow
+
+```
+Step 1: Deploy Uncalibrated
+├─ Input: Design specifications (YAML)
+├─ Output: Physics model with nominal parameters
+├─ Accuracy: ±3-5 dB absolute, ±2 dB loss
+└─ Use case: Initial deployment, loss analysis
+
+Step 2: Boresight Calibration (Optional)
+├─ Input: Boresight measurements (~15 points, 1 hour test)
+├─ Output: Tuned physics model
+├─ Accuracy: ±1.5 dB boresight, ±2-3 dB off-axis
+└─ Use case: Rapid commissioning, verification
+
+Step 3: Full Grid Calibration
+├─ Input: Full grid measurements (500-3000 points, 8 hour test)
+├─ Output: Tuned physics model + correction surface
+├─ Accuracy: ±1 dB everywhere
+└─ Use case: Production operations
+```
+
+**Incremental Investment:**
+Each step produces a valid `.bin` calibration artifact usable in the service. Engineers can choose when to invest additional test time based on accuracy requirements.
+
+**See Also:**
+- Detailed workflows: `docs/calibration-workflow-guide.md`
+- Boresight calibration examples: `examples/README_boresight.md`
+- API integration: Section 4.3 (Request/Response Schemas)
+
 ## 4. Data Architecture
 
 ### 4.1 Calibration Data Flow

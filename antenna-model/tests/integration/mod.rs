@@ -53,9 +53,27 @@
 //! - Thread safety of calibration repository
 //! - Sustained load testing
 //! - Error handling under concurrent load
+//!
+//! ### Error Tests (`error_tests.rs`)
+//! - Startup failures (missing files, invalid config)
+//! - Runtime errors (invalid requests, out-of-range values)
+//! - Resource exhaustion (large requests, memory limits)
+//! - Malformed API requests
+//! - Extreme parameter values
+//! - HTTP method and content type validation
+//!
+//! ### Resilience Tests (`resilience_tests.rs`)
+//! - Graceful degradation under partial failures
+//! - Recovery from transient errors
+//! - Service stability under error conditions
+//! - Partial antenna loading failures
+//! - Concurrent error conditions
+//! - Resource cleanup verification
 
 pub mod helpers;
 
 pub mod api_tests;
 pub mod concurrent_tests;
+pub mod error_tests;
 pub mod partial_calibration_tests;
+pub mod resilience_tests;

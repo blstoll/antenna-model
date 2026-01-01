@@ -1,0 +1,32 @@
+# Design Specifications for Test Uncalibrated Antenna
+# Matches test_antennas.yaml configuration
+
+antenna_id: "test_uncalibrated"
+antenna_name: "Test Uncalibrated Antenna"
+
+# Reflector geometry
+reflector:
+  diameter_m: 3.7
+  focal_length_m: 1.85
+  surface_rms_mm: 1.5
+
+# Feed configurations
+feeds:
+  - feed_id: "x_band"
+    name: "X-Band Test Feed"
+    position: [0.0, 0.0, 0.0]
+    q_factor: 8.0
+    phase_center_offset_m: 0.0
+    frequency_range: [7100.0, 8500.0]
+
+  - feed_id: "s_band"
+    name: "S-Band Test Feed"
+    position: [0.05, 0.0, 0.0]
+    q_factor: 7.0
+    phase_center_offset_m: 0.0
+    frequency_range: [2000.0, 2300.0]
+
+# Mesh reflector parameters
+mesh:
+  mesh_spacing_mm: 5.0
+  wire_diameter_mm: 0.5

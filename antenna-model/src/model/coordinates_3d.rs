@@ -526,47 +526,56 @@ pub fn compute_feed_position_from_pointing(
 ///
 /// When the antenna is mechanically pointed at `pointing_frequency` but
 /// operating at `operating_frequency`, the beam direction shifts due to
-/// frequency-dependent phase effects.
+/// frequency-dependent phase effects. The squint magnitude depends on the
+/// actual feed displacement from the focal point.
 ///
 /// # Arguments
 /// - `azimuth_deg`: Uncorrected azimuth (degrees)
 /// - `elevation_deg`: Uncorrected elevation (degrees)
 /// - `pointing_freq_mhz`: Frequency at which antenna is pointed
 /// - `operating_freq_mhz`: Actual operating frequency
-/// - `antenna_diameter_m`: Antenna diameter (for computing squint magnitude)
+/// - `feed_displacement_m`: Radial feed displacement from focal point (meters)
+/// - `focal_length_m`: Focal length of the reflector (meters)
 ///
 /// # Returns
 /// (corrected_azimuth_deg, corrected_elevation_deg, squint_magnitude_deg)
 ///
-/// # Note
-/// This is a simplified model. Real beam squint depends on antenna design,
-/// feed configuration, and higher-order effects.
+/// # Physics
+/// Beam squint occurs because the phase gradient across the aperture changes
+/// with frequency when the feed is displaced. The squint angle is approximately:
+/// ```text
+/// Δθ ≈ (f_op - f_point) / f_point × (δ / f)
+/// ```
+/// where δ is feed displacement and f is focal length.
 pub fn apply_beam_squint_correction(
     azimuth_deg: f64,
     elevation_deg: f64,
     pointing_freq_mhz: f64,
     operating_freq_mhz: f64,
-    antenna_diameter_m: f64,
+    feed_displacement_m: f64,
+    focal_length_m: f64,
 ) -> (f64, f64, f64) {
     // If frequencies are the same (within 0.1%), no correction needed
     if (pointing_freq_mhz - operating_freq_mhz).abs() / pointing_freq_mhz < 0.001 {
         return (azimuth_deg, elevation_deg, 0.0);
     }
 
-    // Frequency ratio
-    let freq_ratio = operating_freq_mhz / pointing_freq_mhz;
+    // If no feed displacement, no beam squint
+    if feed_displacement_m < 1e-6 {
+        return (azimuth_deg, elevation_deg, 0.0);
+    }
 
-    // Beam squint scales inversely with frequency (higher freq → tighter beam → larger angular shift)
-    // Rough approximation: squint ≈ (1 - freq_ratio) * beamwidth
-    // Beamwidth (HPBW) ≈ 70 * λ / D degrees (for parabolic dish)
-    let wavelength_m = 299.792458 / operating_freq_mhz; // c / f (f in MHz → m/s / MHz = m)
-    let beamwidth_deg = 70.0 * wavelength_m / antenna_diameter_m;
+    // Beam squint formula: Δθ ≈ (f_op - f_point) / f_point × (δ / f)
+    // This gives the angular shift in radians
+    let freq_shift_ratio = (operating_freq_mhz - pointing_freq_mhz) / pointing_freq_mhz;
+    let displacement_ratio = feed_displacement_m / focal_length_m;
 
-    // Squint magnitude (simplified linear model)
-    let squint_deg = (1.0 - freq_ratio) * beamwidth_deg * 0.5;
+    let squint_rad = freq_shift_ratio * displacement_ratio;
+    let squint_deg = squint_rad.to_degrees();
 
-    // Apply squint correction (in direction of boresight)
-    // For simplicity, apply radially from boresight
+    // Apply squint correction radially from boresight
+    // The squint direction is along the feed displacement direction,
+    // which for simplicity we apply to elevation
     let corrected_azimuth = azimuth_deg;
     let corrected_elevation = elevation_deg + squint_deg;
 
@@ -750,7 +759,8 @@ mod tests {
             30.0,   // elevation
             8400.0, // pointing freq
             8400.0, // operating freq
-            34.0,   // antenna diameter
+            1.0,    // feed displacement (m)
+            13.6,   // focal length (m)
         );
 
         assert!((az - 45.0).abs() < EPSILON);
@@ -765,7 +775,8 @@ mod tests {
             0.0,    // elevation
             8400.0, // pointing freq
             8450.0, // operating freq (slightly higher)
-            34.0,   // antenna diameter
+            1.0,    // feed displacement (m)
+            13.6,   // focal length (m)
         );
 
         // Azimuth should be unchanged (radial correction)
@@ -776,6 +787,50 @@ mod tests {
 
         // Squint magnitude should be non-zero
         assert!(squint > 0.0);
+    }
+
+    #[test]
+    fn test_beam_squint_large_frequency_difference() {
+        // Test for 300 MHz pointing, 3 GHz operating (10x ratio)
+        let (az, el, squint) = apply_beam_squint_correction(
+            0.0,    // azimuth
+            1.0,    // elevation (1 degree off boresight)
+            300.0,  // pointing freq (MHz)
+            3000.0, // operating freq (MHz) - 10x higher
+            1.0,    // feed displacement (m)
+            13.6,   // focal length (m)
+        );
+
+        // With 10x frequency increase and δ/f = 1/13.6 ≈ 0.0735
+        // Squint ≈ (3000-300)/300 * 0.0735 = 9 * 0.0735 ≈ 0.66 rad ≈ 38 degrees
+        // This is a large correction!
+        assert!(
+            squint > 30.0,
+            "Large frequency difference should produce significant squint"
+        );
+
+        // Azimuth unchanged
+        assert!((az - 0.0).abs() < EPSILON);
+
+        // Elevation should be significantly shifted
+        assert!(el > 30.0);
+    }
+
+    #[test]
+    fn test_beam_squint_no_displacement() {
+        // No feed displacement means no beam squint
+        let (az, el, squint) = apply_beam_squint_correction(
+            10.0,   // azimuth
+            5.0,    // elevation
+            300.0,  // pointing freq
+            3000.0, // operating freq
+            0.0,    // no displacement
+            13.6,   // focal length
+        );
+
+        assert!((az - 10.0).abs() < EPSILON);
+        assert!((el - 5.0).abs() < EPSILON);
+        assert!(squint.abs() < EPSILON);
     }
 
     // ========================================================================

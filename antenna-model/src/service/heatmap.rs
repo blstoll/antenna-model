@@ -17,7 +17,9 @@ use std::time::Instant;
 const PARALLEL_THRESHOLD: usize = 100;
 
 /// Maximum allowed grid points to prevent excessive computation
-const MAX_GRID_POINTS: usize = 100_000;
+/// NOTE: Increased to 300,000 to support benchmarking of 512x512 grids (262,144 points)
+/// Consider making this configurable in future versions
+const MAX_GRID_POINTS: usize = 300_000;
 
 /// Type alias for grid generation results.
 ///

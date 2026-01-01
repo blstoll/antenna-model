@@ -1,0 +1,72 @@
+# Build artifacts
+target/
+**/target/
+*.rlib
+*.rmeta
+
+# Rust/Cargo
+**/*.rs.bk
+# Note: Cargo.lock is included to ensure reproducible builds with --locked flag
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+
+# Documentation
+*.md
+!README.md
+docs/
+examples/README*.md
+
+# Test files
+**/tests/
+test_data/
+# Note: benches/ is included because Cargo.toml references them
+# They won't be compiled in the final image when using --bin flag
+
+# Development scripts
+scripts/
+!scripts/build-docker.sh
+
+# Temporary files
+*.tmp
+*.log
+*.pid
+tmp/
+
+# Docker files (don't copy into image)
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Load testing
+tests/load/
+
+# Design specs (not needed at runtime, only for calibration)
+calibration_data/design_specs/
+design_specs/
+
+# Example measurement files (not needed at runtime)
+examples/
+!examples/README.md
+*.csv
+
+# Development calibration data (keep only production calibration)
+antenna-model/tests/fixtures/calibration_data/
+
+# Rust tools
+.cargo/
+rust-toolchain.toml

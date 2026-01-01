@@ -1,0 +1,9 @@
+# Clippy configuration for antenna-model workspace
+# Enforces strict lints for production-quality code
+
+# Complexity thresholds
+too-many-arguments-threshold = 7
+type-complexity-threshold = 250
+cognitive-complexity-threshold = 30
+
+# Additional strict lints can be configured here as needed

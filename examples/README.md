@@ -156,6 +156,220 @@ All responses include:
 
 See `responses/` directory for full example responses.
 
+## Calibration Status in API Responses
+
+All gain computation endpoints return calibration status information (v2.0+). The `calibration_status` field provides accuracy estimates and indicates which calibration method was used.
+
+### Fully Calibrated Response
+
+For antennas with complete grid measurements and correction surface:
+
+```json
+{
+  "antenna_id": "dsn_34m_fully_calibrated",
+  "feed_id": "x_band",
+  "gain_db": 45.3,
+  "loss_db": 2.1,
+  "reference_gain_db": 47.4,
+  "calibration_status": {
+    "status": "fully_calibrated",
+    "accuracy_estimate_db": 1.0,
+    "correction_applied": true,
+    "parameters_source": "measurement_tuned"
+  },
+  "warnings": [],
+  "metadata": {
+    "computation_time_ms": 2.8,
+    "extrapolated": false
+  }
+}
+```
+
+**Key Fields:**
+- `status`: "fully_calibrated" - highest accuracy level
+- `accuracy_estimate_db`: 1.0 - expect ±1.0 dB accuracy
+- `correction_applied`: true - B-spline correction surface was used
+- `warnings`: Empty - no calibration warnings for fully calibrated antennas
+
+### Partially Calibrated (Boresight) Response
+
+For antennas calibrated with boresight measurements only:
+
+```json
+{
+  "antenna_id": "gs_7.3m_boresight",
+  "feed_id": "x_band",
+  "gain_db": 44.8,
+  "loss_db": 2.3,
+  "reference_gain_db": 47.1,
+  "calibration_status": {
+    "status": "partially_calibrated",
+    "accuracy_estimate_db": 1.5,
+    "correction_applied": false,
+    "parameters_source": "boresight_tuned",
+    "coverage": {
+      "azimuth_range_deg": [0.0, 0.0],
+      "elevation_range_deg": [0.0, 0.0],
+      "frequency_range_mhz": [7100.0, 8500.0],
+      "num_measurements": 15,
+      "is_boresight_only": true
+    }
+  },
+  "warnings": [
+    "Antenna 'gs_7.3m_boresight' is partially calibrated. Accuracy estimate: ±1.5 dB"
+  ],
+  "metadata": {
+    "computation_time_ms": 1.5,
+    "extrapolated": false
+  }
+}
+```
+
+**Key Fields:**
+- `status`: "partially_calibrated" - limited coverage
+- `accuracy_estimate_db`: 1.5 - ±1.5 dB at boresight
+- `correction_applied`: false - physics model only (no correction surface for boresight-only)
+- `coverage.is_boresight_only`: true - measurements at single spatial point
+- `warnings`: Informs about partial calibration limitation
+
+### Partially Calibrated (Out-of-Coverage) Response
+
+When query is outside the calibrated region:
+
+```json
+{
+  "antenna_id": "gs_7.3m_boresight",
+  "feed_id": "x_band",
+  "gain_db": 42.1,
+  "loss_db": 3.2,
+  "calibration_status": {
+    "status": "partially_calibrated",
+    "accuracy_estimate_db": 2.5,
+    "correction_applied": false,
+    "parameters_source": "boresight_tuned",
+    "coverage": {
+      "azimuth_range_deg": [0.0, 0.0],
+      "elevation_range_deg": [0.0, 0.0],
+      "frequency_range_mhz": [7100.0, 8500.0],
+      "num_measurements": 15,
+      "is_boresight_only": true
+    }
+  },
+  "warnings": [
+    "Antenna 'gs_7.3m_boresight' is partially calibrated. Accuracy estimate: ±1.5 dB",
+    "Query is outside calibrated region - using physics model extrapolation"
+  ],
+  "metadata": {
+    "computation_time_ms": 1.8,
+    "extrapolated": false
+  }
+}
+```
+
+**Key Observations:**
+- `accuracy_estimate_db`: 2.5 - degraded to ±2-3 dB off-axis (physics extrapolation)
+- Additional warning about extrapolation beyond calibrated region
+- Physics model still valid, just less accurate than at boresight
+
+### Uncalibrated Response
+
+For antennas using design specifications only (no measurements):
+
+```json
+{
+  "antenna_id": "gs_3.7m_uncalibrated",
+  "feed_id": "x_band_feed",
+  "gain_db": 43.5,
+  "loss_db": 2.5,
+  "reference_gain_db": 46.0,
+  "calibration_status": {
+    "status": "uncalibrated",
+    "accuracy_estimate_db": 4.0,
+    "loss_accuracy_estimate_db": 2.0,
+    "correction_applied": false,
+    "parameters_source": "design_specifications"
+  },
+  "warnings": [
+    "Antenna 'gs_3.7m_uncalibrated' is uncalibrated (using design specifications). Absolute gain accuracy: ±4.0 dB, Loss accuracy: ±2.0 dB"
+  ],
+  "metadata": {
+    "computation_time_ms": 1.2,
+    "extrapolated": false
+  }
+}
+```
+
+**Key Fields:**
+- `status`: "uncalibrated" - design specs only
+- `accuracy_estimate_db`: 4.0 - ±3-5 dB absolute gain uncertainty
+- `loss_accuracy_estimate_db`: 2.0 - **better accuracy for loss (±2 dB)** due to error cancellation
+- `parameters_source`: "design_specifications"
+
+**Important:** For uncalibrated antennas, **use loss values** for comparative analysis. Loss accuracy (±2 dB) is significantly better than absolute gain accuracy (±4 dB) because systematic parameter errors cancel when comparing two pointing directions.
+
+### Backward Compatibility (v1.x clients)
+
+Older API clients will receive responses without the `calibration_status` field:
+
+```json
+{
+  "antenna_id": "antenna_1",
+  "gain_db": 45.2,
+  "loss_db": 2.1,
+  "warnings": []
+}
+```
+
+**Compatibility Notes:**
+- The `calibration_status` field is optional
+- Omitted when not available (old calibration files)
+- Forward compatible: new fields ignored by old parsers
+- No breaking changes
+
+### Using Calibration Status in Client Code
+
+**Python Example:**
+```python
+import requests
+
+response = requests.post('http://localhost:3000/api/v1/gain', json={
+    "antenna_id": "gs_3.7m_uncalibrated",
+    "feed_id": "x_band_feed",
+    ...
+})
+
+data = response.json()
+
+# Check if calibration status is available
+if 'calibration_status' in data:
+    status = data['calibration_status']['status']
+    accuracy = data['calibration_status']['accuracy_estimate_db']
+
+    print(f"Calibration: {status}, Accuracy: ±{accuracy} dB")
+
+    # For uncalibrated antennas, prefer loss values
+    if status == 'uncalibrated':
+        loss_accuracy = data['calibration_status']['loss_accuracy_estimate_db']
+        print(f"Loss accuracy (better): ±{loss_accuracy} dB")
+        print(f"Use loss_db ({data['loss_db']}) for comparative analysis")
+
+    # For partially calibrated, check if query is in coverage
+    if status == 'partially_calibrated':
+        if 'Query is outside calibrated region' in data.get('warnings', []):
+            print("Warning: Query outside calibrated region (degraded accuracy)")
+else:
+    print("Calibration status not available (old format or fully calibrated)")
+```
+
+### Accuracy Expectations Summary
+
+| Calibration Status | Absolute Gain | Loss (Relative) | Recommended Use |
+|-------------------|---------------|-----------------|-----------------|
+| **Fully Calibrated** | ±1.0 dB | ±1.0 dB | All applications |
+| **Partially (in-coverage)** | ±1.0-1.5 dB | ±1.0-1.5 dB | Boresight queries, parameter validation |
+| **Partially (out-of-coverage)** | ±2-3 dB | ±2-3 dB | Physics extrapolation acceptable |
+| **Uncalibrated** | ±3-5 dB | **±2 dB** | **Use loss for comparative analysis** |
+
 ## Testing with Different Configurations
 
 ### Custom Port

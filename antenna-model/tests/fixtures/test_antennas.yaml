@@ -5,6 +5,40 @@
 
 antennas:
   # ==========================================================================
+  # BORESIGHT-CALIBRATED TEST ANTENNA (X-Band)
+  # ==========================================================================
+  - id: "test_boresight_xband"
+    name: "Test Boresight Calibrated Antenna (X-Band)"
+    calibration_status: "partially_calibrated"
+    calibration_file: "tests/fixtures/calibration_data/test_uncalibrated_xband_boresight.bin"
+    enabled: true
+
+    calibration_coverage:
+      azimuth_range: [0.0, 0.0]
+      elevation_range: [0.0, 0.0]
+      frequency_range: [7100.0, 8500.0]
+      num_measurements: 15
+
+    description: "Test antenna with X-band boresight calibration (PartiallyCalibrated status)"
+
+  # ==========================================================================
+  # BORESIGHT-CALIBRATED TEST ANTENNA (S-Band)
+  # ==========================================================================
+  - id: "test_boresight_sband"
+    name: "Test Boresight Calibrated Antenna (S-Band)"
+    calibration_status: "partially_calibrated"
+    calibration_file: "tests/fixtures/calibration_data/test_uncalibrated_sband_boresight.bin"
+    enabled: true
+
+    calibration_coverage:
+      azimuth_range: [0.0, 0.0]
+      elevation_range: [0.0, 0.0]
+      frequency_range: [2000.0, 2300.0]
+      num_measurements: 7
+
+    description: "Test antenna with S-band boresight calibration (PartiallyCalibrated status)"
+
+  # ==========================================================================
   # UNCALIBRATED TEST ANTENNA
   # ==========================================================================
   - id: "test_uncalibrated"

@@ -21,7 +21,9 @@ fn test_antenna_class_properties() {
     let registry = AntennaClassRegistry::load_from_file("antenna_classes.yaml")
         .expect("Failed to load antenna classes");
 
-    let dsn_34m = registry.get_class("DSN_34m").expect("DSN_34m class not found");
+    let dsn_34m = registry
+        .get_class("DSN_34m")
+        .expect("DSN_34m class not found");
 
     // Verify geometry
     assert_eq!(dsn_34m.geometry.diameter_m, 34.0);
@@ -66,10 +68,15 @@ fn test_load_antenna_configuration_with_tuning() {
 
     // Verify metadata
     assert!(config.metadata.parameters_tuned);
-    assert_eq!(config.metadata.calibration_date, Some("2025-10-30".to_string()));
+    assert_eq!(
+        config.metadata.calibration_date,
+        Some("2025-10-30".to_string())
+    );
 
     // Validate configuration against registry
-    config.validate(&registry).expect("Configuration validation failed");
+    config
+        .validate(&registry)
+        .expect("Configuration validation failed");
 }
 
 #[test]
@@ -89,7 +96,9 @@ fn test_load_antenna_configuration_no_tuning() {
     assert!(!config.metadata.parameters_tuned);
 
     // Validate configuration
-    config.validate(&registry).expect("Configuration validation failed");
+    config
+        .validate(&registry)
+        .expect("Configuration validation failed");
 }
 
 #[test]

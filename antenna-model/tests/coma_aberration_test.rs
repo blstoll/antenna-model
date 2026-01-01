@@ -17,23 +17,24 @@
 //! - Love, "Electromagnetic Horn Antennas" (1976), Chapter 10
 
 use antenna_model::model::{
-    compute_gain_db, AntennaConfiguration, FeedParameters, FeedPosition,
-    IntegrationParams, ReflectorGeometry,
+    compute_gain_db, AntennaConfiguration, FeedParameters, FeedPosition, IntegrationParams,
+    ReflectorGeometry,
 };
 
 /// Test that feed at focal point produces maximum gain at boresight
 #[test]
 fn test_feed_at_focus_maximum_gain() {
-    let freq_hz = 8450.0e6;  // X-band
+    let freq_hz = 8450.0e6; // X-band
     let focal_length = 13.6; // 34m dish, f/D = 0.4
 
     let reflector = ReflectorGeometry::new(34.0, focal_length, 0.0).unwrap();
     let feed = FeedParameters::new(
         FeedPosition::at_focus(focal_length),
-        10.0,  // q_factor
-        0.0,   // phase_center_offset
-        1.0,   // asymmetry_factor
-    ).unwrap();
+        10.0, // q_factor
+        0.0,  // phase_center_offset
+        1.0,  // asymmetry_factor
+    )
+    .unwrap();
 
     let config = AntennaConfiguration::new(
         "test".to_string(),
@@ -41,14 +42,17 @@ fn test_feed_at_focus_maximum_gain() {
         reflector,
         feed,
         None,
-    ).unwrap();
+    )
+    .unwrap();
 
     // Theoretical maximum (η = 0.65 for X-band)
     // G = 10*log10(0.65 * (πD/λ)^2)
     let wavelength = 299792458.0 / freq_hz;
-    let theoretical_max = 10.0 * ((0.65 * (std::f64::consts::PI * 34.0 / wavelength).powi(2)).log10());
+    let theoretical_max =
+        10.0 * ((0.65 * (std::f64::consts::PI * 34.0 / wavelength).powi(2)).log10());
 
-    let gain_boresight = compute_gain_db(0.0, 0.0, &config, freq_hz, &IntegrationParams::fast()).unwrap();
+    let result = compute_gain_db(0.0, 0.0, &config, freq_hz, &IntegrationParams::fast()).unwrap();
+    let gain_boresight = result.gain;
 
     println!("Feed at focal point:");
     println!("  Theoretical max: {:.2} dBi", theoretical_max);
@@ -59,7 +63,8 @@ fn test_feed_at_focus_maximum_gain() {
     assert!(
         (gain_boresight - theoretical_max).abs() < 1.0,
         "Feed at focus should produce near-maximum gain, got {:.2} dBi vs theoretical {:.2} dBi",
-        gain_boresight, theoretical_max
+        gain_boresight,
+        theoretical_max
     );
 }
 
@@ -77,15 +82,21 @@ fn test_beam_steering_from_feed_displacement() {
     println!("Beam steering test:");
     println!("  Feed displacement: {:.2} m", feed_displacement);
     println!("  Focal length: {:.2} m", focal_length);
-    println!("  Expected steering: {:.2}° ({:.4} rad)", expected_steering_deg, expected_steering_rad);
+    println!(
+        "  Expected steering: {:.2}° ({:.4} rad)",
+        expected_steering_deg, expected_steering_rad
+    );
 
     let reflector = ReflectorGeometry::new(34.0, focal_length, 0.0).unwrap();
 
     // Feed displaced in +X direction
     let feed = FeedParameters::new(
         FeedPosition::new(feed_displacement, 0.0, focal_length),
-        10.0, 0.0, 1.0,
-    ).unwrap();
+        10.0,
+        0.0,
+        1.0,
+    )
+    .unwrap();
 
     let config = AntennaConfiguration::new(
         "test".to_string(),
@@ -93,7 +104,8 @@ fn test_beam_steering_from_feed_displacement() {
         reflector,
         feed,
         None,
-    ).unwrap();
+    )
+    .unwrap();
 
     // Scan pattern to find peak
     let mut max_gain = f64::NEG_INFINITY;
@@ -102,7 +114,9 @@ fn test_beam_steering_from_feed_displacement() {
     // Scan from -10° to +10° in phi=0 plane
     for theta_deg in -100..=100 {
         let theta = (theta_deg as f64 * 0.1).to_radians();
-        let gain = compute_gain_db(theta, 0.0, &config, freq_hz, &IntegrationParams::fast()).unwrap();
+        let result =
+            compute_gain_db(theta, 0.0, &config, freq_hz, &IntegrationParams::fast()).unwrap();
+        let gain = result.gain;
 
         if gain > max_gain {
             max_gain = gain;
@@ -111,7 +125,10 @@ fn test_beam_steering_from_feed_displacement() {
     }
 
     let peak_theta_deg = peak_theta.to_degrees();
-    println!("  Pattern peak at: {:.2}° with gain {:.2} dBi", peak_theta_deg, max_gain);
+    println!(
+        "  Pattern peak at: {:.2}° with gain {:.2} dBi",
+        peak_theta_deg, max_gain
+    );
 
     // Peak should be offset from boresight by approximately the expected steering angle
     // (Direction is opposite to feed displacement for reflected beam)
@@ -123,7 +140,8 @@ fn test_beam_steering_from_feed_displacement() {
     assert!(
         steering_error < 1.0,
         "Beam should steer by ~{:.2}°, but peak is at {:.2}°",
-        expected_steering_deg, peak_theta_deg
+        expected_steering_deg,
+        peak_theta_deg
     );
 }
 
@@ -135,10 +153,8 @@ fn test_gain_loss_from_feed_displacement() {
     let reflector = ReflectorGeometry::new(34.0, focal_length, 0.0).unwrap();
 
     // Test 1: Feed at focus
-    let feed_at_focus = FeedParameters::new(
-        FeedPosition::at_focus(focal_length),
-        10.0, 0.0, 1.0,
-    ).unwrap();
+    let feed_at_focus =
+        FeedParameters::new(FeedPosition::at_focus(focal_length), 10.0, 0.0, 1.0).unwrap();
 
     let config_focus = AntennaConfiguration::new(
         "test".to_string(),
@@ -146,15 +162,16 @@ fn test_gain_loss_from_feed_displacement() {
         reflector.clone(),
         feed_at_focus,
         None,
-    ).unwrap();
+    )
+    .unwrap();
 
-    let gain_at_focus = compute_gain_db(0.0, 0.0, &config_focus, freq_hz, &IntegrationParams::fast()).unwrap();
+    let result_at_focus =
+        compute_gain_db(0.0, 0.0, &config_focus, freq_hz, &IntegrationParams::fast()).unwrap();
+    let gain_at_focus = result_at_focus.gain;
 
     // Test 2: Feed displaced
-    let feed_displaced = FeedParameters::new(
-        FeedPosition::new(1.19, 0.0, focal_length),
-        10.0, 0.0, 1.0,
-    ).unwrap();
+    let feed_displaced =
+        FeedParameters::new(FeedPosition::new(1.19, 0.0, focal_length), 10.0, 0.0, 1.0).unwrap();
 
     let config_displaced = AntennaConfiguration::new(
         "test".to_string(),
@@ -162,9 +179,18 @@ fn test_gain_loss_from_feed_displacement() {
         reflector,
         feed_displaced,
         None,
-    ).unwrap();
+    )
+    .unwrap();
 
-    let gain_displaced = compute_gain_db(0.0, 0.0, &config_displaced, freq_hz, &IntegrationParams::fast()).unwrap();
+    let result_displaced = compute_gain_db(
+        0.0,
+        0.0,
+        &config_displaced,
+        freq_hz,
+        &IntegrationParams::fast(),
+    )
+    .unwrap();
+    let gain_displaced = result_displaced.gain;
 
     let gain_loss = gain_at_focus - gain_displaced;
 
@@ -191,8 +217,11 @@ fn test_coma_lobe_asymmetry() {
     let reflector = ReflectorGeometry::new(34.0, focal_length, 0.0).unwrap();
     let feed = FeedParameters::new(
         FeedPosition::new(1.19, 0.0, focal_length), // Displaced in +X
-        10.0, 0.0, 1.0,
-    ).unwrap();
+        10.0,
+        0.0,
+        1.0,
+    )
+    .unwrap();
 
     let config = AntennaConfiguration::new(
         "test".to_string(),
@@ -200,16 +229,29 @@ fn test_coma_lobe_asymmetry() {
         reflector,
         feed,
         None,
-    ).unwrap();
+    )
+    .unwrap();
 
     // Sample pattern in +theta and -theta directions (phi=0 plane)
-    let gain_plus_5deg = compute_gain_db(
-        5.0f64.to_radians(), 0.0, &config, freq_hz, &IntegrationParams::fast()
-    ).unwrap();
+    let result_plus_5deg = compute_gain_db(
+        5.0f64.to_radians(),
+        0.0,
+        &config,
+        freq_hz,
+        &IntegrationParams::fast(),
+    )
+    .unwrap();
+    let gain_plus_5deg = result_plus_5deg.gain;
 
-    let gain_minus_5deg = compute_gain_db(
-        (-5.0f64).to_radians(), 0.0, &config, freq_hz, &IntegrationParams::fast()
-    ).unwrap();
+    let result_minus_5deg = compute_gain_db(
+        (-5.0f64).to_radians(),
+        0.0,
+        &config,
+        freq_hz,
+        &IntegrationParams::fast(),
+    )
+    .unwrap();
+    let gain_minus_5deg = result_minus_5deg.gain;
 
     let asymmetry = (gain_plus_5deg - gain_minus_5deg).abs();
 
@@ -233,10 +275,7 @@ fn test_regression_feed_at_focus() {
     let focal_length = 13.6;
 
     let reflector = ReflectorGeometry::new(34.0, focal_length, 0.0005).unwrap();
-    let feed = FeedParameters::new(
-        FeedPosition::at_focus(focal_length),
-        10.0, 0.0, 1.0,
-    ).unwrap();
+    let feed = FeedParameters::new(FeedPosition::at_focus(focal_length), 10.0, 0.0, 1.0).unwrap();
 
     let config = AntennaConfiguration::new(
         "test".to_string(),
@@ -244,9 +283,11 @@ fn test_regression_feed_at_focus() {
         reflector,
         feed,
         None,
-    ).unwrap();
+    )
+    .unwrap();
 
-    let gain = compute_gain_db(0.0, 0.0, &config, freq_hz, &IntegrationParams::fast()).unwrap();
+    let result = compute_gain_db(0.0, 0.0, &config, freq_hz, &IntegrationParams::fast()).unwrap();
+    let gain = result.gain;
 
     // Based on current implementation with full path-length coma model (surface RMS = 0.5mm)
     // This locks in the current behavior to detect regressions
@@ -256,6 +297,7 @@ fn test_regression_feed_at_focus() {
     assert!(
         (gain - expected_gain).abs() < tolerance,
         "Regression: feed at focus gain changed from {:.2} to {:.2} dBi",
-        expected_gain, gain
+        expected_gain,
+        gain
     );
 }

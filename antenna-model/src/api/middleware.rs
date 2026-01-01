@@ -57,16 +57,22 @@ impl<E: Endpoint> Endpoint for RequestIdImpl<E> {
             .unwrap_or_else(|| Uuid::new_v4().to_string());
 
         // Store request ID in extensions for downstream handlers
-        req.extensions_mut().insert(RequestIdExt(request_id.clone()));
+        req.extensions_mut()
+            .insert(RequestIdExt(request_id.clone()));
 
         // Call the endpoint
         let mut response = self.ep.call(req).await.map(IntoResponse::into_response)?;
 
         // Add request ID to response headers
-        response.headers_mut().insert(
-            REQUEST_ID_HEADER,
-            request_id.parse().unwrap(),
-        );
+        // Note: request_id is a valid UUID string, but we handle the parse error defensively
+        if let Ok(header_value) = request_id.parse() {
+            response
+                .headers_mut()
+                .insert(REQUEST_ID_HEADER, header_value);
+        } else {
+            // Log the error but don't fail the request
+            warn!(request_id = %request_id, "Failed to parse request ID as header value");
+        }
 
         Ok(response)
     }
@@ -257,7 +263,7 @@ impl RequestSizeTracker {
     /// Create a new request size tracker with default thresholds
     pub fn new() -> Self {
         Self {
-            warn_request_size: 1_000_000,  // 1 MB
+            warn_request_size: 1_000_000,   // 1 MB
             warn_response_size: 10_000_000, // 10 MB
         }
     }
@@ -352,12 +358,7 @@ impl<E: Endpoint> Endpoint for RequestSizeTrackerImpl<E> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use poem::{
-        http::StatusCode,
-        test::TestClient,
-        EndpointExt,
-        Route,
-    };
+    use poem::{http::StatusCode, test::TestClient, EndpointExt, Route};
 
     #[tokio::test]
     async fn test_request_id_generation() {
@@ -495,12 +496,18 @@ mod tests {
     async fn test_timing_measurement() {
         // Test that RequestLogger adds timing information to request extensions
         let app = Route::new()
-            .at("/test", poem::endpoint::make_sync(|req: Request| {
-                // Verify that start time was recorded by RequestLogger middleware
-                let start_time = req.extensions().get::<RequestStartTime>();
-                assert!(start_time.is_some(), "RequestStartTime should be set by RequestLogger");
-                "OK"
-            }))
+            .at(
+                "/test",
+                poem::endpoint::make_sync(|req: Request| {
+                    // Verify that start time was recorded by RequestLogger middleware
+                    let start_time = req.extensions().get::<RequestStartTime>();
+                    assert!(
+                        start_time.is_some(),
+                        "RequestStartTime should be set by RequestLogger"
+                    );
+                    "OK"
+                }),
+            )
             .with(RequestId)
             .with(RequestLogger);
 

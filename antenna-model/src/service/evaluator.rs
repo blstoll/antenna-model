@@ -1,4 +1,72 @@
 //! Gain Computation Service - Core Pipeline
+//!
+//! This module implements the end-to-end gain computation workflow, orchestrating
+//! coordinate transformations, physics modeling, and correction surface evaluation.
+//!
+//! # Pipeline Overview
+//!
+//! ```text
+//! ┌─────────────────┐
+//! │ GainRequest     │  Input: 3D positions (ECEF/Geodetic), frequencies, antenna ID
+//! └────────┬────────┘
+//!          │
+//!          ▼
+//! ┌─────────────────────────────────────────────────────────────────────┐
+//! │ Step 1: Load Calibration Data                                       │
+//! │ - Retrieve antenna configuration (reflector, feed, mesh)            │
+//! │ - Load correction surface (B-spline) if calibrated                  │
+//! │ - Get validity ranges and calibration status                        │
+//! └────────┬────────────────────────────────────────────────────────────┘
+//!          │
+//!          ▼
+//! ┌─────────────────────────────────────────────────────────────────────┐
+//! │ Step 2: Coordinate Transformations                                  │
+//! │ - Convert emitter/feed/vehicle positions to antenna frame           │
+//! │ - Compute azimuth/elevation angles (θ, φ)                           │
+//! │ - Apply beam squint correction for frequency offset                 │
+//! └────────┬────────────────────────────────────────────────────────────┘
+//!          │
+//!          ▼
+//! ┌─────────────────────────────────────────────────────────────────────┐
+//! │ Step 3: Physics Model Computation                                   │
+//! │ - Aperture integration (physical optics) or ray tracing             │
+//! │ - Phase accumulation: path + coma + surface + mesh                  │
+//! │ - Apply Ruze efficiency (surface RMS) and mesh transparency         │
+//! └────────┬────────────────────────────────────────────────────────────┘
+//!          │
+//!          ▼
+//! ┌─────────────────────────────────────────────────────────────────────┐
+//! │ Step 4: Correction Surface Evaluation                               │
+//! │ - Interpolate B-spline correction (if calibrated)                   │
+//! │ - Add correction to physics model: Gain_final = Gain_phys + ΔG      │
+//! │ - Generate warnings for extrapolation outside calibrated range      │
+//! └────────┬────────────────────────────────────────────────────────────┘
+//!          │
+//!          ▼
+//! ┌─────────────────────────────────────────────────────────────────────┐
+//! │ Step 5: G/T Computation (if temperature provided)                   │
+//! │ - Compute G/T ratio from gain and system temperature                │
+//! │ - Apply overall efficiency (Ruze × mesh)                            │
+//! └────────┬────────────────────────────────────────────────────────────┘
+//!          │
+//!          ▼
+//! ┌─────────────────────────────────────────────────────────────────────┐
+//! │ Step 6: Loss Calculation (if reference gain provided)               │
+//! │ - Compute loss = reference_gain - actual_gain (dB)                  │
+//! │ - Used for link budget analysis                                     │
+//! └────────┬────────────────────────────────────────────────────────────┘
+//!          │
+//!          ▼
+//! ┌─────────────────┐
+//! │ GainResponse    │  Output: gain_db, g_over_t_db, loss, warnings, metadata
+//! └─────────────────┘
+//! ```
+//!
+//! # Error Handling
+//! - Missing antenna/feed → FeedNotFound error
+//! - Invalid coordinates → ValidationError
+//! - Computation failures → ComputationError with context
+//! - Out-of-range queries → Warning (not error)
 
 use crate::api::schemas::{
     CalibrationStatusInfo, ComputationMetadata, GainRequest, GainResponse, GeometryInfo,
@@ -13,6 +81,19 @@ use crate::model::{
 };
 use std::time::Instant;
 
+/// Compute antenna gain from a gain request
+///
+/// This is the main entry point for gain computation, transforming 3D positions
+/// into antenna frame coordinates and evaluating the physics model.
+///
+/// # Arguments
+///
+/// * `request` - The gain request containing vehicle position, reflector boresight, and feed position
+/// * `repository` - The calibration data repository
+///
+/// # Returns
+///
+/// A `GainResponse` containing the computed gain and metadata
 pub fn compute_gain_from_request(
     request: &GainRequest,
     repository: &CalibrationRepository,
@@ -59,11 +140,50 @@ pub fn compute_gain_from_request(
             feed_id: request.feed_id.clone(),
         })?;
 
+    // Build AntennaConfiguration from calibration data
+    // Convert data types to model geometry types
+    use crate::model::{
+        FeedParameters as ModelFeedParams, FeedPosition, MeshParameters as ModelMeshParams,
+        ReflectorGeometry as ModelReflector,
+    };
+
+    let focal_length_m = calibration.physical_config.reflector.focal_length_m;
+    let diameter_m = calibration.physical_config.reflector.diameter_m;
+
+    let reflector = ModelReflector::builder()
+        .diameter(diameter_m)
+        .focal_length(focal_length_m)
+        .surface_rms(calibration.physical_config.reflector.surface_rms_mm / 1000.0) // mm to m
+        .build()
+        .map_err(|e| AntennaModelError::Generic(format!("Failed to build reflector: {}", e)))?;
+
+    // Compute physical feed position from API steering parameters
+    // The API's feed_position specifies where the feed is aimed (Earth target location)
+    // This computes the corresponding physical feed position in the reflector frame
+    let (steer_x, steer_y, steer_z) = compute_feed_position_from_pointing(
+        &request.feed_position,
+        &request.reflector_boresight,
+        &request.vehicle_position,
+        focal_length_m,
+    )?;
+
+    // Combine steering-induced position with design feed offset
+    // The design position represents the physical offset of this feed from the optical axis
+    // (e.g., multi-feed antennas have feeds at different physical locations)
+    let design_pos = &calibration.physical_config.feed.position;
+    let feed_x = steer_x + design_pos.0;
+    let feed_y = steer_y + design_pos.1;
+    let feed_z = steer_z + design_pos.2;
+    let feed_position = FeedPosition::new(feed_x, feed_y, feed_z);
+
+    // Calculate radial feed displacement for beam squint calculation
+    let feed_displacement_m = (feed_x.powi(2) + feed_y.powi(2)).sqrt();
+
     // Apply beam squint correction if pointing frequency differs from operating frequency
+    // Must be done AFTER computing feed position since squint depends on actual displacement
     let pointing_freq = request
         .pointing_frequency_mhz
         .unwrap_or(request.frequency_mhz);
-    let diameter_m = calibration.physical_config.reflector.diameter_m;
 
     let (corrected_az, corrected_el, squint_magnitude_deg) =
         if (pointing_freq - request.frequency_mhz).abs() > 0.1 {
@@ -72,36 +192,12 @@ pub fn compute_gain_from_request(
                 emitter_el,
                 pointing_freq,
                 request.frequency_mhz,
-                diameter_m,
+                feed_displacement_m,
+                focal_length_m,
             )
         } else {
             (emitter_az, emitter_el, 0.0)
         };
-
-    // Build AntennaConfiguration from calibration data
-    // Convert data types to model geometry types
-    use crate::model::{
-        FeedParameters as ModelFeedParams, FeedPosition, MeshParameters as ModelMeshParams,
-        ReflectorGeometry as ModelReflector,
-    };
-
-    let reflector = ModelReflector::builder()
-        .diameter(calibration.physical_config.reflector.diameter_m)
-        .focal_length(calibration.physical_config.reflector.focal_length_m)
-        .surface_rms(calibration.physical_config.reflector.surface_rms_mm / 1000.0) // mm to m
-        .build()
-        .map_err(|e| AntennaModelError::Generic(format!("Failed to build reflector: {}", e)))?;
-
-    // Compute physical feed position from API steering parameters
-    // The API's feed_position specifies where the feed is aimed (Earth target location)
-    // This computes the corresponding physical feed position in the reflector frame
-    let (feed_x, feed_y, feed_z) = compute_feed_position_from_pointing(
-        &request.feed_position,
-        &request.reflector_boresight,
-        &request.vehicle_position,
-        calibration.physical_config.reflector.focal_length_m,
-    )?;
-    let feed_position = FeedPosition::new(feed_x, feed_y, feed_z);
 
     let feed = ModelFeedParams::builder()
         .position(feed_position)
@@ -141,33 +237,40 @@ pub fn compute_gain_from_request(
     // Our corrected_el uses the convention: elevation = 0° at boresight (Z-axis alignment)
     // Physics model theta uses: theta = 0° at boresight (standard spherical coordinates)
     // These conventions match, so direct conversion:
-    eprintln!(
-        "DEBUG: emitter_az={:.4}°, emitter_el={:.4}°",
-        emitter_az, emitter_el
+    tracing::debug!(
+        emitter_az = %emitter_az,
+        emitter_el = %emitter_el,
+        "Computed emitter direction in antenna frame"
     );
-    eprintln!(
-        "DEBUG: corrected_az={:.4}°, corrected_el={:.4}°",
-        corrected_az, corrected_el
+    tracing::debug!(
+        corrected_az = %corrected_az,
+        corrected_el = %corrected_el,
+        "Emitter direction after beam squint correction"
     );
-    eprintln!(
-        "DEBUG: theta_rad={:.6}, phi_rad={:.6}",
-        corrected_el.to_radians(),
-        corrected_az.to_radians()
-    );
-    eprintln!(
-        "DEBUG: feed_position=({:.4}, {:.4}, {:.4})",
-        feed_x, feed_y, feed_z
-    );
+
     let theta_rad = corrected_el.to_radians();
     let phi_rad = corrected_az.to_radians();
 
-    let gain_physics = compute_gain_db(
+    tracing::debug!(
+        theta_rad = %theta_rad,
+        phi_rad = %phi_rad,
+        feed_x = %feed_x,
+        feed_y = %feed_y,
+        feed_z = %feed_z,
+        "Physics model inputs"
+    );
+
+    let result = compute_gain_db(
         theta_rad,
         phi_rad,
         &antenna_config,
         frequency_hz,
         &integration_params,
     )?; // ComputationError automatically converts via #[from]
+    let gain_physics = result.gain;
+
+    // Collect edge case warnings from physics computation
+    warnings.extend(result.warnings);
 
     // Apply correction surface (if available and in coverage)
     // Use corrected angles for coverage check and interpolation
@@ -368,8 +471,8 @@ mod tests {
                     surface_rms_mm: 0.5,
                 },
                 feed: FeedParameters {
-                    // Feed at focal point (0, 0, focal_length) in reflector frame
-                    position: (0.0, 0.0, 5.0),
+                    // Feed at focal point - zero offset from optical axis
+                    position: (0.0, 0.0, 0.0),
                     q_factor: 8.0,
                     phase_center_offset_m: 0.0,
                 },
@@ -740,8 +843,8 @@ mod tests {
                     surface_rms_mm: 0.5,
                 },
                 feed: FeedParameters {
-                    // Feed at focal point (0, 0, focal_length) in reflector frame
-                    position: (0.0, 0.0, 5.0),
+                    // Feed at focal point - zero offset from optical axis
+                    position: (0.0, 0.0, 0.0),
                     q_factor: 8.0,
                     phase_center_offset_m: 0.0,
                 },

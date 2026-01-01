@@ -13,7 +13,9 @@ use tokio::task::JoinSet;
 /// Test concurrent gain computations from multiple clients
 #[tokio::test]
 async fn test_concurrent_gain_computations() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     let num_concurrent = 10;
     let mut tasks = JoinSet::new();
@@ -64,7 +66,9 @@ async fn test_concurrent_gain_computations() {
 /// Test concurrent batch requests
 #[tokio::test]
 async fn test_concurrent_batch_requests() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     let num_concurrent = 5;
     let batch_size = 10;
@@ -115,7 +119,9 @@ async fn test_concurrent_batch_requests() {
 /// Test mixed concurrent requests (single + batch + heatmap)
 #[tokio::test]
 async fn test_mixed_concurrent_requests() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     let mut tasks = JoinSet::new();
 
@@ -130,11 +136,7 @@ async fn test_mixed_concurrent_requests() {
             let response = client.post(&url).json(&request).send().await?;
 
             let gain_response: GainResponse = response.json().await?;
-            Ok::<_, Box<dyn std::error::Error + Send + Sync>>((
-                "single",
-                i,
-                gain_response.gain_db,
-            ))
+            Ok::<_, Box<dyn std::error::Error + Send + Sync>>(("single", i, gain_response.gain_db))
         });
     }
 
@@ -195,7 +197,9 @@ async fn test_mixed_concurrent_requests() {
 /// Test concurrent access to same antenna (thread safety)
 #[tokio::test]
 async fn test_concurrent_same_antenna() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     let num_concurrent = 20;
     let mut tasks = JoinSet::new();
@@ -248,7 +252,9 @@ async fn test_concurrent_same_antenna() {
 /// Test concurrent access to different antennas
 #[tokio::test]
 async fn test_concurrent_different_antennas() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     let antennas = [
         ("test_simple", "primary", 8400.0),
@@ -310,7 +316,9 @@ async fn test_concurrent_different_antennas() {
 /// Test concurrent health checks
 #[tokio::test]
 async fn test_concurrent_health_checks() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     let num_concurrent = 50;
     let mut tasks = JoinSet::new();
@@ -350,7 +358,9 @@ async fn test_concurrent_health_checks() {
 /// Test load with sustained concurrent requests
 #[tokio::test]
 async fn test_sustained_load() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     let duration_ms = 2000; // 2 seconds
     let request_interval_ms = 50; // 20 req/s per task
@@ -408,7 +418,9 @@ async fn test_sustained_load() {
 /// Test error handling under concurrent load
 #[tokio::test]
 async fn test_concurrent_error_handling() {
-    let server = TestServer::start().await.expect("Failed to start test server");
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
 
     let num_concurrent = 20;
     let mut tasks = JoinSet::new();

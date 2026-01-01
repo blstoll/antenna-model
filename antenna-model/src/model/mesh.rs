@@ -148,11 +148,7 @@ pub fn basic_transparency(wavelength: f64, mesh_spacing: f64) -> f64 {
 /// # Returns
 /// Transparency coefficient (0 = fully reflective, 1 = fully transparent)
 #[inline]
-pub fn transparency_with_diameter(
-    wavelength: f64,
-    mesh_spacing: f64,
-    wire_diameter: f64,
-) -> f64 {
+pub fn transparency_with_diameter(wavelength: f64, mesh_spacing: f64, wire_diameter: f64) -> f64 {
     let lambda_0 = effective_cutoff_wavelength(mesh_spacing, wire_diameter);
     let ratio = lambda_0 / wavelength;
 
@@ -195,8 +191,7 @@ pub fn angle_correction_factor(theta_incident: f64) -> f64 {
     } else {
         // Saturate smoothly near grazing to avoid singularity
         let max_angle = 80.0_f64.to_radians();
-        let normalized = (theta_abs - 70.0_f64.to_radians())
-            / (max_angle - 70.0_f64.to_radians());
+        let normalized = (theta_abs - 70.0_f64.to_radians()) / (max_angle - 70.0_f64.to_radians());
         let saturation = 1.0 / 70.0_f64.to_radians().cos();
         let max_correction = 1.0 / max_angle.cos();
 
@@ -298,12 +293,8 @@ pub fn mesh_transparency_polarized(
     polarization: Polarization,
 ) -> f64 {
     // Get base transparency with angle effects
-    let base_transparency = mesh_transparency_with_angle(
-        wavelength,
-        mesh_spacing,
-        wire_diameter,
-        theta_incident,
-    );
+    let base_transparency =
+        mesh_transparency_with_angle(wavelength, mesh_spacing, wire_diameter, theta_incident);
 
     // Apply polarization-dependent correction
     match polarization {
@@ -342,12 +333,8 @@ pub fn mesh_transparency_polarized(
 /// ```
 pub fn mesh_efficiency(mesh: &MeshParameters, wavelength: f64, theta_incident: f64) -> f64 {
     // Reflection coefficient (1 - transparency)
-    let transparency = mesh_transparency_with_angle(
-        wavelength,
-        mesh.spacing,
-        mesh.wire_diameter,
-        theta_incident,
-    );
+    let transparency =
+        mesh_transparency_with_angle(wavelength, mesh.spacing, mesh.wire_diameter, theta_incident);
 
     mesh_reflection_coefficient(transparency)
 }
@@ -401,8 +388,8 @@ mod tests {
         // X-band: 8.4 GHz → λ ≈ 0.0357m
         let wavelength = 0.03571;
         let spacing = 0.005; // 5mm
-        // λ₀ = π × 0.005 ≈ 0.01571m, so λ/λ₀ ≈ 2.27
-        // (λ₀/λ)² ≈ 0.194, so T = 1/(1+0.194) ≈ 0.837
+                             // λ₀ = π × 0.005 ≈ 0.01571m, so λ/λ₀ ≈ 2.27
+                             // (λ₀/λ)² ≈ 0.194, so T = 1/(1+0.194) ≈ 0.837
 
         let transparency = basic_transparency(wavelength, spacing);
 
@@ -466,7 +453,7 @@ mod tests {
         let spacing = 0.005; // 5mm
 
         let thin_wire = transparency_with_diameter(wavelength, spacing, 0.0001); // 0.1mm
-        let thick_wire = transparency_with_diameter(wavelength, spacing, 0.001);  // 1.0mm
+        let thick_wire = transparency_with_diameter(wavelength, spacing, 0.001); // 1.0mm
 
         // Thicker wire should be less transparent (more reflective)
         assert!(thick_wire >= thin_wire);
@@ -515,9 +502,7 @@ mod tests {
         let spacing = 0.002; // 2mm (better for X-band)
         let diameter = 0.0002; // 0.2mm
 
-        let transparency_normal = mesh_transparency_with_angle(
-            wavelength, spacing, diameter, 0.0
-        );
+        let transparency_normal = mesh_transparency_with_angle(wavelength, spacing, diameter, 0.0);
 
         // With 2mm mesh at X-band: λ/λ₀ ≈ 5.7, (λ₀/λ)² ≈ 0.031
         // T ≈ 1/1.031 ≈ 0.97 (highly transparent = poor reflector)
@@ -532,12 +517,9 @@ mod tests {
         let spacing = 0.005; // 5mm
         let diameter = 0.0005; // 0.5mm
 
-        let transparency_normal = mesh_transparency_with_angle(
-            wavelength, spacing, diameter, 0.0
-        );
-        let transparency_45 = mesh_transparency_with_angle(
-            wavelength, spacing, diameter, 45.0_f64.to_radians()
-        );
+        let transparency_normal = mesh_transparency_with_angle(wavelength, spacing, diameter, 0.0);
+        let transparency_45 =
+            mesh_transparency_with_angle(wavelength, spacing, diameter, 45.0_f64.to_radians());
 
         // At oblique angle, effective wavelength increases,
         // but at X-band should still be highly reflective
@@ -560,13 +542,25 @@ mod tests {
         let theta = 30.0_f64.to_radians();
 
         let parallel = mesh_transparency_polarized(
-            wavelength, spacing, diameter, theta, Polarization::Parallel
+            wavelength,
+            spacing,
+            diameter,
+            theta,
+            Polarization::Parallel,
         );
         let perpendicular = mesh_transparency_polarized(
-            wavelength, spacing, diameter, theta, Polarization::Perpendicular
+            wavelength,
+            spacing,
+            diameter,
+            theta,
+            Polarization::Perpendicular,
         );
         let average = mesh_transparency_polarized(
-            wavelength, spacing, diameter, theta, Polarization::Average
+            wavelength,
+            spacing,
+            diameter,
+            theta,
+            Polarization::Average,
         );
 
         // Parallel should be less transparent (more reflective)
@@ -587,7 +581,7 @@ mod tests {
 
         // Use finer mesh for good efficiency at X-band
         let mesh = MeshParameters {
-            spacing: 0.001, // 1mm - fine mesh for X-band
+            spacing: 0.001,        // 1mm - fine mesh for X-band
             wire_diameter: 0.0001, // 0.1mm
             pattern_type: MeshPattern::Square,
         };
@@ -642,7 +636,10 @@ mod tests {
                 assert!(
                     transparency <= prev_transparency,
                     "freq={} GHz, λ={:.4}m: T={:.4} should be <= previous T={:.4}",
-                    freq_ghz, wavelength, transparency, prev_transparency
+                    freq_ghz,
+                    wavelength,
+                    transparency,
+                    prev_transparency
                 );
             }
 
@@ -706,7 +703,7 @@ mod tests {
 
         // Use finer mesh (2mm) for better efficiency at X-band
         let mesh = MeshParameters {
-            spacing: 0.002, // 2mm - finer mesh
+            spacing: 0.002,        // 2mm - finer mesh
             wire_diameter: 0.0002, // 0.2mm
             pattern_type: MeshPattern::Square,
         };
@@ -729,9 +726,17 @@ mod tests {
 
         // Mesh efficiency will be low even with 2mm mesh (still too coarse for X-band)
         // This demonstrates that mesh sizing is critical for high-frequency performance
-        assert!(eta_mesh >= 0.0 && eta_mesh < 0.5, "Mesh efficiency: {}", eta_mesh);
+        assert!(
+            eta_mesh >= 0.0 && eta_mesh < 0.5,
+            "Mesh efficiency: {}",
+            eta_mesh
+        );
 
         // Combined efficiency limited by mesh
-        assert!(eta_total >= 0.0 && eta_total < 0.5, "Total efficiency: {}", eta_total);
+        assert!(
+            eta_total >= 0.0 && eta_total < 0.5,
+            "Total efficiency: {}",
+            eta_total
+        );
     }
 }

@@ -568,21 +568,24 @@ mod tests {
 
         for (az_deg, el_deg) in test_cases {
             let ecc_from_func = EClockConeCoordinates::from_azimuth_elevation(az_deg, el_deg);
-            let ecc_direct = EClockConeCoordinates::new(
-                el_deg.to_radians(),
-                az_deg.to_radians()
-            );
+            let ecc_direct = EClockConeCoordinates::new(el_deg.to_radians(), az_deg.to_radians());
 
             assert!(
                 (ecc_from_func.e_cone - ecc_direct.e_cone).abs() < 1e-10,
                 "E-cone mismatch for (az={}, el={}): got {:.6}, expected {:.6}",
-                az_deg, el_deg, ecc_from_func.e_cone, ecc_direct.e_cone
+                az_deg,
+                el_deg,
+                ecc_from_func.e_cone,
+                ecc_direct.e_cone
             );
 
             assert!(
                 (ecc_from_func.e_clock - ecc_direct.e_clock).abs() < 1e-10,
                 "E-clock mismatch for (az={}, el={}): got {:.6}, expected {:.6}",
-                az_deg, el_deg, ecc_from_func.e_clock, ecc_direct.e_clock
+                az_deg,
+                el_deg,
+                ecc_from_func.e_clock,
+                ecc_direct.e_clock
             );
         }
     }
@@ -593,11 +596,11 @@ mod tests {
         let focal_length = 13.6;
 
         let test_cases = vec![
-            (0.0, 0.0),    // Boresight
-            (0.0, 1.0),    // Small elevation offset
-            (0.0, 5.0),    // Larger elevation offset
-            (90.0, 5.0),   // Offset in Y direction
-            (45.0, 3.0),   // Diagonal
+            (0.0, 0.0),  // Boresight
+            (0.0, 1.0),  // Small elevation offset
+            (0.0, 5.0),  // Larger elevation offset
+            (90.0, 5.0), // Offset in Y direction
+            (45.0, 3.0), // Diagonal
         ];
 
         for (az_deg, el_deg) in test_cases {
@@ -617,7 +620,9 @@ mod tests {
             assert!(
                 cone_error < 1e-6,
                 "Cone angle roundtrip error for (az={}, el={}): {:.9} rad",
-                az_deg, el_deg, cone_error
+                az_deg,
+                el_deg,
+                cone_error
             );
 
             // Clock angle is ambiguous at boresight (el=0)
@@ -625,7 +630,9 @@ mod tests {
                 assert!(
                     clock_error < 1e-6,
                     "Clock angle roundtrip error for (az={}, el={}): {:.9} rad",
-                    az_deg, el_deg, clock_error
+                    az_deg,
+                    el_deg,
+                    clock_error
                 );
             }
         }

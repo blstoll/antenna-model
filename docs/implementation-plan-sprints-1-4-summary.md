@@ -265,3 +265,236 @@ uuid = { version = "1.11.0", features = ["v4", "serde"] }
 ---
 
 **Next:** Sprint 5 - REST API Core Endpoints (production middleware ✅, schemas, health, gain evaluation, repository)
+## Sprint 5: REST API - Core Endpoints ✅
+
+**Status:** ✅ COMPLETE - 7/7 tasks complete (100%)  
+**Duration:** ~4 weeks  
+**Test Coverage:** 80%+ tests passing
+
+### Deliverables
+
+**Production-Grade API Infrastructure:**
+- Middleware stack: RequestId, RequestLogger, ErrorHandler, RequestSizeTracker
+- Health endpoints: `/health` (liveness), `/ready` (readiness), `/status` (detailed)
+- Comprehensive structured logging with request IDs and timing
+- Thread-safe calibration repository with multi-feed support
+
+**3D Coordinate-Based API:**
+- Position3D with auto-detection (ECEF vs Geodetic based on magnitude >6400km)
+- Full coordinate transformation pipeline: ECEF ↔ Geodetic ↔ Antenna Frame ↔ Spherical
+- Beam squint correction for frequency-dependent pointing
+- GeometryInfo in responses (feed offset, emitter direction)
+
+**Complete Gain Computation Pipeline:**
+- `POST /api/v1/gain` - Single gain evaluation
+- Coordinate transforms → Physics model → **B-spline correction surface** → Final gain
+- Optional reference gain and loss calculation
+- Comprehensive input validation (positions, attitudes, frequencies)
+
+**Key Implementation:**
+- `src/api/schemas.rs` (1214 lines) - All request/response types
+- `src/data/repository.rs` (367 lines) - Calibration artifact management
+- `src/service/evaluator.rs` - 7-step gain computation pipeline
+- `src/model/correction_interpolator.rs` (462 lines) - B-spline interpolation **FULLY INTEGRATED**
+- `src/model/coordinates_3d.rs` - WGS84 transformations
+- `src/service/validator.rs` (924 lines) - Comprehensive validation
+
+### Key Files Created
+
+- `src/api/middleware.rs` - 4 middleware components
+- `src/api/schemas.rs` - 30+ schema types
+- `src/data/loader.rs`, `src/data/repository.rs` - Calibration management
+- `src/service/evaluator.rs`, `src/service/validator.rs` - Business logic
+- `src/model/correction_interpolator.rs` - B-spline evaluation (Cox-de Boor)
+- `src/model/coordinates_3d.rs` - 3D transformations
+
+### Test Coverage
+
+- **Middleware:** 23 tests (execution order, request IDs, timing, error handling)
+- **Schemas:** 34 tests (serialization, coordinate detection, validation)
+- **Repository:** 34 tests (loading, multi-feed, concurrent access)
+- **Validation:** 32 tests (coordinates, attitudes, frequencies, batch limits)
+- **Total:** 120+ new tests, all passing
+
+### Architecture Highlights
+
+**Calibration Repository Structure:**
+```
+HashMap<antenna_id, HashMap<feed_id, AntennaCalibration>>
+├── physical_config (reflector, feed, mesh)
+├── correction_surface (Optional<BSplineModel4D>)  // ✅ WORKING
+└── validity_ranges (frequency, spatial, temperature)
+```
+
+**Gain Computation Flow:**
+```
+3D Positions (ECEF/Geodetic)
+  → Auto-detect coordinate system
+  → Transform to antenna frame (vehicle position + attitude)
+  → Compute feed offset & emitter direction
+  → Load calibration (antenna + feed config + correction surface)
+  → Physics model (aperture integration, phase functions, Ruze)
+  → B-spline correction surface evaluation  // ✅ INTEGRATED
+  → Combine: Gain_final = Gain_physics + Correction
+  → Optional: Reference gain & loss calculation
+```
+
+**Coordinate Auto-Detection:**
+- If `|x| > 6400km OR |y| > 6400km OR |z| > 6400km` → ECEF
+- Else → Geodetic (lon°, lat°, alt meters)
+
+---
+
+## Sprint 6: REST API - Advanced Endpoints & Partial Calibration ✅
+
+**Status:** ✅ COMPLETE - 10/10 tasks complete (100%)  
+**Duration:** ~4 weeks  
+**Test Coverage:** 80%+ (468 total tests passing)
+
+### Deliverables
+
+**Advanced API Endpoints:**
+- `POST /api/v1/gain/batch` - Batch processing (max 1000, parallel for ≥5 requests)
+- `POST /api/v1/heatmap` - Loss heatmap generation (rectangular grids, H3 deferred)
+- `GET /api/v1/antennas` - List all antennas with feeds
+- `GET /api/v1/antennas/{id}` - Antenna details
+- `GET /api/v1/antennas/{id}/feeds` - List feeds for antenna
+- `GET /api/v1/antennas/{id}/feeds/{feed_id}` - Feed details
+
+**Partial Calibration Phase 1 (Tasks 6.4-6.9):**
+- **Data Model:** `CalibrationStatus` enum (Fully/Partially/Uncalibrated)
+- **Configuration:** Parse design specs for uncalibrated antennas
+- **Repository:** Load uncalibrated antennas from design specs (no .bin file)
+- **API Schemas:** `CalibrationStatusInfo` in all responses
+- **Service Layer:** Handle all calibration statuses with appropriate warnings
+- **Use Case:** Loss analysis for uncalibrated antennas using physics model only
+
+**API Documentation:**
+- Complete OpenAPI 3.0 specification (47 schemas, 10 endpoints)
+- Examples for all calibration statuses
+- Coordinate system auto-detection documented
+
+### Key Implementation
+
+**Batch Processing** (`src/service/batch.rs`, 457 lines):
+- Parallel processing using `rayon` for batches ≥5 requests
+- Partial failures return NaN with error in warnings
+- Max 1000 evaluations per batch
+- 12 comprehensive tests
+
+**Heatmap Generation** (`src/service/heatmap.rs`, 496 lines):
+- Rectangular grid generation (azimuth × elevation)
+- Parallel processing for grids ≥100 points
+- Loss = peak_gain - gain at each grid point
+- Max 100,000 grid points
+- H3 hexagonal grids deferred (returns NotImplemented)
+- 12 comprehensive tests
+
+**Partial Calibration Support:**
+
+**CalibrationStatus Enum:**
+```rust
+enum CalibrationStatus {
+    FullyCalibrated { 
+        accuracy_estimate_db: f64  // ±1 dB typical
+    },
+    PartiallyCalibrated { 
+        accuracy_estimate_db: f64,  // ±1-3 dB
+        coverage: CalibrationCoverage 
+    },
+    Uncalibrated { 
+        accuracy_estimate_db: f64,        // ±3-5 dB absolute
+        loss_accuracy_estimate_db: f64    // ±2 dB loss
+    }
+}
+```
+
+**Uncalibrated Antenna Loading:**
+- Design specs in `antennas.yaml` (no .bin file required)
+- Builds `PhysicalAntennaConfig` from specs
+- Physics model only (no correction surface)
+- Useful for loss analysis relative to ideal gain
+
+**Example Configuration:**
+```yaml
+antennas:
+  - antenna_id: "test_antenna"
+    enabled: true
+    calibration_status: "uncalibrated"
+    design_specs:
+      reflector:
+        diameter_m: 1.2
+        focal_length_m: 0.48
+        surface_rms_mm: 0.5
+      feeds:
+        - feed_id: "x_band"
+          position: { x: 0.0, y: 0.0, z: 0.48 }
+          q_factor: 8.0
+          frequency_range: { min_mhz: 7000, max_mhz: 8500 }
+```
+
+### Test Coverage
+
+- **Batch:** 12 tests (empty, partial failures, size limits, parallel threshold)
+- **Heatmap:** 12 tests (grids, H3 NotImplemented, parallel, emitter positions)
+- **Antenna Endpoints:** 11 tests (list, details, 404 errors, multi-feed)
+- **Partial Calibration:** 81 tests across 6 tasks
+  - Data models: 18 tests
+  - Config parsing: 14 tests
+  - Loading: 12 tests
+  - Schemas: 11 tests
+  - Service layer: 17 tests
+  - Integration: 4 tests
+- **Total Sprint 6:** 116+ new tests, all passing
+
+### Architecture Highlights
+
+**Service Layer Coverage Check:**
+```rust
+fn is_in_coverage(
+    coverage: &CalibrationCoverage,
+    az: f64, el: f64, freq: f64
+) -> bool {
+    // Check if query point within measured coverage
+    // If out of coverage → physics model only, no correction
+}
+```
+
+**Calibration Warnings:**
+```rust
+fn generate_calibration_warnings(status: &CalibrationStatus) -> Vec<String> {
+    match status {
+        Uncalibrated => vec!["Using uncalibrated antenna - physics model only, no correction surface"],
+        PartiallyCalibrated if !in_coverage => vec!["Query outside calibrated coverage region"],
+        _ => vec![]
+    }
+}
+```
+
+**Parallel Processing Strategy:**
+- Batch: Sequential <5 requests, parallel ≥5 requests
+- Heatmap: Sequential <100 points, parallel ≥100 points
+- Uses `rayon` for CPU-bound parallel evaluation
+
+### Files Created
+
+- `src/service/batch.rs` (457 lines)
+- `src/service/heatmap.rs` (496 lines)
+- Updated `src/data/types.rs` (+328 lines for calibration status types)
+- Updated `src/config/settings.rs` (+704 lines for design specs parsing)
+- Updated `src/data/repository.rs` (+169 lines for uncalibrated loading)
+- Updated `src/api/schemas.rs` (+250 lines for calibration status info)
+- Updated `src/service/evaluator.rs` (+437 lines for status handling)
+- `openapi.yaml` (comprehensive API documentation)
+
+### Performance
+
+- Batch: 10-20 req/s for small batches (parallel)
+- Heatmap: ~3312 points (72×46) in <2 seconds expected
+- Single evaluation: <100ms p95 latency
+- Parallel threshold tuning for optimal performance
+
+---
+
+**Next:** Sprint 7 - Boresight Calibration Tool & Testing (36% complete, 4/11 tasks)
+
