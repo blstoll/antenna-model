@@ -424,7 +424,7 @@ pub fn artifact_format_info() -> String {
          - Correction surface (3D B-spline coefficients)\n\
          - Validation metrics (RMSE, R², max error, etc.)\n\
          - Metadata (timestamps, provenance, quality flags)\n",
-        std::str::from_utf8(MAGIC_NUMBER).unwrap(),
+        std::str::from_utf8(MAGIC_NUMBER).unwrap_or("<invalid UTF-8>"),
         ARTIFACT_VERSION
     )
 }

@@ -272,7 +272,10 @@ impl BoresightObjectiveFunction {
 
         // Build feed parameters (using model builders)
         // For boresight calibration, assume feed is at focal point
-        let feed_spec = self.design_specs.get_feed(&self.feed_id).unwrap();
+        let feed_spec = self
+            .design_specs
+            .get_feed(&self.feed_id)
+            .with_context(|| format!("Feed '{}' not found in design specs", self.feed_id))?;
         let feed = FeedParametersBuilder::default()
             .at_focus(self.design_specs.reflector.focal_length_m)
             .q_factor(params.q_factor)
@@ -469,7 +472,10 @@ pub fn calibrate_boresight(
         .map_err(|e| anyhow::anyhow!("Optimization failed: {}", e))?;
 
     // Extract optimized parameters
-    let final_params_vec = result.state().get_best_param().unwrap();
+    let final_params_vec = result
+        .state()
+        .get_best_param()
+        .context("Optimization produced no best parameter")?;
     let has_mesh = design_specs.mesh.is_some();
     let final_params = BoresightTunableParameters::from_vector(final_params_vec, has_mesh);
 
@@ -847,8 +853,12 @@ mod tests {
             .collect();
 
         // Fit correction
-        let correction_result = frequency_correction::fit_frequency_correction(&frequencies, &residuals);
-        assert!(correction_result.is_ok(), "Frequency correction should fit successfully");
+        let correction_result =
+            frequency_correction::fit_frequency_correction(&frequencies, &residuals);
+        assert!(
+            correction_result.is_ok(),
+            "Frequency correction should fit successfully"
+        );
 
         let correction = correction_result.unwrap();
 

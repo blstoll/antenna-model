@@ -9,12 +9,10 @@ use crate::api::schemas::{
 use crate::data::repository::CalibrationRepository;
 use crate::error::{AntennaModelError, Result};
 use crate::service::evaluator::compute_gain_from_request;
+use crate::service::validator::MAX_BATCH_SIZE;
 use rayon::prelude::*;
 use std::time::Instant;
 use tracing::{debug, info, warn};
-
-/// Maximum number of evaluations allowed in a single batch request
-const MAX_BATCH_SIZE: usize = 1000;
 
 /// Minimum batch size to benefit from parallel processing
 /// Below this threshold, sequential processing may be faster due to overhead
@@ -74,6 +72,7 @@ pub fn evaluate_batch(
             metadata: BatchMetadata {
                 total_computation_time_ms: start.elapsed().as_secs_f64() * 1000.0,
                 count: 0,
+                failure_count: 0,
             },
         });
     }
@@ -147,14 +146,19 @@ pub fn evaluate_batch(
 
     let elapsed = start.elapsed().as_secs_f64() * 1000.0;
 
-    // Count successes and failures for logging
-    let success_count = results.iter().filter(|r| r.warnings.is_empty()).count();
-    let warning_count = results.iter().filter(|r| !r.warnings.is_empty()).count();
+    // Count true failures (NaN gain) and results with warnings for logging
+    let failure_count = results.iter().filter(|r| r.gain_db.is_nan()).count();
+    let success_count = num_evaluations - failure_count;
+    let warning_count = results
+        .iter()
+        .filter(|r| !r.gain_db.is_nan() && !r.warnings.is_empty())
+        .count();
 
     info!(
-        "Batch processing complete: {} total, {} success, {} with warnings, {:.2}ms total, {:.2}ms/evaluation avg",
+        "Batch processing complete: {} total, {} success, {} failures, {} with warnings, {:.2}ms total, {:.2}ms/evaluation avg",
         num_evaluations,
         success_count,
+        failure_count,
         warning_count,
         elapsed,
         elapsed / num_evaluations as f64
@@ -165,6 +169,7 @@ pub fn evaluate_batch(
         metadata: BatchMetadata {
             total_computation_time_ms: elapsed,
             count: num_evaluations,
+            failure_count,
         },
     })
 }
@@ -287,6 +292,7 @@ mod tests {
         let response = evaluate_batch(&request, &repo).unwrap();
         assert_eq!(response.results.len(), 0);
         assert_eq!(response.metadata.count, 0);
+        assert_eq!(response.metadata.failure_count, 0);
     }
 
     #[test]
@@ -391,6 +397,15 @@ mod tests {
         assert!(!response.results[1].warnings.is_empty());
         assert!(response.results[3].gain_db.is_nan());
         assert!(!response.results[3].warnings.is_empty());
+
+        // failure_count must match the number of NaN results
+        let nan_count = response
+            .results
+            .iter()
+            .filter(|r| r.gain_db.is_nan())
+            .count();
+        assert_eq!(response.metadata.failure_count, nan_count);
+        assert_eq!(response.metadata.failure_count, 2);
     }
 
     #[test]

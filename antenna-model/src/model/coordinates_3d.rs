@@ -59,9 +59,6 @@ const WGS84_B: f64 = WGS84_A * (1.0 - WGS84_F);
 /// WGS84 first eccentricity squared
 const WGS84_E2: f64 = 2.0 * WGS84_F - WGS84_F * WGS84_F;
 
-/// Threshold for detecting ECEF coordinates (6400 km in meters)
-pub const ECEF_THRESHOLD_M: f64 = 6_400_000.0;
-
 /// Maximum reasonable altitude for coordinate validation (4000000 km, allows HEO satellites)
 const MAX_ALTITUDE_M: f64 = 400_000_000.0;
 
@@ -242,14 +239,40 @@ pub fn ecef_to_geodetic(x: f64, y: f64, z: f64) -> Result<(f64, f64, f64)> {
     Ok((lon_deg, lat_deg, alt_m))
 }
 
-/// Helper: Convert Position3D to ECEF coordinates.
-fn position_to_ecef(pos: &Position3D) -> Result<(f64, f64, f64)> {
+/// Convert Position3D to ECEF coordinates.
+pub(crate) fn position_to_ecef(pos: &Position3D) -> Result<(f64, f64, f64)> {
     if pos.is_ecef() {
         validate_ecef(pos.x, pos.y, pos.z)?;
         Ok((pos.x, pos.y, pos.z))
     } else {
         geodetic_to_ecef(pos.x, pos.y, pos.z)
     }
+}
+
+/// Compute the 3×3 rotation matrix from ECEF to local ENU frame.
+///
+/// The matrix R satisfies `[E; N; U] = R × [x; y; z]_ECEF`.
+/// To convert an ENU offset to ECEF use `R^T` (transpose), since R is orthogonal.
+///
+/// Rows of R are the ENU basis vectors expressed in ECEF:
+/// - Row 0 (East):  `[-sin(lon),  cos(lon),       0      ]`
+/// - Row 1 (North): `[-sin(lat)cos(lon), -sin(lat)sin(lon), cos(lat)]`
+/// - Row 2 (Up):    `[ cos(lat)cos(lon),  cos(lat)sin(lon), sin(lat)]`
+///
+/// # Arguments
+/// - `lat_rad`: Geodetic latitude in radians
+/// - `lon_rad`: Geodetic longitude in radians
+pub fn ecef_to_enu_rotation(lat_rad: f64, lon_rad: f64) -> [[f64; 3]; 3] {
+    let sin_lat = lat_rad.sin();
+    let cos_lat = lat_rad.cos();
+    let sin_lon = lon_rad.sin();
+    let cos_lon = lon_rad.cos();
+
+    [
+        [-sin_lon, cos_lon, 0.0],
+        [-sin_lat * cos_lon, -sin_lat * sin_lon, cos_lat],
+        [cos_lat * cos_lon, cos_lat * sin_lon, sin_lat],
+    ]
 }
 
 // ============================================================================

@@ -260,10 +260,10 @@ pub fn integrate_aperture(
             config,
             k,
             wavelength,
-            0.0,       // rho starts at aperture center
-            rho_max,   // rho extends to aperture edge (D/2)
-            phi_min,   // azimuthal angle: 0
-            phi_max,   // azimuthal angle: 2π (full circle)
+            0.0,     // rho starts at aperture center
+            rho_max, // rho extends to aperture edge (D/2)
+            phi_min, // azimuthal angle: 0
+            phi_max, // azimuthal angle: 2π (full circle)
             n_rho,
             n_phi,
             params.use_higher_order_aberrations,

@@ -32,8 +32,7 @@ use antenna_model::service::heatmap::generate_heatmap;
 /// - No correction surface (physics-only computation)
 fn create_test_calibration_repository() -> CalibrationRepository {
     // Get the path to test fixtures relative to the workspace root
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-        .unwrap_or_else(|_| ".".to_string());
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
     let fixtures_dir = PathBuf::from(&manifest_dir).join("tests/fixtures");
 
     let config = CalibrationConfig {

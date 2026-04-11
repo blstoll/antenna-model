@@ -15,8 +15,10 @@
 #![deny(unsafe_code)]
 // Allow missing docs for internal calibration tool details
 #![allow(missing_docs, missing_debug_implementations)]
-// Allow unwrap/expect in calibration tool (CLI, not production service)
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+// Allow expect/panic in calibration tool (CLI, not production service)
+#![allow(clippy::expect_used, clippy::panic)]
+// Deny unwrap() in non-test production code; use ? or context() instead
+#![cfg_attr(not(test), deny(clippy::unwrap_used))]
 
 pub mod antenna_config;
 pub mod boresight_calibration;

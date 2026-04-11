@@ -36,11 +36,21 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 
 #[tokio::main]
 async fn main() {
-    // Load configuration from file or use defaults
-    let config = load_configuration();
+    // Load configuration from file or use defaults (before tracing is available)
+    let (config, config_from_defaults, config_path) = load_configuration();
 
     // Initialize tracing/logging with configuration
     init_tracing(&config);
+
+    // Re-emit config load result through tracing (now initialized)
+    if config_from_defaults {
+        tracing::warn!(
+            config_path = %config_path,
+            "Failed to load configuration file; using default configuration values"
+        );
+    } else {
+        info!(config_path = %config_path, "Loaded configuration from file");
+    }
 
     // Log startup information
     info!(
@@ -58,7 +68,7 @@ async fn main() {
     }
 }
 
-/// Load service configuration
+/// Load service configuration and return it along with whether it was from defaults.
 ///
 /// Attempts to load configuration from:
 /// 1. File path specified by CONFIG_PATH environment variable, or
@@ -67,27 +77,22 @@ async fn main() {
 ///
 /// Environment variables can override file-based configuration using
 /// the `ANTENNA_MODEL_` prefix (e.g., `ANTENNA_MODEL_SERVER__PORT=8080`).
-fn load_configuration() -> ServiceConfig {
+///
+/// Returns `(config, config_from_defaults, config_path)`.
+fn load_configuration() -> (ServiceConfig, bool, String) {
     // Check for custom config path via environment variable
     let config_path = env::var("CONFIG_PATH").unwrap_or_else(|_| "config/service.yaml".to_string());
 
     match ServiceConfig::from_file(&config_path) {
-        Ok(config) => {
-            // Successfully loaded configuration
-            info!(
-                config_path = %config_path,
-                "Loaded configuration from file"
-            );
-            config
-        }
+        Ok(config) => (config, false, config_path),
         Err(e) => {
-            // Log warning and use defaults if config file is missing or invalid
+            // Log warning before tracing is available — will also be re-emitted via tracing below.
             eprintln!(
                 "Warning: Failed to load configuration from {}: {}",
                 config_path, e
             );
             eprintln!("Using default configuration values");
-            ServiceConfig::with_defaults()
+            (ServiceConfig::with_defaults(), true, config_path)
         }
     }
 }
@@ -147,10 +152,11 @@ mod tests {
 
     #[test]
     fn test_load_configuration_default() {
-        // Should not panic when config file doesn't exist
-        let config = load_configuration();
-        assert_eq!(config.server.host, "127.0.0.1");
-        assert_eq!(config.server.port, 3000);
+        // Should not panic regardless of whether config/service.yaml exists
+        let (config, _from_defaults, _path) = load_configuration();
+        // Host and port should be set (either from file or defaults)
+        assert!(!config.server.host.is_empty());
+        assert!(config.server.port > 0);
     }
 
     #[test]
@@ -158,7 +164,7 @@ mod tests {
         // Set environment variable
         env::set_var("ANTENNA_MODEL_SERVER__PORT", "8080");
 
-        let _config = load_configuration();
+        let (_config, _from_defaults, _path) = load_configuration();
 
         // Should have loaded the environment override
         // Note: This test may not work consistently due to global env state

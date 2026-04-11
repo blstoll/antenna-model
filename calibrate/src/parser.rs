@@ -172,7 +172,7 @@ impl MeasurementData {
 
         // Calculate median and MAD (Median Absolute Deviation)
         let mut g_over_t_values: Vec<f64> = self.points.iter().map(|p| p.g_over_t_db).collect();
-        g_over_t_values.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        g_over_t_values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let median = if g_over_t_values.len().is_multiple_of(2) {
             let mid = g_over_t_values.len() / 2;
@@ -187,7 +187,7 @@ impl MeasurementData {
             .iter()
             .map(|p| (p.g_over_t_db - median).abs())
             .collect();
-        deviations.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        deviations.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let mad = if deviations.len().is_multiple_of(2) {
             let mid = deviations.len() / 2;
@@ -296,10 +296,9 @@ Frequency Distribution:
     fn format_frequency_distribution(&self) -> String {
         let mut freqs: Vec<_> = self.frequency_distribution.iter().collect();
         freqs.sort_by(|a, b| {
-            a.0.parse::<f64>()
-                .unwrap()
-                .partial_cmp(&b.0.parse::<f64>().unwrap())
-                .unwrap()
+            let fa = a.0.parse::<f64>().unwrap_or(f64::NAN);
+            let fb = b.0.parse::<f64>().unwrap_or(f64::NAN);
+            fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal)
         });
 
         freqs

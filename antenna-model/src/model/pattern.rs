@@ -265,6 +265,7 @@ pub fn compute_gain(
     }
 
     // Dispatch based on computation mode
+    let mut warnings = analysis.warnings;
     let gain = match analysis.mode {
         ComputationMode::StandardPhysicalOptics => {
             compute_gain_standard(theta, phi, config, frequency_hz, wavelength, params)?
@@ -276,7 +277,16 @@ pub fn compute_gain(
             );
             compute_gain_higher_order(theta, phi, config, frequency_hz, wavelength, params)?
         }
-        ComputationMode::RayTracing => compute_gain_ray_tracing(theta, phi, config, wavelength)?,
+        ComputationMode::RayTracing => {
+            // Ray tracing is a stub: aperture sampling is used but true spillover and
+            // geometric ray-reflector intersection are not fully implemented.
+            warnings.push(
+                "WARNING: Ray tracing for large feed offsets (>0.5f) is not fully implemented; \
+                 gain accuracy may be degraded."
+                    .to_string(),
+            );
+            compute_gain_ray_tracing(theta, phi, config, wavelength)?
+        }
         ComputationMode::NearBoresightDirectPath => {
             compute_gain_direct_path(theta, phi, config, frequency_hz, wavelength, params)?
         }
@@ -285,10 +295,7 @@ pub fn compute_gain(
     // Apply gain floor for numerical stability
     let gain = apply_gain_floor(gain);
 
-    Ok(GainComputationResult {
-        gain,
-        warnings: analysis.warnings,
-    })
+    Ok(GainComputationResult { gain, warnings })
 }
 
 /// Standard physical optics gain computation

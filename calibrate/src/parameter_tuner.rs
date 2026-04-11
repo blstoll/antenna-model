@@ -296,7 +296,10 @@ impl CostFunction for ObjectiveFunction {
     type Output = f64;
 
     fn cost(&self, params: &Self::Param) -> Result<Self::Output, argmin::core::Error> {
-        self.compute_rmse(params.as_slice().unwrap())
+        let slice = params.as_slice().ok_or_else(|| {
+            argmin::core::Error::msg("Failed to convert parameter array to slice")
+        })?;
+        self.compute_rmse(slice)
             .map_err(|e| argmin::core::Error::msg(format!("Cost computation failed: {}", e)))
     }
 }
@@ -403,8 +406,11 @@ pub fn tune_parameters(
 
     let final_rmse = result.state().get_best_cost();
 
-    let (surface_rms_mm, mesh_spacing_mm, wire_diameter_mm) =
-        objective.params_to_physical(best_params.as_slice().unwrap());
+    let (surface_rms_mm, mesh_spacing_mm, wire_diameter_mm) = objective.params_to_physical(
+        best_params
+            .as_slice()
+            .context("Could not convert best params to slice")?,
+    );
 
     let improvement = initial_rmse - final_rmse;
 
