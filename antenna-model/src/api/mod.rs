@@ -17,6 +17,7 @@ pub mod schemas;
 
 use crate::config::ServiceConfig;
 use crate::data::repository::CalibrationRepository;
+use crate::service::GainCache;
 use poem::{listener::TcpListener, Server};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -52,11 +53,18 @@ pub struct AppState {
 
     /// Calibration data repository (Task 5.4)
     pub repository: CalibrationRepository,
+
+    /// Gain cache for memoizing physics model results
+    pub cache: Arc<GainCache>,
 }
 
 impl AppState {
     /// Create new application state with configuration and repository
     pub fn new(config: ServiceConfig, repository: CalibrationRepository) -> Self {
+        let cache = Arc::new(GainCache::new(
+            config.cache.enabled,
+            config.cache.max_entries_per_feed,
+        ));
         Self {
             start_time: SystemTime::now(),
             version: env!("CARGO_PKG_VERSION"),
@@ -64,6 +72,7 @@ impl AppState {
             ready: Arc::new(AtomicBool::new(true)), // Default to ready for simple deployments
             antenna_ids: Arc::new(parking_lot::RwLock::new(Vec::new())),
             repository,
+            cache,
         }
     }
 

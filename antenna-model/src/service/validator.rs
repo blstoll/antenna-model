@@ -19,7 +19,8 @@
 //!   - Feed ID exists for specified antenna
 
 use crate::api::schemas::{
-    BatchGainRequest, GainRequest, GridConfig, HeatmapRequest, Position3D, RangeConfig,
+    BatchGainRequest, GainRequest, GridConfig, H3LinkBudgetRequest, HeatmapRequest, Position3D,
+    RangeConfig,
 };
 use crate::data::repository::CalibrationRepository;
 use crate::error::{ValidationError, ValidationResult};
@@ -52,8 +53,8 @@ const MIN_FREQUENCY_MHZ: f64 = 100.0;
 /// Maximum operating frequency (50 GHz = 50,000 MHz per system spec)
 const MAX_FREQUENCY_MHZ: f64 = 50_000.0;
 
-/// Maximum batch size
-const MAX_BATCH_SIZE: usize = 1000;
+/// Maximum batch size (shared with batch.rs to avoid divergence)
+pub const MAX_BATCH_SIZE: usize = 1000;
 
 /// Maximum heatmap grid points
 const MAX_HEATMAP_POINTS: usize = 100_000;
@@ -179,6 +180,37 @@ pub fn validate_heatmap_request(
 
     // Validate grid configuration
     validate_grid_config(&request.grid_config)?;
+
+    Ok(())
+}
+
+/// Validate an H3 link budget request.
+///
+/// Checks frequency positivity and n_rings limit.
+///
+/// # Arguments
+///
+/// * `req` - The H3 link budget request to validate
+///
+/// # Errors
+///
+/// Returns `ValidationError` if any validation check fails.
+pub fn validate_h3_link_budget_request(req: &H3LinkBudgetRequest) -> ValidationResult<()> {
+    // Validate all positions
+    validate_position(&req.vehicle_position, "vehicle_position")?;
+    validate_position(&req.reflector_boresight, "reflector_boresight")?;
+    validate_position(&req.feed_position, "feed_position")?;
+
+    // Validate frequency (handles NaN and enforces [100, 50000] MHz range)
+    validate_frequency(req.frequency_mhz, "frequency_mhz")?;
+
+    // n_rings limit: max 10
+    if req.n_rings > 10 {
+        return Err(ValidationError::InvalidValue {
+            param: "n_rings".to_string(),
+            reason: "n_rings must be ≤ 10".to_string(),
+        });
+    }
 
     Ok(())
 }
@@ -745,6 +777,108 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("non-finite values"));
+    }
+
+    // ========================================================================
+    // H3 Link Budget Validation Tests
+    // ========================================================================
+
+    /// Helper to build a valid H3LinkBudgetRequest for testing.
+    fn valid_h3_request() -> H3LinkBudgetRequest {
+        H3LinkBudgetRequest {
+            antenna_id: "antenna_1".to_string(),
+            feed_id: "feed_0".to_string(),
+            vehicle_position: Position3D::new(-118.0, 34.0, 100.0),
+            reflector_boresight: Position3D::new(-118.1, 34.1, 200.0),
+            feed_position: Position3D::new(-118.0, 34.0, 150.0),
+            frequency_mhz: 8400.0,
+            pointing_frequency_mhz: None,
+            n_rings: 3,
+            h3_resolution: None,
+            temperature_k: None,
+        }
+    }
+
+    #[test]
+    fn test_h3_request_valid() {
+        let req = valid_h3_request();
+        assert!(validate_h3_link_budget_request(&req).is_ok());
+    }
+
+    #[test]
+    fn test_h3_request_n_rings_too_large() {
+        let mut req = valid_h3_request();
+        req.n_rings = 11;
+        let result = validate_h3_link_budget_request(&req);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("n_rings"));
+    }
+
+    #[test]
+    fn test_h3_request_n_rings_max_valid() {
+        let mut req = valid_h3_request();
+        req.n_rings = 10;
+        assert!(validate_h3_link_budget_request(&req).is_ok());
+    }
+
+    #[test]
+    fn test_h3_request_frequency_zero() {
+        let mut req = valid_h3_request();
+        req.frequency_mhz = 0.0;
+        let result = validate_h3_link_budget_request(&req);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("frequency"));
+    }
+
+    #[test]
+    fn test_h3_request_frequency_nan() {
+        let mut req = valid_h3_request();
+        req.frequency_mhz = f64::NAN;
+        let result = validate_h3_link_budget_request(&req);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not finite"));
+    }
+
+    #[test]
+    fn test_h3_request_frequency_too_high() {
+        let mut req = valid_h3_request();
+        req.frequency_mhz = 60_000.0;
+        let result = validate_h3_link_budget_request(&req);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("outside supported range"));
+    }
+
+    #[test]
+    fn test_h3_request_invalid_vehicle_position() {
+        let mut req = valid_h3_request();
+        req.vehicle_position = Position3D::new(f64::NAN, 0.0, 0.0);
+        let result = validate_h3_link_budget_request(&req);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("vehicle_position"));
+    }
+
+    #[test]
+    fn test_h3_request_invalid_reflector_boresight() {
+        let mut req = valid_h3_request();
+        req.reflector_boresight = Position3D::new(-200.0, 34.0, 100.0);
+        let result = validate_h3_link_budget_request(&req);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("reflector_boresight"));
+    }
+
+    #[test]
+    fn test_h3_request_invalid_feed_position() {
+        let mut req = valid_h3_request();
+        req.feed_position = Position3D::new(-118.0, 100.0, 150.0);
+        let result = validate_h3_link_budget_request(&req);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("feed_position"));
     }
 
     // ========================================================================

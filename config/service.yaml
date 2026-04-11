@@ -47,3 +47,11 @@ performance:
   # Enable parallel processing for batch requests
   # Set to false to disable parallelization (useful for debugging)
   enable_parallel_processing: true
+
+cache:
+  # Enable LRU caching of gain results for repeated queries (e.g., H3 heatmaps)
+  enabled: true
+
+  # Maximum cached entries per antenna-feed pair
+  # Each entry is ~50 bytes; 10000 entries ≈ 500 KB per feed
+  max_entries_per_feed: 10000

@@ -21,6 +21,10 @@ pub struct ServiceConfig {
     /// Performance tuning parameters
     #[serde(default)]
     pub performance: PerformanceConfig,
+
+    /// Gain cache configuration
+    #[serde(default)]
+    pub cache: CacheConfig,
 }
 
 /// Server configuration
@@ -83,6 +87,35 @@ pub enum LogFormat {
     Text,
     /// JSON format for structured logging
     Json,
+}
+
+/// Gain cache configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheConfig {
+    /// Enable gain result caching for throughput improvement
+    #[serde(default = "default_cache_enabled")]
+    pub enabled: bool,
+
+    /// Maximum cached gain entries per antenna-feed pair
+    #[serde(default = "default_max_entries_per_feed")]
+    pub max_entries_per_feed: usize,
+}
+
+fn default_cache_enabled() -> bool {
+    true
+}
+
+fn default_max_entries_per_feed() -> usize {
+    10_000
+}
+
+impl Default for CacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_cache_enabled(),
+            max_entries_per_feed: default_max_entries_per_feed(),
+        }
+    }
 }
 
 /// Performance tuning configuration
@@ -281,6 +314,7 @@ impl ServiceConfig {
             calibration: CalibrationConfig::default(),
             logging: LoggingConfig::default(),
             performance: PerformanceConfig::default(),
+            cache: CacheConfig::default(),
         }
     }
 
@@ -1333,6 +1367,50 @@ antennas:
 
         assert_eq!(antenna.get_calibration_status(), "fully_calibrated");
         assert!(antenna.calibration_file.is_some());
+    }
+
+    #[test]
+    fn test_cache_config_defaults() {
+        let config = CacheConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.max_entries_per_feed, 10_000);
+    }
+
+    #[test]
+    fn test_service_config_with_cache_section() {
+        let yaml = r#"
+server:
+  host: "127.0.0.1"
+  port: 3000
+calibration:
+  data_directory: "calibration_data"
+  antenna_config_file: "calibration_data/antennas.yaml"
+logging:
+  level: "info"
+cache:
+  enabled: false
+  max_entries_per_feed: 500
+"#;
+        let config: ServiceConfig = serde_yaml::from_str(yaml).expect("parse failed");
+        assert!(!config.cache.enabled);
+        assert_eq!(config.cache.max_entries_per_feed, 500);
+    }
+
+    #[test]
+    fn test_service_config_cache_defaults_when_section_missing() {
+        let yaml = r#"
+server:
+  host: "127.0.0.1"
+  port: 3000
+calibration:
+  data_directory: "calibration_data"
+  antenna_config_file: "calibration_data/antennas.yaml"
+logging:
+  level: "info"
+"#;
+        let config: ServiceConfig = serde_yaml::from_str(yaml).expect("parse failed");
+        assert!(config.cache.enabled);
+        assert_eq!(config.cache.max_entries_per_feed, 10_000);
     }
 
     #[test]

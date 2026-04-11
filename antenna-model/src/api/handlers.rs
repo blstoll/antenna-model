@@ -4,10 +4,13 @@
 
 use crate::api::schemas::{
     BatchGainRequest, BatchGainResponse, CalibrationStatusInfo, ErrorResponse, GainRequest,
-    GainResponse, HealthResponse, HeatmapRequest, HeatmapResponse, StatusResponse,
+    GainResponse, H3LinkBudgetRequest, H3LinkBudgetResponse, HealthResponse, HeatmapRequest,
+    HeatmapResponse, StatusResponse,
 };
 use crate::api::AppState;
-use crate::service::{compute_gain_from_request, evaluate_batch, generate_heatmap, validator};
+use crate::service::{
+    compute_gain_from_request, compute_h3_link_budget, evaluate_batch, generate_heatmap, validator,
+};
 use poem::{
     handler,
     http::StatusCode,
@@ -842,6 +845,143 @@ pub async fn get_feed_details(
             Err(poem::Error::from_string(
                 serde_json::to_string(&error_response).unwrap_or_default(),
                 StatusCode::NOT_FOUND,
+            ))
+        }
+    }
+}
+
+/// POST /api/v1/h3-heatmap - Compute H3 hexagonal link budget
+///
+/// Generates per-cell link budget values across an H3 hexagonal grid centered
+/// on the feed pointing location. Each cell includes antenna gain, free-space
+/// path loss, total path loss, and optional G/T.
+///
+/// # Request Body
+/// JSON object containing:
+/// - antenna_id: Antenna identifier
+/// - feed_id: Feed identifier
+/// - vehicle_position: 3D position (ECEF or Geodetic)
+/// - reflector_boresight: 3D position (ECEF or Geodetic)
+/// - feed_position: 3D position (ECEF or Geodetic)
+/// - frequency_mhz: Operating frequency in MHz (must be positive)
+/// - n_rings: Number of H3 rings around center cell (max 10)
+/// - h3_resolution: Optional H3 resolution (0-15); derived from frequency when absent
+/// - temperature_k: Optional system noise temperature for G/T computation
+///
+/// # Response
+/// Returns HTTP 200 with JSON body containing:
+/// - cells: Per-cell link budget results
+/// - metadata: Computation metadata (points evaluated, time, peak gain)
+/// - warnings: Any warnings generated during computation
+///
+/// Returns HTTP 422 for validation errors (e.g., n_rings > 10, invalid positions, out-of-range
+/// frequency), HTTP 404 if antenna or feed not found, HTTP 500 for internal errors.
+#[handler]
+pub async fn h3_link_budget(
+    state: Data<&Arc<AppState>>,
+    Json(request): Json<H3LinkBudgetRequest>,
+) -> poem::Result<Json<H3LinkBudgetResponse>> {
+    let start_time = std::time::Instant::now();
+
+    info!(
+        antenna_id = %request.antenna_id,
+        feed_id = %request.feed_id,
+        frequency_mhz = request.frequency_mhz,
+        n_rings = request.n_rings,
+        "H3 link budget request received"
+    );
+
+    // Validate the request
+    if let Err(validation_err) = validator::validate_h3_link_budget_request(&request) {
+        warn!(
+            antenna_id = %request.antenna_id,
+            feed_id = %request.feed_id,
+            error = %validation_err,
+            "H3 link budget request validation failed"
+        );
+        let error_response = ErrorResponse::new("validation_error", validation_err.to_string());
+        return Err(poem::Error::from_string(
+            serde_json::to_string(&error_response).unwrap_or_default(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ));
+    }
+
+    // Look up antenna/feed calibration
+    let calibration = match state
+        .repository
+        .get_calibration(&request.antenna_id, &request.feed_id)
+    {
+        Some(cal) => cal,
+        None => {
+            // Distinguish missing antenna from missing feed
+            let antenna_exists = !state.repository.list_feeds(&request.antenna_id).is_empty();
+            let (error_type, error_msg) = if antenna_exists {
+                (
+                    "feed_not_found",
+                    format!(
+                        "Feed '{}' not found for antenna '{}'",
+                        request.feed_id, request.antenna_id
+                    ),
+                )
+            } else {
+                (
+                    "antenna_not_found",
+                    format!("Antenna '{}' not found", request.antenna_id),
+                )
+            };
+            warn!(
+                antenna_id = %request.antenna_id,
+                feed_id = %request.feed_id,
+                error = %error_msg,
+                "H3 link budget antenna/feed lookup failed"
+            );
+            let error_response = ErrorResponse::new(error_type, error_msg);
+            return Err(poem::Error::from_string(
+                serde_json::to_string(&error_response).unwrap_or_default(),
+                StatusCode::NOT_FOUND,
+            ));
+        }
+    };
+
+    // Delegate to service layer
+    match compute_h3_link_budget(&request, &calibration, &state.cache, start_time) {
+        Ok(response) => {
+            info!(
+                antenna_id = %request.antenna_id,
+                feed_id = %request.feed_id,
+                cells_computed = response.cells.len(),
+                computation_time_ms = response.metadata.computation_time_ms,
+                peak_gain_db = response.metadata.peak_gain_db,
+                warnings_count = response.warnings.len(),
+                "H3 link budget computation successful"
+            );
+            Ok(Json(response))
+        }
+        Err(e) => {
+            error!(
+                antenna_id = %request.antenna_id,
+                feed_id = %request.feed_id,
+                error = %e,
+                "H3 link budget computation failed"
+            );
+
+            let (status_code, error_type) = match &e {
+                crate::error::AntennaModelError::FeedNotFound { .. } => {
+                    (StatusCode::NOT_FOUND, "feed_not_found")
+                }
+                crate::error::AntennaModelError::InvalidCoordinate { .. } => {
+                    (StatusCode::BAD_REQUEST, "invalid_coordinate")
+                }
+                crate::error::AntennaModelError::Validation(_) => {
+                    (StatusCode::BAD_REQUEST, "validation_error")
+                }
+                _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+            };
+
+            let error_response = ErrorResponse::new(error_type, e.to_string());
+            Err(poem::Error::from_string(
+                serde_json::to_string(&error_response).unwrap_or_default(),
+                status_code,
             ))
         }
     }

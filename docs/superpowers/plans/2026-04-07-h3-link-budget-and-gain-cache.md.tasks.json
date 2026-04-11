@@ -1,0 +1,54 @@
+{
+  "planPath": "docs/superpowers/plans/2026-04-07-h3-link-budget-and-gain-cache.md",
+  "tasks": [
+    {
+      "id": 5,
+      "subject": "Task 1: Dependencies and cache configuration",
+      "status": "pending",
+      "description": "**Goal:** Add h3o/lru/dashmap crates and wire a CacheConfig struct into the settings system.\n\n**Files:**\n- Modify: `antenna-model/Cargo.toml`\n- Modify: `antenna-model/src/config/settings.rs`\n- Modify: `config/service.yaml`\n\n**Verify:** `cargo test -p antenna-model -- config`\n\n```json:metadata\n{\"files\": [\"antenna-model/Cargo.toml\", \"antenna-model/src/config/settings.rs\", \"config/service.yaml\"], \"verifyCommand\": \"cargo test -p antenna-model -- config\", \"acceptanceCriteria\": [\"cargo build succeeds with h3o lru dashmap\", \"CacheConfig deserializes from YAML\", \"ServiceConfig has cache field\", \"Missing cache section uses defaults\"]}\n```"
+    },
+    {
+      "id": 6,
+      "subject": "Task 2: Implement GainCache",
+      "status": "pending",
+      "blockedBy": [5],
+      "description": "**Goal:** Thread-safe per-feed LRU cache for gain values.\n\n**Files:**\n- Create: `antenna-model/src/service/cache.rs`\n- Modify: `antenna-model/src/service/mod.rs`\n\n**Verify:** `cargo test -p antenna-model -- cache --nocapture`\n\n```json:metadata\n{\"files\": [\"antenna-model/src/service/cache.rs\", \"antenna-model/src/service/mod.rs\"], \"verifyCommand\": \"cargo test -p antenna-model -- cache --nocapture\", \"acceptanceCriteria\": [\"cache miss calls compute\", \"cache hit skips compute\", \"LRU eviction works\", \"key quantization correct\", \"per-feed isolation\", \"invalidate clears feed\", \"disabled always computes\"]}\n```"
+    },
+    {
+      "id": 7,
+      "subject": "Task 3: Wire GainCache into AppState",
+      "status": "pending",
+      "blockedBy": [6],
+      "description": "**Goal:** Add cache: Arc<GainCache> to AppState.\n\n**Files:**\n- Modify: `antenna-model/src/api/mod.rs`\n\n**Verify:** `cargo test -p antenna-model -- app_state --nocapture`\n\n```json:metadata\n{\"files\": [\"antenna-model/src/api/mod.rs\"], \"verifyCommand\": \"cargo test -p antenna-model -- app_state --nocapture\", \"acceptanceCriteria\": [\"AppState has cache field\", \"new() creates cache from config\", \"existing tests pass\"]}\n```"
+    },
+    {
+      "id": 8,
+      "subject": "Task 4: Add H3 schemas",
+      "status": "pending",
+      "blockedBy": [5],
+      "description": "**Goal:** Define H3LinkBudgetRequest, H3LinkBudgetResponse, H3CellResult.\n\n**Files:**\n- Modify: `antenna-model/src/api/schemas.rs`\n\n**Verify:** `cargo test -p antenna-model -- schemas`\n\n```json:metadata\n{\"files\": [\"antenna-model/src/api/schemas.rs\"], \"verifyCommand\": \"cargo test -p antenna-model -- schemas\", \"acceptanceCriteria\": [\"H3LinkBudgetRequest serde round-trip\", \"H3CellResult optional g_over_t_db absent when None\", \"all existing schema tests pass\"]}\n```"
+    },
+    {
+      "id": 9,
+      "subject": "Task 5: H3 link budget service",
+      "status": "pending",
+      "blockedBy": [6, 7, 8],
+      "description": "**Goal:** Implement compute_h3_link_budget() with h3o cell generation, coordinate transforms, cache, FSPL.\n\n**Files:**\n- Create: `antenna-model/src/service/h3_link_budget.rs`\n- Modify: `antenna-model/src/service/mod.rs`\n- Modify: `antenna-model/src/service/evaluator.rs`\n\n**Verify:** `cargo test -p antenna-model -- h3_link_budget --nocapture`\n\n```json:metadata\n{\"files\": [\"antenna-model/src/service/h3_link_budget.rs\", \"antenna-model/src/service/mod.rs\", \"antenna-model/src/service/evaluator.rs\"], \"verifyCommand\": \"cargo test -p antenna-model -- h3_link_budget --nocapture\", \"acceptanceCriteria\": [\"h3_resolution_from_frequency correct\", \"cell counts correct\", \"FSPL formula verified\", \"total = loss + fspl\"]}\n```"
+    },
+    {
+      "id": 10,
+      "subject": "Task 6: Handler and route registration",
+      "status": "pending",
+      "blockedBy": [9],
+      "description": "**Goal:** Expose POST /api/v1/h3-heatmap.\n\n**Files:**\n- Modify: `antenna-model/src/api/handlers.rs`\n- Modify: `antenna-model/src/api/routes.rs`\n- Modify: `antenna-model/src/service/validator.rs`\n\n**Verify:** `cargo build -p antenna-model`\n\n```json:metadata\n{\"files\": [\"antenna-model/src/api/handlers.rs\", \"antenna-model/src/api/routes.rs\", \"antenna-model/src/service/validator.rs\"], \"verifyCommand\": \"cargo build -p antenna-model\", \"acceptanceCriteria\": [\"route registered\", \"unknown antenna 404\", \"n_rings > 10 422\", \"cache passed to service\"]}\n```"
+    },
+    {
+      "id": 11,
+      "subject": "Task 7: Integration tests",
+      "status": "pending",
+      "blockedBy": [10],
+      "description": "**Goal:** End-to-end tests for H3 heatmap endpoint and cache consistency.\n\n**Files:**\n- Create: `antenna-model/tests/integration/h3_link_budget_tests.rs`\n- Modify: `antenna-model/tests/integration/mod.rs`\n\n**Verify:** `cargo test -p antenna-model --test integration -- h3 --nocapture`\n\n```json:metadata\n{\"files\": [\"antenna-model/tests/integration/h3_link_budget_tests.rs\", \"antenna-model/tests/integration/mod.rs\"], \"verifyCommand\": \"cargo test -p antenna-model --test integration -- h3 --nocapture\", \"acceptanceCriteria\": [\"n_rings=0 returns 1 cell\", \"n_rings=2 returns 19 cells\", \"center cell minimum loss\", \"total = loss + fspl\", \"unknown antenna 404\", \"n_rings=11 returns 422\", \"cache consistency\"]}\n```"
+    }
+  ],
+  "lastUpdated": "2026-04-07T00:00:00Z"
+}

@@ -69,11 +69,21 @@
 //! - Partial antenna loading failures
 //! - Concurrent error conditions
 //! - Resource cleanup verification
+//!
+//! ### H3 Link Budget Tests (`h3_link_budget_tests.rs`)
+//! - Cell count for n_rings values (0 = 1 cell, 2 = 19 cells)
+//! - Center cell minimum loss (approximately 0.0 dB at boresight)
+//! - Link budget arithmetic consistency (total = loss + FSPL)
+//! - Error handling (unknown antenna returns 404, n_rings > 10 returns 422)
+//! - Calibration status presence in responses
+//! - Cache consistency across identical requests
+//! - Auto-resolution selection from frequency
 
 pub mod helpers;
 
 pub mod api_tests;
 pub mod concurrent_tests;
 pub mod error_tests;
+pub mod h3_link_budget_tests;
 pub mod partial_calibration_tests;
 pub mod resilience_tests;

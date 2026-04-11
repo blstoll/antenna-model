@@ -64,12 +64,18 @@ mod nan_as_null {
 ///   - y = latitude in degrees (-90 to 90)
 ///   - z = altitude in meters (above WGS84 ellipsoid)
 ///
+/// # Detection threshold
+///
+/// The 1000 km (1,000,000 m) threshold provides reliable separation:
+/// - Geodetic: lon ≤ 180°, lat ≤ 90°, alt typically ≤ 1000 km for operational scenarios
+/// - ECEF on Earth surface: Earth's minimum radius is ~6357 km, so any surface component > 1000 km
+///
 /// # Examples
 ///
 /// ```
 /// # use antenna_model::api::schemas::{CoordinateSystem, Position3D};
-/// // ECEF coordinates (meters) - exceeds 1000 km threshold
-/// let ecef = Position3D::new(2485073.0, -4673742.0, 3546502.0);
+/// // ECEF coordinates (meters) - Earth surface at equator, prime meridian
+/// let ecef = Position3D::new(6378137.0, 0.0, 100000.0);
 /// assert_eq!(ecef.coordinate_system(), CoordinateSystem::ECEF);
 ///
 /// // Geodetic coordinates (lon, lat degrees, alt meters)
@@ -87,11 +93,16 @@ pub struct Position3D {
 }
 
 impl Position3D {
-    /// Threshold for ECEF detection (1000 km in meters)
+    /// Threshold for ECEF detection (1000 km in meters).
     ///
-    /// Geodetic coordinates use degrees for lon/lat (max ±180/±90) and meters for altitude (max ~1000 km).
-    /// ECEF coordinates are in meters from Earth center (Earth radius ~6371 km, so surface points ~6.37M).
-    /// Using 1M threshold provides clear separation: geodetic values are small, ECEF values are millions.
+    /// Geodetic coordinates use degrees for lon/lat (max ±180/±90) and meters for altitude.
+    /// ECEF coordinates are in meters from Earth center (Earth radius ~6371 km).
+    /// Using 1000 km threshold provides clear separation:
+    /// - Geodetic: lon/lat in degrees (< 1000 km), alt typically < 1000 km for operational scenarios
+    /// - ECEF on/above Earth surface: at least one component exceeds 1000 km (Earth radius ~6371 km)
+    ///
+    /// Note: The ECEF_THRESHOLD_M in `model/coordinates_3d.rs` (now removed) previously used
+    /// 6400 km, which is too high for Earth surface ECEF coordinates near the poles/equator.
     const ECEF_THRESHOLD_M: f64 = 1_000_000.0;
 
     /// Create a new Position3D
@@ -326,6 +337,9 @@ pub struct BatchMetadata {
 
     /// Number of evaluations
     pub count: usize,
+
+    /// Number of evaluations that failed (NaN gain_db)
+    pub failure_count: usize,
 }
 
 // ============================================================================
@@ -474,6 +488,123 @@ pub struct HeatmapMetadata {
 
     /// Peak gain in dB (reference for loss calculation)
     pub peak_gain_db: f64,
+
+    /// Number of grid points that failed to compute (gain replaced with sentinel 999999.0)
+    pub failed_points: usize,
+}
+
+// ============================================================================
+// H3 Link Budget Request/Response
+// ============================================================================
+
+/// Request for H3-based link budget computation.
+///
+/// Computes per-cell link budget across a hexagonal grid of H3 cells
+/// centered on the antenna boresight projection, covering `n_rings` rings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct H3LinkBudgetRequest {
+    /// Antenna identifier
+    pub antenna_id: String,
+
+    /// Feed identifier (for multi-feed antennas)
+    pub feed_id: String,
+
+    /// Vehicle position (ECEF or Geodetic, auto-detected)
+    pub vehicle_position: Position3D,
+
+    /// Reflector boresight position (ECEF or Geodetic)
+    pub reflector_boresight: Position3D,
+
+    /// Feed position (ECEF or Geodetic)
+    pub feed_position: Position3D,
+
+    /// Operating frequency in MHz
+    pub frequency_mhz: f64,
+
+    /// Pointing frequency in MHz (for beam squint correction, optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pointing_frequency_mhz: Option<f64>,
+
+    /// Number of H3 rings around the center cell
+    pub n_rings: u32,
+
+    /// H3 resolution (0-15, higher = finer). Uses a default when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub h3_resolution: Option<u8>,
+
+    /// System noise temperature in Kelvin (used for G/T computation)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature_k: Option<f64>,
+}
+
+/// Per-cell link budget result for a single H3 cell.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct H3CellResult {
+    /// H3 cell index (string representation)
+    pub cell_id: String,
+
+    /// Cell center longitude in degrees
+    pub center_lon: f64,
+
+    /// Cell center latitude in degrees
+    pub center_lat: f64,
+
+    /// Azimuth to cell center in antenna frame (degrees)
+    pub azimuth_deg: f64,
+
+    /// Elevation to cell center in antenna frame (degrees)
+    pub elevation_deg: f64,
+
+    /// Distance from vehicle to cell center in km
+    pub distance_km: f64,
+
+    /// Antenna gain toward cell center in dB
+    pub gain_db: f64,
+
+    /// Gain loss relative to peak in dB (peak_gain - gain_db)
+    pub loss_db: f64,
+
+    /// Free-space path loss in dB
+    pub free_space_path_loss_db: f64,
+
+    /// Total path loss (free-space + other losses) in dB
+    pub total_path_loss_db: f64,
+
+    /// G/T (Gain-over-Temperature) in dB/K (present only when temperature_k was provided)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub g_over_t_db: Option<f64>,
+}
+
+/// Response from H3-based link budget computation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct H3LinkBudgetResponse {
+    /// Antenna identifier
+    pub antenna_id: String,
+
+    /// Feed identifier
+    pub feed_id: String,
+
+    /// Operating frequency in MHz
+    pub frequency_mhz: f64,
+
+    /// H3 cell index of the center cell (string representation)
+    pub center_cell_id: String,
+
+    /// H3 resolution used
+    pub h3_resolution: u8,
+
+    /// Per-cell results
+    pub cells: Vec<H3CellResult>,
+
+    /// Warnings (e.g., extrapolated cells, out-of-range queries)
+    pub warnings: Vec<String>,
+
+    /// Computation metadata
+    pub metadata: HeatmapMetadata,
+
+    /// Calibration status and accuracy information (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub calibration_status: Option<CalibrationStatusInfo>,
 }
 
 // ============================================================================
@@ -924,7 +1055,7 @@ mod tests {
         assert!(ecef.is_ecef());
         assert!(!ecef.is_geodetic());
 
-        // Another ECEF example - equator, prime meridian
+        // Another ECEF example - equator, prime meridian (Earth radius)
         let ecef2 = Position3D::new(6378137.0, 0.0, 0.0);
         assert_eq!(ecef2.coordinate_system(), CoordinateSystem::ECEF);
 
@@ -944,7 +1075,7 @@ mod tests {
 
     #[test]
     fn test_position3d_boundary_detection() {
-        // Just below threshold - should be Geodetic
+        // Just below threshold (1000 km = 1,000,000 m) - should be Geodetic
         let below = Position3D::new(999_999.0, 0.0, 0.0);
         assert_eq!(below.coordinate_system(), CoordinateSystem::Geodetic);
 
@@ -1547,5 +1678,50 @@ mod tests {
         assert_eq!(deserialized.feed_id, "x_band");
         assert_eq!(deserialized.gain_db, 45.5);
         assert!(deserialized.calibration_status.is_none()); // No calibration status in old format
+    }
+
+    // ========================================================================
+    // H3LinkBudgetRequest / H3CellResult Tests
+    // ========================================================================
+
+    #[test]
+    fn test_h3_link_budget_request_serde_round_trip() {
+        let request = H3LinkBudgetRequest {
+            antenna_id: "antenna_1".to_string(),
+            feed_id: "x_band_feed".to_string(),
+            vehicle_position: Position3D::new(4510731.0, 4510731.0, 3488865.0),
+            reflector_boresight: Position3D::new(4510732.0, 4510732.0, 3488950.0),
+            feed_position: Position3D::new(4510731.5, 4510731.5, 3488870.0),
+            frequency_mhz: 8400.0,
+            pointing_frequency_mhz: Some(8450.0),
+            n_rings: 3,
+            h3_resolution: Some(7),
+            temperature_k: Some(290.0),
+        };
+
+        let json = serde_json::to_string(&request).unwrap();
+        let deserialized: H3LinkBudgetRequest = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(request, deserialized);
+    }
+
+    #[test]
+    fn test_h3_cell_result_g_over_t_absent_when_none() {
+        let result = H3CellResult {
+            cell_id: "8a2a100d2dfffff".to_string(),
+            center_lon: -118.1234,
+            center_lat: 34.5678,
+            azimuth_deg: 45.0,
+            elevation_deg: 30.0,
+            distance_km: 500.0,
+            gain_db: 42.0,
+            loss_db: 3.0,
+            free_space_path_loss_db: 180.0,
+            total_path_loss_db: 183.0,
+            g_over_t_db: None,
+        };
+
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(!json.contains("g_over_t_db"));
     }
 }

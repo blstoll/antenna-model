@@ -50,6 +50,8 @@ pub fn create_routes(state: Arc<AppState>) -> impl Endpoint {
         .at("/api/v1/gain/batch", post(handlers::compute_gain_batch))
         // Heatmap endpoint (Sprint 6, Task 6.2)
         .at("/api/v1/heatmap", post(handlers::generate_heatmap_endpoint))
+        // H3 link budget endpoint (Sprint 6, Task 6.x)
+        .at("/api/v1/h3-heatmap", post(handlers::h3_link_budget))
         // Antenna listing and details endpoints (Sprint 6, Task 6.3)
         .at("/api/v1/antennas", get(handlers::list_antennas))
         .at("/api/v1/antennas/:id", get(handlers::get_antenna_details))
@@ -91,6 +93,7 @@ pub fn create_routes_with_size_limits(
         .at("/api/v1/gain", post(handlers::compute_gain))
         .at("/api/v1/gain/batch", post(handlers::compute_gain_batch))
         .at("/api/v1/heatmap", post(handlers::generate_heatmap_endpoint))
+        .at("/api/v1/h3-heatmap", post(handlers::h3_link_budget))
         .at("/api/v1/antennas", get(handlers::list_antennas))
         .at("/api/v1/antennas/:id", get(handlers::get_antenna_details))
         .at(

@@ -274,15 +274,16 @@ pub fn compute_gain_from_request(
 
     // Apply correction surface (if available and in coverage)
     // Use corrected angles for coverage check and interpolation
+    let mut correction_extrapolated = false;
+    let in_coverage = calibration.correction_surface.is_some()
+        && is_in_coverage(
+            &calibration.calibration_coverage,
+            corrected_az,
+            corrected_el,
+            request.frequency_mhz,
+        );
     let (correction_db, correction_applied) = match &calibration.correction_surface {
-        Some(correction)
-            if is_in_coverage(
-                &calibration.calibration_coverage,
-                corrected_az,
-                corrected_el,
-                request.frequency_mhz,
-            ) =>
-        {
+        Some(correction) if in_coverage => {
             let result = evaluate_correction(
                 correction,
                 corrected_az,
@@ -290,11 +291,18 @@ pub fn compute_gain_from_request(
                 request.frequency_mhz,
                 290.0,
             )?;
+            correction_extrapolated = result.extrapolated;
             warnings.extend(result.warnings);
             (result.correction_db, true)
         }
         _ => (0.0, false),
     };
+
+    // Determine whether this result was extrapolated:
+    // - Correction surface was applied but the query was outside its B-spline knot range, OR
+    // - Correction surface exists but was not applied because the query is outside coverage.
+    let out_of_coverage = calibration.correction_surface.is_some() && !correction_applied;
+    let extrapolated = correction_extrapolated || out_of_coverage;
 
     let final_gain_db = gain_physics + correction_db;
 
@@ -347,7 +355,7 @@ pub fn compute_gain_from_request(
             coordinate_transform_ms: None,
             physics_model_ms: None,
             correction_surface_ms: None,
-            extrapolated: false,
+            extrapolated,
         },
         calibration_status: calibration_status_info,
     })
@@ -359,7 +367,7 @@ pub fn compute_gain_from_request(
 /// For partially calibrated antennas, checks if azimuth, elevation, and frequency
 /// are within the specified coverage ranges.
 /// For uncalibrated antennas (no coverage), returns false.
-fn is_in_coverage(
+pub(crate) fn is_in_coverage(
     coverage: &Option<CalibrationCoverage>,
     azimuth_deg: f64,
     elevation_deg: f64,
@@ -813,6 +821,67 @@ mod tests {
             result.unwrap_err(),
             AntennaModelError::FeedNotFound { .. }
         ));
+    }
+
+    #[test]
+    fn test_extrapolated_flag_out_of_coverage() {
+        // When a correction surface exists but the query is outside coverage,
+        // the extrapolated flag should be set to true.
+        let mut repo = CalibrationRepository::new();
+
+        let coverage = CalibrationCoverage::builder()
+            .azimuth_range(0.0, 10.0) // narrow range
+            .elevation_range(0.0, 10.0)
+            .frequency_range(8000.0, 9000.0)
+            .num_measurements(100)
+            .has_correction_surface(true)
+            .build()
+            .unwrap();
+
+        let mut calibration = create_test_calibration(CalibrationStatus::PartiallyCalibrated {
+            accuracy_estimate_db: 1.5,
+            coverage: coverage.clone(),
+        });
+        // Add a correction surface so out-of-coverage detection triggers
+        calibration.correction_surface = Some(crate::data::types::BSplineModel4D {
+            coefficients: vec![0.0; 10],
+            shape: [2, 2, 2, 1],
+            knots_azimuth: vec![0.0, 10.0],
+            knots_elevation: vec![0.0, 10.0],
+            knots_frequency: vec![8000.0, 9000.0],
+            knots_temperature: vec![290.0],
+            spline_order: 3,
+        });
+        repo.add_calibration(calibration);
+
+        // Use the standard test request — emitter direction lands outside the narrow coverage
+        let request = create_test_request();
+        let response = compute_gain_from_request(&request, &repo).unwrap();
+
+        // Since the correction surface exists but coverage doesn't include the emitter direction,
+        // the extrapolated flag should be set.
+        assert!(
+            response.metadata.extrapolated,
+            "Expected extrapolated=true when correction surface exists but query is out-of-coverage"
+        );
+    }
+
+    #[test]
+    fn test_extrapolated_flag_no_correction_surface() {
+        // When there's no correction surface, extrapolated should be false
+        let mut repo = CalibrationRepository::new();
+        let calibration = create_test_calibration(CalibrationStatus::FullyCalibrated {
+            accuracy_estimate_db: 1.0,
+        });
+        repo.add_calibration(calibration);
+
+        let request = create_test_request();
+        let response = compute_gain_from_request(&request, &repo).unwrap();
+
+        assert!(
+            !response.metadata.extrapolated,
+            "Expected extrapolated=false when no correction surface"
+        );
     }
 
     #[test]
