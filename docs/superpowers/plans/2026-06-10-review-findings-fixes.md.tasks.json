@@ -1,0 +1,109 @@
+{
+  "planPath": "docs/superpowers/plans/2026-06-10-review-findings-fixes.md",
+  "tasks": [
+    {
+      "id": 1,
+      "subject": "Task 1: Fix parabolic path phase (1−cosθ factor)",
+      "status": "pending",
+      "description": "**Goal:** Add the missing (1−cosθ) factor to phase_path so the aperture is equiphase at boresight (F1, critical).\n\n**Files:** antenna-model/src/model/phase.rs:88-99 + tests; pattern.rs:932-944 beamwidth test; docs/antenna-model-design-doc.md §2.2.\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/phase.rs\", \"antenna-model/src/model/pattern.rs\", \"docs/antenna-model-design-doc.md\"], \"verifyCommand\": \"cargo test -p antenna-model phase_path && cargo test -p antenna-model test_compute_beamwidth\", \"acceptanceCriteria\": [\"boresight equiphase\", \"(1-cos theta) factor present\", \"HPBW within 0.9-2.0 deg\", \"all tests pass\"]}\n```"
+    },
+    {
+      "id": 2,
+      "subject": "Task 2: Replace inverted mesh-loss model",
+      "status": "pending",
+      "description": "**Goal:** Replace pattern.rs::mesh_transparency with continuous inductive-grid reflectivity (|R|²=1/(1+4X²), X=(g/λ)ln(g/(πd))) in mesh.rs, wired into overall_efficiency (F4, critical).\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/mesh.rs\", \"antenna-model/src/model/pattern.rs\", \"antenna-model/src/model/mod.rs\"], \"verifyCommand\": \"cargo test -p antenna-model mesh\", \"acceptanceCriteria\": [\"continuous at cutoff\", \"eff->1 at long wavelength\", \"monotonic\", \"mesh_transparency removed\"]}\n```"
+    },
+    {
+      "id": 3,
+      "subject": "Task 3: Safe coordinate-system detection (6400 km + explicit override)",
+      "status": "pending",
+      "description": "**Goal:** Raise ECEF auto-detect threshold to 6,400,000 m; optional explicit coordinate_system on Position3D; ambiguity warning for high-altitude geodetic (F3, critical).\n\n```json:metadata\n{\"files\": [\"antenna-model/src/api/schemas.rs\", \"antenna-model/src/model/coordinates_3d.rs\", \"antenna-model/src/service/validator.rs\", \"openapi.yaml\"], \"verifyCommand\": \"cargo test -p antenna-model coordinate\", \"acceptanceCriteria\": [\"threshold 6400km\", \"explicit override works\", \"ambiguity warning emitted\"]}\n```"
+    },
+    {
+      "id": 4,
+      "subject": "Task 4: Normalize azimuth to [0,360); fix coverage gating",
+      "status": "pending",
+      "description": "**Goal:** compute_emitter_direction returns azimuth in [0,360); is_in_coverage(&None,..) == true so corrections are not silently dropped (F5a + F6, critical).\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/coordinates_3d.rs\", \"antenna-model/src/service/evaluator.rs\"], \"verifyCommand\": \"cargo test -p antenna-model is_in_coverage && cargo test -p antenna-model emitter_direction\", \"acceptanceCriteria\": [\"azimuth normalized 0-360\", \"None coverage unrestricted\", \"tests updated\"]}\n```"
+    },
+    {
+      "id": 5,
+      "subject": "Task 5: Harden artifact loader (ANTC header, CRC, spline validation)",
+      "status": "pending",
+      "description": "**Goal:** Loader accepts legacy headerless and ANTC-headered artifacts with CRC32 verification; BSplineModel4D::validate rejects malformed knots so find_knot_span cannot panic (F2 service side + knot-panic medium).\n\n```json:metadata\n{\"files\": [\"antenna-model/src/data/loader.rs\", \"antenna-model/src/data/types.rs\", \"antenna-model/Cargo.toml\"], \"verifyCommand\": \"cargo test -p antenna-model loader && cargo test -p antenna-model bspline\", \"acceptanceCriteria\": [\"ANTC header + CRC verified\", \"bad CRC rejected\", \"knot validation at load\"]}\n```"
+    },
+    {
+      "id": 6,
+      "subject": "Task 6: Full calibration mode emits service-format artifacts",
+      "status": "pending",
+      "blockedBy": [5],
+      "description": "**Goal:** calibrate --mode full writes a service-loadable AntennaCalibration with 4D BSplineModel4D (az:=e_clock, el:=e_cone, freq, degenerate temp axis) and populated calibration_coverage (F2 tool side, critical). Round-trip evaluation test proves coefficient reordering.\n\n```json:metadata\n{\"files\": [\"calibrate/src/artifact_export.rs\", \"calibrate/src/main.rs\", \"calibrate/src/lib.rs\", \"calibrate/src/serializer.rs\"], \"verifyCommand\": \"cargo test -p calibrate artifact_export\", \"acceptanceCriteria\": [\"service loads full-mode artifact\", \"3D->4D round-trip within 1e-9\", \"coverage populated\"]}\n```"
+    },
+    {
+      "id": 7,
+      "subject": "Task 7: Small coordinate fixes (to_degrees, pole altitude, comment)",
+      "status": "pending",
+      "description": "**Goal:** Fix EClockConeCoordinates::to_degrees unit bug, pole singularity in ecef_to_geodetic altitude (z/sin(lat) − N(1−e²) branch), stale MAX_ALTITUDE_M comment (F10, F12 + doc).\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/coordinates.rs\", \"antenna-model/src/model/coordinates_3d.rs\"], \"verifyCommand\": \"cargo test -p antenna-model to_degrees && cargo test -p antenna-model geodetic\", \"acceptanceCriteria\": [\"to_degrees returns degrees\", \"pole-safe altitude\", \"comment fixed\"]}\n```"
+    },
+    {
+      "id": 8,
+      "subject": "Task 8: Apply correction surface in H3 link budget",
+      "status": "pending",
+      "blockedBy": [4],
+      "description": "**Goal:** H3 cell gains include calibration correction (evaluator gating, applied AFTER cache lookup); correction_applied truthful; loss_db semantics documented (F8 + H3 labeling).\n\n```json:metadata\n{\"files\": [\"antenna-model/src/service/h3_link_budget.rs\", \"antenna-model/src/api/schemas.rs\", \"openapi.yaml\"], \"verifyCommand\": \"cargo test -p antenna-model h3\", \"acceptanceCriteria\": [\"correction applied per cell\", \"applied after cache\", \"correction_applied truthful\"]}\n```"
+    },
+    {
+      "id": 9,
+      "subject": "Task 9: Absolute gain from aperture integral; consistent reference",
+      "status": "pending",
+      "blockedBy": [1, 2],
+      "description": "**Goal:** gain = η·(4π/λ²)·|∬A e^{jΨ}dA|²/∬|A|²dA — removes hardcoded 0.55, builds in taper efficiency, removes per-call ideal-reference integration; reference_gain uses identical pipeline so loss_db has no ~2.6 dB offset (F7 + perf medium).\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/integration.rs\", \"antenna-model/src/model/pattern.rs\", \"antenna-model/src/service/evaluator.rs\"], \"verifyCommand\": \"cargo test -p antenna-model compute_gain && cargo test -p antenna-model reference\", \"acceptanceCriteria\": [\"no hardcoded 0.55\", \"boresight 34-38.5 dBi\", \"loss ~0 at boresight\", \"no per-call ideal integration\"]}\n```"
+    },
+    {
+      "id": 10,
+      "subject": "Task 10: Beam squint along feed displacement direction",
+      "status": "pending",
+      "description": "**Goal:** Apply beam squint along the feed-displacement clock angle in direction-cosine (u,v) space instead of always shifting elevation (F9).\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/coordinates_3d.rs\", \"antenna-model/src/service/evaluator.rs\"], \"verifyCommand\": \"cargo test -p antenna-model beam_squint\", \"acceptanceCriteria\": [\"squint along clock angle\", \"elevation >= 0\", \"azimuth normalized\"]}\n```"
+    },
+    {
+      "id": 11,
+      "subject": "Task 11: Model axial feed defocus in phase",
+      "status": "pending",
+      "blockedBy": [1],
+      "description": "**Goal:** phase_feed_displacement takes delta_z (axial offset from focus); feed at (dx,dy,f+δz) instead of hard-assumed z=f (F11). δz=0 must be regression-identical. Calibration artifacts need regeneration after.\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/phase.rs\", \"antenna-model/src/model/integration.rs\"], \"verifyCommand\": \"cargo test -p antenna-model phase_feed_displacement\", \"acceptanceCriteria\": [\"axial offset produces defocus\", \"delta_z=0 regression-identical\"]}\n```"
+    },
+    {
+      "id": 12,
+      "subject": "Task 12: Report integration non-convergence honestly",
+      "status": "pending",
+      "blockedBy": [9],
+      "description": "**Goal:** converged: bool on IntegrationResult; non-convergence → warning in compute_gain results; error_estimate = last inter-iteration difference (medium finding).\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/integration.rs\", \"antenna-model/src/model/pattern.rs\"], \"verifyCommand\": \"cargo test -p antenna-model convergence\", \"acceptanceCriteria\": [\"converged flag\", \"warning propagated\", \"honest error estimate\"]}\n```"
+    },
+    {
+      "id": 13,
+      "subject": "Task 13: Report physical feed offset in meters",
+      "status": "pending",
+      "description": "**Goal:** GeometryInfo.feed_offset_meters = (feed_x, feed_y, feed_z − focal_length) in meters, replacing the (Δaz°, Δel°, angle) packing (F15).\n\n```json:metadata\n{\"files\": [\"antenna-model/src/service/evaluator.rs\", \"antenna-model/src/api/schemas.rs\", \"openapi.yaml\"], \"verifyCommand\": \"cargo test -p antenna-model feed_offset\", \"acceptanceCriteria\": [\"offset in meters\", \"zero for focused feed\"]}\n```"
+    },
+    {
+      "id": 14,
+      "subject": "Task 14: Dedup surface models; add illumination space attenuation",
+      "status": "pending",
+      "blockedBy": [9],
+      "description": "**Goal:** Delete duplicate SurfaceErrorModel/Zernike/Gaussian from phase.rs (canonical in surface.rs); add (1+cosψ)/2 space attenuation to illumination_amplitude; fix edge-taper doc claim (F13, F14). Calibration artifacts need regeneration after.\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/phase.rs\", \"antenna-model/src/model/illumination.rs\", \"antenna-model/src/model/mod.rs\"], \"verifyCommand\": \"cargo test -p antenna-model illumination && cargo test -p antenna-model surface\", \"acceptanceCriteria\": [\"single Zernike impl\", \"space loss adds edge taper\", \"docs corrected\"]}\n```"
+    },
+    {
+      "id": 15,
+      "subject": "Task 15: Robust beamwidth search",
+      "status": "pending",
+      "blockedBy": [1],
+      "description": "**Goal:** compute_beamwidth brackets the FIRST crossing via 0.1·λ/D outward march before bisecting (no sidelobe lock-on); errors if no crossing within π/4 (medium finding).\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/pattern.rs\"], \"verifyCommand\": \"cargo test -p antenna-model beamwidth\", \"acceptanceCriteria\": [\"brackets first crossing\", \"errors when no crossing\", \"guard test passes\"]}\n```"
+    },
+    {
+      "id": 16,
+      "subject": "Task 16: Optional vehicle attitude for stable antenna frame",
+      "status": "pending",
+      "description": "**Goal:** Optional vehicle_attitude unit quaternion [w,x,y,z] (body→ECEF; +Z=boresight, +X=E-clock zero) on GainRequest/H3LinkBudgetRequest; when present, azimuth zero = body X projected ⊥ boresight, replacing the discontinuous Earth-Z heuristic (F5b, critical; API addition — design assumption flagged for review).\n\n```json:metadata\n{\"files\": [\"antenna-model/src/api/schemas.rs\", \"antenna-model/src/model/coordinates_3d.rs\", \"antenna-model/src/service/evaluator.rs\", \"antenna-model/src/service/h3_link_budget.rs\", \"antenna-model/src/service/validator.rs\", \"openapi.yaml\"], \"verifyCommand\": \"cargo test -p antenna-model attitude\", \"acceptanceCriteria\": [\"None = unchanged behaviour\", \"attitude defines azimuth zero\", \"norm validated\"]}\n```"
+    }
+  ],
+  "lastUpdated": "2026-06-10T00:00:00Z"
+}
