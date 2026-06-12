@@ -629,12 +629,12 @@ mod tests {
 
     #[test]
     fn test_coordinate_detection_boundary() {
-        // Just below threshold (1000 km = 1,000,000 m)
-        let below = Position3D::new(999_999.0, 0.0, 0.0);
+        // Just below threshold (6400 km = 6,400,000 m)
+        let below = Position3D::new(6_399_000.0, 0.0, 0.0);
         assert!(!is_ecef_coordinates(&below));
 
         // Just above threshold
-        let above = Position3D::new(1_000_001.0, 0.0, 0.0);
+        let above = Position3D::new(6_401_000.0, 0.0, 0.0);
         assert!(is_ecef_coordinates(&above));
     }
 

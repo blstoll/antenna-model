@@ -4,13 +4,13 @@
     {
       "id": 1,
       "subject": "Task 1: Fix parabolic path phase (1−cosθ factor)",
-      "status": "pending",
+      "status": "completed",
       "description": "**Goal:** Add the missing (1−cosθ) factor to phase_path so the aperture is equiphase at boresight (F1, critical).\n\n**Files:** antenna-model/src/model/phase.rs:88-99 + tests; pattern.rs:932-944 beamwidth test; docs/antenna-model-design-doc.md §2.2.\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/phase.rs\", \"antenna-model/src/model/pattern.rs\", \"docs/antenna-model-design-doc.md\"], \"verifyCommand\": \"cargo test -p antenna-model phase_path && cargo test -p antenna-model test_compute_beamwidth\", \"acceptanceCriteria\": [\"boresight equiphase\", \"(1-cos theta) factor present\", \"HPBW within 0.9-2.0 deg\", \"all tests pass\"]}\n```"
     },
     {
       "id": 2,
       "subject": "Task 2: Replace inverted mesh-loss model",
-      "status": "pending",
+      "status": "completed",
       "description": "**Goal:** Replace pattern.rs::mesh_transparency with continuous inductive-grid reflectivity (|R|²=1/(1+4X²), X=(g/λ)ln(g/(πd))) in mesh.rs, wired into overall_efficiency (F4, critical).\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/mesh.rs\", \"antenna-model/src/model/pattern.rs\", \"antenna-model/src/model/mod.rs\"], \"verifyCommand\": \"cargo test -p antenna-model mesh\", \"acceptanceCriteria\": [\"continuous at cutoff\", \"eff->1 at long wavelength\", \"monotonic\", \"mesh_transparency removed\"]}\n```"
     },
     {

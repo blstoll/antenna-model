@@ -79,6 +79,7 @@ use crate::model::{
     compute_gain_db, evaluate_correction, overall_efficiency, theoretical_max_gain,
     wavelength_from_frequency, AntennaConfiguration, IntegrationParams,
 };
+use crate::service::validator::coordinate_ambiguity_warnings;
 use std::time::Instant;
 
 /// Compute antenna gain from a gain request
@@ -100,6 +101,9 @@ pub fn compute_gain_from_request(
 ) -> Result<GainResponse> {
     let start = Instant::now();
     let mut warnings = Vec::new();
+
+    // Emit ambiguity warnings for positions that may be misclassified by auto-detection
+    warnings.extend(coordinate_ambiguity_warnings(request));
 
     // Compute feed offset for reporting
     // Note: This represents the angular offset converted to physical displacement,
@@ -449,7 +453,7 @@ fn generate_calibration_warnings(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::schemas::Position3D;
+    use crate::api::schemas::{CoordinateSystem, Position3D};
     use crate::data::types::{
         AntennaCalibration, CalibrationCoverage, CalibrationMetadata, CalibrationStatus,
         FeedParameters, MeshParameters, PhysicalAntennaConfig, ReflectorGeometry, ValidityRanges,
@@ -507,13 +511,18 @@ mod tests {
     }
 
     fn create_test_request() -> GainRequest {
+        // Emitter is a LEO satellite at 400 km geodetic altitude. Set explicit
+        // coordinate_system to prevent ambiguity warnings in tests that assert
+        // response.warnings.is_empty().
+        let mut emitter = Position3D::new(-117.0, 35.0, 400_000.0);
+        emitter.coordinate_system = Some(CoordinateSystem::Geodetic);
         GainRequest {
             antenna_id: "test_antenna".to_string(),
             feed_id: "test_feed".to_string(),
             vehicle_position: Position3D::new(-118.0, 34.0, 100.0),
             reflector_boresight: Position3D::new(-117.99, 34.01, 110.0), // 10m from vehicle
             feed_position: Position3D::new(-117.99, 34.01, 123.6),       // Feed at focal point
-            emitter_position: Position3D::new(-117.0, 35.0, 400000.0),
+            emitter_position: emitter,
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: None,
             include_reference: false,

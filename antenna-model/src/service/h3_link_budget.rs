@@ -13,8 +13,8 @@
 //! 6. Return H3LinkBudgetResponse with per-cell results and metadata
 
 use crate::api::schemas::{
-    CalibrationStatusInfo, H3CellResult, H3LinkBudgetRequest, H3LinkBudgetResponse,
-    HeatmapMetadata, Position3D,
+    CalibrationStatusInfo, CoordinateSystem, H3CellResult, H3LinkBudgetRequest,
+    H3LinkBudgetResponse, HeatmapMetadata, Position3D,
 };
 use crate::data::types::AntennaCalibration;
 use crate::error::{AntennaModelError, Result};
@@ -149,8 +149,11 @@ fn compute_cell_gain(
     integration_params: &IntegrationParams,
     frequency_hz: f64,
 ) -> Result<(f64, f64, f64, Vec<String>)> {
-    // Create a Position3D for the cell center (ECEF)
-    let cell_pos = Position3D::new(cell_ecef.0, cell_ecef.1, cell_ecef.2);
+    // Create a Position3D for the cell center (ECEF). Earth-surface ECEF values are
+    // typically 2–6 Mm which is below the 6400 km auto-detect threshold, so set
+    // an explicit tag to prevent misclassification as Geodetic.
+    let mut cell_pos = Position3D::new(cell_ecef.0, cell_ecef.1, cell_ecef.2);
+    cell_pos.coordinate_system = Some(CoordinateSystem::ECEF);
 
     // Compute az/el once; the result is returned to the caller so that
     // `compute_cell_result` does not need to call `compute_emitter_direction` again.
@@ -247,7 +250,10 @@ pub fn compute_h3_link_budget(
     let (center_ex, center_ey, center_ez) = geodetic_to_ecef(center_lon, center_lat, 0.0)?;
 
     let boresight_gain_db = {
-        let cell_pos = Position3D::new(center_ex, center_ey, center_ez);
+        // Earth-surface ECEF values are ~2–6 Mm, below the 6400 km auto-detect
+        // threshold; set explicit ECEF to prevent misclassification as Geodetic.
+        let mut cell_pos = Position3D::new(center_ex, center_ey, center_ez);
+        cell_pos.coordinate_system = Some(CoordinateSystem::ECEF);
         let (az_deg, el_deg) = compute_emitter_direction(
             &cell_pos,
             &request.vehicle_position,

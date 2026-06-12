@@ -504,12 +504,26 @@ paths:
 
 components:
   schemas:
+    CoordinateSystem:
+      type: string
+      enum:
+        - ecef
+        - geodetic
+      description: |
+        Explicit coordinate system tag for a Position3D.
+        - `ecef`: Earth-Centered Earth-Fixed (x, y, z in meters)
+        - `geodetic`: Geodetic (longitude degrees, latitude degrees, altitude meters)
+
     Position3D:
       type: object
       description: |
         3D position with automatic coordinate system detection:
-        - ECEF if |x| or |y| or |z| > 6400 km
+        - ECEF if |x| or |y| or |z| > 6400 km (matches Earth's radius)
         - Geodetic otherwise (lon/lat degrees, alt meters)
+
+        Set `coordinate_system` explicitly to override auto-detection. This is
+        recommended for high-altitude geodetic positions (e.g. GEO orbit at
+        ~35,786 km) where auto-detection may misclassify as ECEF.
       required:
         - x
         - y
@@ -527,6 +541,11 @@ components:
           type: number
           format: double
           description: ECEF Z (meters) OR altitude (meters)
+        coordinate_system:
+          $ref: '#/components/schemas/CoordinateSystem'
+          description: |
+            Optional explicit coordinate system override. When absent, auto-detected
+            by magnitude. Setting this prevents misclassification for ambiguous positions.
 
     Quaternion:
       type: object

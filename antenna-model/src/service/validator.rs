@@ -19,8 +19,8 @@
 //!   - Feed ID exists for specified antenna
 
 use crate::api::schemas::{
-    BatchGainRequest, GainRequest, GridConfig, H3LinkBudgetRequest, HeatmapRequest, Position3D,
-    RangeConfig,
+    BatchGainRequest, CoordinateSystem, GainRequest, GridConfig, H3LinkBudgetRequest,
+    HeatmapRequest, Position3D, RangeConfig,
 };
 use crate::data::repository::CalibrationRepository;
 use crate::error::{ValidationError, ValidationResult};
@@ -395,6 +395,53 @@ fn validate_antenna_feed_exists(
 }
 
 // ============================================================================
+// Coordinate Ambiguity Warning
+// ============================================================================
+
+/// Altitude threshold above which a geodetic position is considered ambiguous (100 km).
+///
+/// Positions auto-detected as geodetic with |z| > this value could plausibly be ECEF
+/// and should carry an explicit `coordinate_system` tag to prevent misclassification.
+const GEODETIC_AMBIGUITY_ALTITUDE_M: f64 = 100_000.0;
+
+/// Emit a warning if a position is auto-detected as geodetic but has suspiciously
+/// high altitude (> 100 km), which could indicate an ECEF position near the
+/// threshold or a legitimate high-altitude geodetic position (e.g. GEO orbit).
+///
+/// If the caller has set an explicit `coordinate_system`, no warning is emitted.
+fn warn_if_ambiguous(pos: &Position3D, name: &str, warnings: &mut Vec<String>) {
+    if pos.coordinate_system.is_none() {
+        if let CoordinateSystem::Geodetic = pos.coordinate_system() {
+            if pos.z.abs() > GEODETIC_AMBIGUITY_ALTITUDE_M {
+                warnings.push(format!(
+                    "{name}: auto-detected as geodetic with altitude {:.0} km; \
+                     set coordinate_system explicitly to avoid ECEF misclassification",
+                    pos.z / 1000.0
+                ));
+            }
+        }
+    }
+}
+
+/// Return ambiguity warnings for all positions in a `GainRequest`.
+///
+/// These are non-fatal advisories: they do not block processing but indicate
+/// positions where auto-detection may produce incorrect results. Callers should
+/// merge these into the response warnings list.
+pub fn coordinate_ambiguity_warnings(request: &GainRequest) -> Vec<String> {
+    let mut warnings = Vec::new();
+    warn_if_ambiguous(&request.vehicle_position, "vehicle_position", &mut warnings);
+    warn_if_ambiguous(
+        &request.reflector_boresight,
+        "reflector_boresight",
+        &mut warnings,
+    );
+    warn_if_ambiguous(&request.feed_position, "feed_position", &mut warnings);
+    warn_if_ambiguous(&request.emitter_position, "emitter_position", &mut warnings);
+    warnings
+}
+
+// ============================================================================
 // Grid Configuration Validation
 // ============================================================================
 
@@ -523,11 +570,69 @@ fn validate_range_config(range: &RangeConfig, dimension: &str) -> ValidationResu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::schemas::CoordinateSystem;
     use crate::data::repository::CalibrationRepository;
 
     // Helper to create a test repository with sample data
     fn create_test_repository() -> CalibrationRepository {
         CalibrationRepository::new()
+    }
+
+    // ========================================================================
+    // Coordinate Ambiguity Warning Tests
+    // ========================================================================
+
+    #[test]
+    fn test_warn_if_ambiguous_high_altitude_no_tag() {
+        // z = 200 km altitude, no explicit tag → warning expected
+        let pos = Position3D::new(0.0, 0.0, 200_000.0);
+        let mut warnings = Vec::new();
+        warn_if_ambiguous(&pos, "test_position", &mut warnings);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("test_position"));
+        assert!(warnings[0].contains("200 km"));
+        assert!(warnings[0].contains("coordinate_system"));
+    }
+
+    #[test]
+    fn test_warn_if_ambiguous_high_altitude_with_explicit_tag() {
+        // Same position but with explicit Geodetic tag → no warning
+        let mut pos = Position3D::new(0.0, 0.0, 200_000.0);
+        pos.coordinate_system = Some(CoordinateSystem::Geodetic);
+        let mut warnings = Vec::new();
+        warn_if_ambiguous(&pos, "test_position", &mut warnings);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn test_warn_if_ambiguous_low_altitude_no_warning() {
+        // z = 100 m, well below threshold → no warning
+        let pos = Position3D::new(-118.0, 34.0, 100.0);
+        let mut warnings = Vec::new();
+        warn_if_ambiguous(&pos, "test_position", &mut warnings);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn test_coordinate_ambiguity_warnings_full_request() {
+        // Build a GainRequest where emitter is at 500 km altitude (geodetic) — no explicit tag.
+        // At 500 km, auto-detection says Geodetic (500_000 < 6_400_000), but altitude is
+        // > 100 km, so it triggers the ambiguity warning.
+        let request = GainRequest {
+            antenna_id: "test".to_string(),
+            feed_id: "feed".to_string(),
+            vehicle_position: Position3D::new(-118.0, 34.0, 100.0),
+            reflector_boresight: Position3D::new(-118.0, 34.0, 110.0),
+            feed_position: Position3D::new(-118.0, 34.0, 105.0),
+            // LEO altitude in geodetic form, no tag — ambiguous
+            emitter_position: Position3D::new(0.0, 0.0, 500_000.0),
+            frequency_mhz: 8400.0,
+            pointing_frequency_mhz: None,
+            include_reference: false,
+        };
+        let warnings = coordinate_ambiguity_warnings(&request);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("emitter_position"));
     }
 
     // ========================================================================

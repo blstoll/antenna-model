@@ -4,7 +4,15 @@
 //! 1. Perfect alignment: feed_position == reflector_boresight → maximum gain
 //! 2. Large feed offset: feed steered away from boresight → reduced gain
 
-use antenna_model::api::schemas::{GainRequest, Position3D};
+use antenna_model::api::schemas::{CoordinateSystem, GainRequest, Position3D};
+
+/// Helper to create a Position3D with explicit ECEF coordinate system.
+/// Needed for ECEF surface points whose max component < 6400 km (below auto-detect threshold).
+fn ecef(x: f64, y: f64, z: f64) -> Position3D {
+    let mut p = Position3D::new(x, y, z);
+    p.coordinate_system = Some(CoordinateSystem::ECEF);
+    p
+}
 use antenna_model::data::repository::CalibrationRepository;
 use antenna_model::data::types::{
     AntennaCalibration, CalibrationMetadata, CalibrationStatus, FeedParameters, MeshParameters,
@@ -69,10 +77,10 @@ fn test_feed_steering_perfect_alignment() {
     let request = GainRequest {
         antenna_id: "test_antenna".to_string(),
         feed_id: "x_band".to_string(),
-        vehicle_position: Position3D::new(-19794863.29, -37228723.27, 0.0),
-        reflector_boresight: Position3D::new(-2485073.18, -4673742.90, 3546502.48),
-        feed_position: Position3D::new(-2485073.18, -4673742.90, 3546502.48), // Same as boresight
-        emitter_position: Position3D::new(-2485073.18, -4673742.90, 3546502.48),
+        vehicle_position: ecef(-19_794_863.29, -37_228_723.27, 0.0),
+        reflector_boresight: ecef(-2_485_073.18, -4_673_742.90, 3_546_502.48),
+        feed_position: ecef(-2_485_073.18, -4_673_742.90, 3_546_502.48), // Same as boresight
+        emitter_position: ecef(-2_485_073.18, -4_673_742.90, 3_546_502.48),
         frequency_mhz: 8450.0,
         pointing_frequency_mhz: None,
         include_reference: true,
@@ -118,10 +126,10 @@ fn test_feed_steering_large_offset() {
     let request = GainRequest {
         antenna_id: "test_antenna".to_string(),
         feed_id: "x_band".to_string(),
-        vehicle_position: Position3D::new(-19794863.29, -37228723.27, 0.0),
-        reflector_boresight: Position3D::new(-2485073.18, -4673742.90, 3546502.48),
-        feed_position: Position3D::new(-4831642.29, -1948496.21, 3667577.84), // ~5° from boresight
-        emitter_position: Position3D::new(-2225583.04, -4185713.15, 4252983.55),
+        vehicle_position: ecef(-19_794_863.29, -37_228_723.27, 0.0),
+        reflector_boresight: ecef(-2_485_073.18, -4_673_742.90, 3_546_502.48),
+        feed_position: ecef(-4_831_642.29, -1_948_496.21, 3_667_577.84), // ~5° from boresight
+        emitter_position: ecef(-2_225_583.04, -4_185_713.15, 4_252_983.55),
         frequency_mhz: 8450.0,
         pointing_frequency_mhz: None,
         include_reference: true,
@@ -162,10 +170,10 @@ fn test_feed_steering_produces_different_gains() {
     let mut repo = CalibrationRepository::new();
     repo.add_calibration(create_test_calibration("test_antenna", "x_band"));
 
-    // Base parameters
-    let vehicle_pos = Position3D::new(-19794863.29, -37228723.27, 0.0);
-    let reflector_boresight = Position3D::new(-2485073.18, -4673742.90, 3546502.48);
-    let emitter_pos = Position3D::new(-2485073.18, -4673742.90, 3546502.48);
+    // Base parameters (all ECEF — set explicit tag for components below 6400 km threshold)
+    let vehicle_pos = ecef(-19_794_863.29, -37_228_723.27, 0.0);
+    let reflector_boresight = ecef(-2_485_073.18, -4_673_742.90, 3_546_502.48);
+    let emitter_pos = ecef(-2_485_073.18, -4_673_742.90, 3_546_502.48);
 
     // Scenario 1: Feed at boresight
     let request1 = GainRequest {
@@ -186,7 +194,7 @@ fn test_feed_steering_produces_different_gains() {
         feed_id: "x_band".to_string(),
         vehicle_position: vehicle_pos.clone(),
         reflector_boresight: reflector_boresight.clone(),
-        feed_position: Position3D::new(-4831642.29, -1948496.21, 3667577.84), // Offset
+        feed_position: ecef(-4_831_642.29, -1_948_496.21, 3_667_577.84), // Offset
         emitter_position: emitter_pos.clone(),
         frequency_mhz: 8450.0,
         pointing_frequency_mhz: None,

@@ -26,18 +26,21 @@ fn base_h3_request() -> H3LinkBudgetRequest {
             x: -118.1234,
             y: 34.5678,
             z: 100.0,
+            coordinate_system: None,
         },
         // Reflector boresight: slightly north and up (establishes pointing direction)
         reflector_boresight: Position3D {
             x: -118.1234,
             y: 34.5679,
             z: 110.0,
+            coordinate_system: None,
         },
         // feed_position is the H3 center cell location (same area as vehicle)
         feed_position: Position3D {
             x: -118.124,
             y: 34.568,
             z: 105.0,
+            coordinate_system: None,
         },
         frequency_mhz: 8400.0,
         pointing_frequency_mhz: None,
