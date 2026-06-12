@@ -79,8 +79,16 @@ Total phase function:
 
 #### Path Phase (Standard):
 ```
-Ψ_path = k·[ρ²/(4f) - ρ·sin(θ)·cos(φ-φ')]
+Ψ_path = k·[ρ²/(4f)·(1−cosθ) − ρ·sinθ·cos(φ−φ')]
 ```
+
+**Derivation:** The feed→surface optical path is k(f + z) with z = ρ²/(4f). The
+far-field projection removes k(ρ sinθ cos(φ−φ') + z cosθ). Dropping the constant
+kf gives the formula above. The (1−cosθ) factor is essential: it ensures the aperture
+is equiphase at θ = 0, which is the defining optical property of a parabola.
+
+*Note (2026-06-11): The earlier formula omitted (1−cosθ), which injected a
+spurious defocus across the aperture, corrupting off-axis pattern shape.*
 
 #### Feed Displacement Phase (Coma Aberration):
 ```

@@ -18,12 +18,12 @@ use crate::api::schemas::{
 };
 use crate::data::types::AntennaCalibration;
 use crate::error::{AntennaModelError, Result};
+use crate::model::compute_gain_db;
 use crate::model::{
     compute_emitter_direction, compute_feed_position_from_pointing, ecef_to_geodetic,
     geodetic_to_ecef, AntennaConfiguration, FeedParameters as ModelFeedParams, FeedPosition,
     IntegrationParams, MeshParameters as ModelMeshParams, ReflectorGeometry as ModelReflector,
 };
-use crate::model::compute_gain_db;
 use crate::service::{GainCache, GainCacheKey};
 use rayon::prelude::*;
 use std::collections::HashSet;
@@ -118,9 +118,9 @@ fn build_antenna_config(
         config_builder = config_builder.mesh(mesh);
     }
 
-    let antenna_config = config_builder
-        .build()
-        .map_err(|e| AntennaModelError::Generic(format!("Failed to build antenna configuration: {}", e)))?;
+    let antenna_config = config_builder.build().map_err(|e| {
+        AntennaModelError::Generic(format!("Failed to build antenna configuration: {}", e))
+    })?;
 
     Ok((antenna_config, feed_x, feed_y, feed_z))
 }
@@ -160,7 +160,14 @@ fn compute_cell_gain(
         &request.reflector_boresight,
     )?;
 
-    let cache_key = GainCacheKey::new(az_deg, el_deg, request.frequency_mhz, feed_x, feed_y, feed_z);
+    let cache_key = GainCacheKey::new(
+        az_deg,
+        el_deg,
+        request.frequency_mhz,
+        feed_x,
+        feed_y,
+        feed_z,
+    );
 
     let theta_rad = el_deg.to_radians();
     let phi_rad = az_deg.to_radians();
@@ -172,16 +179,17 @@ fn compute_cell_gain(
     // misses.  To avoid double computation we use a cell to smuggle warnings out
     // of the closure.
     let mut captured_warnings: Vec<String> = Vec::new();
-    let gain_db = cache.get_or_compute(
-        &request.antenna_id,
-        &request.feed_id,
-        cache_key,
-        || {
-            let result = compute_gain_db(theta_rad, phi_rad, antenna_config, frequency_hz, integration_params)?;
-            captured_warnings = result.warnings;
-            Ok(result.gain)
-        },
-    )?;
+    let gain_db = cache.get_or_compute(&request.antenna_id, &request.feed_id, cache_key, || {
+        let result = compute_gain_db(
+            theta_rad,
+            phi_rad,
+            antenna_config,
+            frequency_hz,
+            integration_params,
+        )?;
+        captured_warnings = result.warnings;
+        Ok(result.gain)
+    })?;
 
     Ok((gain_db, az_deg, el_deg, captured_warnings))
 }
@@ -245,18 +253,26 @@ pub fn compute_h3_link_budget(
             &request.vehicle_position,
             &request.reflector_boresight,
         )?;
-        let cache_key = GainCacheKey::new(az_deg, el_deg, request.frequency_mhz, feed_x, feed_y, feed_z);
+        let cache_key = GainCacheKey::new(
+            az_deg,
+            el_deg,
+            request.frequency_mhz,
+            feed_x,
+            feed_y,
+            feed_z,
+        );
         let theta_rad = el_deg.to_radians();
         let phi_rad = az_deg.to_radians();
-        cache.get_or_compute(
-            &request.antenna_id,
-            &request.feed_id,
-            cache_key,
-            || {
-                let result = compute_gain_db(theta_rad, phi_rad, &antenna_config, frequency_hz, &integration_params)?;
-                Ok(result.gain)
-            },
-        )?
+        cache.get_or_compute(&request.antenna_id, &request.feed_id, cache_key, || {
+            let result = compute_gain_db(
+                theta_rad,
+                phi_rad,
+                &antenna_config,
+                frequency_hz,
+                &integration_params,
+            )?;
+            Ok(result.gain)
+        })?
     };
 
     // 7. Process each cell in parallel
@@ -422,9 +438,7 @@ fn compute_cell_result(
     let total_path_loss_db = loss_db + fspl;
 
     // G/T computation (if temperature provided)
-    let g_over_t_db = request
-        .temperature_k
-        .map(|t| gain_db - 10.0 * t.log10());
+    let g_over_t_db = request.temperature_k.map(|t| gain_db - 10.0 * t.log10());
 
     Ok((
         H3CellResult {
@@ -471,7 +485,9 @@ mod tests {
     #[test]
     fn test_cell_counts() {
         use h3o::{LatLng, Resolution};
-        let center = LatLng::new(37.0, -122.0).unwrap().to_cell(Resolution::Seven);
+        let center = LatLng::new(37.0, -122.0)
+            .unwrap()
+            .to_cell(Resolution::Seven);
         assert_eq!(center.grid_disk::<Vec<_>>(0).len(), 1);
         assert_eq!(center.grid_disk::<Vec<_>>(1).len(), 7);
         assert_eq!(center.grid_disk::<Vec<_>>(2).len(), 19);

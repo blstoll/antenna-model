@@ -933,14 +933,17 @@ mod tests {
         let config = test_antenna();
         let params = IntegrationParams::fast();
 
-        // Compute half-power beamwidth (3 dB)
+        // Compute half-power beamwidth (3 dB drop from boresight)
         let hpbw = compute_beamwidth(&config, 8.4e9, 3.0, 0.0, &params).unwrap();
 
-        // For 1m dish at 8.4 GHz, HPBW ≈ 1.2λ/D ≈ 1.2 × 0.0357 / 1.0 ≈ 0.043 rad ≈ 2.5°
-        // But with losses and actual integration, it may be somewhat larger
-        let hpbw_degrees = hpbw.to_degrees();
-        assert!(hpbw_degrees > 0.5);
-        assert!(hpbw_degrees < 10.0);
+        // 1 m dish at 8.4 GHz: full HPBW ≈ 1.05–1.2·λ/D ≈ 2.1°–2.5°;
+        // this function returns boresight→−3dB (half of that), widened by the
+        // q=8 taper. Anything outside 0.9°–2.0° indicates a phase model bug.
+        let half_deg = hpbw.to_degrees();
+        assert!(
+            half_deg > 0.9 && half_deg < 2.0,
+            "boresight→-3dB half-angle = {half_deg}°; expected 0.9°–2.0°"
+        );
     }
 
     #[test]
@@ -1009,8 +1012,12 @@ mod tests {
             result.warnings
         );
 
-        // Gain value should still be valid
-        assert!(result.gain > 0.0);
-        assert!(result.gain < 100.0); // Reasonable dB range
+        // Gain value should still be a valid dB number (no NaN/inf, and above the floor).
+        // With a 0.4f feed displacement the boresight gain is significantly reduced and may
+        // legitimately fall below 0 dBi, so we only check the floor and upper bound.
+        // (The old assertion "> 0.0 dBi" was only valid under the wrong spurious-defocus phase.)
+        assert!(result.gain.is_finite());
+        assert!(result.gain >= -60.0); // Must be at or above the gain floor
+        assert!(result.gain < 100.0); // Reasonable upper bound
     }
 }

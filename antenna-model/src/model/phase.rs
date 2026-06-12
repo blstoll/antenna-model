@@ -66,13 +66,21 @@ pub fn wavelength_from_frequency(frequency_hz: f64) -> f64 {
 /// This is the phase contribution from the parabolic reflector geometry
 /// when the feed is at the focal point and observing in direction (θ, φ).
 ///
-/// # Formula (from design doc Section 2.2)
+/// # Derivation
+///
+/// For a parabola z = ρ²/(4f), the feed→surface optical path is k(f + z).
+/// The far-field projection removes k(ρ·sinθ·cos(φ−φ') + z·cosθ). Dropping
+/// the constant term kf:
+///
 /// ```text
-/// Ψ_path = k·[ρ²/(4f) - ρ·sin(θ)·cos(φ-φ')]
+/// Ψ_path = k·[z·(1−cosθ) − ρ·sinθ·cos(φ−φ')],  z = ρ²/(4f)
+///        = k·[ρ²/(4f)·(1−cosθ) − ρ·sinθ·cos(φ−φ')]
 /// ```
 ///
-/// The first term accounts for the path length from aperture to focal point,
-/// and the second term accounts for the far-field observation direction.
+/// The `(1−cosθ)` factor is essential: it ensures the aperture is equiphase
+/// at boresight (θ = 0), which is the defining optical property of a parabola.
+/// Without it, a large spurious defocus phase is injected across the aperture,
+/// corrupting the off-axis pattern.
 ///
 /// # Arguments
 /// - `rho`: Radial distance from axis in aperture plane (meters)
@@ -93,7 +101,10 @@ pub fn phase_path(
     focal_length: f64,
     k: f64,
 ) -> f64 {
-    let term1 = rho * rho / (4.0 * focal_length);
+    // Feed→surface path is k(f+z); far-field projection removes
+    // k(ρ·sinθ·cos(φ−φ′) + z·cosθ). Dropping the constant kf:
+    //   Ψ = k·[z·(1−cosθ) − ρ·sinθ·cos(φ−φ′)],  z = ρ²/(4f)
+    let term1 = rho * rho / (4.0 * focal_length) * (1.0 - theta.cos());
     let term2 = rho * theta.sin() * (phi - phi_prime).cos();
     k * (term1 - term2)
 }
@@ -500,31 +511,42 @@ mod tests {
 
     #[test]
     fn test_phase_path_on_axis() {
-        // On-axis (θ=0), only the ρ²/(4f) term contributes
+        // On-axis (θ=0): aperture must be equiphase (defining property of a parabola).
+        // The (1−cosθ) factor ensures the quadratic term vanishes at boresight.
         let focal_length = 17.0;
         let k = wavenumber(0.03);
 
         let phase = phase_path(1.0, 0.0, 0.0, 0.0, focal_length, k);
-        let expected = k * (1.0 / (4.0 * focal_length));
-        assert!((phase - expected).abs() < EPSILON);
+        assert!(
+            phase.abs() < EPSILON,
+            "on-axis phase should be 0, got {phase}"
+        );
+    }
+
+    #[test]
+    fn test_phase_path_boresight_equiphase() {
+        // For a parabola fed at focus, the aperture is equiphase at theta=0.
+        // This must hold for all radii — it is the defining optical property of a parabola.
+        let focal_length = 17.0;
+        let k = wavenumber(0.03);
+        for rho in [0.0, 1.0, 5.0, 10.0, 17.0] {
+            let phase = phase_path(rho, 0.7, 0.0, 0.0, focal_length, k);
+            assert!(phase.abs() < EPSILON, "rho={rho}: phase={phase}");
+        }
     }
 
     #[test]
     fn test_phase_path_off_axis() {
         let focal_length = 17.0;
         let k = wavenumber(0.03);
-        let rho = 5.0;
-        let phi_prime = PI / 4.0;
-        let theta = 0.1;
-        let phi = PI / 3.0;
+        let (rho, phi_prime, theta, phi) = (5.0, PI / 4.0, 0.1, PI / 3.0);
 
         let phase = phase_path(rho, phi_prime, theta, phi, focal_length, k);
 
-        let term1 = rho * rho / (4.0 * focal_length);
+        // Correct formula: Ψ = k·[ρ²/(4f)·(1−cosθ) − ρ·sinθ·cos(φ−φ')]
+        let term1 = rho * rho / (4.0 * focal_length) * (1.0 - theta.cos());
         let term2 = rho * theta.sin() * (phi - phi_prime).cos();
-        let expected = k * (term1 - term2);
-
-        assert!((phase - expected).abs() < EPSILON);
+        assert!((phase - k * (term1 - term2)).abs() < EPSILON);
     }
 
     #[test]
