@@ -13,7 +13,7 @@
 //!
 //! Multiple efficiency factors reduce the ideal gain:
 //! - **Ruze Efficiency**: Surface errors reduce gain as η_ruze = exp(-(4πσ/λ)²)
-//! - **Mesh Transparency**: Wire mesh reflectors have frequency-dependent transparency
+//! - **Mesh Reflection Efficiency**: Wire mesh reflectors have frequency-dependent reflectivity (inductive-grid model)
 //! - **Illumination Efficiency**: Non-uniform illumination reduces effective aperture
 //! - **Spillover Efficiency**: Feed pattern energy missing the reflector
 //!
@@ -106,52 +106,10 @@ pub fn ruze_efficiency(surface_rms: f64, wavelength: f64) -> f64 {
     (-ratio * ratio).exp()
 }
 
-/// Compute mesh transparency for wire mesh reflectors
-///
-/// Wire mesh reflectors have frequency-dependent transparency. At low frequencies,
-/// the wavelength is large compared to mesh spacing, and the mesh becomes transparent.
-///
-/// # Formula (simplified model)
-/// ```text
-/// T = 1 / (1 + (λ₀/λ)²)  for λ > λ₀
-/// T = 1                   for λ ≤ λ₀
-/// ```
-/// where λ₀ = π · mesh_spacing (cutoff wavelength).
-///
-/// # Arguments
-/// - `mesh_spacing`: Mesh spacing in meters (hole size)
-/// - `wavelength`: Wavelength in meters
-///
-/// # Returns
-/// Transparency factor (0 to 1, where 1 = opaque, 0 = transparent)
-///
-/// # Examples
-/// ```
-/// use antenna_model::model::pattern::mesh_transparency;
-///
-/// // 5mm mesh at 8.4 GHz (λ ≈ 35.7mm) - above cutoff
-/// let transparency = mesh_transparency(0.005, 0.0357);
-/// assert!(transparency > 0.80 && transparency < 0.90); // About 84% opaque
-///
-/// // 5mm mesh at 100 MHz (λ = 3m) - well below cutoff
-/// let transparency_low_freq = mesh_transparency(0.005, 3.0);
-/// assert!(transparency_low_freq > 0.99); // Nearly 1.0 (poor reflector, lets energy through)
-/// ```
-pub fn mesh_transparency(mesh_spacing: f64, wavelength: f64) -> f64 {
-    let lambda_0 = PI * mesh_spacing;
-
-    if wavelength <= lambda_0 {
-        // Above cutoff frequency - mesh is opaque
-        1.0
-    } else {
-        // Below cutoff - transparency increases
-        1.0 / (1.0 + (lambda_0 / wavelength).powi(2))
-    }
-}
-
 /// Compute overall antenna efficiency
 ///
-/// Combines Ruze efficiency and mesh transparency (if mesh present).
+/// Combines Ruze efficiency (surface errors) and mesh reflection efficiency
+/// (inductive-grid model, if mesh present).
 ///
 /// # Arguments
 /// - `config`: Antenna configuration
@@ -163,9 +121,9 @@ pub fn overall_efficiency(config: &AntennaConfiguration, wavelength: f64) -> f64
     // Ruze efficiency (surface errors)
     let eta_ruze = ruze_efficiency(config.reflector.surface_rms, wavelength);
 
-    // Mesh transparency (if mesh present)
+    // Mesh reflection efficiency using inductive-grid model (if mesh present)
     let eta_mesh = if let Some(ref mesh) = config.mesh {
-        mesh_transparency(mesh.spacing, wavelength)
+        crate::model::mesh::mesh_reflection_efficiency(mesh.spacing, mesh.wire_diameter, wavelength)
     } else {
         1.0 // Solid reflector - no mesh loss
     };
@@ -776,41 +734,6 @@ mod tests {
     }
 
     #[test]
-    fn test_mesh_transparency_above_cutoff() {
-        let mesh_spacing = 0.005; // 5mm
-        let wavelength = 0.0357; // ~8.4 GHz
-                                 // lambda_0 = π × 0.005 ≈ 0.0157 m
-
-        // At 8.4 GHz, λ = 0.0357 > λ₀ = 0.0157, so we're above cutoff
-        // T = 1/(1 + (0.0157/0.0357)²) = 1/(1 + 0.193) ≈ 0.84
-        let transparency = mesh_transparency(mesh_spacing, wavelength);
-        assert!(transparency > 0.80 && transparency < 0.90);
-    }
-
-    #[test]
-    fn test_mesh_transparency_below_cutoff() {
-        let mesh_spacing = 0.005; // 5mm
-        let wavelength = 3.0; // 100 MHz
-                              // lambda_0 = π × 0.005 ≈ 0.0157 m
-
-        // At 100 MHz, λ = 3.0 >> λ₀, so deeply above cutoff in wavelength
-        // T = 1/(1 + (0.0157/3.0)²) ≈ 1/(1 + 0.000027) ≈ 0.999
-        let transparency = mesh_transparency(mesh_spacing, wavelength);
-        assert!(transparency > 0.99); // Nearly 1.0 (acts transparent, poor reflector)
-    }
-
-    #[test]
-    fn test_mesh_transparency_at_cutoff() {
-        let mesh_spacing = 0.005; // 5mm
-        let lambda_0 = PI * mesh_spacing;
-
-        // Right at cutoff wavelength
-        // Below cutoff freq (above cutoff wavelength): solid reflector
-        let transparency = mesh_transparency(mesh_spacing, lambda_0 * 0.99);
-        assert_eq!(transparency, 1.0); // Opaque (good reflector)
-    }
-
-    #[test]
     fn test_overall_efficiency_no_mesh() {
         let reflector = ReflectorGeometry::new(1.0, 0.5, 0.001).unwrap();
         let feed_pos = FeedPosition::at_focus(0.5);
@@ -840,9 +763,13 @@ mod tests {
 
         let efficiency = overall_efficiency(&config, wavelength);
 
-        // Should be product of Ruze and mesh
+        // Should be product of Ruze efficiency and inductive-grid mesh reflection efficiency.
+        // For 5mm mesh (spacing=0.005, wire_diameter=0.0005) at λ=0.0357m:
+        //   log_term = ln(0.005 / (π × 0.0005)) = ln(3.183) ≈ 1.157
+        //   X = (0.005/0.0357) × 1.157 ≈ 0.162
+        //   |R|² = 1/(1 + 4×0.162²) ≈ 0.905
         let ruze = ruze_efficiency(0.001, wavelength);
-        let mesh = mesh_transparency(0.005, wavelength);
+        let mesh = crate::model::mesh::mesh_reflection_efficiency(0.005, 0.0005, wavelength);
         let expected = ruze * mesh;
 
         assert!((efficiency - expected).abs() < 1e-10);
