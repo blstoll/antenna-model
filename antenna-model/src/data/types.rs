@@ -2113,4 +2113,101 @@ mod tests {
         let decoded_json: CalibrationStatus = serde_json::from_str(&json).unwrap();
         assert_eq!(status, decoded_json);
     }
+
+    // ============================================================================
+    // BSpline validation tests (ANTC-hardening, Task 5)
+    // ============================================================================
+
+    /// Helper: build a minimal valid order-3 BSplineModel4D (shape [2,2,2,1]).
+    fn make_valid_bspline() -> BSplineModel4D {
+        BSplineModel4D {
+            coefficients: vec![0.0; 8],
+            shape: [2, 2, 2, 1],
+            // knot vector length must be >= shape[i] + spline_order
+            knots_azimuth: vec![0.0, 0.0, 0.0, 360.0, 360.0, 360.0],
+            knots_elevation: vec![0.0, 0.0, 0.0, 90.0, 90.0, 90.0],
+            knots_frequency: vec![8000.0, 8000.0, 8000.0, 9000.0, 9000.0, 9000.0],
+            knots_temperature: vec![200.0, 200.0, 200.0, 350.0, 350.0, 350.0],
+            spline_order: 3,
+        }
+    }
+
+    #[test]
+    fn test_bspline_validate_valid_model() {
+        let model = make_valid_bspline();
+        assert!(
+            model.validate().is_ok(),
+            "Expected valid model to pass, got: {:?}",
+            model.validate().err()
+        );
+    }
+
+    #[test]
+    fn test_bspline_validate_rejects_short_knots() {
+        // knots_azimuth has only 2 elements but order=3 requires shape[0]+order = 2+3 = 5 elements
+        let model = BSplineModel4D {
+            coefficients: vec![0.0; 8],
+            shape: [2, 2, 2, 1],
+            knots_azimuth: vec![0.0, 360.0], // too short for order 3 (needs >= 5)
+            knots_elevation: vec![0.0, 0.0, 0.0, 90.0, 90.0, 90.0],
+            knots_frequency: vec![8000.0, 8000.0, 8000.0, 9000.0, 9000.0, 9000.0],
+            knots_temperature: vec![200.0, 200.0, 200.0, 350.0, 350.0, 350.0],
+            spline_order: 3,
+        };
+        assert!(
+            model.validate().is_err(),
+            "Expected validation to fail for too-short knot vector"
+        );
+        match model.validate().unwrap_err() {
+            ValidationError::InvalidKnotVector { dimension, .. } => {
+                assert_eq!(dimension, "azimuth");
+            }
+            other => panic!("Expected InvalidKnotVector, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_bspline_validate_rejects_non_monotonic_knots() {
+        let mut model = make_valid_bspline();
+        // Break monotonicity in elevation knots
+        model.knots_elevation = vec![0.0, 0.0, 90.0, 50.0, 90.0, 90.0]; // 90 then 50 is decreasing
+        assert!(
+            model.validate().is_err(),
+            "Expected validation to fail for non-monotonic knot vector"
+        );
+        match model.validate().unwrap_err() {
+            ValidationError::InvalidKnotVector { dimension, .. } => {
+                assert_eq!(dimension, "elevation");
+            }
+            other => panic!("Expected InvalidKnotVector, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_bspline_validate_rejects_coefficient_shape_mismatch() {
+        let mut model = make_valid_bspline();
+        // shape says 2*2*2*1 = 8 coefficients, but we give 7
+        model.coefficients = vec![0.0; 7];
+        assert!(
+            model.validate().is_err(),
+            "Expected validation to fail for coefficient/shape mismatch"
+        );
+        match model.validate().unwrap_err() {
+            ValidationError::InconsistentShape { expected, actual } => {
+                assert_eq!(expected, 8);
+                assert_eq!(actual, 7);
+            }
+            other => panic!("Expected InconsistentShape, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_bspline_validate_rejects_zero_spline_order() {
+        let mut model = make_valid_bspline();
+        model.spline_order = 0;
+        assert!(
+            model.validate().is_err(),
+            "Expected validation to fail for spline_order=0"
+        );
+    }
 }

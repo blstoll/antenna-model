@@ -9,6 +9,15 @@ use bincode::config;
 use std::path::Path;
 use tracing::{debug, info, warn};
 
+/// Magic bytes identifying an ANTC-format calibration artifact.
+const ANTC_MAGIC: &[u8; 4] = b"ANTC";
+
+/// The only ANTC artifact version this build can decode.
+const ANTC_SUPPORTED_VERSION: u32 = 1;
+
+/// Minimum byte length of an ANTC header: 4 (magic) + 4 (version) + 4 (crc) + 8 (len) = 20.
+const ANTC_HEADER_LEN: usize = 20;
+
 /// Load a calibration artifact from a binary file
 ///
 /// Deserializes and validates a calibration artifact from a .bin file.
@@ -39,9 +48,70 @@ pub fn load_calibration_artifact<P: AsRef<Path>>(path: P) -> Result<AntennaCalib
         reason: format!("Failed to read file: {}", e),
     })?;
 
+    // Detect ANTC header format or fall back to legacy headerless format.
+    let payload: &[u8] = if bytes.len() >= ANTC_HEADER_LEN && &bytes[0..4] == ANTC_MAGIC {
+        // Parse ANTC header: [magic 4][version u32 LE][crc u32 LE][len u64 LE][payload]
+        let version_bytes: [u8; 4] = bytes[4..8].try_into().map_err(|_| DataError::LoadError {
+            path: path.display().to_string(),
+            reason: "ANTC header truncated (version)".to_string(),
+        })?;
+        let crc_bytes: [u8; 4] = bytes[8..12].try_into().map_err(|_| DataError::LoadError {
+            path: path.display().to_string(),
+            reason: "ANTC header truncated (crc)".to_string(),
+        })?;
+        let len_bytes: [u8; 8] = bytes[12..20].try_into().map_err(|_| DataError::LoadError {
+            path: path.display().to_string(),
+            reason: "ANTC header truncated (len)".to_string(),
+        })?;
+
+        let version = u32::from_le_bytes(version_bytes);
+        let expected_crc = u32::from_le_bytes(crc_bytes);
+        let payload_len = u64::from_le_bytes(len_bytes) as usize;
+
+        debug!(
+            antc_version = version,
+            payload_len = payload_len,
+            "Detected ANTC-format artifact"
+        );
+
+        if version != ANTC_SUPPORTED_VERSION {
+            return Err(DataError::LoadError {
+                path: path.display().to_string(),
+                reason: format!(
+                    "unsupported ANTC artifact version {version} (this build supports version {ANTC_SUPPORTED_VERSION})"
+                ),
+            });
+        }
+
+        let payload_slice = bytes
+            .get(ANTC_HEADER_LEN..ANTC_HEADER_LEN.saturating_add(payload_len))
+            .filter(|p| p.len() == payload_len)
+            .ok_or_else(|| DataError::LoadError {
+                path: path.display().to_string(),
+                reason: "ANTC header length exceeds file size".to_string(),
+            })?;
+
+        let actual_crc = crc32fast::hash(payload_slice);
+        if actual_crc != expected_crc {
+            return Err(DataError::LoadError {
+                path: path.display().to_string(),
+                reason: format!(
+                    "CRC32 mismatch — artifact corrupted (expected {:#010x}, got {:#010x})",
+                    expected_crc, actual_crc
+                ),
+            });
+        }
+
+        debug!("ANTC CRC32 verified successfully");
+        payload_slice
+    } else {
+        debug!("No ANTC magic detected; using legacy headerless format");
+        &bytes
+    };
+
     // Deserialize using bincode
     let config = config::standard();
-    let (calibration, _): (AntennaCalibration, usize) = bincode::decode_from_slice(&bytes, config)
+    let (calibration, _): (AntennaCalibration, usize) = bincode::decode_from_slice(payload, config)
         .map_err(|e| DataError::LoadError {
             path: path.display().to_string(),
             reason: format!("Failed to deserialize calibration data: {}", e),
@@ -196,6 +266,18 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
+    /// Build a minimal ANTC-format byte vector from a serialized payload.
+    fn make_antc_bytes(payload: &[u8], version: u32, crc_override: Option<u32>) -> Vec<u8> {
+        let crc = crc_override.unwrap_or_else(|| crc32fast::hash(payload));
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"ANTC");
+        bytes.extend_from_slice(&version.to_le_bytes());
+        bytes.extend_from_slice(&crc.to_le_bytes());
+        bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(payload);
+        bytes
+    }
+
     fn create_test_calibration() -> AntennaCalibration {
         let metadata = CalibrationMetadata::builder()
             .antenna_name("Test Antenna")
@@ -325,5 +407,126 @@ mod tests {
         calibration.correction_surface = Some(correction);
 
         assert!(validate_calibration(&calibration).is_ok());
+    }
+
+    #[test]
+    fn test_load_antc_headered_artifact() {
+        let calibration = create_test_calibration();
+
+        let config = config::standard();
+        let payload = bincode::encode_to_vec(&calibration, config).unwrap();
+        let bytes = make_antc_bytes(&payload, 1, None);
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(&bytes).unwrap();
+        temp_file.flush().unwrap();
+
+        let loaded = load_calibration_artifact(temp_file.path()).unwrap();
+
+        assert_eq!(loaded.antenna_id, "test_antenna");
+        assert_eq!(loaded.feed_id, "x_band");
+        assert_eq!(loaded.metadata.antenna_name, "Test Antenna");
+    }
+
+    #[test]
+    fn test_load_antc_bad_crc_rejected() {
+        let calibration = create_test_calibration();
+
+        let config = config::standard();
+        let mut payload = bincode::encode_to_vec(&calibration, config).unwrap();
+
+        // Build header with correct CRC, then corrupt a payload byte.
+        let correct_crc = crc32fast::hash(&payload);
+        // Flip the last byte of the payload after computing the CRC.
+        if let Some(last) = payload.last_mut() {
+            *last ^= 0xff;
+        }
+        let bytes = make_antc_bytes(&payload, 1, Some(correct_crc));
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(&bytes).unwrap();
+        temp_file.flush().unwrap();
+
+        let result = load_calibration_artifact(temp_file.path());
+        assert!(result.is_err(), "Expected Err for bad CRC, got Ok");
+        match result {
+            Err(DataError::LoadError { reason, .. }) => {
+                assert!(
+                    reason.contains("CRC32 mismatch"),
+                    "Expected CRC32 mismatch message, got: {}",
+                    reason
+                );
+            }
+            other => panic!("Expected LoadError, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_load_antc_truncated_length_rejected() {
+        let calibration = create_test_calibration();
+
+        let config = config::standard();
+        let payload = bincode::encode_to_vec(&calibration, config).unwrap();
+
+        // Claim the payload is 100 bytes longer than it actually is.
+        let inflated_len = payload.len() as u64 + 100;
+        let crc = crc32fast::hash(&payload);
+
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"ANTC");
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&crc.to_le_bytes());
+        bytes.extend_from_slice(&inflated_len.to_le_bytes());
+        bytes.extend_from_slice(&payload); // actual payload is shorter than claimed
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(&bytes).unwrap();
+        temp_file.flush().unwrap();
+
+        let result = load_calibration_artifact(temp_file.path());
+        assert!(
+            result.is_err(),
+            "Expected Err for truncated payload, got Ok"
+        );
+        match result {
+            Err(DataError::LoadError { reason, .. }) => {
+                assert!(
+                    reason.contains("length exceeds file size"),
+                    "Expected 'length exceeds file size' message, got: {}",
+                    reason
+                );
+            }
+            other => panic!("Expected LoadError, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_load_antc_unsupported_version_rejected() {
+        let calibration = create_test_calibration();
+
+        let config = config::standard();
+        let payload = bincode::encode_to_vec(&calibration, config).unwrap();
+        // Build a valid ANTC artifact but with version = 2 (unsupported).
+        let bytes = make_antc_bytes(&payload, 2, None);
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(&bytes).unwrap();
+        temp_file.flush().unwrap();
+
+        let result = load_calibration_artifact(temp_file.path());
+        assert!(
+            result.is_err(),
+            "Expected Err for unsupported ANTC version, got Ok"
+        );
+        match result {
+            Err(DataError::LoadError { reason, .. }) => {
+                assert!(
+                    reason.contains("version 2"),
+                    "Expected message to mention 'version 2', got: {}",
+                    reason
+                );
+            }
+            other => panic!("Expected LoadError, got {:?}", other),
+        }
     }
 }
