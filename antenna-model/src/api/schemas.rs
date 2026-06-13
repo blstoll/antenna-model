@@ -595,7 +595,12 @@ pub struct H3CellResult {
     /// Antenna gain toward cell center in dB
     pub gain_db: f64,
 
-    /// Gain loss relative to peak in dB (peak_gain - gain_db)
+    /// Gain relative to the grid-center cell (feed ground target), in dB.
+    /// Computed as `boresight_gain_db - gain_db`, where `boresight_gain_db` is the
+    /// gain toward the center H3 cell (the cell nearest the feed pointing location),
+    /// not the true beam peak (which may lie at a slightly different direction).
+    /// Both `boresight_gain_db` and `gain_db` are on the same basis (physics +
+    /// correction surface, if applicable), so loss_db is internally consistent.
     pub loss_db: f64,
 
     /// Free-space path loss in dB

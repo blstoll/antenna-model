@@ -21,8 +21,9 @@ use crate::error::{AntennaModelError, Result};
 use crate::model::compute_gain_db;
 use crate::model::{
     compute_emitter_direction, compute_feed_position_from_pointing, ecef_to_geodetic,
-    geodetic_to_ecef, AntennaConfiguration, FeedParameters as ModelFeedParams, FeedPosition,
-    IntegrationParams, MeshParameters as ModelMeshParams, ReflectorGeometry as ModelReflector,
+    evaluate_correction, geodetic_to_ecef, AntennaConfiguration, FeedParameters as ModelFeedParams,
+    FeedPosition, IntegrationParams, MeshParameters as ModelMeshParams,
+    ReflectorGeometry as ModelReflector,
 };
 use crate::service::{GainCache, GainCacheKey};
 use rayon::prelude::*;
@@ -128,19 +129,22 @@ fn build_antenna_config(
 /// Compute the gain (dB) for a cell position using the cache.
 ///
 /// Cell center is provided as ECEF for consistent az/el derivation.
-/// Returns `(gain_db, az_deg, el_deg, warnings)` so the caller can use the
+/// Returns `(gain_db, az_deg, el_deg, warnings, correction_applied)` so the caller can use the
 /// az/el values directly for reporting without a second `compute_emitter_direction` call.
 ///
-/// The `GainCache` stores only the scalar gain value, not the full
-/// `GainComputationResult`. To avoid losing extrapolation warnings, this function
-/// checks the cache first and only calls the physics engine on a miss, allowing
-/// us to capture `result.warnings` from the fresh computation.  On a cache hit
-/// the warnings are not re-surfaced (they were already returned on the first
-/// call that populated the entry).
+/// The `GainCache` stores only the **physics-only** scalar gain value, not the
+/// correction-adjusted value. The correction surface is applied AFTER the cache
+/// lookup so that the cache key space remains consistent regardless of whether a
+/// correction surface is present.
+///
+/// On a cache hit, physics warnings are not re-surfaced (they were already returned
+/// on the first call that populated the entry). Correction-surface warnings ARE
+/// always re-surfaced because they are computed fresh on every call.
 #[allow(clippy::too_many_arguments)]
 fn compute_cell_gain(
     cell_ecef: (f64, f64, f64),
     request: &H3LinkBudgetRequest,
+    calibration: &AntennaCalibration,
     antenna_config: &AntennaConfiguration,
     feed_x: f64,
     feed_y: f64,
@@ -148,7 +152,7 @@ fn compute_cell_gain(
     cache: &GainCache,
     integration_params: &IntegrationParams,
     frequency_hz: f64,
-) -> Result<(f64, f64, f64, Vec<String>)> {
+) -> Result<(f64, f64, f64, Vec<String>, bool)> {
     // Create a Position3D for the cell center (ECEF). Earth-surface ECEF values are
     // typically 2–6 Mm which is below the 6400 km auto-detect threshold, so set
     // an explicit tag to prevent misclassification as Geodetic.
@@ -181,20 +185,49 @@ fn compute_cell_gain(
     // warnings by running compute_gain_db directly when the cache is disabled or
     // misses.  To avoid double computation we use a cell to smuggle warnings out
     // of the closure.
+    //
+    // IMPORTANT: the cache stores PHYSICS-ONLY gain. The correction surface must
+    // be applied after this call, never inside the closure.
     let mut captured_warnings: Vec<String> = Vec::new();
-    let gain_db = cache.get_or_compute(&request.antenna_id, &request.feed_id, cache_key, || {
-        let result = compute_gain_db(
-            theta_rad,
-            phi_rad,
-            antenna_config,
-            frequency_hz,
-            integration_params,
-        )?;
-        captured_warnings = result.warnings;
-        Ok(result.gain)
-    })?;
+    let physics_gain_db =
+        cache.get_or_compute(&request.antenna_id, &request.feed_id, cache_key, || {
+            let result = compute_gain_db(
+                theta_rad,
+                phi_rad,
+                antenna_config,
+                frequency_hz,
+                integration_params,
+            )?;
+            captured_warnings = result.warnings;
+            Ok(result.gain)
+        })?;
 
-    Ok((gain_db, az_deg, el_deg, captured_warnings))
+    // Apply correction surface (post-cache). Uses the same gating logic as
+    // `service::evaluator::compute_gain_from_request` (290.0 K temperature constant,
+    // `is_in_coverage` for optional-coverage gating).
+    let mut correction_applied = false;
+    let mut gain_db = physics_gain_db;
+    if let Some(ref surface) = calibration.correction_surface {
+        if crate::service::evaluator::is_in_coverage(
+            &calibration.calibration_coverage,
+            az_deg,
+            el_deg,
+            request.frequency_mhz,
+        ) {
+            let corr = evaluate_correction(surface, az_deg, el_deg, request.frequency_mhz, 290.0)?;
+            gain_db += corr.correction_db;
+            captured_warnings.extend(corr.warnings);
+            correction_applied = true;
+        }
+    }
+
+    Ok((
+        gain_db,
+        az_deg,
+        el_deg,
+        captured_warnings,
+        correction_applied,
+    ))
 }
 
 /// Compute H3 link budget for a request.
@@ -243,7 +276,9 @@ pub fn compute_h3_link_budget(
     // 5. Compute vehicle ECEF for distance calculations
     let (vehicle_ex, vehicle_ey, vehicle_ez) = pos_to_ecef(&request.vehicle_position)?;
 
-    // 6. Compute boresight gain (center cell) as reference peak for loss_db
+    // 6. Compute boresight gain (center cell) as reference peak for loss_db.
+    //    The correction surface is applied here so that loss_db = boresight_gain_db - cell_gain_db
+    //    is computed on a consistent basis (both corrected, or both physics-only).
     let center_latlng_cell = h3o::LatLng::from(center_cell);
     let center_lat = center_latlng_cell.lat();
     let center_lon = center_latlng_cell.lng();
@@ -269,77 +304,101 @@ pub fn compute_h3_link_budget(
         );
         let theta_rad = el_deg.to_radians();
         let phi_rad = az_deg.to_radians();
-        cache.get_or_compute(&request.antenna_id, &request.feed_id, cache_key, || {
-            let result = compute_gain_db(
-                theta_rad,
-                phi_rad,
-                &antenna_config,
-                frequency_hz,
-                &integration_params,
-            )?;
-            Ok(result.gain)
-        })?
+        // Cache stores physics-only gain; correction is applied below.
+        let physics_gain =
+            cache.get_or_compute(&request.antenna_id, &request.feed_id, cache_key, || {
+                let result = compute_gain_db(
+                    theta_rad,
+                    phi_rad,
+                    &antenna_config,
+                    frequency_hz,
+                    &integration_params,
+                )?;
+                Ok(result.gain)
+            })?;
+        // Apply correction surface to boresight reference for consistent loss_db.
+        if let Some(ref surface) = calibration.correction_surface {
+            if crate::service::evaluator::is_in_coverage(
+                &calibration.calibration_coverage,
+                az_deg,
+                el_deg,
+                request.frequency_mhz,
+            ) {
+                let corr =
+                    evaluate_correction(surface, az_deg, el_deg, request.frequency_mhz, 290.0)?;
+                physics_gain + corr.correction_db
+            } else {
+                physics_gain
+            }
+        } else {
+            physics_gain
+        }
     };
 
     // 7. Process each cell in parallel
     const PARALLEL_THRESHOLD: usize = 20;
 
-    let results: Vec<Result<(H3CellResult, Vec<String>)>> = if cells.len() >= PARALLEL_THRESHOLD {
-        cells
-            .par_iter()
-            .map(|&cell| {
-                compute_cell_result(
-                    cell,
-                    request,
-                    &antenna_config,
-                    feed_x,
-                    feed_y,
-                    feed_z,
-                    cache,
-                    &integration_params,
-                    frequency_hz,
-                    vehicle_ex,
-                    vehicle_ey,
-                    vehicle_ez,
-                    boresight_gain_db,
-                )
-            })
-            .collect()
-    } else {
-        cells
-            .iter()
-            .map(|&cell| {
-                compute_cell_result(
-                    cell,
-                    request,
-                    &antenna_config,
-                    feed_x,
-                    feed_y,
-                    feed_z,
-                    cache,
-                    &integration_params,
-                    frequency_hz,
-                    vehicle_ex,
-                    vehicle_ey,
-                    vehicle_ez,
-                    boresight_gain_db,
-                )
-            })
-            .collect()
-    };
+    let results: Vec<Result<(H3CellResult, Vec<String>, bool)>> =
+        if cells.len() >= PARALLEL_THRESHOLD {
+            cells
+                .par_iter()
+                .map(|&cell| {
+                    compute_cell_result(
+                        cell,
+                        request,
+                        calibration,
+                        &antenna_config,
+                        feed_x,
+                        feed_y,
+                        feed_z,
+                        cache,
+                        &integration_params,
+                        frequency_hz,
+                        vehicle_ex,
+                        vehicle_ey,
+                        vehicle_ez,
+                        boresight_gain_db,
+                    )
+                })
+                .collect()
+        } else {
+            cells
+                .iter()
+                .map(|&cell| {
+                    compute_cell_result(
+                        cell,
+                        request,
+                        calibration,
+                        &antenna_config,
+                        feed_x,
+                        feed_y,
+                        feed_z,
+                        cache,
+                        &integration_params,
+                        frequency_hz,
+                        vehicle_ex,
+                        vehicle_ey,
+                        vehicle_ez,
+                        boresight_gain_db,
+                    )
+                })
+                .collect()
+        };
 
-    // 8. Separate successes and failures
+    // 8. Separate successes and failures; track whether correction was applied to any cell.
     let mut cell_results: Vec<H3CellResult> = Vec::with_capacity(cells.len());
     let mut warnings_set: HashSet<String> = HashSet::new();
     let mut failed_count = 0usize;
+    let mut any_correction_applied = false;
 
     for result in results {
         match result {
-            Ok((cell_result, cell_warnings)) => {
+            Ok((cell_result, cell_warnings, correction_applied)) => {
                 cell_results.push(cell_result);
                 for w in cell_warnings {
                     warnings_set.insert(w);
                 }
+                any_correction_applied |= correction_applied;
             }
             Err(e) => {
                 failed_count += 1;
@@ -367,10 +426,13 @@ pub fn compute_h3_link_budget(
     let computation_time_ms = start_time.elapsed().as_secs_f64() * 1000.0;
     let points_evaluated = cells.len();
 
-    // Build calibration status info
+    // Build calibration status info.
+    // `correction_applied` reflects whether the correction surface was actually
+    // applied to at least one cell (gated on coverage), not merely whether a surface
+    // exists — matching the truthful reporting in `service::evaluator`.
     let calibration_status = calibration.calibration_status.as_ref().map(|status| {
         let mut info = CalibrationStatusInfo::from(status);
-        info.correction_applied = calibration.correction_surface.is_some();
+        info.correction_applied = any_correction_applied;
         info
     });
 
@@ -397,6 +459,7 @@ pub fn compute_h3_link_budget(
 fn compute_cell_result(
     cell: h3o::CellIndex,
     request: &H3LinkBudgetRequest,
+    calibration: &AntennaCalibration,
     antenna_config: &AntennaConfiguration,
     feed_x: f64,
     feed_y: f64,
@@ -408,7 +471,7 @@ fn compute_cell_result(
     vehicle_ey: f64,
     vehicle_ez: f64,
     boresight_gain_db: f64,
-) -> Result<(H3CellResult, Vec<String>)> {
+) -> Result<(H3CellResult, Vec<String>, bool)> {
     // Get cell center lat/lon
     let latlng = h3o::LatLng::from(cell);
     let lat_deg = latlng.lat();
@@ -426,19 +489,26 @@ fn compute_cell_result(
 
     // Compute gain together with az/el; az/el are returned directly so we
     // avoid a redundant second call to `compute_emitter_direction` for reporting.
-    let (gain_db, azimuth_deg, elevation_deg, cell_warnings) = compute_cell_gain(
-        (cell_ex, cell_ey, cell_ez),
-        request,
-        antenna_config,
-        feed_x,
-        feed_y,
-        feed_z,
-        cache,
-        integration_params,
-        frequency_hz,
-    )?;
+    // `correction_applied` indicates whether the correction surface was applied.
+    let (gain_db, azimuth_deg, elevation_deg, cell_warnings, correction_applied) =
+        compute_cell_gain(
+            (cell_ex, cell_ey, cell_ez),
+            request,
+            calibration,
+            antenna_config,
+            feed_x,
+            feed_y,
+            feed_z,
+            cache,
+            integration_params,
+            frequency_hz,
+        )?;
 
-    // Compute losses
+    // Compute losses.
+    // loss_db = boresight_gain_db - gain_db, where both values are on the same
+    // basis (both physics+correction, or both physics-only). The boresight reference
+    // computed in step 6 of `compute_h3_link_budget` uses the same correction gating,
+    // so loss_db is a consistent relative measure.
     let loss_db = boresight_gain_db - gain_db;
     let fspl = free_space_path_loss_db(distance_m, frequency_hz);
     let total_path_loss_db = loss_db + fspl;
@@ -461,12 +531,219 @@ fn compute_cell_result(
             g_over_t_db,
         },
         cell_warnings,
+        correction_applied,
     ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::types::{
+        AntennaCalibration, BSplineModel4D, CalibrationMetadata, CalibrationStatus, FeedParameters,
+        MeshParameters, PhysicalAntennaConfig, ReflectorGeometry, ValidityRanges,
+    };
+    use crate::model::evaluate_correction;
+
+    /// Build a minimal `AntennaCalibration` suitable for H3 link-budget tests.
+    ///
+    /// The geometry matches the evaluator.rs `create_test_calibration`:
+    /// 10 m dish, f/D=0.5, no design feed offset, mesh present.
+    fn make_h3_test_calibration() -> AntennaCalibration {
+        let metadata = CalibrationMetadata::builder()
+            .antenna_name("H3 Test Antenna")
+            .calibration_date("2025-01-01T00:00:00Z")
+            .format_version("2.0")
+            .data_source("test")
+            .rmse_db(0.5)
+            .r_squared(0.99)
+            .num_measurements(1000)
+            .build()
+            .unwrap();
+
+        AntennaCalibration::builder()
+            .antenna_id("h3_test_antenna")
+            .feed_id("h3_test_feed")
+            .metadata(metadata)
+            .physical_config(PhysicalAntennaConfig {
+                reflector: ReflectorGeometry {
+                    diameter_m: 10.0,
+                    focal_length_m: 5.0,
+                    f_over_d_ratio: 0.5,
+                    surface_rms_mm: 0.5,
+                },
+                feed: FeedParameters {
+                    position: (0.0, 0.0, 0.0),
+                    q_factor: 8.0,
+                    phase_center_offset_m: 0.0,
+                },
+                mesh: Some(MeshParameters {
+                    mesh_spacing_mm: 5.0,
+                    wire_diameter_mm: 0.5,
+                }),
+            })
+            .validity_ranges(ValidityRanges {
+                azimuth_min_max: (0.0, 360.0),
+                elevation_min_max: (0.0, 90.0),
+                frequency_min_max: (1000.0, 10000.0),
+                temperature_const: 290.0,
+            })
+            .calibration_status(CalibrationStatus::FullyCalibrated {
+                accuracy_estimate_db: 1.0,
+            })
+            .build()
+            .unwrap()
+    }
+
+    /// Build an H3 link-budget request centered near San Francisco with 0 rings
+    /// (a single cell) so tests finish fast.  The vehicle is at 400 km altitude
+    /// which keeps the geometry realistic without requiring real ECEF coordinates.
+    fn make_h3_test_request() -> H3LinkBudgetRequest {
+        use crate::api::schemas::CoordinateSystem;
+        // Vehicle: geodetic (lon, lat, alt_m)
+        let mut vehicle = Position3D::new(-122.0, 37.5, 400_000.0);
+        vehicle.coordinate_system = Some(CoordinateSystem::Geodetic);
+        // Reflector boresight: aimed a tiny bit away from nadir so there is a
+        // well-defined boresight direction.
+        let mut boresight = Position3D::new(-122.01, 37.49, 0.0);
+        boresight.coordinate_system = Some(CoordinateSystem::Geodetic);
+        // Feed position: same as boresight (on-axis) for simplicity.
+        let mut feed = Position3D::new(-122.01, 37.49, 0.0);
+        feed.coordinate_system = Some(CoordinateSystem::Geodetic);
+
+        H3LinkBudgetRequest {
+            antenna_id: "h3_test_antenna".to_string(),
+            feed_id: "h3_test_feed".to_string(),
+            vehicle_position: vehicle,
+            reflector_boresight: boresight,
+            feed_position: feed,
+            frequency_mhz: 8400.0,
+            pointing_frequency_mhz: None,
+            n_rings: 0, // single center cell only — fast
+            h3_resolution: Some(7),
+            temperature_k: None,
+        }
+    }
+
+    /// Build a constant-valued 4D B-spline correction surface.
+    ///
+    /// Uses order-2 (linear), shape [2, 2, 2, 2] (4 control points per axis means
+    /// 16 coefficients total).  The knot vectors are clamped and wide enough to
+    /// cover the test request's az/el/freq/temp values.
+    ///
+    /// For a B-spline with all equal coefficients `c`, the partition-of-unity
+    /// property guarantees that the interpolant evaluates to exactly `c` everywhere
+    /// in range.
+    fn constant_surface_db(value: f64) -> BSplineModel4D {
+        // Order 2, shape [2,2,2,2]: knot vectors need length >= n + order = 2 + 2 = 4.
+        // Clamped knots for order 2: [lo, lo, hi, hi].
+        let surface = BSplineModel4D {
+            // 2×2×2×2 = 16 coefficients, all equal to `value`.
+            coefficients: vec![value; 16],
+            shape: [2, 2, 2, 2],
+            // Wide ranges that encompass any az/el from the test geometry.
+            knots_azimuth: vec![0.0, 0.0, 360.0, 360.0],
+            knots_elevation: vec![0.0, 0.0, 90.0, 90.0],
+            // Cover the test frequency (8400 MHz).
+            knots_frequency: vec![8000.0, 8000.0, 9000.0, 9000.0],
+            // Cover the temperature constant used by the evaluator (290 K).
+            knots_temperature: vec![280.0, 280.0, 300.0, 300.0],
+            spline_order: 2,
+        };
+        // Verify the model passes structural validation before returning.
+        surface
+            .validate()
+            .expect("constant_surface_db: BSplineModel4D failed validate()");
+        surface
+    }
+
+    /// Verify the constant surface helper actually evaluates to the expected constant.
+    ///
+    /// This is a pre-flight check ensuring the test fixture is non-vacuous before
+    /// using it in `test_h3_applies_correction_surface`.
+    #[test]
+    fn test_constant_surface_evaluates_to_constant() {
+        let surface = constant_surface_db(2.0);
+        let result = evaluate_correction(&surface, 45.0, 30.0, 8400.0, 290.0)
+            .expect("evaluate_correction failed on constant surface");
+        assert!(
+            !result.extrapolated,
+            "query (45°, 30°, 8400 MHz, 290 K) should be in range"
+        );
+        assert!(
+            (result.correction_db - 2.0).abs() < 1e-9,
+            "constant surface should evaluate to 2.0 dB everywhere, got {}",
+            result.correction_db
+        );
+    }
+
+    /// Core correctness test: a constant +2 dB correction surface must shift
+    /// every cell's gain by exactly +2 dB relative to the physics-only run.
+    ///
+    /// Also checks that `correction_applied` is truthfully reported.
+    #[test]
+    fn test_h3_applies_correction_surface() {
+        let request = make_h3_test_request();
+
+        // Physics-only calibration (no correction surface).
+        let cal_no_corr = make_h3_test_calibration();
+
+        // Same calibration but with a +2 dB correction surface and unrestricted coverage.
+        let mut cal_corr = cal_no_corr.clone();
+        cal_corr.correction_surface = Some(constant_surface_db(2.0));
+        cal_corr.calibration_coverage = None; // unrestricted → correction applies everywhere
+
+        // Disable the cache so each run computes fresh (avoids cross-test key collisions).
+        let cache1 = GainCache::new(false, 1);
+        let base =
+            compute_h3_link_budget(&request, &cal_no_corr, &cache1, std::time::Instant::now())
+                .expect("physics-only H3 run failed");
+
+        let cache2 = GainCache::new(false, 1);
+        let corrected =
+            compute_h3_link_budget(&request, &cal_corr, &cache2, std::time::Instant::now())
+                .expect("corrected H3 run failed");
+
+        assert!(
+            !base.cells.is_empty(),
+            "expected at least one cell in result"
+        );
+        assert_eq!(
+            base.cells.len(),
+            corrected.cells.len(),
+            "cell count must match between runs"
+        );
+
+        for (a, b) in base.cells.iter().zip(corrected.cells.iter()) {
+            assert!(
+                (b.gain_db - a.gain_db - 2.0).abs() < 1e-6,
+                "cell {}: corrected gain {:.6} - base gain {:.6} = {:.6}, expected +2.0 dB",
+                a.cell_id,
+                b.gain_db,
+                a.gain_db,
+                b.gain_db - a.gain_db
+            );
+        }
+
+        // correction_applied must be true when surface was applied.
+        assert!(
+            corrected
+                .calibration_status
+                .as_ref()
+                .map(|s| s.correction_applied)
+                .unwrap_or(false),
+            "correction_applied should be true when correction surface was applied"
+        );
+
+        // correction_applied must be false when no surface present.
+        assert!(
+            !base
+                .calibration_status
+                .as_ref()
+                .map(|s| s.correction_applied)
+                .unwrap_or(true),
+            "correction_applied should be false when no correction surface"
+        );
+    }
 
     #[test]
     fn test_h3_resolution_l_band() {
