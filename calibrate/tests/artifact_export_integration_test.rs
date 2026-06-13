@@ -110,11 +110,12 @@ fn test_full_export_loads_via_service() {
         .as_ref()
         .expect("correction surface present");
 
-    // Shape: spatial axes top-padded by one, temperature = order + 1.
+    // Shape: spatial axes copy directly (no top-padding; service evaluator fixed),
+    // temperature = order + 1.
     let [n_freq, n_cone, n_clock] = surface.shape;
-    assert_eq!(correction.shape[0], n_clock + 1, "azimuth control points");
-    assert_eq!(correction.shape[1], n_cone + 1, "elevation control points");
-    assert_eq!(correction.shape[2], n_freq + 1, "frequency control points");
+    assert_eq!(correction.shape[0], n_clock, "azimuth control points");
+    assert_eq!(correction.shape[1], n_cone, "elevation control points");
+    assert_eq!(correction.shape[2], n_freq, "frequency control points");
     assert_eq!(
         correction.shape[3],
         surface.spline_order + 1,

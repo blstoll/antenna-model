@@ -76,6 +76,14 @@ pub type Result<T> = std::result::Result<T, ArtifactExportError>;
 /// `frequency := frequency`, with a flat (temperature-independent) temperature
 /// axis over `[t_lo, t_hi]`.
 ///
+/// # Spatial axes
+///
+/// Each spatial knot vector is copied directly from the 3D surface; no padding
+/// is applied.  The service's `find_knot_span` previously had an off-by-one
+/// (`n = len - order - 1`) that prevented it from reaching the topmost knot
+/// interval.  That bug has been fixed (`n = len - order`), so the evaluator and
+/// the calibrate side now agree natively without any extra sentinel knots.
+///
 /// # Temperature axis construction
 ///
 /// The temperature axis is made *flat but valid* (not degenerate). The
@@ -85,15 +93,10 @@ pub type Result<T> = std::result::Result<T, ArtifactExportError>;
 /// `order` copies of `t_lo`, then `t_mid`, then `order` copies of `t_hi`
 /// (length `2*order + 1 = n_temp + order`).
 ///
-/// The interior knot is load-bearing: the service's `find_knot_span` uses
-/// `n = knots.len() - order - 1` as the last span index and special-cases
-/// `u >= knots[n]`. With a purely clamped vector (no interior knot), `knots[n]`
-/// still lies inside the leading repeated-`t_lo` block, so every in-range query
-/// collapses to a degenerate span where all basis functions evaluate to zero —
-/// silently zeroing the correction. Adding the midpoint interior knot moves
-/// `knots[n]` to a genuine interior value, so the basis functions are nonzero
-/// and sum to one. Because all temperature layers are identical, the result is
-/// temperature-independent across `[t_lo, t_hi]`.
+/// The interior knot ensures the temperature axis has a genuine non-degenerate
+/// span so the basis functions are nonzero and sum to one.  Because all
+/// temperature layers are identical, the result is temperature-independent
+/// across `[t_lo, t_hi]`.
 ///
 /// # Arguments
 /// * `surface` - The fitted 3D correction surface.
@@ -116,52 +119,41 @@ pub fn to_bspline_4d(surface: &CorrectionSurface, t_lo: f64, t_hi: f64) -> Resul
     }
 
     // Dimension mapping: azimuth <- clock, elevation <- cone, frequency <- frequency.
-    //
-    // Each spatial axis is "top-padded" (see `pad_top_max`): one extra copy of
-    // the axis maximum is appended to the knot vector and the final control
-    // point is duplicated. This compensates for the service's `find_knot_span`,
-    // which caps the usable span one short of the 3D evaluator's, so that
-    // queries in the topmost knot interval would otherwise select the wrong
-    // coefficients. With the pad, both evaluators agree across the whole
-    // interior (matching to ~1e-14); only the exact axis maximum may differ,
-    // which is the legitimate boundary the round-trip tolerates.
-    let knots_azimuth = pad_top_max(&surface.knots_eclock);
-    let knots_elevation = pad_top_max(&surface.knots_econe);
-    let knots_frequency = pad_top_max(&surface.knots_frequency);
+    // Knot vectors are copied directly (no top-padding needed now that the service's
+    // find_knot_span off-by-one has been corrected).
+    let knots_azimuth = surface.knots_eclock.clone();
+    let knots_elevation = surface.knots_econe.clone();
+    let knots_frequency = surface.knots_frequency.clone();
 
-    let n_az = n_clock + 1;
-    let n_el = n_cone + 1;
-    let n_freq_p = n_freq + 1;
+    let n_az = n_clock;
+    let n_el = n_cone;
+    let n_freq_4d = n_freq;
     let n_temp = order + 1; // flat-but-valid temperature axis (see module/fn docs)
 
     // Clamped temperature knot vector with one interior knot at the midpoint:
     // `order` copies of t_lo, then t_mid, then `order` copies of t_hi
-    // (length 2*order + 1 = n_temp + order). The interior knot is required so
-    // the service's knot-span search does not collapse to a degenerate span.
+    // (length 2*order + 1 = n_temp + order).
     let t_mid = 0.5 * (t_lo + t_hi);
     let mut knots_temperature = Vec::with_capacity(2 * order + 1);
     knots_temperature.extend(std::iter::repeat_n(t_lo, order));
     knots_temperature.push(t_mid);
     knots_temperature.extend(std::iter::repeat_n(t_hi, order));
 
-    // Reindex coefficients. Source index (freq fastest), dest index (az fastest).
-    // The extra (padded) control point on each spatial axis duplicates the last
-    // real layer (constant extrapolation of the boundary), and the temperature
-    // slab is replicated identically across all `n_temp` layers.
-    let total = n_az * n_el * n_freq_p * n_temp;
+    // Reindex coefficients from source layout (freq fastest) to dest layout (az fastest).
+    //   Source: idx = i_freq + n_freq * (i_cone + n_cone * i_clock)
+    //   Dest:   idx = i_az   + n_az   * (i_el   + n_el   * (i_freq + n_freq * i_temp))
+    // The temperature slab is replicated identically across all `n_temp` layers.
+    let total = n_az * n_el * n_freq_4d * n_temp;
     let mut coefficients = vec![0.0_f64; total];
 
     for i_az in 0..n_az {
-        let i_clock = i_az.min(n_clock - 1);
         for i_el in 0..n_el {
-            let i_cone = i_el.min(n_cone - 1);
-            for i_freq in 0..n_freq_p {
-                let src_freq = i_freq.min(n_freq - 1);
-                let src_idx = src_freq + n_freq * (i_cone + n_cone * i_clock);
+            for i_freq in 0..n_freq_4d {
+                let src_idx = i_freq + n_freq * (i_el + n_cone * i_az);
                 let value = surface.coefficients[src_idx];
 
                 for i_temp in 0..n_temp {
-                    let dst_idx = i_az + n_az * (i_el + n_el * (i_freq + n_freq_p * i_temp));
+                    let dst_idx = i_az + n_az * (i_el + n_el * (i_freq + n_freq_4d * i_temp));
                     coefficients[dst_idx] = value;
                 }
             }
@@ -170,28 +162,13 @@ pub fn to_bspline_4d(surface: &CorrectionSurface, t_lo: f64, t_hi: f64) -> Resul
 
     Ok(BSplineModel4D {
         coefficients,
-        shape: [n_az, n_el, n_freq_p, n_temp],
+        shape: [n_az, n_el, n_freq_4d, n_temp],
         knots_azimuth,
         knots_elevation,
         knots_frequency,
         knots_temperature,
         spline_order: order as u8,
     })
-}
-
-/// Append one extra copy of the maximum (last) knot to a clamped knot vector.
-///
-/// This widens the effective control-point count by one so the service's
-/// `find_knot_span` (which caps the usable span one short of the calibrate
-/// evaluator) reaches the topmost real knot interval. The caller pairs this
-/// with duplicating the final control-point layer along the same axis.
-fn pad_top_max(knots: &[f64]) -> Vec<f64> {
-    let mut out = Vec::with_capacity(knots.len() + 1);
-    out.extend_from_slice(knots);
-    if let Some(&last) = knots.last() {
-        out.push(last);
-    }
-    out
 }
 
 /// Extents of the measurement set used to populate validity ranges and coverage.
@@ -468,12 +445,12 @@ mod tests {
             model.validate()
         );
 
-        // Shape mapping: spatial axes are top-padded by one control point, and
-        // the temperature axis has order+1 layers.
+        // Shape mapping: spatial axes copy directly (no padding now that the
+        // service's find_knot_span off-by-one is fixed); temperature axis has order+1 layers.
         let [n_freq, n_cone, n_clock] = surface.shape;
-        assert_eq!(model.shape[0], n_clock + 1);
-        assert_eq!(model.shape[1], n_cone + 1);
-        assert_eq!(model.shape[2], n_freq + 1);
+        assert_eq!(model.shape[0], n_clock); // azimuth <- clock, no pad
+        assert_eq!(model.shape[1], n_cone); // elevation <- cone, no pad
+        assert_eq!(model.shape[2], n_freq); // frequency, no pad
         assert_eq!(model.shape[3], surface.spline_order + 1);
     }
 
