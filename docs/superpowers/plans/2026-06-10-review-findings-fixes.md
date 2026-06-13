@@ -1530,6 +1530,45 @@ git commit -m "feat: optional vehicle attitude quaternion defines a stable anten
 
 ---
 
+## Task 17: Fix `find_knot_span` off-by-one; remove export top-pad workaround (newly found during Task 6 review)
+
+**Goal:** Root-cause fix for a B-spline evaluator off-by-one discovered while implementing Task 6. Not in the original review.
+
+**Background:** `antenna-model/src/model/correction_interpolator.rs::find_knot_span` computes `let n = knots.len() - order as usize - 1;` and uses `n` as the upper bound (`high`) of the knot-span binary search and in the `u_clamped >= knots[high]` short-circuit. The correct number-of-basis-functions bound for a clamped B-spline is `knots.len() - order` (the calibrate-side `correction_surface.rs::find_knot_interval` uses exactly that). With the `- 1`, the search can never reach the final span, so any query in the topmost knot interval of any axis selects the wrong coefficients — a ~232 dB error at the top of range. This affects **every** `BSplineModel4D` producer: boresight-mode artifacts, hand-built surfaces, and (before this fix) full-mode artifacts. Task 6 compensated with an export-side "top-pad" (`pad_top_max` in `calibrate/src/artifact_export.rs`); once the evaluator is correct, that pad must be removed or it would over-extend by one.
+
+**Files:**
+- Modify: `antenna-model/src/model/correction_interpolator.rs` (`find_knot_span` bound)
+- Modify: `calibrate/src/artifact_export.rs` (remove `pad_top_max` and the duplicated-final-layer logic; the temperature flat-axis handling stays)
+
+**Acceptance Criteria:**
+- [ ] A query in the topmost knot interval returns the correct coefficient (known-answer test below)
+- [ ] `pad_top_max` and its call sites removed; `to_bspline_4d` no longer top-pads spatial axes
+- [ ] Task 6's round-trip test (3D vs 4D) still agrees to < 1e-9 (now without the pad)
+- [ ] `cargo test -p antenna-model && cargo test -p calibrate` pass; fmt clean
+
+**Verify:** `cargo test -p antenna-model correction && cargo test -p calibrate artifact_export`
+
+**Steps:**
+
+- [ ] **Step 1: Write a failing known-answer test** in `correction_interpolator.rs`. Construct a `BSplineModel4D` whose correction is a known function of azimuth only (e.g. a clamped linear ramp in azimuth, other axes degenerate), with enough interior knots that there is a distinct top interval. Evaluate at an azimuth inside the top interval and assert the returned `correction_db` matches the analytic value. With the current `- 1` bound this returns the wrong (lower-interval) coefficient and the test fails.
+
+- [ ] **Step 2: Run** → confirm FAIL (top-interval query wrong).
+
+- [ ] **Step 3: Fix** `find_knot_span`: change `let n = knots.len() - order as usize - 1;` to `let n = knots.len() - order as usize;`. Re-check the function's bounds: `high = n`, the `u_clamped >= knots[high]` branch returns `high - 1` (the correct last span index `len - order - 1`), and `low` starts at `order - 1`. Verify no index-out-of-bounds: `knots[n] = knots[len - order]` is valid (it's `u_max`). Update the `// Number of basis functions` comment to match.
+
+- [ ] **Step 4: Remove the workaround** in `artifact_export.rs`: delete `pad_top_max` and the final-control-point duplication along az/el/freq; keep the flat (non-degenerate) temperature-axis construction. The coefficient reindex stays the same.
+
+- [ ] **Step 5: Re-verify** Task 6's `test_round_trip_matches_3d_evaluation` and the integration round-trip still agree to < 1e-9 without the pad (this proves the evaluator fix and the pad removal are mutually consistent). Run both full suites + fmt.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add antenna-model/src/model/correction_interpolator.rs calibrate/src/artifact_export.rs
+git commit -m "fix: correct find_knot_span basis-count off-by-one; drop export top-pad workaround"
+```
+
+---
+
 ## Explicitly deferred (not tasks)
 
 - **Cache invalidation on calibration reload:** no hot-reload path exists in `CalibrationRepository` today; `GainCache::invalidate` already exists for whoever adds one. Re-check when reload is built.
