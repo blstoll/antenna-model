@@ -105,35 +105,6 @@ pub fn compute_gain_from_request(
     // Emit ambiguity warnings for positions that may be misclassified by auto-detection
     warnings.extend(coordinate_ambiguity_warnings(request));
 
-    // Compute feed offset for reporting
-    // Note: This represents the angular offset converted to physical displacement,
-    // not the distance between Earth positions
-    let (feed_az, feed_el) = compute_emitter_direction(
-        &request.feed_position,
-        &request.vehicle_position,
-        &request.reflector_boresight,
-    )?;
-    let (refl_az, refl_el) = compute_emitter_direction(
-        &request.reflector_boresight,
-        &request.vehicle_position,
-        &request.reflector_boresight,
-    )?;
-
-    // The feed offset is the angular separation from boresight.
-    // Both feed_az and refl_az are now in [0, 360) (normalized by compute_emitter_direction).
-    // The difference is used only for reporting; the small angular offset between
-    // feed pointing and reflector boresight is unaffected by the [0,360) normalization.
-    let feed_offset_az = feed_az - refl_az;
-    let feed_offset_el = feed_el - refl_el;
-
-    // For reporting purposes, convert to a simple vector representation
-    // This is an approximate Cartesian representation of the angular offset
-    let feed_offset = crate::api::schemas::Vector3D::new(
-        feed_offset_az,
-        feed_offset_el,
-        (feed_offset_az * feed_offset_az + feed_offset_el * feed_offset_el).sqrt(),
-    );
-
     let (emitter_az, emitter_el) = compute_emitter_direction(
         &request.emitter_position,
         &request.vehicle_position,
@@ -182,6 +153,13 @@ pub fn compute_gain_from_request(
     let feed_y = steer_y + design_pos.1;
     let feed_z = steer_z + design_pos.2;
     let feed_position = FeedPosition::new(feed_x, feed_y, feed_z);
+
+    // Physical feed offset from the focal point in the antenna frame (meters).
+    // feed_z is the z-position relative to the reflector vertex; subtracting focal_length_m
+    // gives the displacement from the focal point. For an on-axis feed (zero steering offset),
+    // this is (0, 0, 0). For a steered feed, x/y are the lateral displacement and z is
+    // the (small, second-order) defocus component.
+    let feed_offset = crate::api::schemas::Vector3D::new(feed_x, feed_y, feed_z - focal_length_m);
 
     // Calculate radial feed displacement for beam squint calculation
     let feed_displacement_m = (feed_x.powi(2) + feed_y.powi(2)).sqrt();
@@ -899,6 +877,106 @@ mod tests {
         assert!(
             !response.metadata.extrapolated,
             "Expected extrapolated=false when no correction surface"
+        );
+    }
+
+    /// Test that `feed_offset_meters` is ~zero when the feed is aimed at the same Earth
+    /// target as the reflector boresight (focused/on-axis configuration).
+    ///
+    /// When `feed_position == reflector_boresight`, `compute_feed_position_from_pointing`
+    /// returns (0, 0, focal_length), so the physical offset from the focal point is
+    /// (0, 0, focal_length - focal_length) = (0, 0, 0).
+    ///
+    /// The OLD (angular) code also returned ~(0, 0, 0) for this case because
+    /// `feed_az - refl_az ≈ 0` — so this test alone does not discriminate.
+    /// See `test_feed_offset_is_meters_not_degrees` for the discriminating case.
+    #[test]
+    fn test_feed_offset_reported_in_meters_zero_for_boresight() {
+        let mut repo = CalibrationRepository::new();
+        repo.add_calibration(create_test_calibration(
+            CalibrationStatus::FullyCalibrated {
+                accuracy_estimate_db: 1.0,
+            },
+        ));
+        let mut request = create_test_request();
+        // Aim the feed at the same Earth point as the reflector boresight → on-axis feed,
+        // so the physical feed offset from the focal point should be ~zero.
+        request.feed_position = request.reflector_boresight.clone();
+        let response = compute_gain_from_request(&request, &repo).unwrap();
+        let off = &response.geometry.feed_offset_meters;
+        assert!(
+            off.x.abs() < 0.05 && off.y.abs() < 0.05 && off.z.abs() < 0.05,
+            "expected ~zero physical offset in meters for boresight-aimed feed, got ({}, {}, {})",
+            off.x,
+            off.y,
+            off.z
+        );
+    }
+
+    /// Discriminating test: verifies `feed_offset_meters` contains physical meters,
+    /// not angular degrees.
+    ///
+    /// Strategy: call `compute_feed_position_from_pointing` directly to get the
+    /// expected physical feed position (x, y, z) in the antenna frame, then assert
+    /// that `response.geometry.feed_offset_meters` equals (x, y, z - focal_length_m).
+    ///
+    /// The default `create_test_request()` has `feed_position` at a different altitude
+    /// than `reflector_boresight` (123.6 m vs 110.0 m at the same lon/lat), giving a
+    /// non-zero angular offset and therefore a non-zero physical feed displacement.
+    ///
+    /// The OLD code stored angular degrees (feed_az - refl_az, feed_el - refl_el),
+    /// which for this geometry differ from the physical meters values — so this test
+    /// WOULD HAVE FAILED against the old implementation.
+    #[test]
+    fn test_feed_offset_is_meters_not_degrees() {
+        let mut repo = CalibrationRepository::new();
+        repo.add_calibration(create_test_calibration(
+            CalibrationStatus::FullyCalibrated {
+                accuracy_estimate_db: 1.0,
+            },
+        ));
+        let request = create_test_request();
+
+        // Compute the expected physical feed position directly using the same helper
+        // the evaluator uses. focal_length_m = 5.0 (from create_test_calibration).
+        let focal_length_m = 5.0_f64;
+        let (steer_x, steer_y, steer_z) = compute_feed_position_from_pointing(
+            &request.feed_position,
+            &request.reflector_boresight,
+            &request.vehicle_position,
+            focal_length_m,
+        )
+        .expect("compute_feed_position_from_pointing failed in test");
+        // Design offset from create_test_calibration is (0, 0, 0), so total = steer
+        let expected_x = steer_x;
+        let expected_y = steer_y;
+        let expected_z_offset = steer_z - focal_length_m;
+
+        let response = compute_gain_from_request(&request, &repo).unwrap();
+        let off = &response.geometry.feed_offset_meters;
+
+        assert!(
+            (off.x - expected_x).abs() < 1e-9,
+            "feed_offset_meters.x should be {expected_x} m (physical), got {}",
+            off.x
+        );
+        assert!(
+            (off.y - expected_y).abs() < 1e-9,
+            "feed_offset_meters.y should be {expected_y} m (physical), got {}",
+            off.y
+        );
+        assert!(
+            (off.z - expected_z_offset).abs() < 1e-9,
+            "feed_offset_meters.z should be {expected_z_offset} m (z - focal_length), got {}",
+            off.z
+        );
+
+        // Also verify the magnitude is physically plausible (sub-meter for the small
+        // angular offset in this test geometry, certainly < focal_length = 5 m).
+        let mag = (off.x * off.x + off.y * off.y + off.z * off.z).sqrt();
+        assert!(
+            mag.is_finite() && mag < focal_length_m,
+            "feed offset magnitude {mag} m is not physically plausible (should be < focal_length {focal_length_m} m)"
         );
     }
 

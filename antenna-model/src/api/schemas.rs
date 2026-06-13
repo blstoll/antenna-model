@@ -298,7 +298,11 @@ pub struct GainResponse {
 /// Details about the geometric configuration computed from 3D positions.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct GeometryInfo {
-    /// Feed offset from reflector boresight in meters
+    /// Physical feed offset from the focal point in the antenna frame (meters).
+    ///
+    /// `x` and `y` are the lateral displacement of the feed from the optical axis;
+    /// `z` is the axial displacement from the focal point (positive toward the reflector vertex).
+    /// For an on-axis (boresight-aimed) feed all three components are ~zero.
     pub feed_offset_meters: Vector3D,
 
     /// Emitter azimuth in antenna frame (degrees)

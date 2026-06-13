@@ -672,13 +672,21 @@ components:
       properties:
         feed_offset_meters:
           type: object
+          description: >
+            Physical feed offset from the focal point in the antenna frame (meters).
+            x and y are the lateral displacement of the feed from the optical axis;
+            z is the axial displacement from the focal point (positive toward the
+            reflector vertex). All three components are ~zero for an on-axis feed.
           properties:
             x:
               type: number
+              description: Lateral displacement along antenna x-axis (meters)
             y:
               type: number
+              description: Lateral displacement along antenna y-axis (meters)
             z:
               type: number
+              description: Axial displacement from focal point (meters)
         emitter_azimuth_deg:
           type: number
         emitter_elevation_deg:
