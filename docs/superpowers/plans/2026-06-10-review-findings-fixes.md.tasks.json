@@ -22,13 +22,13 @@
     {
       "id": 4,
       "subject": "Task 4: Normalize azimuth to [0,360); fix coverage gating",
-      "status": "pending",
+      "status": "completed",
       "description": "**Goal:** compute_emitter_direction returns azimuth in [0,360); is_in_coverage(&None,..) == true so corrections are not silently dropped (F5a + F6, critical).\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/coordinates_3d.rs\", \"antenna-model/src/service/evaluator.rs\"], \"verifyCommand\": \"cargo test -p antenna-model is_in_coverage && cargo test -p antenna-model emitter_direction\", \"acceptanceCriteria\": [\"azimuth normalized 0-360\", \"None coverage unrestricted\", \"tests updated\"]}\n```"
     },
     {
       "id": 5,
       "subject": "Task 5: Harden artifact loader (ANTC header, CRC, spline validation)",
-      "status": "pending",
+      "status": "completed",
       "description": "**Goal:** Loader accepts legacy headerless and ANTC-headered artifacts with CRC32 verification; BSplineModel4D::validate rejects malformed knots so find_knot_span cannot panic (F2 service side + knot-panic medium).\n\n```json:metadata\n{\"files\": [\"antenna-model/src/data/loader.rs\", \"antenna-model/src/data/types.rs\", \"antenna-model/Cargo.toml\"], \"verifyCommand\": \"cargo test -p antenna-model loader && cargo test -p antenna-model bspline\", \"acceptanceCriteria\": [\"ANTC header + CRC verified\", \"bad CRC rejected\", \"knot validation at load\"]}\n```"
     },
     {

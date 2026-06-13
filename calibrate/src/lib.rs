@@ -21,6 +21,7 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used))]
 
 pub mod antenna_config;
+pub mod artifact_export;
 pub mod boresight_calibration;
 pub mod correction_surface;
 pub mod design_specs_loader;

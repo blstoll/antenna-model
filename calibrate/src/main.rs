@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{fmt, EnvFilter};
 
+use calibrate::artifact_export::{export_full_calibration, ExportPhysicalParams};
 use calibrate::{
     build_calibration_artifact,
     // Boresight calibration imports
@@ -17,7 +18,6 @@ use calibrate::{
     export_validation_json,
     fit_correction_surface,
     parse_measurements,
-    save_artifact,
     tune_parameters,
     validate_calibration,
     AntennaClassRegistry,
@@ -138,7 +138,32 @@ struct Args {
     max_tuning_iterations: u64,
 }
 
-/// Compute model predictions for all measurement points
+/// Serialize an [`AntennaCalibration`] with an ANTC header and write it to `path`.
+///
+/// The ANTC header is `[magic "ANTC"][version u32 LE][crc32 u32 LE][len u64 LE]`
+/// followed by the bincode payload, matching the service loader's CRC-checked
+/// path in `antenna_model::data::loader::load_calibration_artifact`.
+fn write_antc_artifact(
+    calibration: &antenna_model::data::types::AntennaCalibration,
+    path: &std::path::Path,
+) -> Result<()> {
+    let payload = bincode::encode_to_vec(calibration, bincode::config::standard())
+        .context("Failed to bincode-encode calibration artifact")?;
+
+    let crc = crc32fast::hash(&payload);
+    let mut bytes = Vec::with_capacity(20 + payload.len());
+    bytes.extend_from_slice(b"ANTC");
+    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&crc.to_le_bytes());
+    bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(&payload);
+
+    std::fs::write(path, &bytes)
+        .with_context(|| format!("Failed to write artifact to {}", path.display()))?;
+    Ok(())
+}
+
+/// Compute physics-model G/T predictions for all measurement points.
 fn compute_model_predictions(
     measurements: &[MeasurementPoint],
     antenna_class: &calibrate::AntennaClass,
@@ -645,7 +670,56 @@ async fn run_calibration(args: Args) -> Result<()> {
         },
     };
 
-    save_artifact(&artifact, &args.output).context("Failed to save calibration artifact")?;
+    // Build a service-loadable AntennaCalibration (4D B-spline correction
+    // surface) and write it as the binary artifact. The legacy
+    // `CalibrationArtifact` above is retained only to drive the optional
+    // `--metadata`/`--report` JSON sidecars below (it is no longer the on-disk
+    // binary format, which the service cannot load).
+    let focal_length_m = class.geometry.diameter_m * class.geometry.f_over_d;
+    let surface_rms_mm = tunable_params
+        .surface_rms_mm
+        .unwrap_or(class.surface.rms_mm);
+    let mesh_spacing_mm = tunable_params
+        .mesh_spacing_mm
+        .unwrap_or(class.mesh.spacing_mm);
+    let wire_diameter_mm = tunable_params
+        .mesh_wire_diameter_mm
+        .unwrap_or(class.mesh.wire_diameter_mm);
+
+    let export_physical = ExportPhysicalParams {
+        diameter_m: class.geometry.diameter_m,
+        focal_length_m,
+        f_over_d_ratio: class.geometry.f_over_d,
+        surface_rms_mm,
+        // On-axis configuration: feed at the focal point.
+        feed_position_m: (0.0, 0.0, focal_length_m),
+        q_factor: class.feed.q_factor,
+        phase_center_offset_m: 0.0,
+        mesh: Some((mesh_spacing_mm, wire_diameter_mm)),
+    };
+
+    let feed_id = args.feed_id.as_deref().unwrap_or("primary");
+    let service_calibration = export_full_calibration(
+        &args.antenna_id,
+        feed_id,
+        &args.antenna_name,
+        format!("file://{}", args.input.display()),
+        &export_physical,
+        &correction_surface,
+        &measurements.points,
+        artifact.validation_report.corrected_rmse,
+        correction_surface.fit_stats.r_squared,
+        model_only_rmse,
+        args.tune_parameters,
+    )
+    .context("Failed to build service-loadable calibration artifact")?;
+
+    service_calibration
+        .validate()
+        .map_err(|e| anyhow::anyhow!("Service calibration failed validation: {}", e))?;
+
+    write_antc_artifact(&service_calibration, &args.output)
+        .context("Failed to write service calibration artifact")?;
 
     let file_size = std::fs::metadata(&args.output)?.len();
     info!(
