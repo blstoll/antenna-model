@@ -59,7 +59,7 @@ const WGS84_B: f64 = WGS84_A * (1.0 - WGS84_F);
 /// WGS84 first eccentricity squared
 const WGS84_E2: f64 = 2.0 * WGS84_F - WGS84_F * WGS84_F;
 
-/// Maximum reasonable altitude for coordinate validation (4000000 km, allows HEO satellites)
+/// Maximum reasonable altitude for coordinate validation (400,000 km, allows HEO satellites)
 const MAX_ALTITUDE_M: f64 = 400_000_000.0;
 
 /// Maximum reasonable ECEF coordinate magnitude (Earth radius + max altitude)
@@ -233,8 +233,14 @@ pub fn ecef_to_geodetic(x: f64, y: f64, z: f64) -> Result<(f64, f64, f64)> {
 
     // Altitude
     let sin_lat = lat_rad.sin();
+    let cos_lat = lat_rad.cos();
     let n = WGS84_A / (1.0 - WGS84_E2 * sin_lat * sin_lat).sqrt();
-    let alt_m = p / lat_rad.cos() - n;
+    // p/cos(lat) − N is 0/0 at the poles (cos(lat)=0); use the z-based form there.
+    let alt_m = if cos_lat.abs() > 1e-4 {
+        p / cos_lat - n
+    } else {
+        z / sin_lat - n * (1.0 - WGS84_E2)
+    };
 
     Ok((lon_deg, lat_deg, alt_m))
 }
@@ -929,5 +935,15 @@ mod tests {
             az > 180.0,
             "az={az}: raw azimuth was negative, wrap should land in (180, 360)"
         );
+    }
+
+    #[test]
+    fn test_ecef_to_geodetic_pole_with_altitude() {
+        for lat in [90.0, -90.0] {
+            let (x, y, z) = geodetic_to_ecef(0.0, lat, 1000.0).unwrap();
+            let (_lon, lat2, alt2) = ecef_to_geodetic(x, y, z).unwrap();
+            assert!((lat2 - lat).abs() < 1e-9, "lat {lat}: got {lat2}");
+            assert!((alt2 - 1000.0).abs() < 1e-3, "lat {lat}: alt {alt2}");
+        }
     }
 }
