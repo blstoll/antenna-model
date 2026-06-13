@@ -275,6 +275,20 @@ pub fn ecef_to_enu_rotation(lat_rad: f64, lon_rad: f64) -> [[f64; 3]; 3] {
     ]
 }
 
+/// Normalize an azimuth in degrees to [0, 360).
+///
+/// Raw `atan2` returns values in (−180, 180]. Coverage ranges and correction-surface
+/// B-spline knots are defined over [0, 360), so all pipeline azimuths must be
+/// normalised before being compared or used as lookup keys.
+pub fn normalize_azimuth_deg(az_deg: f64) -> f64 {
+    let a = az_deg % 360.0;
+    if a < 0.0 {
+        a + 360.0
+    } else {
+        a
+    }
+}
+
 // ============================================================================
 // Antenna Frame → Spherical Coordinates
 // ============================================================================
@@ -340,7 +354,9 @@ pub fn antenna_frame_to_spherical(x: f64, y: f64, z: f64) -> Result<(f64, f64, f
 /// - `boresight_pos`: Reflector boresight position (ECEF or Geodetic)
 ///
 /// # Returns
-/// (azimuth_deg, elevation_deg) in antenna frame
+/// `(azimuth_deg, elevation_deg)` in antenna frame.
+/// `azimuth_deg` is normalized to [0, 360) so that it is compatible with
+/// correction-surface knot ranges and coverage checks, which use [0, 360) throughout.
 pub fn compute_emitter_direction(
     emitter_pos: &Position3D,
     vehicle_pos: &Position3D,
@@ -414,7 +430,7 @@ pub fn compute_emitter_direction(
     let (azimuth_deg, elevation_deg, _range) =
         antenna_frame_to_spherical(antenna_x, antenna_y, antenna_z)?;
 
-    Ok((azimuth_deg, elevation_deg))
+    Ok((normalize_azimuth_deg(azimuth_deg), elevation_deg))
 }
 
 /// Compute feed offset from reflector boresight using boresight-based orientation.
@@ -520,7 +536,10 @@ pub fn compute_feed_position_from_pointing(
         compute_emitter_direction(reflector_pointing_pos, vehicle_pos, reflector_pointing_pos)?;
 
     // Reflector boresight should be at (0, 0) by definition
-    // The angular offset between feed and reflector is the feed displacement angle
+    // The angular offset between feed and reflector is the feed displacement angle.
+    // Both feed_az and refl_az are now in [0, 360) (normalized by compute_emitter_direction);
+    // delta_az is therefore in (-360, 360), which EClockConeCoordinates::from_azimuth_elevation
+    // accepts because clock angle is periodic and the difference is always small in practice.
     let delta_az = feed_az - refl_az;
     let delta_el = feed_el - refl_el;
 
@@ -878,10 +897,10 @@ mod tests {
         // Emitter is directly along boresight direction, so elevation should be near 0°
         // (elevation is polar angle from boresight: 0° = on-axis)
 
-        // Just verify we get reasonable angles (valid range)
+        // Azimuth is now normalized to [0, 360) by compute_emitter_direction
         assert!(
-            azimuth >= -180.0 && azimuth <= 180.0,
-            "Azimuth {} out of range",
+            azimuth >= 0.0 && azimuth < 360.0,
+            "Azimuth {} out of range [0, 360)",
             azimuth
         );
         assert!(
@@ -894,6 +913,21 @@ mod tests {
             elevation < 1.0,
             "Expected on-axis elevation near 0°, got {:.2}°",
             elevation
+        );
+    }
+
+    #[test]
+    fn test_emitter_azimuth_normalized_to_0_360() {
+        // Raw atan2 azimuth for this geometry is ≈ -170.60° (verified empirically);
+        // after normalization it must land in (180, 360), proving the wrap occurred.
+        let vehicle = Position3D::new(0.0, 0.0, 42_000_000.0);
+        let boresight = Position3D::new(0.0, 0.0, 0.0);
+        let emitter = Position3D::new(-1.0, -1.0, 100.0);
+        let (az, _el) = compute_emitter_direction(&emitter, &vehicle, &boresight).unwrap();
+        assert!((0.0..360.0).contains(&az), "az={az} outside [0, 360)");
+        assert!(
+            az > 180.0,
+            "az={az}: raw azimuth was negative, wrap should land in (180, 360)"
         );
     }
 }

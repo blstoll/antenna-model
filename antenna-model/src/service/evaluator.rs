@@ -119,7 +119,10 @@ pub fn compute_gain_from_request(
         &request.reflector_boresight,
     )?;
 
-    // The feed offset is the angular separation from boresight
+    // The feed offset is the angular separation from boresight.
+    // Both feed_az and refl_az are now in [0, 360) (normalized by compute_emitter_direction).
+    // The difference is used only for reporting; the small angular offset between
+    // feed pointing and reflector boresight is unaffected by the [0,360) normalization.
     let feed_offset_az = feed_az - refl_az;
     let feed_offset_el = feed_el - refl_el;
 
@@ -367,10 +370,13 @@ pub fn compute_gain_from_request(
 
 /// Check if the query is within the calibrated coverage region.
 ///
-/// For fully calibrated antennas (no coverage specified), always returns true.
-/// For partially calibrated antennas, checks if azimuth, elevation, and frequency
-/// are within the specified coverage ranges.
-/// For uncalibrated antennas (no coverage), returns false.
+/// When no coverage restriction is recorded (`None`) the correction surface is
+/// treated as valid everywhere it has data — the query is considered in-coverage.
+/// Actual correction application is still gated separately on
+/// `correction_surface.is_some()`, so returning `true` here for `None` is safe.
+///
+/// When a `CalibrationCoverage` is present (partially calibrated artifact), the
+/// query must fall within the specified azimuth, elevation, and frequency ranges.
 pub(crate) fn is_in_coverage(
     coverage: &Option<CalibrationCoverage>,
     azimuth_deg: f64,
@@ -386,7 +392,9 @@ pub(crate) fn is_in_coverage(
                 && frequency_mhz >= cov.frequency_range.0
                 && frequency_mhz <= cov.frequency_range.1
         }
-        None => false,
+        // No coverage restriction recorded (fully calibrated artifact):
+        // the correction surface applies everywhere it has data.
+        None => true,
     }
 }
 
@@ -594,8 +602,9 @@ mod tests {
     }
 
     #[test]
-    fn test_is_in_coverage_none() {
-        assert!(!is_in_coverage(&None, 180.0, 45.0, 8400.0));
+    fn test_is_in_coverage_none_means_unrestricted() {
+        // No coverage restriction recorded (fully calibrated artifact) → always in coverage.
+        assert!(is_in_coverage(&None, 180.0, 45.0, 8400.0));
     }
 
     #[test]

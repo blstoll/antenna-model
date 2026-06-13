@@ -16,7 +16,7 @@
     {
       "id": 3,
       "subject": "Task 3: Safe coordinate-system detection (6400 km + explicit override)",
-      "status": "pending",
+      "status": "completed",
       "description": "**Goal:** Raise ECEF auto-detect threshold to 6,400,000 m; optional explicit coordinate_system on Position3D; ambiguity warning for high-altitude geodetic (F3, critical).\n\n```json:metadata\n{\"files\": [\"antenna-model/src/api/schemas.rs\", \"antenna-model/src/model/coordinates_3d.rs\", \"antenna-model/src/service/validator.rs\", \"openapi.yaml\"], \"verifyCommand\": \"cargo test -p antenna-model coordinate\", \"acceptanceCriteria\": [\"threshold 6400km\", \"explicit override works\", \"ambiguity warning emitted\"]}\n```"
     },
     {
