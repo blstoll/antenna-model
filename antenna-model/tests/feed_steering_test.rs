@@ -98,14 +98,27 @@ fn test_feed_steering_perfect_alignment() {
         response.geometry.emitter_elevation_deg
     );
 
-    // Verify results
+    // Verify results. With the aperture-directivity gain formula (taper efficiency
+    // built into the integral, no hardcoded aperture-efficiency constant), the 34 m
+    // dish with a q=10 feed on f/D=0.4 produces ≈ 63 dBi at boresight (heavy taper).
+    // The uniform-aperture max for 34 m at 8.45 GHz is ≈ 69.6 dBi. Lock to [62, 64].
     assert!(
-        response.gain_db > 66.0,
-        "Gain should be near theoretical maximum (~67 dBi)"
+        response.gain_db > 62.0,
+        "Boresight gain should be near the antenna maximum (~63 dBi), got {:.2} dBi",
+        response.gain_db
     );
     assert!(
-        response.gain_db < 68.0,
-        "Gain should not exceed theoretical maximum"
+        response.gain_db < 64.0,
+        "Boresight gain {:.2} dBi exceeds expected maximum",
+        response.gain_db
+    );
+    // Loss vs the ideal-feed reference (identical pipeline) must be ~0 dB at boresight:
+    // there is no longer a built-in efficiency offset in loss_db.
+    let loss = response.loss_db.unwrap();
+    assert!(
+        loss.abs() < 0.5,
+        "Boresight focused-feed loss should be ~0 dB, got {:.2} dB",
+        loss
     );
 
     // Emitter elevation should be very small (nearly at boresight)

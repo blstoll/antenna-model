@@ -529,6 +529,55 @@ fn aperture_integrand(
     amplitude * phase_factor
 }
 
+/// ∬ |A(ρ,φ')|² ρ dρ dφ' over the aperture — denominator of the aperture-directivity
+/// formula. Uses the same illumination model and Simpson scheme as the field integral.
+///
+/// The directivity of an aperture is
+/// ```text
+/// D(θ,φ) = (4π/λ²) · |∬ A e^{jΨ} ρ dρ dφ'|² / ∬ |A|² ρ dρ dφ'
+/// ```
+/// This function computes the (real, phase-free) denominator. The numerator is the
+/// raw aperture integral from [`integrate_aperture`] (i.e. `IntegrationResult::field`),
+/// NOT the normalized [`compute_far_field`] value.
+pub fn integrate_amplitude_squared(
+    config: &AntennaConfiguration,
+    n_rho: usize,
+    n_phi: usize,
+) -> f64 {
+    let rho_max = config.reflector.diameter / 2.0;
+
+    // Ensure odd number of points for Simpson's rule.
+    let n_rho = if n_rho.is_multiple_of(2) {
+        n_rho + 1
+    } else {
+        n_rho
+    };
+    let n_phi = if n_phi.is_multiple_of(2) {
+        n_phi + 1
+    } else {
+        n_phi
+    };
+
+    let h_rho = rho_max / (n_rho - 1) as f64;
+    let h_phi = 2.0 * PI / (n_phi - 1) as f64;
+
+    let mut sum = 0.0;
+    for j in 0..n_phi {
+        let phi_prime = j as f64 * h_phi;
+        let wj = simpson_weight(j, n_phi);
+        let mut inner = 0.0;
+        for i in 0..n_rho {
+            let rho = i as f64 * h_rho;
+            let a =
+                illumination_amplitude(rho, phi_prime, &config.feed, config.reflector.focal_length);
+            inner += a * a * rho * simpson_weight(i, n_rho);
+        }
+        sum += inner * wj;
+    }
+
+    sum * h_rho * h_phi / 9.0
+}
+
 /// Compute far-field normalization factor
 ///
 /// The complete far-field formula includes a normalization factor:
@@ -759,6 +808,22 @@ mod tests {
         // Invalid angle (NaN)
         let result = integrate_aperture(f64::NAN, 0.0, &config, 8.4e9, &params);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_integrate_amplitude_squared_positive_finite() {
+        let config = test_antenna();
+
+        // The denominator of the directivity formula must be a positive, finite
+        // real number for a physically-illuminated aperture.
+        let amp_sq = integrate_amplitude_squared(&config, 33, 65);
+        assert!(amp_sq.is_finite());
+        assert!(amp_sq > 0.0);
+
+        // Sanity upper bound: |A| <= 1 everywhere, so the integral is at most the
+        // area integral ∬ ρ dρ dφ' = π(D/2)² = π·0.25 ≈ 0.785 for the 1m test dish.
+        let area = PI * (config.reflector.diameter / 2.0).powi(2);
+        assert!(amp_sq <= area + 1e-9);
     }
 
     #[test]

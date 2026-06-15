@@ -24,6 +24,8 @@
 
 use std::f64::consts::PI;
 
+use num_complex::Complex64;
+
 use crate::error::{ComputationError, ComputationResult};
 use crate::model::{
     direct_path::compute_with_direct_path,
@@ -31,8 +33,10 @@ use crate::model::{
         analyze_edge_cases, apply_gain_floor, apply_gain_floor_db, needs_adaptive_integration,
         ComputationMode,
     },
-    geometry::{AntennaConfiguration, FeedParameters, FeedPosition, ReflectorGeometry},
-    integration::{compute_far_field, IntegrationParams},
+    geometry::AntennaConfiguration,
+    integration::{
+        far_field_normalization, integrate_amplitude_squared, integrate_aperture, IntegrationParams,
+    },
     ray_trace::compute_gain_ray_trace,
     wavelength_from_frequency,
 };
@@ -243,7 +247,7 @@ pub fn compute_gain(
                  gain accuracy may be degraded."
                     .to_string(),
             );
-            compute_gain_ray_tracing(theta, phi, config, wavelength)?
+            compute_gain_ray_tracing(theta, phi, config, frequency_hz, wavelength, params)?
         }
         ComputationMode::NearBoresightDirectPath => {
             compute_gain_direct_path(theta, phi, config, frequency_hz, wavelength, params)?
@@ -254,6 +258,38 @@ pub fn compute_gain(
     let gain = apply_gain_floor(gain);
 
     Ok(GainComputationResult { gain, warnings })
+}
+
+/// Absolute gain from the raw aperture integral (standard directivity formula):
+/// ```text
+/// gain(θ,φ) = η · (4π/λ²) · |I|² / ∬|A|² dA,   I = ∬ A e^{jΨ} ρ dρ dφ'
+/// ```
+/// where `I` is the RAW, un-normalized aperture integral returned by
+/// [`integrate_aperture`] (`IntegrationResult::field`) — NOT [`compute_far_field`],
+/// whose `jk/(2λ)` normalization (magnitude π/λ²) would be wrongly squared into the
+/// directivity. Taper/illumination efficiency is built into the ratio |I|²/∬|A|²,
+/// so no separate aperture-efficiency constant is needed.
+///
+/// `η` here is the Ruze (surface) × mesh efficiency from [`overall_efficiency`].
+/// **Spillover efficiency is NOT modeled** — the calibration correction surface
+/// absorbs it (and any other residual systematic offset).
+fn absolute_gain_from_integral(
+    raw_field: Complex64,
+    config: &AntennaConfiguration,
+    wavelength: f64,
+    params: &IntegrationParams,
+) -> ComputationResult<f64> {
+    // Denominator integrand |A|²ρ is phase-free and smooth, so the min grid suffices
+    // even when the field integral adaptively refines.
+    let amp_sq = integrate_amplitude_squared(config, params.min_rho_points, params.min_phi_points);
+    if amp_sq <= 1e-20 {
+        return Err(ComputationError::NumericalInstability {
+            operation: "absolute_gain_from_integral".to_string(),
+            reason: "amplitude integral is zero".to_string(),
+        });
+    }
+    let directivity = 4.0 * PI / (wavelength * wavelength) * raw_field.norm_sqr() / amp_sq;
+    Ok(directivity * overall_efficiency(config, wavelength))
 }
 
 /// Standard physical optics gain computation
@@ -268,58 +304,11 @@ fn compute_gain_standard(
     // Select integration parameters (adaptive near nulls)
     let effective_params = select_integration_params(theta, phi, config, params);
 
-    // Compute far-field electric field at the requested angle
-    let e_field = compute_far_field(theta, phi, config, frequency_hz, &effective_params)?;
+    // Raw aperture integral I = ∬ A e^{jΨ} ρ dρ dφ' at the requested angle.
+    // The directivity formula uses this raw value, not the normalized far field.
+    let result = integrate_aperture(theta, phi, config, frequency_hz, &effective_params)?;
 
-    // Power is proportional to |E|²
-    let field_magnitude_squared = e_field.norm_sqr();
-
-    // Compute maximum possible on-axis field (ideal reference: feed at focus, ideal surface)
-    // This gives us the reference for computing actual aperture efficiency
-    let ideal_feed = FeedParameters::new(
-        FeedPosition::at_focus(config.reflector.focal_length),
-        config.feed.q_factor,
-        config.feed.phase_center_offset,
-        config.feed.asymmetry_factor,
-    )?;
-    let ideal_reflector = ReflectorGeometry::new(
-        config.reflector.diameter,
-        config.reflector.focal_length,
-        0.0, // Ideal surface (no RMS error)
-    )?;
-    let ideal_config = AntennaConfiguration::new(
-        format!("{}_ideal", config.id),
-        format!("{} Ideal", config.name),
-        ideal_reflector,
-        ideal_feed,
-        config.mesh.clone(), // Keep mesh parameters
-    )?;
-
-    // Compute ideal on-axis field for reference
-    let e_ideal_on_axis = compute_far_field(0.0, 0.0, &ideal_config, frequency_hz, params)?;
-    let ideal_on_axis_field = e_ideal_on_axis.norm_sqr();
-
-    // Relative gain (normalized to ideal on-axis)
-    // This correctly captures efficiency loss from feed displacement AND surface errors
-    let relative_gain = if ideal_on_axis_field > 1e-20 {
-        field_magnitude_squared / ideal_on_axis_field
-    } else {
-        return Err(ComputationError::NumericalInstability {
-            operation: "compute_gain".to_string(),
-            reason: "Ideal on-axis field is zero or near-zero".to_string(),
-        });
-    };
-
-    // Apply efficiency corrections (Ruze and mesh)
-    let efficiency = overall_efficiency(config, wavelength);
-
-    // Compute absolute gain using theoretical maximum
-    // Assume aperture efficiency of 0.55 (typical for cos^q feed with q~8)
-    let theoretical_gain = theoretical_max_gain(config.reflector.diameter, wavelength, 0.55);
-
-    // Final gain = theoretical maximum × efficiency × relative pattern
-    // NOTE: relative_gain now includes efficiency loss from feed displacement
-    Ok(theoretical_gain * efficiency * relative_gain)
+    absolute_gain_from_integral(result.field, config, wavelength, &effective_params)
 }
 
 /// Higher-order aberrations gain computation for moderate feed offsets
@@ -344,69 +333,30 @@ fn compute_gain_higher_order(
         ..effective_params
     };
 
-    // Compute far-field electric field with higher-order aberrations
-    let e_field = compute_far_field(theta, phi, config, frequency_hz, &ho_params)?;
+    // Raw aperture integral with higher-order aberrations included in the phase.
+    let result = integrate_aperture(theta, phi, config, frequency_hz, &ho_params)?;
 
-    // Power is proportional to |E|²
-    let field_magnitude_squared = e_field.norm_sqr();
-
-    // Compute maximum possible on-axis field (ideal reference)
-    // NOTE: These unwrap() calls are safe because we're constructing from known-valid parameters
-    let ideal_feed = FeedParameters::new(
-        FeedPosition::at_focus(config.reflector.focal_length),
-        config.feed.q_factor,
-        config.feed.phase_center_offset,
-        config.feed.asymmetry_factor,
-    )?;
-    let ideal_reflector = ReflectorGeometry::new(
-        config.reflector.diameter,
-        config.reflector.focal_length,
-        0.0, // Ideal surface (no RMS error)
-    )?;
-    let ideal_config = AntennaConfiguration::new(
-        format!("{}_ideal", config.id),
-        format!("{} Ideal", config.name),
-        ideal_reflector,
-        ideal_feed,
-        config.mesh.clone(),
-    )?;
-
-    // Compute ideal on-axis field for reference (without higher-order aberrations)
-    let e_ideal_on_axis = compute_far_field(0.0, 0.0, &ideal_config, frequency_hz, params)?;
-    let ideal_on_axis_field = e_ideal_on_axis.norm_sqr();
-
-    // Relative gain (normalized to ideal on-axis)
-    let relative_gain = if ideal_on_axis_field > 1e-20 {
-        field_magnitude_squared / ideal_on_axis_field
-    } else {
-        return Err(ComputationError::NumericalInstability {
-            operation: "compute_gain_higher_order".to_string(),
-            reason: "Ideal on-axis field is zero or near-zero".to_string(),
-        });
-    };
-
-    // Apply efficiency corrections (Ruze and mesh)
-    let efficiency = overall_efficiency(config, wavelength);
-
-    // Compute absolute gain using theoretical maximum
-    let theoretical_gain = theoretical_max_gain(config.reflector.diameter, wavelength, 0.55);
-
-    // Final gain = theoretical maximum × efficiency × relative pattern
-    Ok(theoretical_gain * efficiency * relative_gain)
+    absolute_gain_from_integral(result.field, config, wavelength, &ho_params)
 }
 
 /// Ray tracing gain computation for large feed offsets
+///
+/// Ray tracing produces a *relative* pattern only (a |E|²-like quantity). To make it
+/// absolute we anchor it to the directivity of the boresight physical-optics aperture
+/// field (computed via [`absolute_gain_from_integral`]) and scale by the ray-traced
+/// relative pattern `ray_gain(θ,φ) / ray_gain(0,0)`. This keeps ray tracing on the
+/// same absolute scale as the standard PO path. The ray-tracing model itself is a stub
+/// (see the warning emitted by the caller); only the normalization is corrected here.
 fn compute_gain_ray_tracing(
     theta: f64,
     phi: f64,
     config: &AntennaConfiguration,
+    frequency_hz: f64,
     wavelength: f64,
+    params: &IntegrationParams,
 ) -> ComputationResult<f64> {
-    // Compute gain using ray tracing
+    // Compute gain using ray tracing (relative pattern)
     let ray_gain_relative = compute_gain_ray_trace(config, theta, phi, wavelength);
-
-    // Ray tracing returns |E|², need to normalize and convert to absolute gain
-    // Use same normalization approach as standard computation
     let on_axis_ray_gain = compute_gain_ray_trace(config, 0.0, 0.0, wavelength);
 
     let relative_gain = if on_axis_ray_gain > 1e-20 {
@@ -418,14 +368,12 @@ fn compute_gain_ray_tracing(
         });
     };
 
-    // Apply efficiency corrections (Ruze and mesh)
-    let efficiency = overall_efficiency(config, wavelength);
+    // Absolute boresight gain from the physical-optics aperture integral, used as the
+    // anchor for the ray-traced relative pattern.
+    let on_axis = integrate_aperture(0.0, 0.0, config, frequency_hz, params)?;
+    let boresight_gain = absolute_gain_from_integral(on_axis.field, config, wavelength, params)?;
 
-    // Compute absolute gain using theoretical maximum
-    let theoretical_gain = theoretical_max_gain(config.reflector.diameter, wavelength, 0.55);
-
-    // Final gain with ray-traced relative pattern
-    Ok(theoretical_gain * efficiency * relative_gain)
+    Ok(boresight_gain * relative_gain)
 }
 
 /// Direct path interference gain computation for near-boresight scenarios
@@ -440,52 +388,31 @@ fn compute_gain_direct_path(
     // Select integration parameters (adaptive near nulls)
     let effective_params = select_integration_params(theta, phi, config, params);
 
-    // First compute the reflected field using standard physical optics
-    let e_reflected = compute_far_field(theta, phi, config, frequency_hz, &effective_params)?;
+    // Raw reflected-only aperture integral I = ∬ A e^{jΨ} ρ dρ dφ'. Its directivity is
+    // the absolute reflected-path gain.
+    let reflected = integrate_aperture(theta, phi, config, frequency_hz, &effective_params)?;
+    let reflected_gain =
+        absolute_gain_from_integral(reflected.field, config, wavelength, &effective_params)?;
 
-    // Compute field with direct path interference
-    let result = compute_with_direct_path(config, theta, phi, wavelength, e_reflected);
+    // The direct-path module combines a *normalized* reflected far field with a direct
+    // contribution. We apply its effect as a dimensionless ratio
+    // |total|² / |reflected|², which is invariant to the (shared) normalization, then
+    // scale the absolute reflected-path gain by it. This keeps the direct-path result on
+    // the same absolute (directivity) scale as the standard PO path.
+    //
+    // Derive the normalized field from the already-computed `reflected.field` to avoid
+    // running the aperture integral a second time with identical arguments.
+    let e_reflected_normalized = far_field_normalization(wavelength) * reflected.field;
+    let direct = compute_with_direct_path(config, theta, phi, wavelength, e_reflected_normalized);
 
-    // Use total field (reflected + direct) for gain computation
-    let field_magnitude_squared = result.total_field.norm_sqr();
-
-    // Compute ideal on-axis field for reference
-    let ideal_feed = FeedParameters::new(
-        FeedPosition::at_focus(config.reflector.focal_length),
-        config.feed.q_factor,
-        config.feed.phase_center_offset,
-        config.feed.asymmetry_factor,
-    )?;
-    let ideal_reflector = ReflectorGeometry::new(
-        config.reflector.diameter,
-        config.reflector.focal_length,
-        0.0,
-    )?;
-    let ideal_config = AntennaConfiguration::new(
-        format!("{}_ideal", config.id),
-        format!("{} Ideal", config.name),
-        ideal_reflector,
-        ideal_feed,
-        config.mesh.clone(),
-    )?;
-
-    let e_ideal_on_axis = compute_far_field(0.0, 0.0, &ideal_config, frequency_hz, params)?;
-    let ideal_on_axis_field = e_ideal_on_axis.norm_sqr();
-
-    let relative_gain = if ideal_on_axis_field > 1e-20 {
-        field_magnitude_squared / ideal_on_axis_field
+    let reflected_norm_sq = e_reflected_normalized.norm_sqr();
+    let direct_path_factor = if reflected_norm_sq > 1e-30 {
+        direct.total_field.norm_sqr() / reflected_norm_sq
     } else {
-        return Err(ComputationError::NumericalInstability {
-            operation: "compute_gain_direct_path".to_string(),
-            reason: "Ideal on-axis field is zero or near-zero".to_string(),
-        });
+        1.0
     };
 
-    // Apply efficiency corrections
-    let efficiency = overall_efficiency(config, wavelength);
-    let theoretical_gain = theoretical_max_gain(config.reflector.diameter, wavelength, 0.55);
-
-    Ok(theoretical_gain * efficiency * relative_gain)
+    Ok(reflected_gain * direct_path_factor)
 }
 
 /// Compute antenna gain in dB
@@ -790,6 +717,31 @@ mod tests {
     }
 
     #[test]
+    fn test_boresight_gain_reflects_taper_efficiency() {
+        // No mesh, ideal surface → efficiency = 1, so boresight gain is pure aperture
+        // directivity with the q=8 taper. Must be below the uniform-aperture max and
+        // within a few dB of it (taper efficiency ~0.7-0.9).
+        let reflector = ReflectorGeometry::new(1.0, 0.5, 0.0).unwrap();
+        let feed = FeedParameters::new(FeedPosition::at_focus(0.5), 8.0, 0.0, 1.0).unwrap();
+        let config =
+            AntennaConfiguration::new("t".into(), "T".into(), reflector, feed, None).unwrap();
+        let params = IntegrationParams::default();
+        let result = compute_gain_db(0.0, 0.0, &config, 8.4e9, &params).unwrap();
+        let wl = 0.0357_f64; // ~8.4 GHz
+        let uniform_db = 10.0 * (4.0 * PI * (PI * 0.25) / (wl * wl)).log10(); // 4πA/λ², A=π(0.5)²
+        assert!(
+            result.gain < uniform_db,
+            "taper must cost gain: {} vs {uniform_db}",
+            result.gain
+        );
+        assert!(
+            result.gain > uniform_db - 6.0,
+            "taper loss implausibly large: {} vs {uniform_db}",
+            result.gain
+        );
+    }
+
+    #[test]
     fn test_compute_gain_positive() {
         let config = test_antenna();
         let params = IntegrationParams::fast();
@@ -800,9 +752,12 @@ mod tests {
         // Gain should be positive
         assert!(gain > 0.0);
 
-        // Should be reasonable value (10 to 10000 linear, or 10-40 dB)
-        assert!(gain > 10.0);
-        assert!(gain < 100000.0);
+        // Boresight gain for the 1 m test dish (q=8 taper, 1 mm RMS, 5 mm mesh) at
+        // 8.4 GHz is ~34.7 dBi from the aperture-directivity formula. In linear units
+        // that is 10^(34.7/10) ≈ 2950. Bound it to [2000, 5000] (≈33.0–37.0 dBi):
+        // a meaningful window around the derived value, not just "finite".
+        assert!(gain > 2000.0, "boresight gain {gain} (linear) too low");
+        assert!(gain < 5000.0, "boresight gain {gain} (linear) too high");
     }
 
     #[test]
@@ -813,9 +768,12 @@ mod tests {
         let result = compute_gain_db(0.0, 0.0, &config, 8.4e9, &params).unwrap();
         let gain_db = result.gain;
 
-        // Gain should be reasonable (10-40 dB for 1m dish at X-band)
-        assert!(gain_db > 10.0);
-        assert!(gain_db < 50.0);
+        // Aperture-directivity formula: uniform-aperture max for a 1 m dish at 8.4 GHz
+        // (λ≈0.0357 m) is 10·log10(4πA/λ²) ≈ 38.9 dBi. The q=8 taper (~1.5–2 dB),
+        // 1 mm RMS Ruze (~0.5 dB) and mesh (~0.4 dB) losses give ~34.7 dBi.
+        // Bound to [33.0, 37.0] dBi.
+        assert!(gain_db > 33.0, "boresight gain {gain_db} dBi too low");
+        assert!(gain_db < 37.0, "boresight gain {gain_db} dBi too high");
     }
 
     #[test]
@@ -840,10 +798,11 @@ mod tests {
 
         let g_over_t = compute_g_over_t(0.0, 0.0, &config, 8.4e9, 50.0, &params).unwrap();
 
-        // G/T for 1m dish at X-band with 50K should be reasonable
-        // Gain ~35 dB, T = 50K (17 dB) => G/T ~ 18 dB/K
-        assert!(g_over_t > 10.0);
-        assert!(g_over_t < 30.0);
+        // G/T = G(dB) − 10·log10(T). Boresight gain ≈ 34.7 dBi (see above),
+        // T = 50 K → 10·log10(50) ≈ 17.0 dB, so G/T ≈ 17.7 dB/K.
+        // Bound to [15.0, 20.0] dB/K.
+        assert!(g_over_t > 15.0, "G/T {g_over_t} dB/K too low");
+        assert!(g_over_t < 20.0, "G/T {g_over_t} dB/K too high");
     }
 
     #[test]

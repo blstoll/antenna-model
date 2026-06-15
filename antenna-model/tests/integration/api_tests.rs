@@ -81,9 +81,12 @@ async fn test_single_gain_computation_ecef() {
     assert_eq!(response.antenna_id, request.antenna_id);
     assert_eq!(response.feed_id, request.feed_id);
 
-    // Check gain is reasonable (should be between 20-50 dB for typical antennas)
+    // Check gain is reasonable. This request steers the feed far off boresight
+    // (feed near the vehicle, boresight at the satellite), so the gain is well below
+    // the antenna's boresight maximum. With the aperture-directivity formula (no
+    // hardcoded 0.55 efficiency) the 5 m test_simple antenna yields ≈ 8.7 dBi here.
     assert!(
-        response.gain_db > 10.0 && response.gain_db < 60.0,
+        response.gain_db > 5.0 && response.gain_db < 60.0,
         "Gain {} is outside expected range",
         response.gain_db
     );
@@ -118,10 +121,13 @@ async fn test_single_gain_computation_geodetic() {
     assert!(response.loss_db.is_some());
 
     let loss = response.loss_db.unwrap();
-    // Loss can be negative (gain over reference) due to coma lobe effects
-    // Expect reasonable range: -10 dB (gain) to +30 dB (loss)
+    // loss_db = reference(ideal boresight) − actual. The request steers the feed far
+    // off boresight AND uses a different pointing frequency (8450 vs 8400 MHz, adding
+    // beam squint), so the actual gain is tens of dB below the ideal reference. With
+    // loss_db now free of the old ~2.6 dB efficiency offset, the value is ≈ 32 dB.
+    // Loss can also be slightly negative near coma lobes. Range: -10 dB to +40 dB.
     assert!(
-        (-10.0..30.0).contains(&loss),
+        (-10.0..40.0).contains(&loss),
         "Loss {} is outside expected range",
         loss
     );

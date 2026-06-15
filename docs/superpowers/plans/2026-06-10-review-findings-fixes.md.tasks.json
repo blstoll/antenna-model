@@ -41,13 +41,13 @@
     {
       "id": 7,
       "subject": "Task 7: Small coordinate fixes (to_degrees, pole altitude, comment)",
-      "status": "pending",
+      "status": "completed",
       "description": "**Goal:** Fix EClockConeCoordinates::to_degrees unit bug, pole singularity in ecef_to_geodetic altitude (z/sin(lat) − N(1−e²) branch), stale MAX_ALTITUDE_M comment (F10, F12 + doc).\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/coordinates.rs\", \"antenna-model/src/model/coordinates_3d.rs\"], \"verifyCommand\": \"cargo test -p antenna-model to_degrees && cargo test -p antenna-model geodetic\", \"acceptanceCriteria\": [\"to_degrees returns degrees\", \"pole-safe altitude\", \"comment fixed\"]}\n```"
     },
     {
       "id": 8,
       "subject": "Task 8: Apply correction surface in H3 link budget",
-      "status": "pending",
+      "status": "completed",
       "blockedBy": [4],
       "description": "**Goal:** H3 cell gains include calibration correction (evaluator gating, applied AFTER cache lookup); correction_applied truthful; loss_db semantics documented (F8 + H3 labeling).\n\n```json:metadata\n{\"files\": [\"antenna-model/src/service/h3_link_budget.rs\", \"antenna-model/src/api/schemas.rs\", \"openapi.yaml\"], \"verifyCommand\": \"cargo test -p antenna-model h3\", \"acceptanceCriteria\": [\"correction applied per cell\", \"applied after cache\", \"correction_applied truthful\"]}\n```"
     },
@@ -81,7 +81,7 @@
     {
       "id": 13,
       "subject": "Task 13: Report physical feed offset in meters",
-      "status": "pending",
+      "status": "completed",
       "description": "**Goal:** GeometryInfo.feed_offset_meters = (feed_x, feed_y, feed_z − focal_length) in meters, replacing the (Δaz°, Δel°, angle) packing (F15).\n\n```json:metadata\n{\"files\": [\"antenna-model/src/service/evaluator.rs\", \"antenna-model/src/api/schemas.rs\", \"openapi.yaml\"], \"verifyCommand\": \"cargo test -p antenna-model feed_offset\", \"acceptanceCriteria\": [\"offset in meters\", \"zero for focused feed\"]}\n```"
     },
     {
@@ -107,7 +107,7 @@
     {
       "id": 17,
       "subject": "Task 17: Fix find_knot_span off-by-one; remove export top-pad workaround",
-      "status": "pending",
+      "status": "completed",
       "blockedBy": [6],
       "description": "**Goal:** Root-cause fix for the B-spline evaluator off-by-one discovered during Task 6 review. `antenna-model/src/model/correction_interpolator.rs::find_knot_span` uses `n = knots.len() - order - 1`; the correct number-of-basis-functions bound is `knots.len() - order` (matches calibrate's find_knot_interval). The bug loses the topmost knot interval for ANY BSplineModel4D producer (boresight mode, hand-built surfaces) — 232 dB mismatch at the top of range. Task 6 worked around it with an export-side top-pad; this task fixes the root cause and removes the now-redundant pad. NOT in original review (newly found).\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/correction_interpolator.rs\", \"calibrate/src/artifact_export.rs\"], \"verifyCommand\": \"cargo test -p antenna-model correction && cargo test -p calibrate artifact_export\", \"acceptanceCriteria\": [\"top-interval query returns correct coefficient\", \"export top-pad removed\", \"round-trip still 1e-9\", \"both suites pass\"]}\n```"
     }

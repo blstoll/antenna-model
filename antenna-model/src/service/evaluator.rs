@@ -76,8 +76,7 @@ use crate::data::types::{CalibrationCoverage, CalibrationStatus};
 use crate::error::{AntennaModelError, Result};
 use crate::model::{
     apply_beam_squint_correction, compute_emitter_direction, compute_feed_position_from_pointing,
-    compute_gain_db, evaluate_correction, overall_efficiency, theoretical_max_gain,
-    wavelength_from_frequency, AntennaConfiguration, IntegrationParams,
+    compute_gain_db, evaluate_correction, AntennaConfiguration, IntegrationParams,
 };
 use crate::service::validator::coordinate_ambiguity_warnings;
 use std::time::Instant;
@@ -291,17 +290,36 @@ pub fn compute_gain_from_request(
 
     let final_gain_db = gain_physics + correction_db;
 
-    // Compute reference gain if requested
+    // Compute reference gain if requested.
+    //
+    // The reference is the boresight gain of an IDEAL version of this antenna (feed at
+    // the focal point, perfect surface), evaluated through the SAME `compute_gain_db`
+    // pipeline as the actual gain. Because both numbers come from the identical
+    // aperture-directivity formula, `loss_db` has no built-in offset: it is purely the
+    // pointing/aberration loss (≈0 dB at boresight with a focused feed).
     let (reference_gain_db, loss_db) = if request.include_reference {
-        // Reference gain is theoretical maximum with efficiency factors (no pointing loss)
-        let wavelength_m = wavelength_from_frequency(frequency_hz);
-        let aperture_efficiency = overall_efficiency(&antenna_config, wavelength_m);
-        let theoretical_gain_linear =
-            theoretical_max_gain(diameter_m, wavelength_m, aperture_efficiency);
-        let reference_db = 10.0 * theoretical_gain_linear.log10();
+        let ideal_reflector = ModelReflector::new(diameter_m, focal_length_m, 0.0)
+            .map_err(|e| AntennaModelError::Generic(format!("ideal reflector: {e}")))?;
+        let ideal_feed = ModelFeedParams::new(
+            FeedPosition::at_focus(focal_length_m),
+            calibration.physical_config.feed.q_factor,
+            calibration.physical_config.feed.phase_center_offset_m,
+            1.0,
+        )
+        .map_err(|e| AntennaModelError::Generic(format!("ideal feed: {e}")))?;
+        let ideal_config = AntennaConfiguration::new(
+            format!("{}_ideal", calibration.antenna_id),
+            "ideal".into(),
+            ideal_reflector,
+            ideal_feed,
+            antenna_config.mesh.clone(),
+        )
+        .map_err(|e| AntennaModelError::Generic(format!("ideal config: {e}")))?;
+        let reference =
+            compute_gain_db(0.0, 0.0, &ideal_config, frequency_hz, &integration_params)?;
 
-        // Loss is difference between reference and actual gain (without correction surface)
-        (Some(reference_db), Some(reference_db - final_gain_db))
+        // Loss is reference minus actual gain (without correction surface).
+        (Some(reference.gain), Some(reference.gain - final_gain_db))
     } else {
         (None, None)
     };
@@ -718,6 +736,27 @@ mod tests {
         // Should have warning about uncalibrated
         assert!(!response.warnings.is_empty());
         assert!(response.warnings.iter().any(|w| w.contains("uncalibrated")));
+    }
+
+    #[test]
+    fn test_loss_near_zero_for_boresight_focused_feed() {
+        let mut repo = CalibrationRepository::new();
+        repo.add_calibration(create_test_calibration(
+            CalibrationStatus::FullyCalibrated {
+                accuracy_estimate_db: 1.0,
+            },
+        ));
+        let mut request = create_test_request();
+        // Aim emitter along the boresight direction (on-axis) and feed at boresight (focused):
+        request.emitter_position = request.reflector_boresight.clone();
+        request.feed_position = request.reflector_boresight.clone();
+        request.include_reference = true;
+        let response = compute_gain_from_request(&request, &repo).unwrap();
+        let loss = response.loss_db.expect("reference requested");
+        assert!(
+            loss.abs() < 0.6,
+            "boresight focused-feed loss should be ~0 dB, got {loss}"
+        );
     }
 
     #[test]
