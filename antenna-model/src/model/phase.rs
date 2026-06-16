@@ -109,21 +109,21 @@ pub fn phase_path(
     k * (term1 - term2)
 }
 
-/// Feed displacement phase (coma aberration)
+/// Feed displacement phase (coma and defocus aberrations)
 ///
 /// When the feed is displaced from the focal point, aberrations are introduced including
-/// beam steering, coma (asymmetric sidelobes), and gain loss. This function computes the
-/// exact phase difference using full path-length analysis.
+/// beam steering, coma (asymmetric sidelobes), defocus, and gain loss. This function
+/// computes the exact phase difference using full path-length analysis.
 ///
 /// # Algorithm
 ///
 /// Computes the actual path length difference between:
-/// - Path from ideal focal point to each aperture point on the parabolic surface
-/// - Path from displaced feed position to each aperture point
+/// - Path from ideal focal point `(0, 0, f)` to each aperture point on the parabolic surface
+/// - Path from displaced feed position `(δ·cos(α), δ·sin(α), f + δz)` to each aperture point
 ///
 /// This naturally includes all orders of aberration:
 /// - First order (linear): Beam steering (θ ≈ δ/f)
-/// - Second order: Defocus/astigmatism effects
+/// - Second order: Defocus/astigmatism effects (both lateral and axial displacements)
 /// - Third order: True coma with asymmetric sidelobes
 /// - Higher orders: Additional aberrations for large displacements
 ///
@@ -132,13 +132,16 @@ pub fn phase_path(
 /// For a parabolic reflector with equation z = ρ²/(4f):
 /// - Aperture point in Cartesian: (x, y, z) where x = ρ·cos(φ'), y = ρ·sin(φ')
 /// - Ideal focus at: (0, 0, f)
-/// - Displaced feed at: (δ·cos(α), δ·sin(α), f)
+/// - Displaced feed at: (δ·cos(α), δ·sin(α), f + δz)
+///
+/// When `delta_z = 0` this function is identical to the previous 6-argument model.
 ///
 /// # Arguments
 /// - `rho`: Radial distance from axis in aperture plane (meters)
 /// - `phi_prime`: Azimuthal angle in aperture plane (radians)
-/// - `delta_feed`: Feed displacement magnitude from focal point (meters)
-/// - `alpha`: Direction angle of feed displacement (radians)
+/// - `delta_feed`: Lateral feed displacement magnitude from focal axis (meters)
+/// - `alpha`: Direction angle of lateral feed displacement (radians)
+/// - `delta_z`: Axial feed offset from focal point (meters, positive = away from vertex)
 /// - `focal_length`: Reflector focal length (meters)
 /// - `k`: Wavenumber (radians/meter)
 ///
@@ -155,6 +158,7 @@ pub fn phase_feed_displacement(
     phi_prime: f64,
     delta_feed: f64,
     alpha: f64,
+    delta_z: f64,
     focal_length: f64,
     k: f64,
 ) -> f64 {
@@ -165,18 +169,21 @@ pub fn phase_feed_displacement(
     // Surface height on parabola: z = ρ²/(4f)
     let z = rho * rho / (4.0 * focal_length);
 
-    // Feed displacement in Cartesian (lateral displacement in focal plane)
+    // Lateral feed displacement in Cartesian (in focal plane)
     let dx = delta_feed * alpha.cos();
     let dy = delta_feed * alpha.sin();
 
-    // Distance from focal point to surface point (ideal path)
+    // Distance from ideal focal point (0, 0, f) to surface point
     // For parabola, all paths from focus to surface to aperture plane are equal,
     // but we need the actual geometric distance for phase calculation
-    let dz = z - focal_length;
-    let path_ideal = (x * x + y * y + dz * dz).sqrt();
+    let dz_ideal = z - focal_length;
+    let path_ideal = (x * x + y * y + dz_ideal * dz_ideal).sqrt();
 
-    // Distance from displaced feed to surface point
-    let path_displaced = ((x - dx).powi(2) + (y - dy).powi(2) + dz * dz).sqrt();
+    // Distance from displaced feed (dx, dy, f + delta_z) to surface point
+    // The axial offset delta_z shifts the z-position of the feed, producing
+    // a ρ-dependent (defocus) phase when delta_z != 0
+    let dz_displaced = z - (focal_length + delta_z);
+    let path_displaced = ((x - dx).powi(2) + (y - dy).powi(2) + dz_displaced * dz_displaced).sqrt();
 
     // Phase difference: k × (displaced_path - ideal_path)
     // Positive phase when displaced feed creates longer path
@@ -239,15 +246,17 @@ pub fn phase_mesh(mesh_spacing: f64, theta_incident: f64, k: f64) -> f64 {
 /// Total phase combining all contributions
 ///
 /// Computes the complete phase at an aperture point, including all physical effects:
-/// path phase, coma aberration, surface errors, and mesh effects.
+/// path phase, coma aberration (lateral feed displacement), axial defocus (feed axial
+/// offset from focus), surface errors, and mesh effects.
 ///
 /// # Arguments
 /// - `aperture`: Aperture coordinates (ρ, φ')
 /// - `theta`: Far-field polar angle (radians)
 /// - `phi`: Far-field azimuthal angle (radians)
 /// - `focal_length`: Reflector focal length (meters)
-/// - `feed_displacement`: Feed position relative to focal point (meters)
-/// - `feed_displacement_angle`: Direction of feed displacement (radians)
+/// - `feed_displacement`: Lateral feed displacement magnitude from focal axis (meters)
+/// - `feed_displacement_angle`: Direction of lateral feed displacement (radians)
+/// - `feed_axial_offset`: Axial feed offset from focal point (meters, positive = away from vertex)
 /// - `surface_error`: Surface deviation at this point (meters)
 /// - `theta_incident`: Angle of incidence (radians)
 /// - `mesh_spacing`: Mesh spacing (meters), or 0.0 for solid reflector
@@ -264,6 +273,7 @@ pub fn phase_total(
     focal_length: f64,
     feed_displacement: f64,
     feed_displacement_angle: f64,
+    feed_axial_offset: f64,
     surface_error: f64,
     theta_incident: f64,
     mesh_spacing: f64,
@@ -278,13 +288,14 @@ pub fn phase_total(
         k,
     );
 
-    // Add feed displacement phase (coma) if feed is off-axis
-    if feed_displacement > 0.0 {
+    // Add feed displacement phase (lateral coma + axial defocus) if feed is displaced
+    if feed_displacement > 0.0 || feed_axial_offset.abs() > 0.0 {
         total += phase_feed_displacement(
             aperture.rho,
             aperture.phi_prime,
             feed_displacement,
             feed_displacement_angle,
+            feed_axial_offset,
             focal_length,
             k,
         );
@@ -553,7 +564,7 @@ mod tests {
     fn test_phase_feed_displacement_zero() {
         // Zero displacement should give zero phase
         let k = wavenumber(0.03);
-        let phase = phase_feed_displacement(5.0, 0.0, 0.0, 0.0, 17.0, k);
+        let phase = phase_feed_displacement(5.0, 0.0, 0.0, 0.0, 0.0, 17.0, k);
         assert!(phase.abs() < EPSILON);
     }
 
@@ -566,7 +577,8 @@ mod tests {
         let delta_feed = 1.0; // 1 meter displacement
         let alpha = 0.0; // Displacement in x-direction
 
-        let phase = phase_feed_displacement(rho, phi_prime, delta_feed, alpha, focal_length, k);
+        let phase =
+            phase_feed_displacement(rho, phi_prime, delta_feed, alpha, 0.0, focal_length, k);
 
         // Should be non-zero for off-axis feed
         assert!(phase.abs() > 0.0);
@@ -595,8 +607,10 @@ mod tests {
         let alpha = 0.0; // Displacement in +x direction
 
         // Points at +phi_prime and -phi_prime should have equal magnitude phase
-        let phase_pos = phase_feed_displacement(rho, PI / 4.0, delta_feed, alpha, focal_length, k);
-        let phase_neg = phase_feed_displacement(rho, -PI / 4.0, delta_feed, alpha, focal_length, k);
+        let phase_pos =
+            phase_feed_displacement(rho, PI / 4.0, delta_feed, alpha, 0.0, focal_length, k);
+        let phase_neg =
+            phase_feed_displacement(rho, -PI / 4.0, delta_feed, alpha, 0.0, focal_length, k);
 
         assert!(
             (phase_pos - phase_neg).abs() < 1e-10,
@@ -617,10 +631,11 @@ mod tests {
         let alpha = 0.0; // Displacement in +x direction
 
         // Point in +x direction (φ'=0) - displaced feed is closer
-        let phase_toward = phase_feed_displacement(rho, 0.0, delta_feed, alpha, focal_length, k);
+        let phase_toward =
+            phase_feed_displacement(rho, 0.0, delta_feed, alpha, 0.0, focal_length, k);
 
         // Point in -x direction (φ'=π) - displaced feed is farther
-        let phase_away = phase_feed_displacement(rho, PI, delta_feed, alpha, focal_length, k);
+        let phase_away = phase_feed_displacement(rho, PI, delta_feed, alpha, 0.0, focal_length, k);
 
         // Phases should have opposite signs
         assert!(
@@ -654,7 +669,7 @@ mod tests {
         let delta_feed = 1.0;
         let alpha = 0.0;
 
-        let phase = phase_feed_displacement(0.0, 0.0, delta_feed, alpha, focal_length, k);
+        let phase = phase_feed_displacement(0.0, 0.0, delta_feed, alpha, 0.0, focal_length, k);
 
         // Expected: k * (sqrt(δ² + f²) - f)
         let expected = k * ((delta_feed.powi(2) + focal_length.powi(2)).sqrt() - focal_length);
@@ -684,7 +699,8 @@ mod tests {
         // Path from ideal: sqrt(16 + 0 + 92.16) = sqrt(108.16) ≈ 10.4
         // Path from displaced: sqrt(9 + 0 + 92.16) = sqrt(101.16) ≈ 10.058
 
-        let phase = phase_feed_displacement(rho, phi_prime, delta_feed, alpha, focal_length, k);
+        let phase =
+            phase_feed_displacement(rho, phi_prime, delta_feed, alpha, 0.0, focal_length, k);
 
         // Expected: path_displaced - path_ideal ≈ 10.058 - 10.4 = -0.342
         let expected = (101.16_f64).sqrt() - (108.16_f64).sqrt();
@@ -707,9 +723,9 @@ mod tests {
         let phi_prime = PI; // Away from displacement
 
         let phase_small =
-            phase_feed_displacement(2.0, phi_prime, delta_feed, alpha, focal_length, k);
+            phase_feed_displacement(2.0, phi_prime, delta_feed, alpha, 0.0, focal_length, k);
         let phase_large =
-            phase_feed_displacement(8.0, phi_prime, delta_feed, alpha, focal_length, k);
+            phase_feed_displacement(8.0, phi_prime, delta_feed, alpha, 0.0, focal_length, k);
 
         assert!(
             phase_large.abs() > phase_small.abs(),
@@ -766,6 +782,7 @@ mod tests {
             focal_length,
             0.0, // No feed displacement
             0.0,
+            0.0, // No axial offset
             0.0, // No surface error
             0.0,
             0.0, // No mesh
@@ -792,6 +809,7 @@ mod tests {
             focal_length,
             1.0,      // Feed displacement
             0.0,      // Displacement angle
+            0.0,      // No axial offset
             0.001,    // Surface error
             PI / 6.0, // Incident angle
             0.005,    // Mesh spacing
@@ -800,7 +818,7 @@ mod tests {
 
         // Should be sum of all components
         let p_path = phase_path(5.0, PI / 4.0, theta, phi, focal_length, k);
-        let p_feed = phase_feed_displacement(5.0, PI / 4.0, 1.0, 0.0, focal_length, k);
+        let p_feed = phase_feed_displacement(5.0, PI / 4.0, 1.0, 0.0, 0.0, focal_length, k);
         let p_surf = phase_surface_error(0.001, PI / 6.0, k);
         let p_mesh = phase_mesh(0.005, PI / 6.0, k);
         let expected = p_path + p_feed + p_surf + p_mesh;
@@ -871,5 +889,38 @@ mod tests {
         // At ρ = 2f, angle should be atan(1) = 45 degrees
         let angle = angle_of_incidence(2.0 * focal_length, focal_length);
         assert!((angle - PI / 4.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_axial_displacement_produces_defocus() {
+        // Pure axial offset (no lateral): δ_lateral=0, δz=0.10 m behind focus.
+        // This must produce a ρ-dependent (defocus) phase — center and edge differ.
+        let (f, k) = (17.0, wavenumber(0.03));
+        let p_center = phase_feed_displacement(0.0, 0.0, 0.0, 0.0, 0.10, f, k);
+        let p_edge = phase_feed_displacement(8.0, 0.0, 0.0, 0.0, 0.10, f, k);
+        assert!(
+            (p_edge - p_center).abs() > 1.0,
+            "no defocus: center={p_center} edge={p_edge}"
+        );
+    }
+
+    #[test]
+    fn test_zero_axial_matches_previous_model() {
+        // δz = 0 must reproduce the old 6-arg model exactly.
+        let (f, k) = (17.0, wavenumber(0.03));
+        let with_z0 = phase_feed_displacement(5.0, std::f64::consts::PI / 4.0, 1.0, 0.0, 0.0, f, k);
+        let (x, y) = (
+            5.0 * (std::f64::consts::PI / 4.0).cos(),
+            5.0 * (std::f64::consts::PI / 4.0).sin(),
+        );
+        let z = 25.0 / (4.0 * f);
+        let dz = z - f;
+        let ideal = (x * x + y * y + dz * dz).sqrt();
+        let displaced = ((x - 1.0).powi(2) + y * y + dz * dz).sqrt();
+        let expected = k * (displaced - ideal);
+        assert!(
+            (with_z0 - expected).abs() < 1e-10,
+            "δz=0 regression: {with_z0} vs {expected}"
+        );
     }
 }

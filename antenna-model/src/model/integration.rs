@@ -465,11 +465,12 @@ fn aperture_integrand(
     // Create aperture coordinates
     let aperture = ApertureCoordinates { rho, phi_prime };
 
-    // Calculate feed displacement from position
-    // NOTE: For coma aberration, we only use the radial (xy-plane) displacement
-    // not the full 3D displacement. Axial displacement (z) causes defocus, not coma.
+    // Calculate feed displacement from position.
+    // Lateral (xy-plane) displacement drives coma; axial (z) offset drives defocus.
     let feed_displacement = config.feed.position.radial_displacement();
     let feed_displacement_angle = config.feed.position.y.atan2(config.feed.position.x);
+    // Axial offset of the feed from the focal point: positive = away from vertex.
+    let feed_axial_offset = config.feed.position.z - config.reflector.focal_length;
 
     // Calculate angle of incidence (simplified - assumes small angles)
     // For parabolic reflector, theta_incident ≈ ρ/(2f)
@@ -504,6 +505,7 @@ fn aperture_integrand(
         config.reflector.focal_length,
         feed_displacement,
         feed_displacement_angle,
+        feed_axial_offset,
         surface_error,
         theta_incident,
         mesh_spacing,
