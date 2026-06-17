@@ -54,7 +54,7 @@
     {
       "id": 9,
       "subject": "Task 9: Absolute gain from aperture integral; consistent reference",
-      "status": "pending",
+      "status": "completed",
       "blockedBy": [1, 2],
       "description": "**Goal:** gain = η·(4π/λ²)·|∬A e^{jΨ}dA|²/∬|A|²dA — removes hardcoded 0.55, builds in taper efficiency, removes per-call ideal-reference integration; reference_gain uses identical pipeline so loss_db has no ~2.6 dB offset (F7 + perf medium).\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/integration.rs\", \"antenna-model/src/model/pattern.rs\", \"antenna-model/src/service/evaluator.rs\"], \"verifyCommand\": \"cargo test -p antenna-model compute_gain && cargo test -p antenna-model reference\", \"acceptanceCriteria\": [\"no hardcoded 0.55\", \"boresight 34-38.5 dBi\", \"loss ~0 at boresight\", \"no per-call ideal integration\"]}\n```"
     },
@@ -67,7 +67,7 @@
     {
       "id": 11,
       "subject": "Task 11: Model axial feed defocus in phase",
-      "status": "pending",
+      "status": "completed",
       "blockedBy": [1],
       "description": "**Goal:** phase_feed_displacement takes delta_z (axial offset from focus); feed at (dx,dy,f+δz) instead of hard-assumed z=f (F11). δz=0 must be regression-identical. Calibration artifacts need regeneration after.\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/phase.rs\", \"antenna-model/src/model/integration.rs\"], \"verifyCommand\": \"cargo test -p antenna-model phase_feed_displacement\", \"acceptanceCriteria\": [\"axial offset produces defocus\", \"delta_z=0 regression-identical\"]}\n```"
     },
