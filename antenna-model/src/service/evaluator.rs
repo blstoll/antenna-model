@@ -160,8 +160,11 @@ pub fn compute_gain_from_request(
     // the (small, second-order) defocus component.
     let feed_offset = crate::api::schemas::Vector3D::new(feed_x, feed_y, feed_z - focal_length_m);
 
-    // Calculate radial feed displacement for beam squint calculation
+    // Calculate radial feed displacement and clock angle for beam squint calculation.
+    // Clock angle is atan2(feed_y, feed_x): the direction of the lateral displacement
+    // in the antenna frame, matching the azimuth convention (0° = +X, 90° = +Y).
     let feed_displacement_m = (feed_x.powi(2) + feed_y.powi(2)).sqrt();
+    let displacement_clock_angle_rad = feed_y.atan2(feed_x);
 
     // Apply beam squint correction if pointing frequency differs from operating frequency
     // Must be done AFTER computing feed position since squint depends on actual displacement
@@ -178,6 +181,7 @@ pub fn compute_gain_from_request(
                 request.frequency_mhz,
                 feed_displacement_m,
                 focal_length_m,
+                displacement_clock_angle_rad,
             )
         } else {
             (emitter_az, emitter_el, 0.0)

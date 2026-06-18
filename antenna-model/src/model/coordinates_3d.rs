@@ -577,16 +577,24 @@ pub fn compute_feed_position_from_pointing(
 /// frequency-dependent phase effects. The squint magnitude depends on the
 /// actual feed displacement from the focal point.
 ///
+/// The squint is applied in direction-cosine (u, v) space along the
+/// feed-displacement clock angle, giving correct results for all displacement
+/// directions — not just elevation.
+///
 /// # Arguments
-/// - `azimuth_deg`: Uncorrected azimuth (degrees)
-/// - `elevation_deg`: Uncorrected elevation (degrees)
+/// - `azimuth_deg`: Uncorrected azimuth (degrees, 0° = +X, 90° = +Y, [0,360))
+/// - `elevation_deg`: Uncorrected elevation (POLAR ANGLE from boresight, degrees)
 /// - `pointing_freq_mhz`: Frequency at which antenna is pointed
 /// - `operating_freq_mhz`: Actual operating frequency
 /// - `feed_displacement_m`: Radial feed displacement from focal point (meters)
 /// - `focal_length_m`: Focal length of the reflector (meters)
+/// - `displacement_clock_angle_rad`: Clock angle of feed displacement in antenna
+///   frame (radians). Computed as `atan2(feed_y, feed_x)`.
 ///
 /// # Returns
 /// (corrected_azimuth_deg, corrected_elevation_deg, squint_magnitude_deg)
+/// - `corrected_azimuth_deg` is normalized to [0, 360)
+/// - `corrected_elevation_deg` (polar angle from boresight) is always >= 0
 ///
 /// # Physics
 /// Beam squint occurs because the phase gradient across the aperture changes
@@ -594,7 +602,13 @@ pub fn compute_feed_position_from_pointing(
 /// ```text
 /// Δθ ≈ (f_op - f_point) / f_point × (δ / f)
 /// ```
-/// where δ is feed displacement and f is focal length.
+/// where δ is feed displacement and f is focal length. The squint vector is
+/// applied in (u, v) direction-cosine space along the displacement clock angle:
+/// ```text
+/// u = sin(θ)·cos(φ),  v = sin(θ)·sin(φ)
+/// u' = u + Δθ·cos(clock),  v' = v + Δθ·sin(clock)
+/// θ' = asin(sqrt(u'²+v'²)),  φ' = atan2(v', u')
+/// ```
 pub fn apply_beam_squint_correction(
     azimuth_deg: f64,
     elevation_deg: f64,
@@ -602,32 +616,56 @@ pub fn apply_beam_squint_correction(
     operating_freq_mhz: f64,
     feed_displacement_m: f64,
     focal_length_m: f64,
+    displacement_clock_angle_rad: f64,
 ) -> (f64, f64, f64) {
     // If frequencies are the same (within 0.1%), no correction needed
     if (pointing_freq_mhz - operating_freq_mhz).abs() / pointing_freq_mhz < 0.001 {
-        return (azimuth_deg, elevation_deg, 0.0);
+        return (
+            normalize_azimuth_deg(azimuth_deg),
+            elevation_deg.abs(),
+            0.0,
+        );
     }
 
     // If no feed displacement, no beam squint
     if feed_displacement_m < 1e-6 {
-        return (azimuth_deg, elevation_deg, 0.0);
+        return (
+            normalize_azimuth_deg(azimuth_deg),
+            elevation_deg.abs(),
+            0.0,
+        );
     }
 
-    // Beam squint formula: Δθ ≈ (f_op - f_point) / f_point × (δ / f)
-    // This gives the angular shift in radians
+    // Beam squint magnitude: Δθ ≈ (f_op - f_point) / f_point × (δ / f)
     let freq_shift_ratio = (operating_freq_mhz - pointing_freq_mhz) / pointing_freq_mhz;
     let displacement_ratio = feed_displacement_m / focal_length_m;
-
     let squint_rad = freq_shift_ratio * displacement_ratio;
-    let squint_deg = squint_rad.to_degrees();
 
-    // Apply squint correction radially from boresight
-    // The squint direction is along the feed displacement direction,
-    // which for simplicity we apply to elevation
-    let corrected_azimuth = azimuth_deg;
-    let corrected_elevation = elevation_deg + squint_deg;
+    // Convert current (azimuth, elevation) to direction cosines (u, v).
+    // elevation_deg is the POLAR ANGLE from boresight (+Z); azimuth_deg is the clock angle.
+    // u = sin(θ)·cos(φ),  v = sin(θ)·sin(φ)
+    let theta_rad = elevation_deg.to_radians();
+    let phi_rad = azimuth_deg.to_radians();
+    let sin_theta = theta_rad.sin();
+    let u = sin_theta * phi_rad.cos();
+    let v = sin_theta * phi_rad.sin();
 
-    (corrected_azimuth, corrected_elevation, squint_deg.abs())
+    // Apply squint along the displacement clock angle in (u, v) space.
+    let u_new = u + squint_rad * displacement_clock_angle_rad.cos();
+    let v_new = v + squint_rad * displacement_clock_angle_rad.sin();
+
+    // Convert back to (θ', φ').
+    // θ' = asin(sqrt(u'²+v'²)), clamped to [0,1] to guard against floating-point overshoot.
+    let sin_theta_new = (u_new * u_new + v_new * v_new).sqrt().min(1.0);
+    let theta_new_rad = sin_theta_new.asin(); // always in [0, π/2]
+
+    // φ' = atan2(v', u'); atan2(0,0) is 0 which is fine at/near boresight.
+    let phi_new_rad = v_new.atan2(u_new);
+
+    let corrected_elevation = theta_new_rad.to_degrees(); // >= 0 by construction
+    let corrected_azimuth = normalize_azimuth_deg(phi_new_rad.to_degrees());
+
+    (corrected_azimuth, corrected_elevation, squint_rad.abs().to_degrees())
 }
 
 #[cfg(test)]
@@ -802,83 +840,181 @@ mod tests {
 
     #[test]
     fn test_beam_squint_no_correction_same_frequency() {
+        // Same frequency → no squint; function should still normalise the outputs.
         let (az, el, squint) = apply_beam_squint_correction(
             45.0,   // azimuth
-            30.0,   // elevation
+            30.0,   // elevation (polar from boresight)
             8400.0, // pointing freq
-            8400.0, // operating freq
+            8400.0, // operating freq (same → no squint)
             1.0,    // feed displacement (m)
             13.6,   // focal length (m)
+            0.0,    // displacement clock angle (irrelevant here)
         );
 
-        assert!((az - 45.0).abs() < EPSILON);
-        assert!((el - 30.0).abs() < EPSILON);
-        assert!(squint.abs() < EPSILON);
+        assert!((az - 45.0).abs() < EPSILON, "az={az}");
+        assert!((el - 30.0).abs() < EPSILON, "el={el}");
+        assert!(squint.abs() < EPSILON, "squint={squint}");
     }
 
     #[test]
     fn test_beam_squint_correction_applied() {
+        // Feed displaced along +x (clock = 0°), boresight pointing (az=0, el=0).
+        // Squint should shift in +u direction → elevation increases, azimuth stays near 0°.
+        let clock_rad = 0.0_f64; // +x direction
         let (az, el, squint) = apply_beam_squint_correction(
             0.0,    // azimuth
-            0.0,    // elevation
+            0.0,    // elevation (on boresight)
             8400.0, // pointing freq
             8450.0, // operating freq (slightly higher)
             1.0,    // feed displacement (m)
             13.6,   // focal length (m)
+            clock_rad,
         );
 
-        // Azimuth should be unchanged (radial correction)
-        assert!((az - 0.0).abs() < EPSILON);
-
-        // Elevation should change
-        assert!(el.abs() > 0.0);
-
         // Squint magnitude should be non-zero
-        assert!(squint > 0.0);
+        assert!(squint > 0.0, "squint={squint}");
+
+        // Elevation should increase (beam moves away from boresight)
+        assert!(el > 0.0, "el={el}");
+
+        // Azimuth should still be near 0° (or 360°) since clock is 0°
+        let az_near_zero = az < 1.0 || az > 359.0;
+        assert!(az_near_zero, "az={az} should be near 0°/360° for clock=0°");
     }
 
     #[test]
     fn test_beam_squint_large_frequency_difference() {
-        // Test for 300 MHz pointing, 3 GHz operating (10x ratio)
+        // Feed displaced along +x (clock = 0°), 1° off boresight along azimuth 0°.
+        // 10x frequency ratio gives large squint.
         let (az, el, squint) = apply_beam_squint_correction(
             0.0,    // azimuth
             1.0,    // elevation (1 degree off boresight)
             300.0,  // pointing freq (MHz)
-            3000.0, // operating freq (MHz) - 10x higher
+            3000.0, // operating freq (MHz) – 10x higher
             1.0,    // feed displacement (m)
             13.6,   // focal length (m)
+            0.0,    // clock = 0° (feed along +x)
         );
 
-        // With 10x frequency increase and δ/f = 1/13.6 ≈ 0.0735
-        // Squint ≈ (3000-300)/300 * 0.0735 = 9 * 0.0735 ≈ 0.66 rad ≈ 38 degrees
-        // This is a large correction!
+        // Δθ ≈ (3000-300)/300 × 1/13.6 ≈ 9 × 0.0735 ≈ 0.66 rad ≈ 38°
         assert!(
             squint > 30.0,
-            "Large frequency difference should produce significant squint"
+            "Large frequency difference should produce significant squint, got {squint}"
         );
 
-        // Azimuth unchanged
-        assert!((az - 0.0).abs() < EPSILON);
-
         // Elevation should be significantly shifted
-        assert!(el > 30.0);
+        assert!(el > 30.0, "el={el}");
+
+        // Azimuth should remain near 0° (clock=0° → squint along u axis)
+        let az_near_zero = az < 5.0 || az > 355.0;
+        assert!(az_near_zero, "az={az} should be near 0°/360° for clock=0°");
     }
 
     #[test]
     fn test_beam_squint_no_displacement() {
-        // No feed displacement means no beam squint
+        // No feed displacement means no beam squint, even with large frequency difference.
         let (az, el, squint) = apply_beam_squint_correction(
             10.0,   // azimuth
-            5.0,    // elevation
+            5.0,    // elevation (polar)
             300.0,  // pointing freq
             3000.0, // operating freq
             0.0,    // no displacement
             13.6,   // focal length
+            0.0,    // clock angle (irrelevant)
         );
 
-        assert!((az - 10.0).abs() < EPSILON);
-        assert!((el - 5.0).abs() < EPSILON);
-        assert!(squint.abs() < EPSILON);
+        // Normalisation is still applied, so check output is normalised/non-negative.
+        assert!((az - 10.0).abs() < EPSILON, "az={az}");
+        assert!((el - 5.0).abs() < EPSILON, "el={el}");
+        assert!(squint.abs() < EPSILON, "squint={squint}");
+    }
+
+    /// Squint applied along clock angle 0° (+x) shifts beam in the u direction,
+    /// not the v direction.  Starting from boresight (az=0, el=0) with a positive
+    /// frequency shift and +x feed displacement, the corrected beam should land at
+    /// azimuth ≈ 0° (or 360°) and elevation > 0°.
+    #[test]
+    fn test_beam_squint_clock_angle_x_direction() {
+        let (az, el, squint) = apply_beam_squint_correction(
+            0.0,    // boresight
+            0.0,
+            8400.0,
+            8500.0, // 100 MHz above pointing frequency
+            1.0,    // 1 m lateral displacement
+            13.6,
+            0.0_f64, // clock = 0° → feed along +x axis
+        );
+
+        assert!(squint > 0.0, "squint should be non-zero");
+        assert!(el >= 0.0, "elevation must be >= 0, got {el}");
+        // Beam squint along +x means azimuth stays near 0° (or 360°)
+        let az_near_zero = az < 5.0 || az > 355.0;
+        assert!(
+            az_near_zero,
+            "clock=0° squint should be along u; az={az} should be ~0 or ~360"
+        );
+    }
+
+    /// Squint applied along clock angle 90° (+y) shifts beam in the v direction.
+    /// From boresight with feed displaced in +y, the corrected beam should land at
+    /// azimuth ≈ 90° and elevation > 0°.
+    #[test]
+    fn test_beam_squint_clock_angle_y_direction() {
+        let (az, el, squint) = apply_beam_squint_correction(
+            0.0,    // boresight
+            0.0,
+            8400.0,
+            8500.0, // 100 MHz above pointing frequency
+            1.0,    // 1 m lateral displacement
+            13.6,
+            std::f64::consts::FRAC_PI_2, // clock = 90° → feed along +y axis
+        );
+
+        assert!(squint > 0.0, "squint should be non-zero");
+        assert!(el >= 0.0, "elevation must be >= 0, got {el}");
+        // Beam squint along +y means azimuth stays near 90°
+        assert!(
+            (az - 90.0).abs() < 5.0,
+            "clock=90° squint should be along v; az={az} should be ~90°"
+        );
+    }
+
+    /// Elevation returned by apply_beam_squint_correction must always be >= 0
+    /// (it is a polar angle from boresight).
+    #[test]
+    fn test_beam_squint_elevation_always_nonnegative() {
+        // Drive the squint in a negative direction (lower operating freq) from a small
+        // positive elevation to try to push elevation negative.
+        let (_, el, _) = apply_beam_squint_correction(
+            0.0,
+            0.5,    // small positive elevation
+            8400.0,
+            8300.0, // lower operating freq → negative squint in u
+            2.0,
+            13.6,
+            0.0, // clock = 0°
+        );
+        assert!(el >= 0.0, "elevation must be >= 0, got {el}");
+    }
+
+    /// Azimuth returned by apply_beam_squint_correction must be in [0, 360).
+    #[test]
+    fn test_beam_squint_azimuth_normalised() {
+        // Use a negative raw azimuth input to exercise the normalisation path.
+        let (az, el, _) = apply_beam_squint_correction(
+            -30.0,  // raw azimuth outside [0,360) – function should normalise
+            10.0,
+            8400.0,
+            8400.0, // same freq → passthrough, but normalisation still applied
+            0.0,
+            13.6,
+            0.0,
+        );
+        assert!(
+            az >= 0.0 && az < 360.0,
+            "azimuth must be in [0,360), got {az}"
+        );
+        assert!(el >= 0.0, "elevation must be >= 0, got {el}");
     }
 
     // ========================================================================
