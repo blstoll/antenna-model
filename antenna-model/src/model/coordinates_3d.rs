@@ -588,8 +588,10 @@ pub fn compute_feed_position_from_pointing(
 /// - `operating_freq_mhz`: Actual operating frequency
 /// - `feed_displacement_m`: Radial feed displacement from focal point (meters)
 /// - `focal_length_m`: Focal length of the reflector (meters)
-/// - `displacement_clock_angle_rad`: Clock angle of feed displacement in antenna
-///   frame (radians). Computed as `atan2(feed_y, feed_x)`.
+/// - `displacement_clock_angle_rad`: Clock angle of the **combined** feed lateral
+///   position in the antenna frame (radians). This is `atan2(feed_y, feed_x)` of
+///   the total lateral offset — i.e. the vector sum of the design feed offset and
+///   any steering offset — not just the steering component alone.
 ///
 /// # Returns
 /// (corrected_azimuth_deg, corrected_elevation_deg, squint_magnitude_deg)
@@ -618,6 +620,11 @@ pub fn apply_beam_squint_correction(
     focal_length_m: f64,
     displacement_clock_angle_rad: f64,
 ) -> (f64, f64, f64) {
+    debug_assert!(
+        elevation_deg >= 0.0,
+        "elevation must be polar angle >= 0"
+    );
+
     // If frequencies are the same (within 0.1%), no correction needed
     if (pointing_freq_mhz - operating_freq_mhz).abs() / pointing_freq_mhz < 0.001 {
         return (
@@ -1015,6 +1022,25 @@ mod tests {
             "azimuth must be in [0,360), got {az}"
         );
         assert!(el >= 0.0, "elevation must be >= 0, got {el}");
+    }
+
+    #[test]
+    fn test_beam_squint_applied_along_feed_clock_angle() {
+        // Feed displaced along +Y (clock = 90°). Squint must move the beam in the
+        // v (sin(theta)*sin(phi)) direction, leaving u (sin(theta)*cos(phi)) unchanged.
+        let (az, el, squint) = apply_beam_squint_correction(
+            0.0, 2.0,            // pointing: az=0, el=2 deg polar
+            8400.0, 8800.0,      // freq offset
+            1.0, 13.6,           // displacement, focal length
+            std::f64::consts::FRAC_PI_2, // feed clock angle = +Y
+        );
+        assert!(squint > 0.0);
+        let theta = el.to_radians();
+        let phi = az.to_radians();
+        let u = theta.sin() * phi.cos();
+        // original u = sin(2 deg)*cos(0) ~ 0.0349 - must be unchanged by a +Y squint
+        assert!((u - 2.0_f64.to_radians().sin()).abs() < 1e-6, "u changed: {u}");
+        assert!(el >= 0.0);
     }
 
     // ========================================================================
