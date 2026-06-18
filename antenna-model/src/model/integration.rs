@@ -46,10 +46,25 @@ pub struct IntegrationResult {
     pub field: Complex64,
 
     /// Estimated integration error (magnitude)
+    ///
+    /// On successful convergence this is the inter-iteration difference that
+    /// satisfied the tolerance.  On non-convergence it is the last computed
+    /// inter-iteration difference (an honest, if pessimistic, error estimate).
     pub error_estimate: f64,
 
     /// Number of function evaluations performed
     pub num_evaluations: usize,
+
+    /// Whether the integration converged within the allowed iterations.
+    ///
+    /// `true`  – the refinement loop exited because the relative error fell below
+    ///           `relative_tolerance` (or the absolute difference below
+    ///           `absolute_tolerance`).
+    /// `false` – the loop exhausted `max_iterations` (or hit the maximum grid
+    ///           size) without meeting tolerance.  The returned `field` is the
+    ///           best available estimate; `error_estimate` holds the last
+    ///           inter-iteration difference.
+    pub converged: bool,
 }
 
 /// Integration parameters for convergence control
@@ -241,6 +256,11 @@ pub fn integrate_aperture(
 
     let mut previous_result = Complex64::new(0.0, 0.0);
     let mut num_evaluations = 0;
+    // Tracks the last inter-iteration difference computed inside the loop.
+    // Initialised to INFINITY so that if the loop exits before any convergence
+    // check (e.g. max_iterations == 1, or the grid hits max on iteration 0),
+    // the non-converged error estimate is still a conservative, honest value.
+    let mut last_difference = f64::INFINITY;
 
     // Adaptive refinement loop: progressively refine the integration grid
     // until the result converges or we reach the maximum grid density.
@@ -278,6 +298,10 @@ pub fn integrate_aperture(
             let difference = (result - previous_result).norm();
             let magnitude = result.norm();
 
+            // Track the most recent inter-iteration difference for the
+            // non-converged fall-through error estimate below.
+            last_difference = difference;
+
             // Calculate relative error (or absolute if magnitude is too small)
             // This handles both large and small field values correctly
             let relative_error = if magnitude > params.absolute_tolerance {
@@ -294,6 +318,7 @@ pub fn integrate_aperture(
                     field: result,
                     error_estimate: difference,
                     num_evaluations,
+                    converged: true,
                 });
             }
         }
@@ -314,14 +339,25 @@ pub fn integrate_aperture(
         }
     }
 
-    // Did not converge within max iterations
-    let error_estimate =
-        (previous_result - Complex64::new(0.0, 0.0)).norm() * params.relative_tolerance;
+    // Did not converge within max iterations.
+    // Use the last inter-iteration difference as the error estimate — it is an
+    // honest (pessimistic) value rather than a fabricated |result| × tolerance.
+    // If the loop ran only a single iteration, no convergence check was ever
+    // performed so last_difference remains INFINITY, which correctly signals
+    // that the accuracy is completely unknown.
+    tracing::warn!(
+        theta,
+        phi,
+        last_difference,
+        "aperture integration did not converge within {} iterations",
+        params.max_iterations
+    );
 
     Ok(IntegrationResult {
         field: previous_result,
-        error_estimate,
+        error_estimate: last_difference,
         num_evaluations,
+        converged: false,
     })
 }
 
@@ -870,6 +906,18 @@ mod tests {
 
         // Pattern should decrease off-axis
         assert!(field_off_axis.norm() < field_on_axis.norm());
+    }
+
+    #[test]
+    fn test_non_convergence_is_reported() {
+        let config = test_antenna();
+        let params = IntegrationParams {
+            max_iterations: 1,   // cannot converge: convergence check needs iteration > 0
+            relative_tolerance: 1e-15,
+            ..IntegrationParams::fast()
+        };
+        let result = integrate_aperture(0.3, 0.0, &config, 8.4e9, &params).unwrap();
+        assert!(!result.converged);
     }
 
     #[test]

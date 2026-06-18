@@ -230,14 +230,14 @@ pub fn compute_gain(
     let mut warnings = analysis.warnings;
     let gain = match analysis.mode {
         ComputationMode::StandardPhysicalOptics => {
-            compute_gain_standard(theta, phi, config, frequency_hz, wavelength, params)?
+            compute_gain_standard(theta, phi, config, frequency_hz, wavelength, params, &mut warnings)?
         }
         ComputationMode::HigherOrderAberrations => {
             tracing::debug!(
                 "Using higher-order aberrations mode (feed offset ratio: {:.3})",
                 analysis.feed_offset_ratio
             );
-            compute_gain_higher_order(theta, phi, config, frequency_hz, wavelength, params)?
+            compute_gain_higher_order(theta, phi, config, frequency_hz, wavelength, params, &mut warnings)?
         }
         ComputationMode::RayTracing => {
             // Ray tracing is a stub: aperture sampling is used but true spillover and
@@ -247,10 +247,10 @@ pub fn compute_gain(
                  gain accuracy may be degraded."
                     .to_string(),
             );
-            compute_gain_ray_tracing(theta, phi, config, frequency_hz, wavelength, params)?
+            compute_gain_ray_tracing(theta, phi, config, frequency_hz, wavelength, params, &mut warnings)?
         }
         ComputationMode::NearBoresightDirectPath => {
-            compute_gain_direct_path(theta, phi, config, frequency_hz, wavelength, params)?
+            compute_gain_direct_path(theta, phi, config, frequency_hz, wavelength, params, &mut warnings)?
         }
     };
 
@@ -300,6 +300,7 @@ fn compute_gain_standard(
     frequency_hz: f64,
     wavelength: f64,
     params: &IntegrationParams,
+    warnings: &mut Vec<String>,
 ) -> ComputationResult<f64> {
     // Select integration parameters (adaptive near nulls)
     let effective_params = select_integration_params(theta, phi, config, params);
@@ -307,6 +308,12 @@ fn compute_gain_standard(
     // Raw aperture integral I = ∬ A e^{jΨ} ρ dρ dφ' at the requested angle.
     // The directivity formula uses this raw value, not the normalized far field.
     let result = integrate_aperture(theta, phi, config, frequency_hz, &effective_params)?;
+
+    if !result.converged {
+        warnings.push(
+            "aperture integration did not converge; gain accuracy may be degraded".to_string(),
+        );
+    }
 
     absolute_gain_from_integral(result.field, config, wavelength, &effective_params)
 }
@@ -323,6 +330,7 @@ fn compute_gain_higher_order(
     frequency_hz: f64,
     wavelength: f64,
     params: &IntegrationParams,
+    warnings: &mut Vec<String>,
 ) -> ComputationResult<f64> {
     // Select integration parameters (adaptive near nulls)
     let effective_params = select_integration_params(theta, phi, config, params);
@@ -335,6 +343,12 @@ fn compute_gain_higher_order(
 
     // Raw aperture integral with higher-order aberrations included in the phase.
     let result = integrate_aperture(theta, phi, config, frequency_hz, &ho_params)?;
+
+    if !result.converged {
+        warnings.push(
+            "aperture integration did not converge; gain accuracy may be degraded".to_string(),
+        );
+    }
 
     absolute_gain_from_integral(result.field, config, wavelength, &ho_params)
 }
@@ -354,6 +368,7 @@ fn compute_gain_ray_tracing(
     frequency_hz: f64,
     wavelength: f64,
     params: &IntegrationParams,
+    warnings: &mut Vec<String>,
 ) -> ComputationResult<f64> {
     // Compute gain using ray tracing (relative pattern)
     let ray_gain_relative = compute_gain_ray_trace(config, theta, phi, wavelength);
@@ -371,6 +386,13 @@ fn compute_gain_ray_tracing(
     // Absolute boresight gain from the physical-optics aperture integral, used as the
     // anchor for the ray-traced relative pattern.
     let on_axis = integrate_aperture(0.0, 0.0, config, frequency_hz, params)?;
+
+    if !on_axis.converged {
+        warnings.push(
+            "aperture integration did not converge; gain accuracy may be degraded".to_string(),
+        );
+    }
+
     let boresight_gain = absolute_gain_from_integral(on_axis.field, config, wavelength, params)?;
 
     Ok(boresight_gain * relative_gain)
@@ -384,6 +406,7 @@ fn compute_gain_direct_path(
     frequency_hz: f64,
     wavelength: f64,
     params: &IntegrationParams,
+    warnings: &mut Vec<String>,
 ) -> ComputationResult<f64> {
     // Select integration parameters (adaptive near nulls)
     let effective_params = select_integration_params(theta, phi, config, params);
@@ -391,6 +414,13 @@ fn compute_gain_direct_path(
     // Raw reflected-only aperture integral I = ∬ A e^{jΨ} ρ dρ dφ'. Its directivity is
     // the absolute reflected-path gain.
     let reflected = integrate_aperture(theta, phi, config, frequency_hz, &effective_params)?;
+
+    if !reflected.converged {
+        warnings.push(
+            "aperture integration did not converge; gain accuracy may be degraded".to_string(),
+        );
+    }
+
     let reflected_gain =
         absolute_gain_from_integral(reflected.field, config, wavelength, &effective_params)?;
 
@@ -850,6 +880,30 @@ mod tests {
         assert_eq!(params_null.max_phi_points, base_params.max_phi_points * 2);
         assert!(
             (params_null.relative_tolerance - base_params.relative_tolerance / 2.0).abs() < 1e-10
+        );
+    }
+
+    #[test]
+    fn test_non_convergence_warning_propagated() {
+        // Force non-convergence by capping to a single iteration with an impossible
+        // tolerance.  compute_gain must include a warning containing "did not converge"
+        // in the returned warnings vec.
+        let config = test_antenna();
+        let params = IntegrationParams {
+            max_iterations: 1,
+            relative_tolerance: 1e-15,
+            ..IntegrationParams::fast()
+        };
+        // Use an off-boresight angle to ensure the standard PO path is exercised.
+        let result = compute_gain(0.3, 0.0, &config, 8.4e9, &params).unwrap();
+        let has_convergence_warning = result
+            .warnings
+            .iter()
+            .any(|w| w.contains("did not converge"));
+        assert!(
+            has_convergence_warning,
+            "Expected a convergence warning but got: {:?}",
+            result.warnings
         );
     }
 
