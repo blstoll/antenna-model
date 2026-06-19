@@ -575,11 +575,19 @@ pub fn compute_g_over_t(
 /// - `params`: Integration parameters
 ///
 /// # Returns
-/// Half-power beamwidth in radians (from boresight to -3dB point)
+/// Half-angle to the first −`gain_drop_db` crossing from boresight (radians).
 ///
-/// # Notes
-/// This is a simplified search that assumes monotonic decrease from boresight.
-/// For more complex patterns with sidelobes, this may not find the true beamwidth.
+/// # Algorithm
+/// 1. **March outward** from boresight in steps of `0.1·λ/D` to bracket the FIRST
+///    crossing of `peak − gain_drop_db`. This avoids locking onto a sidelobe crossing
+///    that a naive bisection over `[0, π/4]` would produce.
+/// 2. **Bisect** within the identified bracket `[theta_lo, theta_hi]` to 1e-5 rad
+///    precision (30 iterations max).
+///
+/// # Errors
+/// Returns [`ComputationError::NumericalInstability`] if no crossing is found within
+/// π/4 (45°). This indicates either `gain_drop_db` is larger than the dynamic range
+/// of the pattern within the search window, or the pattern is unusually broad.
 pub fn compute_beamwidth(
     config: &AntennaConfiguration,
     frequency_hz: f64,
@@ -587,42 +595,48 @@ pub fn compute_beamwidth(
     phi: f64,
     params: &IntegrationParams,
 ) -> ComputationResult<f64> {
-    // Get on-axis gain
+    // On-axis peak gain and the target threshold.
     let result_peak = compute_gain_db(0.0, phi, config, frequency_hz, params)?;
-    let gain_peak = result_peak.gain;
-    let target_gain = gain_peak - gain_drop_db;
+    let target_gain = result_peak.gain - gain_drop_db;
 
-    // Binary search for beamwidth
-    let mut theta_min = 0.0;
-    let mut theta_max = PI / 4.0; // Start with 45 degrees max
+    // Step size: 0.1·λ/D — small enough to resolve the main lobe without
+    // overshooting into a sidelobe on the first step.
+    let wavelength = wavelength_from_frequency(frequency_hz);
+    let step = 0.1 * wavelength / config.reflector.diameter;
 
-    const MAX_ITERATIONS: usize = 20;
-    const TOLERANCE: f64 = 1e-4; // 0.01 degree tolerance
-
-    for _ in 0..MAX_ITERATIONS {
-        let theta_mid = (theta_min + theta_max) / 2.0;
-        let result_mid = compute_gain_db(theta_mid, phi, config, frequency_hz, params)?;
-        let gain_mid = result_mid.gain;
-
-        if (gain_mid - target_gain).abs() < 0.1 {
-            // Found beamwidth within 0.1 dB
-            return Ok(theta_mid);
+    // March outward from boresight to bracket the FIRST crossing.
+    let mut theta_lo = 0.0_f64;
+    let mut theta_hi = step;
+    loop {
+        if theta_hi > PI / 4.0 {
+            return Err(ComputationError::NumericalInstability {
+                operation: "compute_beamwidth".to_string(),
+                reason: format!("no -{gain_drop_db} dB crossing found within 45 deg"),
+            });
         }
+        let g = compute_gain_db(theta_hi, phi, config, frequency_hz, params)?.gain;
+        if g < target_gain {
+            break;
+        }
+        theta_lo = theta_hi;
+        theta_hi += step;
+    }
 
-        if gain_mid > target_gain {
-            // Need to search farther out
-            theta_min = theta_mid;
+    // Bisect within [theta_lo, theta_hi] to ~1e-5 rad precision.
+    for _ in 0..30 {
+        let mid = 0.5 * (theta_lo + theta_hi);
+        let g = compute_gain_db(mid, phi, config, frequency_hz, params)?.gain;
+        if g > target_gain {
+            theta_lo = mid;
         } else {
-            // Need to search closer in
-            theta_max = theta_mid;
+            theta_hi = mid;
         }
-
-        if (theta_max - theta_min) < TOLERANCE {
-            return Ok((theta_min + theta_max) / 2.0);
+        if theta_hi - theta_lo < 1e-5 {
+            break;
         }
     }
 
-    Ok((theta_min + theta_max) / 2.0)
+    Ok(0.5 * (theta_lo + theta_hi))
 }
 
 #[cfg(test)]
@@ -858,6 +872,26 @@ mod tests {
         assert!(
             half_deg > 0.9 && half_deg < 2.0,
             "boresight→-3dB half-angle = {half_deg}°; expected 0.9°–2.0°"
+        );
+    }
+
+    /// AC#2 guard: when `gain_drop_db` is so large that the main lobe never drops
+    /// that far within π/4, `compute_beamwidth` must return `Err` rather than a
+    /// silent (wrong) number.
+    ///
+    /// 200 dB is far beyond any physically realistic pattern dynamic range, so the
+    /// march never finds a crossing and the function returns `NumericalInstability`.
+    #[test]
+    fn test_compute_beamwidth_no_crossing_returns_err() {
+        let config = test_antenna();
+        let params = IntegrationParams::fast();
+
+        // 200 dB drop is unreachable within π/4 for any realistic aperture pattern.
+        let result = compute_beamwidth(&config, 8.4e9, 200.0, 0.0, &params);
+        assert!(
+            result.is_err(),
+            "expected Err for unreachable gain_drop_db=200, got Ok({:?})",
+            result.ok()
         );
     }
 
