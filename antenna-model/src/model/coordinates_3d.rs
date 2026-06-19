@@ -819,6 +819,11 @@ pub fn apply_beam_squint_correction(
 /// Returns `(az_deg, el_deg, squint_deg)`; `squint_deg == 0.0` when no correction applies.
 /// The returned `squint_deg` magnitude depends only on the feed displacement and the
 /// frequency offset, not on the input direction.
+///
+/// Note: this 0.1 MHz *absolute* gate preserves the original `/gain` evaluator behavior
+/// and is distinct from the 0.1%-*relative* gate inside `apply_beam_squint_correction`;
+/// in the target bands (1–30 GHz) the absolute gate is the stricter of the two, so the
+/// delegate's relative gate never independently suppresses a correction this gate admits.
 pub fn squint_corrected_direction(
     az_deg: f64,
     el_deg: f64,
@@ -831,7 +836,7 @@ pub fn squint_corrected_direction(
     if (pointing_freq_mhz - operating_freq_mhz).abs() <= 0.1 {
         return (az_deg, el_deg, 0.0);
     }
-    let feed_displacement_m = (feed_x * feed_x + feed_y * feed_y).sqrt();
+    let feed_displacement_m = feed_x.hypot(feed_y);
     let displacement_clock_angle_rad = feed_y.atan2(feed_x);
     apply_beam_squint_correction(
         az_deg,
