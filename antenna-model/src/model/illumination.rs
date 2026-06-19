@@ -15,9 +15,13 @@
 //! - ψ is the angle from the feed boresight to the aperture point
 //! - q is the pattern factor (higher q → more focused beam)
 //!
-//! Typical q values:
-//! - q ≈ 6-8 for 10 dB edge taper
-//! - q ≈ 10-12 for 12 dB edge taper
+//! The `illumination_amplitude` function applies an additional space-attenuation
+//! factor `(1+cosψ)/2`, which accounts for the increasing feed-to-surface distance
+//! toward the reflector edge (r = 2f/(1+cosψ) for a parabola). This factor is
+//! normalized to unity at boresight (ψ=0).
+//!
+//! Combined edge taper (cos^q × space loss) for q=8, f/D=0.5: approximately −37.4 dB
+//! at the reflector rim (ψ ≈ 53°).
 //!
 //! # References
 //! - Design doc Section 2.3 (Illumination Function)
@@ -214,8 +218,10 @@ pub fn illumination_amplitude(
         feed_params.q_factor
     };
 
-    // Calculate cos^q pattern
-    cos_q_pattern(psi, q_effective)
+    // Space attenuation: feed→reflector distance r = 2f/(1+cosψ) for a parabola,
+    // so the aperture amplitude carries an extra (1+cosψ)/2 factor (normalized to 1 at ψ=0).
+    let space_loss = (1.0 + psi.cos()) / 2.0;
+    cos_q_pattern(psi, q_effective) * space_loss
 }
 
 /// Calculate edge taper in dB for given q-factor and f/D ratio
@@ -596,5 +602,27 @@ mod tests {
         // Should be a few radians (not tiny, not huge)
         assert!(phase.abs() > 0.1);
         assert!(phase.abs() < 10.0);
+    }
+
+    #[test]
+    fn test_space_attenuation_adds_edge_taper() {
+        // Feed at focus with q=8, f/D=0.5 (D=1 normalized, so f=0.5, R=0.5)
+        let feed_pos = FeedPosition::at_focus(0.5);
+        let feed_params = FeedParameters::new(
+            feed_pos,
+            8.0, // q_factor
+            0.0, // phase_center_offset
+            1.0, // asymmetry_factor (symmetric)
+        )
+        .unwrap();
+
+        let psi_edge = feed_angle(0.5, 0.0, &feed_params.position, 0.5);
+        let pure_cos_q = cos_q_pattern(psi_edge, 8.0);
+        let amp = illumination_amplitude(0.5, 0.0, &feed_params, 0.5);
+        assert!(amp < pure_cos_q, "space loss must add taper: {amp} vs {pure_cos_q}");
+
+        // Boresight (vertex) unchanged at 1.0: rho=0 → psi=0 → (1+cos(0))/2 = 1.0
+        let amp0 = illumination_amplitude(0.0, 0.0, &feed_params, 0.5);
+        assert!((amp0 - 1.0).abs() < 1e-9);
     }
 }
