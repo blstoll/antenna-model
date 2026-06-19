@@ -674,6 +674,11 @@ pub struct H3LinkBudgetResponse {
     /// Calibration status and accuracy information (optional)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub calibration_status: Option<CalibrationStatusInfo>,
+
+    /// Beam squint magnitude applied (degrees), when the pointing frequency differs from
+    /// the operating frequency. Omitted when no squint is applied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub beam_squint_deg: Option<f64>,
 }
 
 // ============================================================================

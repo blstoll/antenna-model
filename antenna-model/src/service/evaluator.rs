@@ -75,9 +75,8 @@ use crate::data::repository::CalibrationRepository;
 use crate::data::types::{CalibrationCoverage, CalibrationStatus};
 use crate::error::{AntennaModelError, Result};
 use crate::model::{
-    apply_beam_squint_correction, compute_emitter_direction_with_attitude,
-    compute_feed_position_from_pointing, compute_gain_db, evaluate_correction,
-    AntennaConfiguration, IntegrationParams,
+    compute_emitter_direction_with_attitude, compute_feed_position_from_pointing, compute_gain_db,
+    evaluate_correction, squint_corrected_direction, AntennaConfiguration, IntegrationParams,
 };
 use crate::service::validator::coordinate_ambiguity_warnings;
 use std::time::Instant;
@@ -163,32 +162,21 @@ pub fn compute_gain_from_request(
     // the (small, second-order) defocus component.
     let feed_offset = crate::api::schemas::Vector3D::new(feed_x, feed_y, feed_z - focal_length_m);
 
-    // Calculate radial feed displacement and clock angle for beam squint calculation.
-    // Clock angle is atan2(feed_y, feed_x): the direction of the lateral displacement
-    // in the antenna frame, matching the azimuth convention (0° = +X, 90° = +Y).
-    let feed_displacement_m = (feed_x.powi(2) + feed_y.powi(2)).sqrt();
-    let displacement_clock_angle_rad = feed_y.atan2(feed_x);
-
-    // Apply beam squint correction if pointing frequency differs from operating frequency
-    // Must be done AFTER computing feed position since squint depends on actual displacement
+    // Apply beam squint correction if pointing frequency differs from operating frequency.
+    // Must be done AFTER computing feed position since squint depends on actual displacement.
     let pointing_freq = request
         .pointing_frequency_mhz
         .unwrap_or(request.frequency_mhz);
 
-    let (corrected_az, corrected_el, squint_magnitude_deg) =
-        if (pointing_freq - request.frequency_mhz).abs() > 0.1 {
-            apply_beam_squint_correction(
-                emitter_az,
-                emitter_el,
-                pointing_freq,
-                request.frequency_mhz,
-                feed_displacement_m,
-                focal_length_m,
-                displacement_clock_angle_rad,
-            )
-        } else {
-            (emitter_az, emitter_el, 0.0)
-        };
+    let (corrected_az, corrected_el, squint_magnitude_deg) = squint_corrected_direction(
+        emitter_az,
+        emitter_el,
+        request.frequency_mhz,
+        pointing_freq,
+        feed_x,
+        feed_y,
+        focal_length_m,
+    );
 
     let feed = ModelFeedParams::builder()
         .position(feed_position)
