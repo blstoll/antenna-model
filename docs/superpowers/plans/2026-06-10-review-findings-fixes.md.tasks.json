@@ -61,7 +61,7 @@
     {
       "id": 10,
       "subject": "Task 10: Beam squint along feed displacement direction",
-      "status": "pending",
+      "status": "completed",
       "description": "**Goal:** Apply beam squint along the feed-displacement clock angle in direction-cosine (u,v) space instead of always shifting elevation (F9).\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/coordinates_3d.rs\", \"antenna-model/src/service/evaluator.rs\"], \"verifyCommand\": \"cargo test -p antenna-model beam_squint\", \"acceptanceCriteria\": [\"squint along clock angle\", \"elevation >= 0\", \"azimuth normalized\"]}\n```"
     },
     {
@@ -74,7 +74,7 @@
     {
       "id": 12,
       "subject": "Task 12: Report integration non-convergence honestly",
-      "status": "pending",
+      "status": "completed",
       "blockedBy": [9],
       "description": "**Goal:** converged: bool on IntegrationResult; non-convergence → warning in compute_gain results; error_estimate = last inter-iteration difference (medium finding).\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/integration.rs\", \"antenna-model/src/model/pattern.rs\"], \"verifyCommand\": \"cargo test -p antenna-model convergence\", \"acceptanceCriteria\": [\"converged flag\", \"warning propagated\", \"honest error estimate\"]}\n```"
     },
@@ -87,21 +87,21 @@
     {
       "id": 14,
       "subject": "Task 14: Dedup surface models; add illumination space attenuation",
-      "status": "pending",
+      "status": "completed",
       "blockedBy": [9],
       "description": "**Goal:** Delete duplicate SurfaceErrorModel/Zernike/Gaussian from phase.rs (canonical in surface.rs); add (1+cosψ)/2 space attenuation to illumination_amplitude; fix edge-taper doc claim (F13, F14). Calibration artifacts need regeneration after.\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/phase.rs\", \"antenna-model/src/model/illumination.rs\", \"antenna-model/src/model/mod.rs\"], \"verifyCommand\": \"cargo test -p antenna-model illumination && cargo test -p antenna-model surface\", \"acceptanceCriteria\": [\"single Zernike impl\", \"space loss adds edge taper\", \"docs corrected\"]}\n```"
     },
     {
       "id": 15,
       "subject": "Task 15: Robust beamwidth search",
-      "status": "pending",
+      "status": "completed",
       "blockedBy": [1],
       "description": "**Goal:** compute_beamwidth brackets the FIRST crossing via 0.1·λ/D outward march before bisecting (no sidelobe lock-on); errors if no crossing within π/4 (medium finding).\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/pattern.rs\"], \"verifyCommand\": \"cargo test -p antenna-model beamwidth\", \"acceptanceCriteria\": [\"brackets first crossing\", \"errors when no crossing\", \"guard test passes\"]}\n```"
     },
     {
       "id": 16,
       "subject": "Task 16: Optional vehicle attitude for stable antenna frame",
-      "status": "pending",
+      "status": "completed",
       "description": "**Goal:** Optional vehicle_attitude unit quaternion [w,x,y,z] (body→ECEF; +Z=boresight, +X=E-clock zero) on GainRequest/H3LinkBudgetRequest; when present, azimuth zero = body X projected ⊥ boresight, replacing the discontinuous Earth-Z heuristic (F5b, critical; API addition — design assumption flagged for review).\n\n```json:metadata\n{\"files\": [\"antenna-model/src/api/schemas.rs\", \"antenna-model/src/model/coordinates_3d.rs\", \"antenna-model/src/service/evaluator.rs\", \"antenna-model/src/service/h3_link_budget.rs\", \"antenna-model/src/service/validator.rs\", \"openapi.yaml\"], \"verifyCommand\": \"cargo test -p antenna-model attitude\", \"acceptanceCriteria\": [\"None = unchanged behaviour\", \"attitude defines azimuth zero\", \"norm validated\"]}\n```"
     },
     {
@@ -112,5 +112,5 @@
       "description": "**Goal:** Root-cause fix for the B-spline evaluator off-by-one discovered during Task 6 review. `antenna-model/src/model/correction_interpolator.rs::find_knot_span` uses `n = knots.len() - order - 1`; the correct number-of-basis-functions bound is `knots.len() - order` (matches calibrate's find_knot_interval). The bug loses the topmost knot interval for ANY BSplineModel4D producer (boresight mode, hand-built surfaces) — 232 dB mismatch at the top of range. Task 6 worked around it with an export-side top-pad; this task fixes the root cause and removes the now-redundant pad. NOT in original review (newly found).\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/correction_interpolator.rs\", \"calibrate/src/artifact_export.rs\"], \"verifyCommand\": \"cargo test -p antenna-model correction && cargo test -p calibrate artifact_export\", \"acceptanceCriteria\": [\"top-interval query returns correct coefficient\", \"export top-pad removed\", \"round-trip still 1e-9\", \"both suites pass\"]}\n```"
     }
   ],
-  "lastUpdated": "2026-06-13T00:00:00Z"
+  "lastUpdated": "2026-06-19T00:00:00Z"
 }
