@@ -191,9 +191,9 @@ pub fn feed_angle(rho: f64, phi_prime: f64, feed_pos: &FeedPosition, focal_lengt
 ///     1.0,   // asymmetry_factor (symmetric)
 /// ).unwrap();
 ///
-/// // At vertex (on-axis), should have maximum amplitude
+/// // At vertex (on-axis), amplitude is exactly 1.0:
+/// // ψ=0 → cos^q(0)=1 and (1+cos(0))/2=1, so the product is exactly 1.
 /// let amp = illumination_amplitude(0.0, 0.0, &feed_params, 1.0);
-/// // Note: might not be exactly 1.0 due to geometry, but should be close
 /// ```
 #[inline]
 pub fn illumination_amplitude(
@@ -250,7 +250,7 @@ pub fn illumination_amplitude(
 /// ```
 /// use antenna_model::model::illumination::edge_taper_db;
 ///
-/// // For q=8 and f/D=0.5, edge taper is around -35 dB
+/// // For q=8 and f/D=0.5, edge taper is around -37.4 dB
 /// let taper = edge_taper_db(8.0, 0.5);
 /// assert!(taper < -30.0 && taper > -40.0);
 /// ```
@@ -267,8 +267,9 @@ pub fn edge_taper_db(q: f64, f_over_d: f64) -> f64 {
     // Calculate angle to edge using our feed_angle function
     let psi_edge = feed_angle(r, 0.0, &feed_pos, f);
 
-    // Amplitude at edge
-    let amp_edge = cos_q_pattern(psi_edge, q);
+    // Amplitude at edge: same combined model as illumination_amplitude
+    // (cos^q pattern × space-attenuation factor)
+    let amp_edge = cos_q_pattern(psi_edge, q) * (1.0 + psi_edge.cos()) / 2.0;
 
     // Convert to dB (will be negative)
     20.0 * amp_edge.log10()
@@ -306,13 +307,18 @@ pub fn q_factor_from_taper(edge_taper_db: f64, f_over_d: f64) -> f64 {
     let feed_pos = FeedPosition::new(0.0, 0.0, f);
     let psi_edge = feed_angle(r, 0.0, &feed_pos, f);
 
-    // Solve: amp_edge = cos(psi_edge)^q
-    // q = ln(amp_edge) / ln(cos(psi_edge))
-    if psi_edge.cos() <= 0.0 || amp_edge <= 0.0 {
+    // Solve: amp_edge = cos(psi_edge)^q * (1+cos(psi_edge))/2
+    // Taking log10: taper_db/20 = q·log10(cos ψ_edge) + log10((1+cos ψ_edge)/2)
+    // The space-loss term is independent of q, so:
+    //   q = (taper_db/20 - log10((1+cos ψ_edge)/2)) / log10(cos ψ_edge)
+    let cos_psi = psi_edge.cos();
+    if cos_psi <= 0.0 || amp_edge <= 0.0 {
         return 0.0; // Degenerate case
     }
 
-    amp_edge.ln() / psi_edge.cos().ln()
+    let space_loss_log10 = ((1.0 + cos_psi) / 2.0).log10();
+    let taper_log10 = (edge_taper_db / 20.0) - space_loss_log10;
+    taper_log10 / cos_psi.log10()
 }
 
 /// Calculate phase center offset contribution to illumination phase
@@ -519,7 +525,8 @@ mod tests {
         // Test that edge taper gives reasonable dB values
         // For f/D=0.5, the edge angle is about 53°, giving deep taper values
 
-        // q=8, f/D=0.5 gives approximately -35 dB edge taper
+        // q=8, f/D=0.5 gives approximately -37.4 dB edge taper
+        // (cos^q × space-loss at ψ≈53°: 0.6^8 × 0.8 ≈ 0.01344 → −37.4 dB)
         let taper_q8 = edge_taper_db(8.0, 0.5);
         assert!(taper_q8 < -30.0 && taper_q8 > -40.0);
 
@@ -623,6 +630,6 @@ mod tests {
 
         // Boresight (vertex) unchanged at 1.0: rho=0 → psi=0 → (1+cos(0))/2 = 1.0
         let amp0 = illumination_amplitude(0.0, 0.0, &feed_params, 0.5);
-        assert!((amp0 - 1.0).abs() < 1e-9);
+        assert!((amp0 - 1.0).abs() < 1e-12);
     }
 }
