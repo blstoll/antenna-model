@@ -47,6 +47,7 @@ fn base_h3_request() -> H3LinkBudgetRequest {
         n_rings: 2,
         h3_resolution: Some(7),
         temperature_k: None,
+        vehicle_attitude: None,
     }
 }
 

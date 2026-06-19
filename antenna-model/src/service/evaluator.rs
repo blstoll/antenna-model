@@ -75,8 +75,9 @@ use crate::data::repository::CalibrationRepository;
 use crate::data::types::{CalibrationCoverage, CalibrationStatus};
 use crate::error::{AntennaModelError, Result};
 use crate::model::{
-    apply_beam_squint_correction, compute_emitter_direction, compute_feed_position_from_pointing,
-    compute_gain_db, evaluate_correction, AntennaConfiguration, IntegrationParams,
+    apply_beam_squint_correction, compute_emitter_direction_with_attitude,
+    compute_feed_position_from_pointing, compute_gain_db, evaluate_correction,
+    AntennaConfiguration, IntegrationParams,
 };
 use crate::service::validator::coordinate_ambiguity_warnings;
 use std::time::Instant;
@@ -104,10 +105,11 @@ pub fn compute_gain_from_request(
     // Emit ambiguity warnings for positions that may be misclassified by auto-detection
     warnings.extend(coordinate_ambiguity_warnings(request));
 
-    let (emitter_az, emitter_el) = compute_emitter_direction(
+    let (emitter_az, emitter_el) = compute_emitter_direction_with_attitude(
         &request.emitter_position,
         &request.vehicle_position,
         &request.reflector_boresight,
+        request.vehicle_attitude,
     )?;
 
     let calibration = repository
@@ -142,6 +144,7 @@ pub fn compute_gain_from_request(
         &request.reflector_boresight,
         &request.vehicle_position,
         focal_length_m,
+        request.vehicle_attitude,
     )?;
 
     // Combine steering-induced position with design feed offset
@@ -534,6 +537,7 @@ mod tests {
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: None,
             include_reference: false,
+            vehicle_attitude: None,
         }
     }
 
@@ -1002,6 +1006,7 @@ mod tests {
             &request.reflector_boresight,
             &request.vehicle_position,
             focal_length_m,
+            None,
         )
         .expect("compute_feed_position_from_pointing failed in test");
         // Design offset from create_test_calibration is (0, 0, 0), so total = steer

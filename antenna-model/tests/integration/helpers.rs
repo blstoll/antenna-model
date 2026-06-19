@@ -230,6 +230,7 @@ pub mod builders {
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: None,
             include_reference: false,
+            vehicle_attitude: None,
         }
     }
 
@@ -265,6 +266,7 @@ pub mod builders {
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: Some(8450.0),
             include_reference: true,
+            vehicle_attitude: None,
         }
     }
 

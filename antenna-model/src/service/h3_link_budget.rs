@@ -20,7 +20,7 @@ use crate::data::types::AntennaCalibration;
 use crate::error::{AntennaModelError, Result};
 use crate::model::compute_gain_db;
 use crate::model::{
-    compute_emitter_direction, compute_feed_position_from_pointing, ecef_to_geodetic,
+    compute_emitter_direction_with_attitude, compute_feed_position_from_pointing, ecef_to_geodetic,
     evaluate_correction, geodetic_to_ecef, AntennaConfiguration, FeedParameters as ModelFeedParams,
     FeedPosition, IntegrationParams, MeshParameters as ModelMeshParams,
     ReflectorGeometry as ModelReflector,
@@ -89,6 +89,7 @@ fn build_antenna_config(
         &request.reflector_boresight,
         &request.vehicle_position,
         focal_length_m,
+        request.vehicle_attitude,
     )?;
 
     let design_pos = &calibration.physical_config.feed.position;
@@ -161,10 +162,11 @@ fn compute_cell_gain(
 
     // Compute az/el once; the result is returned to the caller so that
     // `compute_cell_result` does not need to call `compute_emitter_direction` again.
-    let (az_deg, el_deg) = compute_emitter_direction(
+    let (az_deg, el_deg) = compute_emitter_direction_with_attitude(
         &cell_pos,
         &request.vehicle_position,
         &request.reflector_boresight,
+        request.vehicle_attitude,
     )?;
 
     let cache_key = GainCacheKey::new(
@@ -289,10 +291,11 @@ pub fn compute_h3_link_budget(
         // threshold; set explicit ECEF to prevent misclassification as Geodetic.
         let mut cell_pos = Position3D::new(center_ex, center_ey, center_ez);
         cell_pos.coordinate_system = Some(CoordinateSystem::ECEF);
-        let (az_deg, el_deg) = compute_emitter_direction(
+        let (az_deg, el_deg) = compute_emitter_direction_with_attitude(
             &cell_pos,
             &request.vehicle_position,
             &request.reflector_boresight,
+            request.vehicle_attitude,
         )?;
         let cache_key = GainCacheKey::new(
             az_deg,
@@ -621,6 +624,7 @@ mod tests {
             n_rings: 0, // single center cell only — fast
             h3_resolution: Some(7),
             temperature_k: None,
+            vehicle_attitude: None,
         }
     }
 

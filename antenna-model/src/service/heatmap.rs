@@ -293,6 +293,7 @@ fn evaluate_grid_point(
         frequency_mhz: request.frequency_mhz,
         pointing_frequency_mhz: request.pointing_frequency_mhz,
         include_reference: false, // Don't need reference for heatmap
+        vehicle_attitude: None,   // Heatmap does not supply attitude
     };
 
     // Evaluate gain at this point

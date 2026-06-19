@@ -283,6 +283,7 @@ mod tests {
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: None,
             include_reference: false,
+            vehicle_attitude: None,
         }
     }
 

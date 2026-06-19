@@ -593,7 +593,6 @@ components:
         - antenna_id
         - feed_id
         - vehicle_position
-        - vehicle_attitude
         - reflector_boresight
         - feed_position
         - emitter_position
@@ -607,10 +606,6 @@ components:
           description: Feed identifier
         vehicle_position:
           $ref: '#/components/schemas/Position3D'
-        vehicle_attitude:
-          oneOf:
-            - $ref: '#/components/schemas/Quaternion'
-            - $ref: '#/components/schemas/EulerAngles'
         reflector_boresight:
           $ref: '#/components/schemas/Position3D'
         feed_position:
@@ -630,6 +625,22 @@ components:
           type: boolean
           default: false
           description: Include reference gain and loss calculation
+        vehicle_attitude:
+          type: array
+          items:
+            type: number
+            format: double
+          minItems: 4
+          maxItems: 4
+          description: >
+            Optional vehicle attitude as a unit quaternion [w, x, y, z] (body → ECEF).
+            Body axes: body +Z = antenna boresight direction, body +X = azimuth-zero
+            (E-clock zero) reference. When supplied, the antenna-frame X-axis is derived
+            from body +X rotated into ECEF and projected perpendicular to boresight,
+            giving a deterministic, calibration-consistent azimuth reference.
+            When omitted, azimuth zero is derived from the Earth-Z / East cross-product
+            heuristic (approximate and discontinuous near boresight parallel to Earth-Z).
+            The quaternion must be normalised to unit length (norm within 1e-3 of 1.0).
 
     GainResponse:
       type: object
@@ -782,6 +793,73 @@ components:
             $ref: '#/components/schemas/GainRequest'
           maxItems: 1000
 
+    H3LinkBudgetRequest:
+      type: object
+      required:
+        - antenna_id
+        - feed_id
+        - vehicle_position
+        - reflector_boresight
+        - feed_position
+        - frequency_mhz
+        - n_rings
+      properties:
+        antenna_id:
+          type: string
+          description: Antenna identifier
+        feed_id:
+          type: string
+          description: Feed identifier (for multi-feed antennas)
+        vehicle_position:
+          $ref: '#/components/schemas/Position3D'
+        reflector_boresight:
+          $ref: '#/components/schemas/Position3D'
+        feed_position:
+          $ref: '#/components/schemas/Position3D'
+        frequency_mhz:
+          type: number
+          format: double
+          minimum: 100
+          maximum: 50000
+          description: Operating frequency in MHz
+        pointing_frequency_mhz:
+          type: number
+          format: double
+          nullable: true
+          description: Optional pointing frequency for beam squint correction (MHz)
+        n_rings:
+          type: integer
+          minimum: 0
+          maximum: 10
+          description: Number of H3 rings around the center cell
+        h3_resolution:
+          type: integer
+          minimum: 0
+          maximum: 15
+          nullable: true
+          description: H3 resolution (0-15, higher = finer). Derived from frequency when absent.
+        temperature_k:
+          type: number
+          format: double
+          nullable: true
+          description: System noise temperature in Kelvin (used for G/T computation)
+        vehicle_attitude:
+          type: array
+          items:
+            type: number
+            format: double
+          minItems: 4
+          maxItems: 4
+          description: >
+            Optional vehicle attitude as a unit quaternion [w, x, y, z] (body → ECEF).
+            Body axes: body +Z = antenna boresight direction, body +X = azimuth-zero
+            (E-clock zero) reference. When supplied, the antenna-frame X-axis is derived
+            from body +X rotated into ECEF and projected perpendicular to boresight,
+            giving a deterministic, calibration-consistent azimuth reference.
+            When omitted, azimuth zero is derived from the Earth-Z / East cross-product
+            heuristic (approximate and discontinuous near boresight parallel to Earth-Z).
+            The quaternion must be normalised to unit length (norm within 1e-3 of 1.0).
+
     BatchGainResponse:
       type: object
       properties:
@@ -807,7 +885,6 @@ components:
         - antenna_id
         - feed_id
         - vehicle_position
-        - vehicle_attitude
         - reflector_boresight
         - feed_position
         - frequency_mhz
@@ -819,10 +896,6 @@ components:
           type: string
         vehicle_position:
           $ref: '#/components/schemas/Position3D'
-        vehicle_attitude:
-          oneOf:
-            - $ref: '#/components/schemas/Quaternion'
-            - $ref: '#/components/schemas/EulerAngles'
         reflector_boresight:
           $ref: '#/components/schemas/Position3D'
         feed_position:

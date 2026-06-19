@@ -252,6 +252,21 @@ pub struct GainRequest {
     /// Include reference gain computation (ideal: feed at focus, pointing at emitter)
     #[serde(default)]
     pub include_reference: bool,
+
+    /// Optional vehicle attitude as a unit quaternion `[w, x, y, z]` (body → ECEF).
+    ///
+    /// Body axes convention: body +Z = antenna boresight direction, body +X = azimuth-zero
+    /// (E-clock zero) reference. When supplied, the antenna-frame X-axis is derived from
+    /// body +X rotated into ECEF and projected perpendicular to the boresight, giving a
+    /// **deterministic, calibration-consistent** azimuth reference.
+    ///
+    /// When omitted, azimuth zero is derived from the Earth-Z / East cross-product heuristic
+    /// (approximate and discontinuous near boresight ∥ Earth-Z); see
+    /// `compute_emitter_direction` for details.
+    ///
+    /// The quaternion must be normalised to unit length (norm within 1e-3 of 1.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle_attitude: Option<[f64; 4]>,
 }
 
 /// Response from antenna gain computation.
@@ -569,6 +584,21 @@ pub struct H3LinkBudgetRequest {
     /// System noise temperature in Kelvin (used for G/T computation)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature_k: Option<f64>,
+
+    /// Optional vehicle attitude as a unit quaternion `[w, x, y, z]` (body → ECEF).
+    ///
+    /// Body axes convention: body +Z = antenna boresight direction, body +X = azimuth-zero
+    /// (E-clock zero) reference. When supplied, the antenna-frame X-axis is derived from
+    /// body +X rotated into ECEF and projected perpendicular to the boresight, giving a
+    /// **deterministic, calibration-consistent** azimuth reference.
+    ///
+    /// When omitted, azimuth zero is derived from the Earth-Z / East cross-product heuristic
+    /// (approximate and discontinuous near boresight ∥ Earth-Z); see
+    /// `compute_emitter_direction` for details.
+    ///
+    /// The quaternion must be normalised to unit length (norm within 1e-3 of 1.0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle_attitude: Option<[f64; 4]>,
 }
 
 /// Per-cell link budget result for a single H3 cell.
@@ -1241,6 +1271,7 @@ mod tests {
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: Some(8450.0),
             include_reference: true,
+            vehicle_attitude: None,
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -1261,6 +1292,7 @@ mod tests {
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: None,
             include_reference: false,
+            vehicle_attitude: None,
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -1471,6 +1503,7 @@ mod tests {
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: None,
             include_reference: false,
+            vehicle_attitude: None,
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -1815,6 +1848,7 @@ mod tests {
             n_rings: 3,
             h3_resolution: Some(7),
             temperature_k: Some(290.0),
+            vehicle_attitude: None,
         };
 
         let json = serde_json::to_string(&request).unwrap();

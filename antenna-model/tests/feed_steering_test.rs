@@ -84,6 +84,7 @@ fn test_feed_steering_perfect_alignment() {
         frequency_mhz: 8450.0,
         pointing_frequency_mhz: None,
         include_reference: true,
+        vehicle_attitude: None,
     };
 
     let response = compute_gain_from_request(&request, &repo)
@@ -146,6 +147,7 @@ fn test_feed_steering_large_offset() {
         frequency_mhz: 8450.0,
         pointing_frequency_mhz: None,
         include_reference: true,
+        vehicle_attitude: None,
     };
 
     let response = compute_gain_from_request(&request, &repo)
@@ -199,6 +201,7 @@ fn test_feed_steering_produces_different_gains() {
         frequency_mhz: 8450.0,
         pointing_frequency_mhz: None,
         include_reference: false,
+        vehicle_attitude: None,
     };
 
     // Scenario 2: Feed offset from boresight
@@ -212,6 +215,7 @@ fn test_feed_steering_produces_different_gains() {
         frequency_mhz: 8450.0,
         pointing_frequency_mhz: None,
         include_reference: false,
+        vehicle_attitude: None,
     };
 
     let response1 = compute_gain_from_request(&request1, &repo).unwrap();

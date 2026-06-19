@@ -97,6 +97,11 @@ pub fn validate_gain_request(
         validate_frequency(pointing_freq, "pointing_frequency_mhz")?;
     }
 
+    // Validate vehicle attitude quaternion norm (must be unit quaternion)
+    if let Some([w, x, y, z]) = request.vehicle_attitude {
+        validate_quaternion_norm(w, x, y, z, "vehicle_attitude")?;
+    }
+
     Ok(())
 }
 
@@ -210,6 +215,11 @@ pub fn validate_h3_link_budget_request(req: &H3LinkBudgetRequest) -> ValidationR
             param: "n_rings".to_string(),
             reason: "n_rings must be ≤ 10".to_string(),
         });
+    }
+
+    // Validate vehicle attitude quaternion norm (must be unit quaternion)
+    if let Some([w, x, y, z]) = req.vehicle_attitude {
+        validate_quaternion_norm(w, x, y, z, "vehicle_attitude")?;
     }
 
     Ok(())
@@ -391,6 +401,35 @@ fn validate_antenna_feed_exists(
         }
     }
 
+    Ok(())
+}
+
+// ============================================================================
+// Quaternion Validation
+// ============================================================================
+
+/// Validate that a quaternion `[w, x, y, z]` is approximately unit-normalised.
+///
+/// The norm must be within 1e-3 of 1.0 to be accepted. This tolerates small
+/// floating-point round-off while catching obviously unnormalised inputs.
+fn validate_quaternion_norm(
+    w: f64,
+    x: f64,
+    y: f64,
+    z: f64,
+    param_name: &str,
+) -> ValidationResult<()> {
+    let norm = (w * w + x * x + y * y + z * z).sqrt();
+    if (norm - 1.0).abs() > 1e-3 {
+        return Err(ValidationError::InvalidValue {
+            param: param_name.to_string(),
+            reason: format!(
+                "quaternion norm is {:.6} (expected 1.0 ± 1e-3); \
+                 supply a unit quaternion",
+                norm
+            ),
+        });
+    }
     Ok(())
 }
 
@@ -629,6 +668,7 @@ mod tests {
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: None,
             include_reference: false,
+            vehicle_attitude: None,
         };
         let warnings = coordinate_ambiguity_warnings(&request);
         assert_eq!(warnings.len(), 1);
@@ -901,6 +941,7 @@ mod tests {
             n_rings: 3,
             h3_resolution: None,
             temperature_k: None,
+            vehicle_attitude: None,
         }
     }
 
@@ -987,6 +1028,56 @@ mod tests {
     }
 
     // ========================================================================
+    // Vehicle Attitude Quaternion Validation Tests
+    // ========================================================================
+
+    #[test]
+    fn test_quaternion_norm_valid_unit() {
+        // Identity quaternion: norm = 1.0 → valid
+        assert!(validate_quaternion_norm(1.0, 0.0, 0.0, 0.0, "q").is_ok());
+        // 90° rotation about Z axis: norm ≈ 1.0 → valid
+        let s = std::f64::consts::FRAC_1_SQRT_2;
+        assert!(validate_quaternion_norm(s, 0.0, 0.0, s, "q").is_ok());
+        // Slightly off-unit but within 1e-3 tolerance → valid
+        assert!(validate_quaternion_norm(1.0005, 0.0, 0.0, 0.0, "q").is_ok());
+    }
+
+    #[test]
+    fn test_quaternion_norm_invalid_non_unit() {
+        // norm = 2.0 → rejected
+        let result = validate_quaternion_norm(2.0, 0.0, 0.0, 0.0, "vehicle_attitude");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("vehicle_attitude"), "error: {msg}");
+        assert!(
+            msg.contains("norm") || msg.contains("unit"),
+            "error should mention norm: {msg}"
+        );
+
+        // zero quaternion: norm = 0.0 → rejected
+        let result = validate_quaternion_norm(0.0, 0.0, 0.0, 0.0, "vehicle_attitude");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_h3_request_non_unit_quaternion_rejected() {
+        // Uses validate_h3_link_budget_request which does not check antenna/feed existence.
+        let mut req = valid_h3_request();
+        req.vehicle_attitude = Some([0.0, 0.0, 0.0, 0.0]); // zero quaternion
+        let result = validate_h3_link_budget_request(&req);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("vehicle_attitude"), "error: {msg}");
+    }
+
+    #[test]
+    fn test_h3_request_unit_quaternion_accepted() {
+        let mut req = valid_h3_request();
+        req.vehicle_attitude = Some([1.0, 0.0, 0.0, 0.0]);
+        assert!(validate_h3_link_budget_request(&req).is_ok());
+    }
+
+    // ========================================================================
     // Batch Request Validation Tests
     // ========================================================================
 
@@ -1019,6 +1110,7 @@ mod tests {
                 frequency_mhz: 8400.0,
                 pointing_frequency_mhz: None,
                 include_reference: false,
+                vehicle_attitude: None,
             });
         }
         let request = BatchGainRequest { evaluations };
