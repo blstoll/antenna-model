@@ -19,8 +19,8 @@
 //!   - Feed ID exists for specified antenna
 
 use crate::api::schemas::{
-    BatchGainRequest, GainRequest, GridConfig, H3LinkBudgetRequest, HeatmapRequest, Position3D,
-    RangeConfig,
+    BatchGainRequest, CoordinateSystem, GainRequest, GridConfig, H3LinkBudgetRequest,
+    HeatmapRequest, Position3D, RangeConfig,
 };
 use crate::data::repository::CalibrationRepository;
 use crate::error::{ValidationError, ValidationResult};
@@ -95,6 +95,11 @@ pub fn validate_gain_request(
     // Validate pointing frequency if specified
     if let Some(pointing_freq) = request.pointing_frequency_mhz {
         validate_frequency(pointing_freq, "pointing_frequency_mhz")?;
+    }
+
+    // Validate vehicle attitude quaternion norm (must be unit quaternion)
+    if let Some([w, x, y, z]) = request.vehicle_attitude {
+        validate_quaternion_norm(w, x, y, z, "vehicle_attitude")?;
     }
 
     Ok(())
@@ -210,6 +215,11 @@ pub fn validate_h3_link_budget_request(req: &H3LinkBudgetRequest) -> ValidationR
             param: "n_rings".to_string(),
             reason: "n_rings must be ≤ 10".to_string(),
         });
+    }
+
+    // Validate vehicle attitude quaternion norm (must be unit quaternion)
+    if let Some([w, x, y, z]) = req.vehicle_attitude {
+        validate_quaternion_norm(w, x, y, z, "vehicle_attitude")?;
     }
 
     Ok(())
@@ -395,6 +405,82 @@ fn validate_antenna_feed_exists(
 }
 
 // ============================================================================
+// Quaternion Validation
+// ============================================================================
+
+/// Validate that a quaternion `[w, x, y, z]` is approximately unit-normalised.
+///
+/// The norm must be within 1e-3 of 1.0 to be accepted. This tolerates small
+/// floating-point round-off while catching obviously unnormalised inputs.
+fn validate_quaternion_norm(
+    w: f64,
+    x: f64,
+    y: f64,
+    z: f64,
+    param_name: &str,
+) -> ValidationResult<()> {
+    let norm = (w * w + x * x + y * y + z * z).sqrt();
+    if (norm - 1.0).abs() > 1e-3 {
+        return Err(ValidationError::InvalidValue {
+            param: param_name.to_string(),
+            reason: format!(
+                "quaternion norm is {:.6} (expected 1.0 ± 1e-3); \
+                 supply a unit quaternion",
+                norm
+            ),
+        });
+    }
+    Ok(())
+}
+
+// ============================================================================
+// Coordinate Ambiguity Warning
+// ============================================================================
+
+/// Altitude threshold above which a geodetic position is considered ambiguous (100 km).
+///
+/// Positions auto-detected as geodetic with |z| > this value could plausibly be ECEF
+/// and should carry an explicit `coordinate_system` tag to prevent misclassification.
+const GEODETIC_AMBIGUITY_ALTITUDE_M: f64 = 100_000.0;
+
+/// Emit a warning if a position is auto-detected as geodetic but has suspiciously
+/// high altitude (> 100 km), which could indicate an ECEF position near the
+/// threshold or a legitimate high-altitude geodetic position (e.g. GEO orbit).
+///
+/// If the caller has set an explicit `coordinate_system`, no warning is emitted.
+fn warn_if_ambiguous(pos: &Position3D, name: &str, warnings: &mut Vec<String>) {
+    if pos.coordinate_system.is_none() {
+        if let CoordinateSystem::Geodetic = pos.coordinate_system() {
+            if pos.z.abs() > GEODETIC_AMBIGUITY_ALTITUDE_M {
+                warnings.push(format!(
+                    "{name}: auto-detected as geodetic with altitude {:.0} km; \
+                     set coordinate_system explicitly to avoid ECEF misclassification",
+                    pos.z / 1000.0
+                ));
+            }
+        }
+    }
+}
+
+/// Return ambiguity warnings for all positions in a `GainRequest`.
+///
+/// These are non-fatal advisories: they do not block processing but indicate
+/// positions where auto-detection may produce incorrect results. Callers should
+/// merge these into the response warnings list.
+pub fn coordinate_ambiguity_warnings(request: &GainRequest) -> Vec<String> {
+    let mut warnings = Vec::new();
+    warn_if_ambiguous(&request.vehicle_position, "vehicle_position", &mut warnings);
+    warn_if_ambiguous(
+        &request.reflector_boresight,
+        "reflector_boresight",
+        &mut warnings,
+    );
+    warn_if_ambiguous(&request.feed_position, "feed_position", &mut warnings);
+    warn_if_ambiguous(&request.emitter_position, "emitter_position", &mut warnings);
+    warnings
+}
+
+// ============================================================================
 // Grid Configuration Validation
 // ============================================================================
 
@@ -523,11 +609,70 @@ fn validate_range_config(range: &RangeConfig, dimension: &str) -> ValidationResu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::schemas::CoordinateSystem;
     use crate::data::repository::CalibrationRepository;
 
     // Helper to create a test repository with sample data
     fn create_test_repository() -> CalibrationRepository {
         CalibrationRepository::new()
+    }
+
+    // ========================================================================
+    // Coordinate Ambiguity Warning Tests
+    // ========================================================================
+
+    #[test]
+    fn test_warn_if_ambiguous_high_altitude_no_tag() {
+        // z = 200 km altitude, no explicit tag → warning expected
+        let pos = Position3D::new(0.0, 0.0, 200_000.0);
+        let mut warnings = Vec::new();
+        warn_if_ambiguous(&pos, "test_position", &mut warnings);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("test_position"));
+        assert!(warnings[0].contains("200 km"));
+        assert!(warnings[0].contains("coordinate_system"));
+    }
+
+    #[test]
+    fn test_warn_if_ambiguous_high_altitude_with_explicit_tag() {
+        // Same position but with explicit Geodetic tag → no warning
+        let mut pos = Position3D::new(0.0, 0.0, 200_000.0);
+        pos.coordinate_system = Some(CoordinateSystem::Geodetic);
+        let mut warnings = Vec::new();
+        warn_if_ambiguous(&pos, "test_position", &mut warnings);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn test_warn_if_ambiguous_low_altitude_no_warning() {
+        // z = 100 m, well below threshold → no warning
+        let pos = Position3D::new(-118.0, 34.0, 100.0);
+        let mut warnings = Vec::new();
+        warn_if_ambiguous(&pos, "test_position", &mut warnings);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn test_coordinate_ambiguity_warnings_full_request() {
+        // Build a GainRequest where emitter is at 500 km altitude (geodetic) — no explicit tag.
+        // At 500 km, auto-detection says Geodetic (500_000 < 6_400_000), but altitude is
+        // > 100 km, so it triggers the ambiguity warning.
+        let request = GainRequest {
+            antenna_id: "test".to_string(),
+            feed_id: "feed".to_string(),
+            vehicle_position: Position3D::new(-118.0, 34.0, 100.0),
+            reflector_boresight: Position3D::new(-118.0, 34.0, 110.0),
+            feed_position: Position3D::new(-118.0, 34.0, 105.0),
+            // LEO altitude in geodetic form, no tag — ambiguous
+            emitter_position: Position3D::new(0.0, 0.0, 500_000.0),
+            frequency_mhz: 8400.0,
+            pointing_frequency_mhz: None,
+            include_reference: false,
+            vehicle_attitude: None,
+        };
+        let warnings = coordinate_ambiguity_warnings(&request);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("emitter_position"));
     }
 
     // ========================================================================
@@ -796,6 +941,7 @@ mod tests {
             n_rings: 3,
             h3_resolution: None,
             temperature_k: None,
+            vehicle_attitude: None,
         }
     }
 
@@ -882,6 +1028,94 @@ mod tests {
     }
 
     // ========================================================================
+    // Vehicle Attitude Quaternion Validation Tests
+    // ========================================================================
+
+    /// Helper to build a valid GainRequest for testing quaternion validation.
+    ///
+    /// The antenna/feed IDs are intentionally set to non-existent values so that
+    /// `validate_gain_request` will return an error at the antenna-existence check
+    /// (before reaching the quaternion check).  To exercise the quaternion path
+    /// specifically, call `validate_quaternion_norm` directly (see tests below).
+    fn valid_gain_request_template() -> GainRequest {
+        GainRequest {
+            antenna_id: "test_antenna".to_string(),
+            feed_id: "test_feed".to_string(),
+            vehicle_position: Position3D::new(-118.0, 34.0, 100.0),
+            reflector_boresight: Position3D::new(-118.1, 34.1, 200.0),
+            feed_position: Position3D::new(-118.0, 34.0, 150.0),
+            emitter_position: Position3D::new(-118.0, 34.0, 35_786_000.0),
+            frequency_mhz: 8400.0,
+            pointing_frequency_mhz: None,
+            include_reference: false,
+            vehicle_attitude: None,
+        }
+    }
+
+    /// `validate_gain_request` must return `Err` when `vehicle_attitude` is a zero-norm
+    /// quaternion.  Because `validate_gain_request` checks antenna/feed existence first
+    /// (before the quaternion check), this test demonstrates that the overall function
+    /// rejects the request — the `validate_quaternion_norm` path is tested directly in
+    /// `test_quaternion_norm_invalid_non_unit` below.
+    #[test]
+    fn test_gain_request_zero_norm_attitude_rejected() {
+        let repo = create_test_repository();
+        let mut req = valid_gain_request_template();
+        req.vehicle_attitude = Some([0.0, 0.0, 0.0, 0.0]); // zero quaternion (norm = 0)
+        let result = validate_gain_request(&req, &repo);
+        assert!(
+            result.is_err(),
+            "validate_gain_request should reject a zero-norm quaternion"
+        );
+    }
+
+    #[test]
+    fn test_quaternion_norm_valid_unit() {
+        // Identity quaternion: norm = 1.0 → valid
+        assert!(validate_quaternion_norm(1.0, 0.0, 0.0, 0.0, "q").is_ok());
+        // 90° rotation about Z axis: norm ≈ 1.0 → valid
+        let s = std::f64::consts::FRAC_1_SQRT_2;
+        assert!(validate_quaternion_norm(s, 0.0, 0.0, s, "q").is_ok());
+        // Slightly off-unit but within 1e-3 tolerance → valid
+        assert!(validate_quaternion_norm(1.0005, 0.0, 0.0, 0.0, "q").is_ok());
+    }
+
+    #[test]
+    fn test_quaternion_norm_invalid_non_unit() {
+        // norm = 2.0 → rejected
+        let result = validate_quaternion_norm(2.0, 0.0, 0.0, 0.0, "vehicle_attitude");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("vehicle_attitude"), "error: {msg}");
+        assert!(
+            msg.contains("norm") || msg.contains("unit"),
+            "error should mention norm: {msg}"
+        );
+
+        // zero quaternion: norm = 0.0 → rejected
+        let result = validate_quaternion_norm(0.0, 0.0, 0.0, 0.0, "vehicle_attitude");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_h3_request_non_unit_quaternion_rejected() {
+        // Uses validate_h3_link_budget_request which does not check antenna/feed existence.
+        let mut req = valid_h3_request();
+        req.vehicle_attitude = Some([0.0, 0.0, 0.0, 0.0]); // zero quaternion
+        let result = validate_h3_link_budget_request(&req);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("vehicle_attitude"), "error: {msg}");
+    }
+
+    #[test]
+    fn test_h3_request_unit_quaternion_accepted() {
+        let mut req = valid_h3_request();
+        req.vehicle_attitude = Some([1.0, 0.0, 0.0, 0.0]);
+        assert!(validate_h3_link_budget_request(&req).is_ok());
+    }
+
+    // ========================================================================
     // Batch Request Validation Tests
     // ========================================================================
 
@@ -914,6 +1148,7 @@ mod tests {
                 frequency_mhz: 8400.0,
                 pointing_frequency_mhz: None,
                 include_reference: false,
+                vehicle_attitude: None,
             });
         }
         let request = BatchGainRequest { evaluations };

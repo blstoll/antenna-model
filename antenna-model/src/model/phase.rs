@@ -66,13 +66,21 @@ pub fn wavelength_from_frequency(frequency_hz: f64) -> f64 {
 /// This is the phase contribution from the parabolic reflector geometry
 /// when the feed is at the focal point and observing in direction (θ, φ).
 ///
-/// # Formula (from design doc Section 2.2)
+/// # Derivation
+///
+/// For a parabola z = ρ²/(4f), the feed→surface optical path is k(f + z).
+/// The far-field projection removes k(ρ·sinθ·cos(φ−φ') + z·cosθ). Dropping
+/// the constant term kf:
+///
 /// ```text
-/// Ψ_path = k·[ρ²/(4f) - ρ·sin(θ)·cos(φ-φ')]
+/// Ψ_path = k·[z·(1−cosθ) − ρ·sinθ·cos(φ−φ')],  z = ρ²/(4f)
+///        = k·[ρ²/(4f)·(1−cosθ) − ρ·sinθ·cos(φ−φ')]
 /// ```
 ///
-/// The first term accounts for the path length from aperture to focal point,
-/// and the second term accounts for the far-field observation direction.
+/// The `(1−cosθ)` factor is essential: it ensures the aperture is equiphase
+/// at boresight (θ = 0), which is the defining optical property of a parabola.
+/// Without it, a large spurious defocus phase is injected across the aperture,
+/// corrupting the off-axis pattern.
 ///
 /// # Arguments
 /// - `rho`: Radial distance from axis in aperture plane (meters)
@@ -93,26 +101,29 @@ pub fn phase_path(
     focal_length: f64,
     k: f64,
 ) -> f64 {
-    let term1 = rho * rho / (4.0 * focal_length);
+    // Feed→surface path is k(f+z); far-field projection removes
+    // k(ρ·sinθ·cos(φ−φ′) + z·cosθ). Dropping the constant kf:
+    //   Ψ = k·[z·(1−cosθ) − ρ·sinθ·cos(φ−φ′)],  z = ρ²/(4f)
+    let term1 = rho * rho / (4.0 * focal_length) * (1.0 - theta.cos());
     let term2 = rho * theta.sin() * (phi - phi_prime).cos();
     k * (term1 - term2)
 }
 
-/// Feed displacement phase (coma aberration)
+/// Feed displacement phase (coma and defocus aberrations)
 ///
 /// When the feed is displaced from the focal point, aberrations are introduced including
-/// beam steering, coma (asymmetric sidelobes), and gain loss. This function computes the
-/// exact phase difference using full path-length analysis.
+/// beam steering, coma (asymmetric sidelobes), defocus, and gain loss. This function
+/// computes the exact phase difference using full path-length analysis.
 ///
 /// # Algorithm
 ///
 /// Computes the actual path length difference between:
-/// - Path from ideal focal point to each aperture point on the parabolic surface
-/// - Path from displaced feed position to each aperture point
+/// - Path from ideal focal point `(0, 0, f)` to each aperture point on the parabolic surface
+/// - Path from displaced feed position `(δ·cos(α), δ·sin(α), f + δz)` to each aperture point
 ///
 /// This naturally includes all orders of aberration:
 /// - First order (linear): Beam steering (θ ≈ δ/f)
-/// - Second order: Defocus/astigmatism effects
+/// - Second order: Defocus/astigmatism effects (both lateral and axial displacements)
 /// - Third order: True coma with asymmetric sidelobes
 /// - Higher orders: Additional aberrations for large displacements
 ///
@@ -121,13 +132,16 @@ pub fn phase_path(
 /// For a parabolic reflector with equation z = ρ²/(4f):
 /// - Aperture point in Cartesian: (x, y, z) where x = ρ·cos(φ'), y = ρ·sin(φ')
 /// - Ideal focus at: (0, 0, f)
-/// - Displaced feed at: (δ·cos(α), δ·sin(α), f)
+/// - Displaced feed at: (δ·cos(α), δ·sin(α), f + δz)
+///
+/// When `delta_z = 0` this function is identical to the previous 6-argument model.
 ///
 /// # Arguments
 /// - `rho`: Radial distance from axis in aperture plane (meters)
 /// - `phi_prime`: Azimuthal angle in aperture plane (radians)
-/// - `delta_feed`: Feed displacement magnitude from focal point (meters)
-/// - `alpha`: Direction angle of feed displacement (radians)
+/// - `delta_feed`: Lateral feed displacement magnitude from focal axis (meters)
+/// - `alpha`: Direction angle of lateral feed displacement (radians)
+/// - `delta_z`: Axial feed offset from focal point (meters, positive = away from vertex)
 /// - `focal_length`: Reflector focal length (meters)
 /// - `k`: Wavenumber (radians/meter)
 ///
@@ -144,6 +158,7 @@ pub fn phase_feed_displacement(
     phi_prime: f64,
     delta_feed: f64,
     alpha: f64,
+    delta_z: f64,
     focal_length: f64,
     k: f64,
 ) -> f64 {
@@ -154,18 +169,21 @@ pub fn phase_feed_displacement(
     // Surface height on parabola: z = ρ²/(4f)
     let z = rho * rho / (4.0 * focal_length);
 
-    // Feed displacement in Cartesian (lateral displacement in focal plane)
+    // Lateral feed displacement in Cartesian (in focal plane)
     let dx = delta_feed * alpha.cos();
     let dy = delta_feed * alpha.sin();
 
-    // Distance from focal point to surface point (ideal path)
+    // Distance from ideal focal point (0, 0, f) to surface point
     // For parabola, all paths from focus to surface to aperture plane are equal,
     // but we need the actual geometric distance for phase calculation
-    let dz = z - focal_length;
-    let path_ideal = (x * x + y * y + dz * dz).sqrt();
+    let dz_ideal = z - focal_length;
+    let path_ideal = (x * x + y * y + dz_ideal * dz_ideal).sqrt();
 
-    // Distance from displaced feed to surface point
-    let path_displaced = ((x - dx).powi(2) + (y - dy).powi(2) + dz * dz).sqrt();
+    // Distance from displaced feed (dx, dy, f + delta_z) to surface point
+    // The axial offset delta_z shifts the z-position of the feed, producing
+    // a ρ-dependent (defocus) phase when delta_z != 0
+    let dz_displaced = z - (focal_length + delta_z);
+    let path_displaced = ((x - dx).powi(2) + (y - dy).powi(2) + dz_displaced * dz_displaced).sqrt();
 
     // Phase difference: k × (displaced_path - ideal_path)
     // Positive phase when displaced feed creates longer path
@@ -228,15 +246,17 @@ pub fn phase_mesh(mesh_spacing: f64, theta_incident: f64, k: f64) -> f64 {
 /// Total phase combining all contributions
 ///
 /// Computes the complete phase at an aperture point, including all physical effects:
-/// path phase, coma aberration, surface errors, and mesh effects.
+/// path phase, coma aberration (lateral feed displacement), axial defocus (feed axial
+/// offset from focus), surface errors, and mesh effects.
 ///
 /// # Arguments
 /// - `aperture`: Aperture coordinates (ρ, φ')
 /// - `theta`: Far-field polar angle (radians)
 /// - `phi`: Far-field azimuthal angle (radians)
 /// - `focal_length`: Reflector focal length (meters)
-/// - `feed_displacement`: Feed position relative to focal point (meters)
-/// - `feed_displacement_angle`: Direction of feed displacement (radians)
+/// - `feed_displacement`: Lateral feed displacement magnitude from focal axis (meters)
+/// - `feed_displacement_angle`: Direction of lateral feed displacement (radians)
+/// - `feed_axial_offset`: Axial feed offset from focal point (meters, positive = away from vertex)
 /// - `surface_error`: Surface deviation at this point (meters)
 /// - `theta_incident`: Angle of incidence (radians)
 /// - `mesh_spacing`: Mesh spacing (meters), or 0.0 for solid reflector
@@ -253,6 +273,7 @@ pub fn phase_total(
     focal_length: f64,
     feed_displacement: f64,
     feed_displacement_angle: f64,
+    feed_axial_offset: f64,
     surface_error: f64,
     theta_incident: f64,
     mesh_spacing: f64,
@@ -267,13 +288,14 @@ pub fn phase_total(
         k,
     );
 
-    // Add feed displacement phase (coma) if feed is off-axis
-    if feed_displacement > 0.0 {
+    // Add feed displacement phase (lateral coma + axial defocus) if feed is displaced
+    if feed_displacement > 0.0 || feed_axial_offset.abs() > 0.0 {
         total += phase_feed_displacement(
             aperture.rho,
             aperture.phi_prime,
             feed_displacement,
             feed_displacement_angle,
+            feed_axial_offset,
             focal_length,
             k,
         );
@@ -290,164 +312,6 @@ pub fn phase_total(
     }
 
     total
-}
-
-/// Surface error model trait
-///
-/// Defines interface for different surface error models (Gaussian random,
-/// Zernike polynomials, measured surface maps, etc.)
-pub trait SurfaceErrorModel {
-    /// Get surface deviation at aperture point (ρ, φ')
-    ///
-    /// # Arguments
-    /// - `rho`: Radial distance from axis (meters)
-    /// - `phi_prime`: Azimuthal angle (radians)
-    ///
-    /// # Returns
-    /// Surface deviation in meters (positive = away from vertex)
-    fn error_at(&self, rho: f64, phi_prime: f64) -> f64;
-
-    /// Get RMS surface error over the aperture
-    fn rms(&self) -> f64;
-}
-
-/// Ideal surface (no errors)
-#[derive(Debug, Clone, Copy)]
-pub struct IdealSurface;
-
-impl SurfaceErrorModel for IdealSurface {
-    fn error_at(&self, _rho: f64, _phi_prime: f64) -> f64 {
-        0.0
-    }
-
-    fn rms(&self) -> f64 {
-        0.0
-    }
-}
-
-/// Gaussian random surface errors
-///
-/// Models random surface deviations with Gaussian distribution.
-/// Useful for Monte Carlo simulations and testing.
-#[derive(Debug, Clone)]
-pub struct GaussianSurface {
-    /// RMS surface deviation (meters)
-    pub rms: f64,
-    /// Spatial correlation length (meters)
-    pub correlation_length: f64,
-    /// Random seed for reproducibility
-    seed: u64,
-}
-
-impl GaussianSurface {
-    /// Create new Gaussian surface model
-    pub fn new(rms: f64, correlation_length: f64, seed: u64) -> Self {
-        Self {
-            rms,
-            correlation_length,
-            seed,
-        }
-    }
-
-    /// Simple hash function for pseudo-random generation
-    /// This is a placeholder - in production, use a proper RNG
-    fn hash(&self, rho: f64, phi_prime: f64) -> f64 {
-        // Simple deterministic pseudo-random based on position
-        // This is NOT cryptographically secure, just for testing
-        let x = (rho * 1000.0) as u64;
-        let y = (phi_prime * 1000.0) as u64;
-        let h = x
-            .wrapping_mul(2654435761)
-            .wrapping_add(y.wrapping_mul(2654435789));
-        let h = h.wrapping_add(self.seed);
-
-        // Map to [-1, 1]
-        (h % 1000) as f64 / 500.0 - 1.0
-    }
-}
-
-impl SurfaceErrorModel for GaussianSurface {
-    fn error_at(&self, rho: f64, phi_prime: f64) -> f64 {
-        // Simple approximation: scale hash output by RMS
-        // In production, use proper Gaussian random with spatial correlation
-        self.rms * self.hash(rho, phi_prime)
-    }
-
-    fn rms(&self) -> f64 {
-        self.rms
-    }
-}
-
-/// Zernike polynomial surface errors
-///
-/// Models systematic aberrations using Zernike polynomials, which form
-/// an orthonormal basis over a circular aperture.
-///
-/// Common Zernike terms:
-/// - Piston (Z0): Constant offset
-/// - Tilt (Z1, Z2): Linear tilt in x and y
-/// - Defocus (Z3): Quadratic focus error
-/// - Astigmatism (Z4, Z5): Cylindrical aberrations
-/// - Coma (Z6, Z7): Third-order coma
-/// - Spherical (Z8): Spherical aberration
-///
-/// This is a simplified implementation supporting up to 5th order.
-#[derive(Debug, Clone)]
-pub struct ZernikeSurface {
-    /// Zernike coefficients (meters)
-    /// Index corresponds to Noll ordering
-    pub coefficients: Vec<f64>,
-    /// Aperture radius for normalization (meters)
-    pub aperture_radius: f64,
-}
-
-impl ZernikeSurface {
-    /// Create new Zernike surface model
-    pub fn new(coefficients: Vec<f64>, aperture_radius: f64) -> Self {
-        Self {
-            coefficients,
-            aperture_radius,
-        }
-    }
-
-    /// Evaluate Zernike polynomial at normalized coordinates
-    ///
-    /// This is a simplified implementation of common low-order terms.
-    /// For production use, implement full Zernike recursion.
-    fn zernike_at(&self, rho_norm: f64, phi: f64, j: usize) -> f64 {
-        match j {
-            0 => 1.0,                                                      // Piston
-            1 => rho_norm * phi.cos(),                                     // Tilt X
-            2 => rho_norm * phi.sin(),                                     // Tilt Y
-            3 => 2.0 * rho_norm * rho_norm - 1.0,                          // Defocus
-            4 => rho_norm * rho_norm * (2.0 * phi).cos(),                  // Astigmatism 0°
-            5 => rho_norm * rho_norm * (2.0 * phi).sin(),                  // Astigmatism 45°
-            6 => (3.0 * rho_norm * rho_norm - 2.0) * rho_norm * phi.cos(), // Coma X
-            7 => (3.0 * rho_norm * rho_norm - 2.0) * rho_norm * phi.sin(), // Coma Y
-            8 => 6.0 * rho_norm.powi(4) - 6.0 * rho_norm * rho_norm + 1.0, // Spherical
-            _ => 0.0, // Higher orders not implemented
-        }
-    }
-}
-
-impl SurfaceErrorModel for ZernikeSurface {
-    fn error_at(&self, rho: f64, phi_prime: f64) -> f64 {
-        let rho_norm = rho / self.aperture_radius;
-
-        // Sum contributions from all Zernike terms
-        self.coefficients
-            .iter()
-            .enumerate()
-            .map(|(j, &coeff)| coeff * self.zernike_at(rho_norm, phi_prime, j))
-            .sum()
-    }
-
-    fn rms(&self) -> f64 {
-        // For Zernike polynomials, RMS is approximately the L2 norm of coefficients
-        // (exact calculation requires integration, this is an approximation)
-        let sum_squares: f64 = self.coefficients.iter().skip(1).map(|c| c * c).sum();
-        sum_squares.sqrt()
-    }
 }
 
 /// Calculate angle of incidence for a point on the parabolic surface
@@ -500,38 +364,49 @@ mod tests {
 
     #[test]
     fn test_phase_path_on_axis() {
-        // On-axis (θ=0), only the ρ²/(4f) term contributes
+        // On-axis (θ=0): aperture must be equiphase (defining property of a parabola).
+        // The (1−cosθ) factor ensures the quadratic term vanishes at boresight.
         let focal_length = 17.0;
         let k = wavenumber(0.03);
 
         let phase = phase_path(1.0, 0.0, 0.0, 0.0, focal_length, k);
-        let expected = k * (1.0 / (4.0 * focal_length));
-        assert!((phase - expected).abs() < EPSILON);
+        assert!(
+            phase.abs() < EPSILON,
+            "on-axis phase should be 0, got {phase}"
+        );
+    }
+
+    #[test]
+    fn test_phase_path_boresight_equiphase() {
+        // For a parabola fed at focus, the aperture is equiphase at theta=0.
+        // This must hold for all radii — it is the defining optical property of a parabola.
+        let focal_length = 17.0;
+        let k = wavenumber(0.03);
+        for rho in [0.0, 1.0, 5.0, 10.0, 17.0] {
+            let phase = phase_path(rho, 0.7, 0.0, 0.0, focal_length, k);
+            assert!(phase.abs() < EPSILON, "rho={rho}: phase={phase}");
+        }
     }
 
     #[test]
     fn test_phase_path_off_axis() {
         let focal_length = 17.0;
         let k = wavenumber(0.03);
-        let rho = 5.0;
-        let phi_prime = PI / 4.0;
-        let theta = 0.1;
-        let phi = PI / 3.0;
+        let (rho, phi_prime, theta, phi) = (5.0, PI / 4.0, 0.1, PI / 3.0);
 
         let phase = phase_path(rho, phi_prime, theta, phi, focal_length, k);
 
-        let term1 = rho * rho / (4.0 * focal_length);
+        // Correct formula: Ψ = k·[ρ²/(4f)·(1−cosθ) − ρ·sinθ·cos(φ−φ')]
+        let term1 = rho * rho / (4.0 * focal_length) * (1.0 - theta.cos());
         let term2 = rho * theta.sin() * (phi - phi_prime).cos();
-        let expected = k * (term1 - term2);
-
-        assert!((phase - expected).abs() < EPSILON);
+        assert!((phase - k * (term1 - term2)).abs() < EPSILON);
     }
 
     #[test]
     fn test_phase_feed_displacement_zero() {
         // Zero displacement should give zero phase
         let k = wavenumber(0.03);
-        let phase = phase_feed_displacement(5.0, 0.0, 0.0, 0.0, 17.0, k);
+        let phase = phase_feed_displacement(5.0, 0.0, 0.0, 0.0, 0.0, 17.0, k);
         assert!(phase.abs() < EPSILON);
     }
 
@@ -544,7 +419,8 @@ mod tests {
         let delta_feed = 1.0; // 1 meter displacement
         let alpha = 0.0; // Displacement in x-direction
 
-        let phase = phase_feed_displacement(rho, phi_prime, delta_feed, alpha, focal_length, k);
+        let phase =
+            phase_feed_displacement(rho, phi_prime, delta_feed, alpha, 0.0, focal_length, k);
 
         // Should be non-zero for off-axis feed
         assert!(phase.abs() > 0.0);
@@ -573,8 +449,10 @@ mod tests {
         let alpha = 0.0; // Displacement in +x direction
 
         // Points at +phi_prime and -phi_prime should have equal magnitude phase
-        let phase_pos = phase_feed_displacement(rho, PI / 4.0, delta_feed, alpha, focal_length, k);
-        let phase_neg = phase_feed_displacement(rho, -PI / 4.0, delta_feed, alpha, focal_length, k);
+        let phase_pos =
+            phase_feed_displacement(rho, PI / 4.0, delta_feed, alpha, 0.0, focal_length, k);
+        let phase_neg =
+            phase_feed_displacement(rho, -PI / 4.0, delta_feed, alpha, 0.0, focal_length, k);
 
         assert!(
             (phase_pos - phase_neg).abs() < 1e-10,
@@ -595,10 +473,11 @@ mod tests {
         let alpha = 0.0; // Displacement in +x direction
 
         // Point in +x direction (φ'=0) - displaced feed is closer
-        let phase_toward = phase_feed_displacement(rho, 0.0, delta_feed, alpha, focal_length, k);
+        let phase_toward =
+            phase_feed_displacement(rho, 0.0, delta_feed, alpha, 0.0, focal_length, k);
 
         // Point in -x direction (φ'=π) - displaced feed is farther
-        let phase_away = phase_feed_displacement(rho, PI, delta_feed, alpha, focal_length, k);
+        let phase_away = phase_feed_displacement(rho, PI, delta_feed, alpha, 0.0, focal_length, k);
 
         // Phases should have opposite signs
         assert!(
@@ -632,7 +511,7 @@ mod tests {
         let delta_feed = 1.0;
         let alpha = 0.0;
 
-        let phase = phase_feed_displacement(0.0, 0.0, delta_feed, alpha, focal_length, k);
+        let phase = phase_feed_displacement(0.0, 0.0, delta_feed, alpha, 0.0, focal_length, k);
 
         // Expected: k * (sqrt(δ² + f²) - f)
         let expected = k * ((delta_feed.powi(2) + focal_length.powi(2)).sqrt() - focal_length);
@@ -662,7 +541,8 @@ mod tests {
         // Path from ideal: sqrt(16 + 0 + 92.16) = sqrt(108.16) ≈ 10.4
         // Path from displaced: sqrt(9 + 0 + 92.16) = sqrt(101.16) ≈ 10.058
 
-        let phase = phase_feed_displacement(rho, phi_prime, delta_feed, alpha, focal_length, k);
+        let phase =
+            phase_feed_displacement(rho, phi_prime, delta_feed, alpha, 0.0, focal_length, k);
 
         // Expected: path_displaced - path_ideal ≈ 10.058 - 10.4 = -0.342
         let expected = (101.16_f64).sqrt() - (108.16_f64).sqrt();
@@ -685,9 +565,9 @@ mod tests {
         let phi_prime = PI; // Away from displacement
 
         let phase_small =
-            phase_feed_displacement(2.0, phi_prime, delta_feed, alpha, focal_length, k);
+            phase_feed_displacement(2.0, phi_prime, delta_feed, alpha, 0.0, focal_length, k);
         let phase_large =
-            phase_feed_displacement(8.0, phi_prime, delta_feed, alpha, focal_length, k);
+            phase_feed_displacement(8.0, phi_prime, delta_feed, alpha, 0.0, focal_length, k);
 
         assert!(
             phase_large.abs() > phase_small.abs(),
@@ -744,6 +624,7 @@ mod tests {
             focal_length,
             0.0, // No feed displacement
             0.0,
+            0.0, // No axial offset
             0.0, // No surface error
             0.0,
             0.0, // No mesh
@@ -770,6 +651,7 @@ mod tests {
             focal_length,
             1.0,      // Feed displacement
             0.0,      // Displacement angle
+            0.0,      // No axial offset
             0.001,    // Surface error
             PI / 6.0, // Incident angle
             0.005,    // Mesh spacing
@@ -778,64 +660,12 @@ mod tests {
 
         // Should be sum of all components
         let p_path = phase_path(5.0, PI / 4.0, theta, phi, focal_length, k);
-        let p_feed = phase_feed_displacement(5.0, PI / 4.0, 1.0, 0.0, focal_length, k);
+        let p_feed = phase_feed_displacement(5.0, PI / 4.0, 1.0, 0.0, 0.0, focal_length, k);
         let p_surf = phase_surface_error(0.001, PI / 6.0, k);
         let p_mesh = phase_mesh(0.005, PI / 6.0, k);
         let expected = p_path + p_feed + p_surf + p_mesh;
 
         assert!((phase - expected).abs() < EPSILON);
-    }
-
-    #[test]
-    fn test_ideal_surface() {
-        let surface = IdealSurface;
-        assert_eq!(surface.error_at(5.0, 0.0), 0.0);
-        assert_eq!(surface.rms(), 0.0);
-    }
-
-    #[test]
-    fn test_gaussian_surface() {
-        let surface = GaussianSurface::new(0.001, 0.1, 12345);
-
-        // Error should be within reasonable bounds
-        let error = surface.error_at(5.0, PI / 4.0);
-        assert!(error.abs() <= 3.0 * surface.rms()); // Within 3 sigma
-
-        // Same position should give same error (deterministic)
-        let error2 = surface.error_at(5.0, PI / 4.0);
-        assert_eq!(error, error2);
-
-        // RMS should match specification
-        assert_eq!(surface.rms(), 0.001);
-    }
-
-    #[test]
-    fn test_zernike_surface_piston() {
-        // Pure piston (constant offset)
-        let coeffs = vec![0.001, 0.0, 0.0]; // 1 mm piston
-        let surface = ZernikeSurface::new(coeffs, 17.0);
-
-        // All points should have same error
-        let error1 = surface.error_at(5.0, 0.0);
-        let error2 = surface.error_at(10.0, PI / 2.0);
-        assert!((error1 - 0.001).abs() < 1e-6);
-        assert!((error2 - 0.001).abs() < 1e-6);
-    }
-
-    #[test]
-    fn test_zernike_surface_tilt() {
-        // Pure tilt in x-direction
-        let coeffs = vec![0.0, 0.001, 0.0]; // 1 mm tilt coefficient
-        let surface = ZernikeSurface::new(coeffs, 17.0);
-
-        // Error should vary linearly with ρ·cos(φ')
-        let error1 = surface.error_at(5.0, 0.0); // φ'=0, max positive
-        let error2 = surface.error_at(5.0, PI); // φ'=π, max negative
-
-        // Should be opposite signs
-        assert!(error1 > 0.0);
-        assert!(error2 < 0.0);
-        assert!((error1 + error2).abs() < 1e-10); // Should be symmetric
     }
 
     #[test]
@@ -849,5 +679,38 @@ mod tests {
         // At ρ = 2f, angle should be atan(1) = 45 degrees
         let angle = angle_of_incidence(2.0 * focal_length, focal_length);
         assert!((angle - PI / 4.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_axial_displacement_produces_defocus() {
+        // Pure axial offset (no lateral): δ_lateral=0, δz=0.10 m behind focus.
+        // This must produce a ρ-dependent (defocus) phase — center and edge differ.
+        let (f, k) = (17.0, wavenumber(0.03));
+        let p_center = phase_feed_displacement(0.0, 0.0, 0.0, 0.0, 0.10, f, k);
+        let p_edge = phase_feed_displacement(8.0, 0.0, 0.0, 0.0, 0.10, f, k);
+        assert!(
+            (p_edge - p_center).abs() > 1.0,
+            "no defocus: center={p_center} edge={p_edge}"
+        );
+    }
+
+    #[test]
+    fn test_zero_axial_matches_previous_model() {
+        // δz = 0 must reproduce the old 6-arg model exactly.
+        let (f, k) = (17.0, wavenumber(0.03));
+        let with_z0 = phase_feed_displacement(5.0, std::f64::consts::PI / 4.0, 1.0, 0.0, 0.0, f, k);
+        let (x, y) = (
+            5.0 * (std::f64::consts::PI / 4.0).cos(),
+            5.0 * (std::f64::consts::PI / 4.0).sin(),
+        );
+        let z = 25.0 / (4.0 * f);
+        let dz = z - f;
+        let ideal = (x * x + y * y + dz * dz).sqrt();
+        let displaced = ((x - 1.0).powi(2) + y * y + dz * dz).sqrt();
+        let expected = k * (displaced - ideal);
+        assert!(
+            (with_z0 - expected).abs() < 1e-10,
+            "δz=0 regression: {with_z0} vs {expected}"
+        );
     }
 }

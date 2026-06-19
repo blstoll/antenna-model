@@ -300,10 +300,13 @@ async fn test_concurrent_different_antennas() {
 
     assert_eq!(results.len(), 15);
 
-    // All results should be valid
+    // All results should be valid. The shared request steers the feed far off
+    // boresight (feed near the vehicle, boresight at the satellite), so gains are
+    // well below each antenna's boresight maximum. With the aperture-directivity
+    // formula (no hardcoded 0.55 efficiency) the smallest of these is ≈ 8.7 dBi.
     for (antenna_id, gain) in &results {
         assert!(
-            *gain > 10.0 && *gain < 60.0,
+            *gain > 5.0 && *gain < 60.0,
             "Antenna {} got invalid gain {}",
             antenna_id,
             gain

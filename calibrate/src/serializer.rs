@@ -1,5 +1,11 @@
 //! Calibration Artifact Serialization Module
 //!
+//! DEPRECATED: This module serializes the legacy `CalibrationArtifact` (3D
+//! `CorrectionSurface`), which the antenna-model service **cannot** load. Full
+//! calibration mode now emits a service-loadable `AntennaCalibration` via
+//! `crate::artifact_export`. This module is retained only for the optional
+//! `--metadata`/`--report` JSON sidecars and existing tests.
+//!
 //! This module handles serialization and deserialization of calibration artifacts
 //! for deployment. Artifacts contain:
 //! - Antenna configuration (class reference + tuned parameters)

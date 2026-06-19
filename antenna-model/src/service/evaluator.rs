@@ -75,10 +75,11 @@ use crate::data::repository::CalibrationRepository;
 use crate::data::types::{CalibrationCoverage, CalibrationStatus};
 use crate::error::{AntennaModelError, Result};
 use crate::model::{
-    apply_beam_squint_correction, compute_emitter_direction, compute_feed_position_from_pointing,
-    compute_gain_db, evaluate_correction, overall_efficiency, theoretical_max_gain,
-    wavelength_from_frequency, AntennaConfiguration, IntegrationParams,
+    apply_beam_squint_correction, compute_emitter_direction_with_attitude,
+    compute_feed_position_from_pointing, compute_gain_db, evaluate_correction,
+    AntennaConfiguration, IntegrationParams,
 };
+use crate::service::validator::coordinate_ambiguity_warnings;
 use std::time::Instant;
 
 /// Compute antenna gain from a gain request
@@ -101,36 +102,14 @@ pub fn compute_gain_from_request(
     let start = Instant::now();
     let mut warnings = Vec::new();
 
-    // Compute feed offset for reporting
-    // Note: This represents the angular offset converted to physical displacement,
-    // not the distance between Earth positions
-    let (feed_az, feed_el) = compute_emitter_direction(
-        &request.feed_position,
-        &request.vehicle_position,
-        &request.reflector_boresight,
-    )?;
-    let (refl_az, refl_el) = compute_emitter_direction(
-        &request.reflector_boresight,
-        &request.vehicle_position,
-        &request.reflector_boresight,
-    )?;
+    // Emit ambiguity warnings for positions that may be misclassified by auto-detection
+    warnings.extend(coordinate_ambiguity_warnings(request));
 
-    // The feed offset is the angular separation from boresight
-    let feed_offset_az = feed_az - refl_az;
-    let feed_offset_el = feed_el - refl_el;
-
-    // For reporting purposes, convert to a simple vector representation
-    // This is an approximate Cartesian representation of the angular offset
-    let feed_offset = crate::api::schemas::Vector3D::new(
-        feed_offset_az,
-        feed_offset_el,
-        (feed_offset_az * feed_offset_az + feed_offset_el * feed_offset_el).sqrt(),
-    );
-
-    let (emitter_az, emitter_el) = compute_emitter_direction(
+    let (emitter_az, emitter_el) = compute_emitter_direction_with_attitude(
         &request.emitter_position,
         &request.vehicle_position,
         &request.reflector_boresight,
+        request.vehicle_attitude,
     )?;
 
     let calibration = repository
@@ -165,6 +144,7 @@ pub fn compute_gain_from_request(
         &request.reflector_boresight,
         &request.vehicle_position,
         focal_length_m,
+        request.vehicle_attitude,
     )?;
 
     // Combine steering-induced position with design feed offset
@@ -176,8 +156,18 @@ pub fn compute_gain_from_request(
     let feed_z = steer_z + design_pos.2;
     let feed_position = FeedPosition::new(feed_x, feed_y, feed_z);
 
-    // Calculate radial feed displacement for beam squint calculation
+    // Physical feed offset from the focal point in the antenna frame (meters).
+    // feed_z is the z-position relative to the reflector vertex; subtracting focal_length_m
+    // gives the displacement from the focal point. For an on-axis feed (zero steering offset),
+    // this is (0, 0, 0). For a steered feed, x/y are the lateral displacement and z is
+    // the (small, second-order) defocus component.
+    let feed_offset = crate::api::schemas::Vector3D::new(feed_x, feed_y, feed_z - focal_length_m);
+
+    // Calculate radial feed displacement and clock angle for beam squint calculation.
+    // Clock angle is atan2(feed_y, feed_x): the direction of the lateral displacement
+    // in the antenna frame, matching the azimuth convention (0° = +X, 90° = +Y).
     let feed_displacement_m = (feed_x.powi(2) + feed_y.powi(2)).sqrt();
+    let displacement_clock_angle_rad = feed_y.atan2(feed_x);
 
     // Apply beam squint correction if pointing frequency differs from operating frequency
     // Must be done AFTER computing feed position since squint depends on actual displacement
@@ -194,6 +184,7 @@ pub fn compute_gain_from_request(
                 request.frequency_mhz,
                 feed_displacement_m,
                 focal_length_m,
+                displacement_clock_angle_rad,
             )
         } else {
             (emitter_az, emitter_el, 0.0)
@@ -306,17 +297,36 @@ pub fn compute_gain_from_request(
 
     let final_gain_db = gain_physics + correction_db;
 
-    // Compute reference gain if requested
+    // Compute reference gain if requested.
+    //
+    // The reference is the boresight gain of an IDEAL version of this antenna (feed at
+    // the focal point, perfect surface), evaluated through the SAME `compute_gain_db`
+    // pipeline as the actual gain. Because both numbers come from the identical
+    // aperture-directivity formula, `loss_db` has no built-in offset: it is purely the
+    // pointing/aberration loss (≈0 dB at boresight with a focused feed).
     let (reference_gain_db, loss_db) = if request.include_reference {
-        // Reference gain is theoretical maximum with efficiency factors (no pointing loss)
-        let wavelength_m = wavelength_from_frequency(frequency_hz);
-        let aperture_efficiency = overall_efficiency(&antenna_config, wavelength_m);
-        let theoretical_gain_linear =
-            theoretical_max_gain(diameter_m, wavelength_m, aperture_efficiency);
-        let reference_db = 10.0 * theoretical_gain_linear.log10();
+        let ideal_reflector = ModelReflector::new(diameter_m, focal_length_m, 0.0)
+            .map_err(|e| AntennaModelError::Generic(format!("ideal reflector: {e}")))?;
+        let ideal_feed = ModelFeedParams::new(
+            FeedPosition::at_focus(focal_length_m),
+            calibration.physical_config.feed.q_factor,
+            calibration.physical_config.feed.phase_center_offset_m,
+            1.0,
+        )
+        .map_err(|e| AntennaModelError::Generic(format!("ideal feed: {e}")))?;
+        let ideal_config = AntennaConfiguration::new(
+            format!("{}_ideal", calibration.antenna_id),
+            "ideal".into(),
+            ideal_reflector,
+            ideal_feed,
+            antenna_config.mesh.clone(),
+        )
+        .map_err(|e| AntennaModelError::Generic(format!("ideal config: {e}")))?;
+        let reference =
+            compute_gain_db(0.0, 0.0, &ideal_config, frequency_hz, &integration_params)?;
 
-        // Loss is difference between reference and actual gain (without correction surface)
-        (Some(reference_db), Some(reference_db - final_gain_db))
+        // Loss is reference minus actual gain (without correction surface).
+        (Some(reference.gain), Some(reference.gain - final_gain_db))
     } else {
         (None, None)
     };
@@ -363,10 +373,13 @@ pub fn compute_gain_from_request(
 
 /// Check if the query is within the calibrated coverage region.
 ///
-/// For fully calibrated antennas (no coverage specified), always returns true.
-/// For partially calibrated antennas, checks if azimuth, elevation, and frequency
-/// are within the specified coverage ranges.
-/// For uncalibrated antennas (no coverage), returns false.
+/// When no coverage restriction is recorded (`None`) the correction surface is
+/// treated as valid everywhere it has data — the query is considered in-coverage.
+/// Actual correction application is still gated separately on
+/// `correction_surface.is_some()`, so returning `true` here for `None` is safe.
+///
+/// When a `CalibrationCoverage` is present (partially calibrated artifact), the
+/// query must fall within the specified azimuth, elevation, and frequency ranges.
 pub(crate) fn is_in_coverage(
     coverage: &Option<CalibrationCoverage>,
     azimuth_deg: f64,
@@ -382,7 +395,9 @@ pub(crate) fn is_in_coverage(
                 && frequency_mhz >= cov.frequency_range.0
                 && frequency_mhz <= cov.frequency_range.1
         }
-        None => false,
+        // No coverage restriction recorded (fully calibrated artifact):
+        // the correction surface applies everywhere it has data.
+        None => true,
     }
 }
 
@@ -449,7 +464,7 @@ fn generate_calibration_warnings(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::schemas::Position3D;
+    use crate::api::schemas::{CoordinateSystem, Position3D};
     use crate::data::types::{
         AntennaCalibration, CalibrationCoverage, CalibrationMetadata, CalibrationStatus,
         FeedParameters, MeshParameters, PhysicalAntennaConfig, ReflectorGeometry, ValidityRanges,
@@ -507,16 +522,22 @@ mod tests {
     }
 
     fn create_test_request() -> GainRequest {
+        // Emitter is a LEO satellite at 400 km geodetic altitude. Set explicit
+        // coordinate_system to prevent ambiguity warnings in tests that assert
+        // response.warnings.is_empty().
+        let mut emitter = Position3D::new(-117.0, 35.0, 400_000.0);
+        emitter.coordinate_system = Some(CoordinateSystem::Geodetic);
         GainRequest {
             antenna_id: "test_antenna".to_string(),
             feed_id: "test_feed".to_string(),
             vehicle_position: Position3D::new(-118.0, 34.0, 100.0),
             reflector_boresight: Position3D::new(-117.99, 34.01, 110.0), // 10m from vehicle
             feed_position: Position3D::new(-117.99, 34.01, 123.6),       // Feed at focal point
-            emitter_position: Position3D::new(-117.0, 35.0, 400000.0),
+            emitter_position: emitter,
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: None,
             include_reference: false,
+            vehicle_attitude: None,
         }
     }
 
@@ -585,8 +606,9 @@ mod tests {
     }
 
     #[test]
-    fn test_is_in_coverage_none() {
-        assert!(!is_in_coverage(&None, 180.0, 45.0, 8400.0));
+    fn test_is_in_coverage_none_means_unrestricted() {
+        // No coverage restriction recorded (fully calibrated artifact) → always in coverage.
+        assert!(is_in_coverage(&None, 180.0, 45.0, 8400.0));
     }
 
     #[test]
@@ -725,6 +747,27 @@ mod tests {
     }
 
     #[test]
+    fn test_loss_near_zero_for_boresight_focused_feed() {
+        let mut repo = CalibrationRepository::new();
+        repo.add_calibration(create_test_calibration(
+            CalibrationStatus::FullyCalibrated {
+                accuracy_estimate_db: 1.0,
+            },
+        ));
+        let mut request = create_test_request();
+        // Aim emitter along the boresight direction (on-axis) and feed at boresight (focused):
+        request.emitter_position = request.reflector_boresight.clone();
+        request.feed_position = request.reflector_boresight.clone();
+        request.include_reference = true;
+        let response = compute_gain_from_request(&request, &repo).unwrap();
+        let loss = response.loss_db.expect("reference requested");
+        assert!(
+            loss.abs() < 0.6,
+            "boresight focused-feed loss should be ~0 dB, got {loss}"
+        );
+    }
+
+    #[test]
     fn test_compute_gain_uncalibrated_with_reference() {
         let mut repo = CalibrationRepository::new();
         let calibration = create_test_calibration(CalibrationStatus::Uncalibrated {
@@ -767,8 +810,22 @@ mod tests {
         assert_eq!(status.status, "fully_calibrated");
         assert_eq!(status.accuracy_estimate_db, 1.0);
 
-        // Should NOT have warnings (fully calibrated)
-        assert!(response.warnings.is_empty());
+        // Should NOT have calibration-related warnings (fully calibrated).
+        // Integration convergence warnings are acceptable and unrelated to
+        // calibration status.
+        let calibration_warnings: Vec<_> = response
+            .warnings
+            .iter()
+            .filter(|w| {
+                !w.contains("did not converge")
+                    && !w.contains("aperture integration")
+            })
+            .collect();
+        assert!(
+            calibration_warnings.is_empty(),
+            "Unexpected calibration warnings: {:?}",
+            calibration_warnings
+        );
     }
 
     #[test]
@@ -884,6 +941,107 @@ mod tests {
         );
     }
 
+    /// Test that `feed_offset_meters` is ~zero when the feed is aimed at the same Earth
+    /// target as the reflector boresight (focused/on-axis configuration).
+    ///
+    /// When `feed_position == reflector_boresight`, `compute_feed_position_from_pointing`
+    /// returns (0, 0, focal_length), so the physical offset from the focal point is
+    /// (0, 0, focal_length - focal_length) = (0, 0, 0).
+    ///
+    /// The OLD (angular) code also returned ~(0, 0, 0) for this case because
+    /// `feed_az - refl_az ≈ 0` — so this test alone does not discriminate.
+    /// See `test_feed_offset_is_meters_not_degrees` for the discriminating case.
+    #[test]
+    fn test_feed_offset_reported_in_meters_zero_for_boresight() {
+        let mut repo = CalibrationRepository::new();
+        repo.add_calibration(create_test_calibration(
+            CalibrationStatus::FullyCalibrated {
+                accuracy_estimate_db: 1.0,
+            },
+        ));
+        let mut request = create_test_request();
+        // Aim the feed at the same Earth point as the reflector boresight → on-axis feed,
+        // so the physical feed offset from the focal point should be ~zero.
+        request.feed_position = request.reflector_boresight.clone();
+        let response = compute_gain_from_request(&request, &repo).unwrap();
+        let off = &response.geometry.feed_offset_meters;
+        assert!(
+            off.x.abs() < 0.05 && off.y.abs() < 0.05 && off.z.abs() < 0.05,
+            "expected ~zero physical offset in meters for boresight-aimed feed, got ({}, {}, {})",
+            off.x,
+            off.y,
+            off.z
+        );
+    }
+
+    /// Discriminating test: verifies `feed_offset_meters` contains physical meters,
+    /// not angular degrees.
+    ///
+    /// Strategy: call `compute_feed_position_from_pointing` directly to get the
+    /// expected physical feed position (x, y, z) in the antenna frame, then assert
+    /// that `response.geometry.feed_offset_meters` equals (x, y, z - focal_length_m).
+    ///
+    /// The default `create_test_request()` has `feed_position` at a different altitude
+    /// than `reflector_boresight` (123.6 m vs 110.0 m at the same lon/lat), giving a
+    /// non-zero angular offset and therefore a non-zero physical feed displacement.
+    ///
+    /// The OLD code stored angular degrees (feed_az - refl_az, feed_el - refl_el),
+    /// which for this geometry differ from the physical meters values — so this test
+    /// WOULD HAVE FAILED against the old implementation.
+    #[test]
+    fn test_feed_offset_is_meters_not_degrees() {
+        let mut repo = CalibrationRepository::new();
+        repo.add_calibration(create_test_calibration(
+            CalibrationStatus::FullyCalibrated {
+                accuracy_estimate_db: 1.0,
+            },
+        ));
+        let request = create_test_request();
+
+        // Compute the expected physical feed position directly using the same helper
+        // the evaluator uses. focal_length_m = 5.0 (from create_test_calibration).
+        let focal_length_m = 5.0_f64;
+        let (steer_x, steer_y, steer_z) = compute_feed_position_from_pointing(
+            &request.feed_position,
+            &request.reflector_boresight,
+            &request.vehicle_position,
+            focal_length_m,
+            None,
+        )
+        .expect("compute_feed_position_from_pointing failed in test");
+        // Design offset from create_test_calibration is (0, 0, 0), so total = steer
+        let expected_x = steer_x;
+        let expected_y = steer_y;
+        let expected_z_offset = steer_z - focal_length_m;
+
+        let response = compute_gain_from_request(&request, &repo).unwrap();
+        let off = &response.geometry.feed_offset_meters;
+
+        assert!(
+            (off.x - expected_x).abs() < 1e-9,
+            "feed_offset_meters.x should be {expected_x} m (physical), got {}",
+            off.x
+        );
+        assert!(
+            (off.y - expected_y).abs() < 1e-9,
+            "feed_offset_meters.y should be {expected_y} m (physical), got {}",
+            off.y
+        );
+        assert!(
+            (off.z - expected_z_offset).abs() < 1e-9,
+            "feed_offset_meters.z should be {expected_z_offset} m (z - focal_length), got {}",
+            off.z
+        );
+
+        // Also verify the magnitude is physically plausible (sub-meter for the small
+        // angular offset in this test geometry, certainly < focal_length = 5 m).
+        let mag = (off.x * off.x + off.y * off.y + off.z * off.z).sqrt();
+        assert!(
+            mag.is_finite() && mag < focal_length_m,
+            "feed offset magnitude {mag} m is not physically plausible (should be < focal_length {focal_length_m} m)"
+        );
+    }
+
     #[test]
     fn test_backward_compatibility_no_calibration_status() {
         let mut repo = CalibrationRepository::new();
@@ -942,7 +1100,21 @@ mod tests {
         // calibration_status should be None for backward compatibility
         assert!(response.calibration_status.is_none());
 
-        // Should not have calibration warnings (treated as fully calibrated)
-        assert!(response.warnings.is_empty());
+        // Should not have calibration warnings (treated as fully calibrated).
+        // Integration convergence warnings are acceptable and unrelated to
+        // calibration status.
+        let calibration_warnings: Vec<_> = response
+            .warnings
+            .iter()
+            .filter(|w| {
+                !w.contains("did not converge")
+                    && !w.contains("aperture integration")
+            })
+            .collect();
+        assert!(
+            calibration_warnings.is_empty(),
+            "Unexpected calibration warnings: {:?}",
+            calibration_warnings
+        );
     }
 }

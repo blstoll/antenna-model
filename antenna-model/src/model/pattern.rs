@@ -13,7 +13,7 @@
 //!
 //! Multiple efficiency factors reduce the ideal gain:
 //! - **Ruze Efficiency**: Surface errors reduce gain as η_ruze = exp(-(4πσ/λ)²)
-//! - **Mesh Transparency**: Wire mesh reflectors have frequency-dependent transparency
+//! - **Mesh Reflection Efficiency**: Wire mesh reflectors have frequency-dependent reflectivity (inductive-grid model)
 //! - **Illumination Efficiency**: Non-uniform illumination reduces effective aperture
 //! - **Spillover Efficiency**: Feed pattern energy missing the reflector
 //!
@@ -24,6 +24,15 @@
 
 use std::f64::consts::PI;
 
+use num_complex::Complex64;
+
+/// Warning message emitted when the aperture integration loop exhausts its
+/// iteration budget without meeting the convergence criterion.  Extracted as a
+/// constant so the text stays consistent across all four gain-computation helpers
+/// and the existing test can rely on `.contains("did not converge")`.
+const INTEGRATION_NONCONVERGENCE_WARNING: &str =
+    "aperture integration did not converge; gain accuracy may be degraded";
+
 use crate::error::{ComputationError, ComputationResult};
 use crate::model::{
     direct_path::compute_with_direct_path,
@@ -31,8 +40,10 @@ use crate::model::{
         analyze_edge_cases, apply_gain_floor, apply_gain_floor_db, needs_adaptive_integration,
         ComputationMode,
     },
-    geometry::{AntennaConfiguration, FeedParameters, FeedPosition, ReflectorGeometry},
-    integration::{compute_far_field, IntegrationParams},
+    geometry::AntennaConfiguration,
+    integration::{
+        far_field_normalization, integrate_amplitude_squared, integrate_aperture, IntegrationParams,
+    },
     ray_trace::compute_gain_ray_trace,
     wavelength_from_frequency,
 };
@@ -106,52 +117,10 @@ pub fn ruze_efficiency(surface_rms: f64, wavelength: f64) -> f64 {
     (-ratio * ratio).exp()
 }
 
-/// Compute mesh transparency for wire mesh reflectors
-///
-/// Wire mesh reflectors have frequency-dependent transparency. At low frequencies,
-/// the wavelength is large compared to mesh spacing, and the mesh becomes transparent.
-///
-/// # Formula (simplified model)
-/// ```text
-/// T = 1 / (1 + (λ₀/λ)²)  for λ > λ₀
-/// T = 1                   for λ ≤ λ₀
-/// ```
-/// where λ₀ = π · mesh_spacing (cutoff wavelength).
-///
-/// # Arguments
-/// - `mesh_spacing`: Mesh spacing in meters (hole size)
-/// - `wavelength`: Wavelength in meters
-///
-/// # Returns
-/// Transparency factor (0 to 1, where 1 = opaque, 0 = transparent)
-///
-/// # Examples
-/// ```
-/// use antenna_model::model::pattern::mesh_transparency;
-///
-/// // 5mm mesh at 8.4 GHz (λ ≈ 35.7mm) - above cutoff
-/// let transparency = mesh_transparency(0.005, 0.0357);
-/// assert!(transparency > 0.80 && transparency < 0.90); // About 84% opaque
-///
-/// // 5mm mesh at 100 MHz (λ = 3m) - well below cutoff
-/// let transparency_low_freq = mesh_transparency(0.005, 3.0);
-/// assert!(transparency_low_freq > 0.99); // Nearly 1.0 (poor reflector, lets energy through)
-/// ```
-pub fn mesh_transparency(mesh_spacing: f64, wavelength: f64) -> f64 {
-    let lambda_0 = PI * mesh_spacing;
-
-    if wavelength <= lambda_0 {
-        // Above cutoff frequency - mesh is opaque
-        1.0
-    } else {
-        // Below cutoff - transparency increases
-        1.0 / (1.0 + (lambda_0 / wavelength).powi(2))
-    }
-}
-
 /// Compute overall antenna efficiency
 ///
-/// Combines Ruze efficiency and mesh transparency (if mesh present).
+/// Combines Ruze efficiency (surface errors) and mesh reflection efficiency
+/// (inductive-grid model, if mesh present).
 ///
 /// # Arguments
 /// - `config`: Antenna configuration
@@ -163,9 +132,9 @@ pub fn overall_efficiency(config: &AntennaConfiguration, wavelength: f64) -> f64
     // Ruze efficiency (surface errors)
     let eta_ruze = ruze_efficiency(config.reflector.surface_rms, wavelength);
 
-    // Mesh transparency (if mesh present)
+    // Mesh reflection efficiency using inductive-grid model (if mesh present)
     let eta_mesh = if let Some(ref mesh) = config.mesh {
-        mesh_transparency(mesh.spacing, wavelength)
+        crate::model::mesh::mesh_reflection_efficiency(mesh.spacing, mesh.wire_diameter, wavelength)
     } else {
         1.0 // Solid reflector - no mesh loss
     };
@@ -268,14 +237,14 @@ pub fn compute_gain(
     let mut warnings = analysis.warnings;
     let gain = match analysis.mode {
         ComputationMode::StandardPhysicalOptics => {
-            compute_gain_standard(theta, phi, config, frequency_hz, wavelength, params)?
+            compute_gain_standard(theta, phi, config, frequency_hz, wavelength, params, &mut warnings)?
         }
         ComputationMode::HigherOrderAberrations => {
             tracing::debug!(
                 "Using higher-order aberrations mode (feed offset ratio: {:.3})",
                 analysis.feed_offset_ratio
             );
-            compute_gain_higher_order(theta, phi, config, frequency_hz, wavelength, params)?
+            compute_gain_higher_order(theta, phi, config, frequency_hz, wavelength, params, &mut warnings)?
         }
         ComputationMode::RayTracing => {
             // Ray tracing is a stub: aperture sampling is used but true spillover and
@@ -285,10 +254,10 @@ pub fn compute_gain(
                  gain accuracy may be degraded."
                     .to_string(),
             );
-            compute_gain_ray_tracing(theta, phi, config, wavelength)?
+            compute_gain_ray_tracing(theta, phi, config, frequency_hz, wavelength, params, &mut warnings)?
         }
         ComputationMode::NearBoresightDirectPath => {
-            compute_gain_direct_path(theta, phi, config, frequency_hz, wavelength, params)?
+            compute_gain_direct_path(theta, phi, config, frequency_hz, wavelength, params, &mut warnings)?
         }
     };
 
@@ -296,6 +265,38 @@ pub fn compute_gain(
     let gain = apply_gain_floor(gain);
 
     Ok(GainComputationResult { gain, warnings })
+}
+
+/// Absolute gain from the raw aperture integral (standard directivity formula):
+/// ```text
+/// gain(θ,φ) = η · (4π/λ²) · |I|² / ∬|A|² dA,   I = ∬ A e^{jΨ} ρ dρ dφ'
+/// ```
+/// where `I` is the RAW, un-normalized aperture integral returned by
+/// [`integrate_aperture`] (`IntegrationResult::field`) — NOT [`compute_far_field`],
+/// whose `jk/(2λ)` normalization (magnitude π/λ²) would be wrongly squared into the
+/// directivity. Taper/illumination efficiency is built into the ratio |I|²/∬|A|²,
+/// so no separate aperture-efficiency constant is needed.
+///
+/// `η` here is the Ruze (surface) × mesh efficiency from [`overall_efficiency`].
+/// **Spillover efficiency is NOT modeled** — the calibration correction surface
+/// absorbs it (and any other residual systematic offset).
+fn absolute_gain_from_integral(
+    raw_field: Complex64,
+    config: &AntennaConfiguration,
+    wavelength: f64,
+    params: &IntegrationParams,
+) -> ComputationResult<f64> {
+    // Denominator integrand |A|²ρ is phase-free and smooth, so the min grid suffices
+    // even when the field integral adaptively refines.
+    let amp_sq = integrate_amplitude_squared(config, params.min_rho_points, params.min_phi_points);
+    if amp_sq <= 1e-20 {
+        return Err(ComputationError::NumericalInstability {
+            operation: "absolute_gain_from_integral".to_string(),
+            reason: "amplitude integral is zero".to_string(),
+        });
+    }
+    let directivity = 4.0 * PI / (wavelength * wavelength) * raw_field.norm_sqr() / amp_sq;
+    Ok(directivity * overall_efficiency(config, wavelength))
 }
 
 /// Standard physical optics gain computation
@@ -306,62 +307,20 @@ fn compute_gain_standard(
     frequency_hz: f64,
     wavelength: f64,
     params: &IntegrationParams,
+    warnings: &mut Vec<String>,
 ) -> ComputationResult<f64> {
     // Select integration parameters (adaptive near nulls)
     let effective_params = select_integration_params(theta, phi, config, params);
 
-    // Compute far-field electric field at the requested angle
-    let e_field = compute_far_field(theta, phi, config, frequency_hz, &effective_params)?;
+    // Raw aperture integral I = ∬ A e^{jΨ} ρ dρ dφ' at the requested angle.
+    // The directivity formula uses this raw value, not the normalized far field.
+    let result = integrate_aperture(theta, phi, config, frequency_hz, &effective_params)?;
 
-    // Power is proportional to |E|²
-    let field_magnitude_squared = e_field.norm_sqr();
+    if !result.converged {
+        warnings.push(INTEGRATION_NONCONVERGENCE_WARNING.to_string());
+    }
 
-    // Compute maximum possible on-axis field (ideal reference: feed at focus, ideal surface)
-    // This gives us the reference for computing actual aperture efficiency
-    let ideal_feed = FeedParameters::new(
-        FeedPosition::at_focus(config.reflector.focal_length),
-        config.feed.q_factor,
-        config.feed.phase_center_offset,
-        config.feed.asymmetry_factor,
-    )?;
-    let ideal_reflector = ReflectorGeometry::new(
-        config.reflector.diameter,
-        config.reflector.focal_length,
-        0.0, // Ideal surface (no RMS error)
-    )?;
-    let ideal_config = AntennaConfiguration::new(
-        format!("{}_ideal", config.id),
-        format!("{} Ideal", config.name),
-        ideal_reflector,
-        ideal_feed,
-        config.mesh.clone(), // Keep mesh parameters
-    )?;
-
-    // Compute ideal on-axis field for reference
-    let e_ideal_on_axis = compute_far_field(0.0, 0.0, &ideal_config, frequency_hz, params)?;
-    let ideal_on_axis_field = e_ideal_on_axis.norm_sqr();
-
-    // Relative gain (normalized to ideal on-axis)
-    // This correctly captures efficiency loss from feed displacement AND surface errors
-    let relative_gain = if ideal_on_axis_field > 1e-20 {
-        field_magnitude_squared / ideal_on_axis_field
-    } else {
-        return Err(ComputationError::NumericalInstability {
-            operation: "compute_gain".to_string(),
-            reason: "Ideal on-axis field is zero or near-zero".to_string(),
-        });
-    };
-
-    // Apply efficiency corrections (Ruze and mesh)
-    let efficiency = overall_efficiency(config, wavelength);
-
-    // Compute absolute gain using theoretical maximum
-    // Assume aperture efficiency of 0.55 (typical for cos^q feed with q~8)
-    let theoretical_gain = theoretical_max_gain(config.reflector.diameter, wavelength, 0.55);
-
-    // Final gain = theoretical maximum × efficiency × relative pattern
-    // NOTE: relative_gain now includes efficiency loss from feed displacement
-    Ok(theoretical_gain * efficiency * relative_gain)
+    absolute_gain_from_integral(result.field, config, wavelength, &effective_params)
 }
 
 /// Higher-order aberrations gain computation for moderate feed offsets
@@ -376,6 +335,7 @@ fn compute_gain_higher_order(
     frequency_hz: f64,
     wavelength: f64,
     params: &IntegrationParams,
+    warnings: &mut Vec<String>,
 ) -> ComputationResult<f64> {
     // Select integration parameters (adaptive near nulls)
     let effective_params = select_integration_params(theta, phi, config, params);
@@ -386,69 +346,35 @@ fn compute_gain_higher_order(
         ..effective_params
     };
 
-    // Compute far-field electric field with higher-order aberrations
-    let e_field = compute_far_field(theta, phi, config, frequency_hz, &ho_params)?;
+    // Raw aperture integral with higher-order aberrations included in the phase.
+    let result = integrate_aperture(theta, phi, config, frequency_hz, &ho_params)?;
 
-    // Power is proportional to |E|²
-    let field_magnitude_squared = e_field.norm_sqr();
+    if !result.converged {
+        warnings.push(INTEGRATION_NONCONVERGENCE_WARNING.to_string());
+    }
 
-    // Compute maximum possible on-axis field (ideal reference)
-    // NOTE: These unwrap() calls are safe because we're constructing from known-valid parameters
-    let ideal_feed = FeedParameters::new(
-        FeedPosition::at_focus(config.reflector.focal_length),
-        config.feed.q_factor,
-        config.feed.phase_center_offset,
-        config.feed.asymmetry_factor,
-    )?;
-    let ideal_reflector = ReflectorGeometry::new(
-        config.reflector.diameter,
-        config.reflector.focal_length,
-        0.0, // Ideal surface (no RMS error)
-    )?;
-    let ideal_config = AntennaConfiguration::new(
-        format!("{}_ideal", config.id),
-        format!("{} Ideal", config.name),
-        ideal_reflector,
-        ideal_feed,
-        config.mesh.clone(),
-    )?;
-
-    // Compute ideal on-axis field for reference (without higher-order aberrations)
-    let e_ideal_on_axis = compute_far_field(0.0, 0.0, &ideal_config, frequency_hz, params)?;
-    let ideal_on_axis_field = e_ideal_on_axis.norm_sqr();
-
-    // Relative gain (normalized to ideal on-axis)
-    let relative_gain = if ideal_on_axis_field > 1e-20 {
-        field_magnitude_squared / ideal_on_axis_field
-    } else {
-        return Err(ComputationError::NumericalInstability {
-            operation: "compute_gain_higher_order".to_string(),
-            reason: "Ideal on-axis field is zero or near-zero".to_string(),
-        });
-    };
-
-    // Apply efficiency corrections (Ruze and mesh)
-    let efficiency = overall_efficiency(config, wavelength);
-
-    // Compute absolute gain using theoretical maximum
-    let theoretical_gain = theoretical_max_gain(config.reflector.diameter, wavelength, 0.55);
-
-    // Final gain = theoretical maximum × efficiency × relative pattern
-    Ok(theoretical_gain * efficiency * relative_gain)
+    absolute_gain_from_integral(result.field, config, wavelength, &ho_params)
 }
 
 /// Ray tracing gain computation for large feed offsets
+///
+/// Ray tracing produces a *relative* pattern only (a |E|²-like quantity). To make it
+/// absolute we anchor it to the directivity of the boresight physical-optics aperture
+/// field (computed via [`absolute_gain_from_integral`]) and scale by the ray-traced
+/// relative pattern `ray_gain(θ,φ) / ray_gain(0,0)`. This keeps ray tracing on the
+/// same absolute scale as the standard PO path. The ray-tracing model itself is a stub
+/// (see the warning emitted by the caller); only the normalization is corrected here.
 fn compute_gain_ray_tracing(
     theta: f64,
     phi: f64,
     config: &AntennaConfiguration,
+    frequency_hz: f64,
     wavelength: f64,
+    params: &IntegrationParams,
+    warnings: &mut Vec<String>,
 ) -> ComputationResult<f64> {
-    // Compute gain using ray tracing
+    // Compute gain using ray tracing (relative pattern)
     let ray_gain_relative = compute_gain_ray_trace(config, theta, phi, wavelength);
-
-    // Ray tracing returns |E|², need to normalize and convert to absolute gain
-    // Use same normalization approach as standard computation
     let on_axis_ray_gain = compute_gain_ray_trace(config, 0.0, 0.0, wavelength);
 
     let relative_gain = if on_axis_ray_gain > 1e-20 {
@@ -460,14 +386,17 @@ fn compute_gain_ray_tracing(
         });
     };
 
-    // Apply efficiency corrections (Ruze and mesh)
-    let efficiency = overall_efficiency(config, wavelength);
+    // Absolute boresight gain from the physical-optics aperture integral, used as the
+    // anchor for the ray-traced relative pattern.
+    let on_axis = integrate_aperture(0.0, 0.0, config, frequency_hz, params)?;
 
-    // Compute absolute gain using theoretical maximum
-    let theoretical_gain = theoretical_max_gain(config.reflector.diameter, wavelength, 0.55);
+    if !on_axis.converged {
+        warnings.push(INTEGRATION_NONCONVERGENCE_WARNING.to_string());
+    }
 
-    // Final gain with ray-traced relative pattern
-    Ok(theoretical_gain * efficiency * relative_gain)
+    let boresight_gain = absolute_gain_from_integral(on_axis.field, config, wavelength, params)?;
+
+    Ok(boresight_gain * relative_gain)
 }
 
 /// Direct path interference gain computation for near-boresight scenarios
@@ -478,56 +407,41 @@ fn compute_gain_direct_path(
     frequency_hz: f64,
     wavelength: f64,
     params: &IntegrationParams,
+    warnings: &mut Vec<String>,
 ) -> ComputationResult<f64> {
     // Select integration parameters (adaptive near nulls)
     let effective_params = select_integration_params(theta, phi, config, params);
 
-    // First compute the reflected field using standard physical optics
-    let e_reflected = compute_far_field(theta, phi, config, frequency_hz, &effective_params)?;
+    // Raw reflected-only aperture integral I = ∬ A e^{jΨ} ρ dρ dφ'. Its directivity is
+    // the absolute reflected-path gain.
+    let reflected = integrate_aperture(theta, phi, config, frequency_hz, &effective_params)?;
 
-    // Compute field with direct path interference
-    let result = compute_with_direct_path(config, theta, phi, wavelength, e_reflected);
+    if !reflected.converged {
+        warnings.push(INTEGRATION_NONCONVERGENCE_WARNING.to_string());
+    }
 
-    // Use total field (reflected + direct) for gain computation
-    let field_magnitude_squared = result.total_field.norm_sqr();
+    let reflected_gain =
+        absolute_gain_from_integral(reflected.field, config, wavelength, &effective_params)?;
 
-    // Compute ideal on-axis field for reference
-    let ideal_feed = FeedParameters::new(
-        FeedPosition::at_focus(config.reflector.focal_length),
-        config.feed.q_factor,
-        config.feed.phase_center_offset,
-        config.feed.asymmetry_factor,
-    )?;
-    let ideal_reflector = ReflectorGeometry::new(
-        config.reflector.diameter,
-        config.reflector.focal_length,
-        0.0,
-    )?;
-    let ideal_config = AntennaConfiguration::new(
-        format!("{}_ideal", config.id),
-        format!("{} Ideal", config.name),
-        ideal_reflector,
-        ideal_feed,
-        config.mesh.clone(),
-    )?;
+    // The direct-path module combines a *normalized* reflected far field with a direct
+    // contribution. We apply its effect as a dimensionless ratio
+    // |total|² / |reflected|², which is invariant to the (shared) normalization, then
+    // scale the absolute reflected-path gain by it. This keeps the direct-path result on
+    // the same absolute (directivity) scale as the standard PO path.
+    //
+    // Derive the normalized field from the already-computed `reflected.field` to avoid
+    // running the aperture integral a second time with identical arguments.
+    let e_reflected_normalized = far_field_normalization(wavelength) * reflected.field;
+    let direct = compute_with_direct_path(config, theta, phi, wavelength, e_reflected_normalized);
 
-    let e_ideal_on_axis = compute_far_field(0.0, 0.0, &ideal_config, frequency_hz, params)?;
-    let ideal_on_axis_field = e_ideal_on_axis.norm_sqr();
-
-    let relative_gain = if ideal_on_axis_field > 1e-20 {
-        field_magnitude_squared / ideal_on_axis_field
+    let reflected_norm_sq = e_reflected_normalized.norm_sqr();
+    let direct_path_factor = if reflected_norm_sq > 1e-30 {
+        direct.total_field.norm_sqr() / reflected_norm_sq
     } else {
-        return Err(ComputationError::NumericalInstability {
-            operation: "compute_gain_direct_path".to_string(),
-            reason: "Ideal on-axis field is zero or near-zero".to_string(),
-        });
+        1.0
     };
 
-    // Apply efficiency corrections
-    let efficiency = overall_efficiency(config, wavelength);
-    let theoretical_gain = theoretical_max_gain(config.reflector.diameter, wavelength, 0.55);
-
-    Ok(theoretical_gain * efficiency * relative_gain)
+    Ok(reflected_gain * direct_path_factor)
 }
 
 /// Compute antenna gain in dB
@@ -656,16 +570,25 @@ pub fn compute_g_over_t(
 /// # Arguments
 /// - `config`: Antenna configuration
 /// - `frequency_hz`: Frequency in Hz
-/// - `gain_drop_db`: Gain drop from peak in dB (e.g., 3.0 for half-power beamwidth)
+/// - `gain_drop_db`: Gain drop from peak in dB (e.g., 3.0 for half-power beamwidth);
+///   must be > 0
 /// - `phi`: Azimuthal cut angle (radians, typically 0 for E-plane)
 /// - `params`: Integration parameters
 ///
 /// # Returns
-/// Half-power beamwidth in radians (from boresight to -3dB point)
+/// Half-angle to the first −`gain_drop_db` crossing from boresight (radians).
 ///
-/// # Notes
-/// This is a simplified search that assumes monotonic decrease from boresight.
-/// For more complex patterns with sidelobes, this may not find the true beamwidth.
+/// # Algorithm
+/// 1. **March outward** from boresight in steps of `0.1·λ/D` to bracket the FIRST
+///    crossing of `peak − gain_drop_db`. This avoids locking onto a sidelobe crossing
+///    that a naive bisection over `[0, π/4]` would produce.
+/// 2. **Bisect** within the identified bracket `[theta_lo, theta_hi]` to 1e-5 rad
+///    precision (30 iterations max).
+///
+/// # Errors
+/// Returns [`ComputationError::NumericalInstability`] if no crossing is found within
+/// π/4 (45°). This indicates either `gain_drop_db` is larger than the dynamic range
+/// of the pattern within the search window, or the pattern is unusually broad.
 pub fn compute_beamwidth(
     config: &AntennaConfiguration,
     frequency_hz: f64,
@@ -673,42 +596,58 @@ pub fn compute_beamwidth(
     phi: f64,
     params: &IntegrationParams,
 ) -> ComputationResult<f64> {
-    // Get on-axis gain
+    const BISECTION_ITERS: usize = 30;
+    const BISECTION_TOL_RAD: f64 = 1e-5;
+
+    if gain_drop_db <= 0.0 {
+        return Err(ComputationError::NumericalInstability {
+            operation: "compute_beamwidth".to_string(),
+            reason: format!("gain_drop_db must be > 0, got {gain_drop_db}"),
+        });
+    }
+
+    // On-axis peak gain and the target threshold.
     let result_peak = compute_gain_db(0.0, phi, config, frequency_hz, params)?;
-    let gain_peak = result_peak.gain;
-    let target_gain = gain_peak - gain_drop_db;
+    let target_gain = result_peak.gain - gain_drop_db;
 
-    // Binary search for beamwidth
-    let mut theta_min = 0.0;
-    let mut theta_max = PI / 4.0; // Start with 45 degrees max
+    // Step size: 0.1·λ/D — small enough to resolve the main lobe without
+    // overshooting into a sidelobe on the first step.
+    let wavelength = wavelength_from_frequency(frequency_hz);
+    let step = 0.1 * wavelength / config.reflector.diameter;
 
-    const MAX_ITERATIONS: usize = 20;
-    const TOLERANCE: f64 = 1e-4; // 0.01 degree tolerance
-
-    for _ in 0..MAX_ITERATIONS {
-        let theta_mid = (theta_min + theta_max) / 2.0;
-        let result_mid = compute_gain_db(theta_mid, phi, config, frequency_hz, params)?;
-        let gain_mid = result_mid.gain;
-
-        if (gain_mid - target_gain).abs() < 0.1 {
-            // Found beamwidth within 0.1 dB
-            return Ok(theta_mid);
+    // March outward from boresight to bracket the FIRST crossing.
+    let mut theta_lo = 0.0_f64;
+    let mut theta_hi = step;
+    loop {
+        if theta_hi > PI / 4.0 {
+            return Err(ComputationError::NumericalInstability {
+                operation: "compute_beamwidth".to_string(),
+                reason: format!("no -{gain_drop_db} dB crossing found within 45 deg"),
+            });
         }
+        let g = compute_gain_db(theta_hi, phi, config, frequency_hz, params)?.gain;
+        if g < target_gain {
+            break;
+        }
+        theta_lo = theta_hi;
+        theta_hi += step;
+    }
 
-        if gain_mid > target_gain {
-            // Need to search farther out
-            theta_min = theta_mid;
+    // Bisect within [theta_lo, theta_hi] to BISECTION_TOL_RAD precision.
+    for _ in 0..BISECTION_ITERS {
+        let mid = 0.5 * (theta_lo + theta_hi);
+        let g = compute_gain_db(mid, phi, config, frequency_hz, params)?.gain;
+        if g > target_gain {
+            theta_lo = mid;
         } else {
-            // Need to search closer in
-            theta_max = theta_mid;
+            theta_hi = mid;
         }
-
-        if (theta_max - theta_min) < TOLERANCE {
-            return Ok((theta_min + theta_max) / 2.0);
+        if theta_hi - theta_lo < BISECTION_TOL_RAD {
+            break;
         }
     }
 
-    Ok((theta_min + theta_max) / 2.0)
+    Ok(0.5 * (theta_lo + theta_hi))
 }
 
 #[cfg(test)]
@@ -776,41 +715,6 @@ mod tests {
     }
 
     #[test]
-    fn test_mesh_transparency_above_cutoff() {
-        let mesh_spacing = 0.005; // 5mm
-        let wavelength = 0.0357; // ~8.4 GHz
-                                 // lambda_0 = π × 0.005 ≈ 0.0157 m
-
-        // At 8.4 GHz, λ = 0.0357 > λ₀ = 0.0157, so we're above cutoff
-        // T = 1/(1 + (0.0157/0.0357)²) = 1/(1 + 0.193) ≈ 0.84
-        let transparency = mesh_transparency(mesh_spacing, wavelength);
-        assert!(transparency > 0.80 && transparency < 0.90);
-    }
-
-    #[test]
-    fn test_mesh_transparency_below_cutoff() {
-        let mesh_spacing = 0.005; // 5mm
-        let wavelength = 3.0; // 100 MHz
-                              // lambda_0 = π × 0.005 ≈ 0.0157 m
-
-        // At 100 MHz, λ = 3.0 >> λ₀, so deeply above cutoff in wavelength
-        // T = 1/(1 + (0.0157/3.0)²) ≈ 1/(1 + 0.000027) ≈ 0.999
-        let transparency = mesh_transparency(mesh_spacing, wavelength);
-        assert!(transparency > 0.99); // Nearly 1.0 (acts transparent, poor reflector)
-    }
-
-    #[test]
-    fn test_mesh_transparency_at_cutoff() {
-        let mesh_spacing = 0.005; // 5mm
-        let lambda_0 = PI * mesh_spacing;
-
-        // Right at cutoff wavelength
-        // Below cutoff freq (above cutoff wavelength): solid reflector
-        let transparency = mesh_transparency(mesh_spacing, lambda_0 * 0.99);
-        assert_eq!(transparency, 1.0); // Opaque (good reflector)
-    }
-
-    #[test]
     fn test_overall_efficiency_no_mesh() {
         let reflector = ReflectorGeometry::new(1.0, 0.5, 0.001).unwrap();
         let feed_pos = FeedPosition::at_focus(0.5);
@@ -840,9 +744,13 @@ mod tests {
 
         let efficiency = overall_efficiency(&config, wavelength);
 
-        // Should be product of Ruze and mesh
+        // Should be product of Ruze efficiency and inductive-grid mesh reflection efficiency.
+        // For 5mm mesh (spacing=0.005, wire_diameter=0.0005) at λ=0.0357m:
+        //   log_term = ln(0.005 / (π × 0.0005)) = ln(3.183) ≈ 1.157
+        //   X = (0.005/0.0357) × 1.157 ≈ 0.162
+        //   |R|² = 1/(1 + 4×0.162²) ≈ 0.905
         let ruze = ruze_efficiency(0.001, wavelength);
-        let mesh = mesh_transparency(0.005, wavelength);
+        let mesh = crate::model::mesh::mesh_reflection_efficiency(0.005, 0.0005, wavelength);
         let expected = ruze * mesh;
 
         assert!((efficiency - expected).abs() < 1e-10);
@@ -863,6 +771,31 @@ mod tests {
     }
 
     #[test]
+    fn test_boresight_gain_reflects_taper_efficiency() {
+        // No mesh, ideal surface → efficiency = 1, so boresight gain is pure aperture
+        // directivity with the q=8 taper. Must be below the uniform-aperture max and
+        // within a few dB of it (taper efficiency ~0.7-0.9).
+        let reflector = ReflectorGeometry::new(1.0, 0.5, 0.0).unwrap();
+        let feed = FeedParameters::new(FeedPosition::at_focus(0.5), 8.0, 0.0, 1.0).unwrap();
+        let config =
+            AntennaConfiguration::new("t".into(), "T".into(), reflector, feed, None).unwrap();
+        let params = IntegrationParams::default();
+        let result = compute_gain_db(0.0, 0.0, &config, 8.4e9, &params).unwrap();
+        let wl = 0.0357_f64; // ~8.4 GHz
+        let uniform_db = 10.0 * (4.0 * PI * (PI * 0.25) / (wl * wl)).log10(); // 4πA/λ², A=π(0.5)²
+        assert!(
+            result.gain < uniform_db,
+            "taper must cost gain: {} vs {uniform_db}",
+            result.gain
+        );
+        assert!(
+            result.gain > uniform_db - 6.0,
+            "taper loss implausibly large: {} vs {uniform_db}",
+            result.gain
+        );
+    }
+
+    #[test]
     fn test_compute_gain_positive() {
         let config = test_antenna();
         let params = IntegrationParams::fast();
@@ -873,9 +806,12 @@ mod tests {
         // Gain should be positive
         assert!(gain > 0.0);
 
-        // Should be reasonable value (10 to 10000 linear, or 10-40 dB)
-        assert!(gain > 10.0);
-        assert!(gain < 100000.0);
+        // Boresight gain for the 1 m test dish (q=8 taper, 1 mm RMS, 5 mm mesh) at
+        // 8.4 GHz is ~34.7 dBi from the aperture-directivity formula. In linear units
+        // that is 10^(34.7/10) ≈ 2950. Bound it to [2000, 5000] (≈33.0–37.0 dBi):
+        // a meaningful window around the derived value, not just "finite".
+        assert!(gain > 2000.0, "boresight gain {gain} (linear) too low");
+        assert!(gain < 5000.0, "boresight gain {gain} (linear) too high");
     }
 
     #[test]
@@ -886,9 +822,12 @@ mod tests {
         let result = compute_gain_db(0.0, 0.0, &config, 8.4e9, &params).unwrap();
         let gain_db = result.gain;
 
-        // Gain should be reasonable (10-40 dB for 1m dish at X-band)
-        assert!(gain_db > 10.0);
-        assert!(gain_db < 50.0);
+        // Aperture-directivity formula: uniform-aperture max for a 1 m dish at 8.4 GHz
+        // (λ≈0.0357 m) is 10·log10(4πA/λ²) ≈ 38.9 dBi. The q=8 taper (~1.5–2 dB),
+        // 1 mm RMS Ruze (~0.5 dB) and mesh (~0.4 dB) losses give ~34.7 dBi.
+        // Bound to [33.0, 37.0] dBi.
+        assert!(gain_db > 33.0, "boresight gain {gain_db} dBi too low");
+        assert!(gain_db < 37.0, "boresight gain {gain_db} dBi too high");
     }
 
     #[test]
@@ -913,10 +852,11 @@ mod tests {
 
         let g_over_t = compute_g_over_t(0.0, 0.0, &config, 8.4e9, 50.0, &params).unwrap();
 
-        // G/T for 1m dish at X-band with 50K should be reasonable
-        // Gain ~35 dB, T = 50K (17 dB) => G/T ~ 18 dB/K
-        assert!(g_over_t > 10.0);
-        assert!(g_over_t < 30.0);
+        // G/T = G(dB) − 10·log10(T). Boresight gain ≈ 34.7 dBi (see above),
+        // T = 50 K → 10·log10(50) ≈ 17.0 dB, so G/T ≈ 17.7 dB/K.
+        // Bound to [15.0, 20.0] dB/K.
+        assert!(g_over_t > 15.0, "G/T {g_over_t} dB/K too low");
+        assert!(g_over_t < 20.0, "G/T {g_over_t} dB/K too high");
     }
 
     #[test]
@@ -933,14 +873,53 @@ mod tests {
         let config = test_antenna();
         let params = IntegrationParams::fast();
 
-        // Compute half-power beamwidth (3 dB)
+        // Compute half-power beamwidth (3 dB drop from boresight)
         let hpbw = compute_beamwidth(&config, 8.4e9, 3.0, 0.0, &params).unwrap();
 
-        // For 1m dish at 8.4 GHz, HPBW ≈ 1.2λ/D ≈ 1.2 × 0.0357 / 1.0 ≈ 0.043 rad ≈ 2.5°
-        // But with losses and actual integration, it may be somewhat larger
-        let hpbw_degrees = hpbw.to_degrees();
-        assert!(hpbw_degrees > 0.5);
-        assert!(hpbw_degrees < 10.0);
+        // 1 m dish at 8.4 GHz: full HPBW ≈ 1.05–1.2·λ/D ≈ 2.1°–2.5°;
+        // this function returns boresight→−3dB (half of that), widened by the
+        // q=8 taper. Anything outside 0.9°–2.0° indicates a phase model bug.
+        let half_deg = hpbw.to_degrees();
+        assert!(
+            half_deg > 0.9 && half_deg < 2.0,
+            "boresight→-3dB half-angle = {half_deg}°; expected 0.9°–2.0°"
+        );
+    }
+
+    /// AC#2 guard: when `gain_drop_db` is so large that the main lobe never drops
+    /// that far within π/4, `compute_beamwidth` must return `Err` rather than a
+    /// silent (wrong) number.
+    ///
+    /// 200 dB is far beyond any physically realistic pattern dynamic range, so the
+    /// march never finds a crossing and the function returns `NumericalInstability`.
+    #[test]
+    fn test_compute_beamwidth_no_crossing_returns_err() {
+        let config = test_antenna();
+        let params = IntegrationParams::fast();
+
+        // 200 dB drop is unreachable within π/4 for any realistic aperture pattern.
+        let result = compute_beamwidth(&config, 8.4e9, 200.0, 0.0, &params);
+        assert!(
+            result.is_err(),
+            "expected Err for unreachable gain_drop_db=200, got Ok({:?})",
+            result.ok()
+        );
+    }
+
+    #[test]
+    fn test_beamwidth_does_not_lock_on_sidelobe() {
+        let config = test_antenna();
+        let params = IntegrationParams::fast();
+        let hpbw = compute_beamwidth(&config, 32e9, 3.0, 0.0, &params).unwrap();
+        let first_null = 1.22 * wavelength_from_frequency(32e9) / 1.0; // diameter = 1.0 m
+        assert!(hpbw < first_null, "beamwidth {hpbw} beyond first null {first_null}");
+    }
+
+    #[test]
+    fn test_beamwidth_rejects_nonpositive_drop() {
+        let config = test_antenna();
+        let params = IntegrationParams::fast();
+        assert!(compute_beamwidth(&config, 8.4e9, 0.0, 0.0, &params).is_err());
     }
 
     #[test]
@@ -961,6 +940,30 @@ mod tests {
         assert_eq!(params_null.max_phi_points, base_params.max_phi_points * 2);
         assert!(
             (params_null.relative_tolerance - base_params.relative_tolerance / 2.0).abs() < 1e-10
+        );
+    }
+
+    #[test]
+    fn test_non_convergence_warning_propagated() {
+        // Force non-convergence by capping to a single iteration with an impossible
+        // tolerance.  compute_gain must include a warning containing "did not converge"
+        // in the returned warnings vec.
+        let config = test_antenna();
+        let params = IntegrationParams {
+            max_iterations: 1,
+            relative_tolerance: 1e-15,
+            ..IntegrationParams::fast()
+        };
+        // Use an off-boresight angle to ensure the standard PO path is exercised.
+        let result = compute_gain(0.3, 0.0, &config, 8.4e9, &params).unwrap();
+        let has_convergence_warning = result
+            .warnings
+            .iter()
+            .any(|w| w.contains("did not converge"));
+        assert!(
+            has_convergence_warning,
+            "Expected a convergence warning but got: {:?}",
+            result.warnings
         );
     }
 
@@ -1009,8 +1012,12 @@ mod tests {
             result.warnings
         );
 
-        // Gain value should still be valid
-        assert!(result.gain > 0.0);
-        assert!(result.gain < 100.0); // Reasonable dB range
+        // Gain value should still be a valid dB number (no NaN/inf, and above the floor).
+        // With a 0.4f feed displacement the boresight gain is significantly reduced and may
+        // legitimately fall below 0 dBi, so we only check the floor and upper bound.
+        // (The old assertion "> 0.0 dBi" was only valid under the wrong spurious-defocus phase.)
+        assert!(result.gain.is_finite());
+        assert!(result.gain >= -60.0); // Must be at or above the gain floor
+        assert!(result.gain < 100.0); // Reasonable upper bound
     }
 }

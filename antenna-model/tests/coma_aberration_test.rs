@@ -45,26 +45,39 @@ fn test_feed_at_focus_maximum_gain() {
     )
     .unwrap();
 
-    // Theoretical maximum (η = 0.65 for X-band)
-    // G = 10*log10(0.65 * (πD/λ)^2)
+    // Aperture-directivity reference (no aperture-efficiency constant): the
+    // uniform-aperture maximum is G_uniform = 4πA/λ², A = π(D/2)².
+    // For the 34 m dish at 8.45 GHz (λ ≈ 0.03548 m) this is ≈ 69.6 dBi.
     let wavelength = 299792458.0 / freq_hz;
-    let theoretical_max =
-        10.0 * ((0.65 * (std::f64::consts::PI * 34.0 / wavelength).powi(2)).log10());
+    let aperture_area = std::f64::consts::PI * (34.0_f64 / 2.0).powi(2);
+    let uniform_max =
+        10.0 * (4.0 * std::f64::consts::PI * aperture_area / (wavelength * wavelength)).log10();
 
     let result = compute_gain_db(0.0, 0.0, &config, freq_hz, &IntegrationParams::fast()).unwrap();
     let gain_boresight = result.gain;
 
     println!("Feed at focal point:");
-    println!("  Theoretical max: {:.2} dBi", theoretical_max);
+    println!("  Uniform-aperture max: {:.2} dBi", uniform_max);
     println!("  Actual gain: {:.2} dBi", gain_boresight);
-    println!("  Difference: {:.2} dB", theoretical_max - gain_boresight);
+    println!("  Taper loss: {:.2} dB", uniform_max - gain_boresight);
 
-    // Should be within 1 dB of theoretical max
+    // The q=10 cos^q feed on a deep dish (f/D=0.4, edge angle ≈ 64°) is heavily
+    // tapered, so taper efficiency is well below a uniform aperture. The directivity
+    // formula yields ≈ 63.6 dBi (no RMS error here), i.e. ~6 dB taper loss — larger
+    // than the old hardcoded η=0.65 assumption but physically consistent with a deep
+    // taper (spillover is unmodeled and absorbed by calibration). Lock to [62.5, 65.0].
     assert!(
-        (gain_boresight - theoretical_max).abs() < 1.0,
-        "Feed at focus should produce near-maximum gain, got {:.2} dBi vs theoretical {:.2} dBi",
+        gain_boresight > 62.5 && gain_boresight < 65.0,
+        "Feed at focus boresight gain {:.2} dBi out of expected [62.5, 65.0] (uniform max {:.2} dBi)",
         gain_boresight,
-        theoretical_max
+        uniform_max
+    );
+    // Must remain below the uniform-aperture maximum.
+    assert!(
+        gain_boresight < uniform_max,
+        "Gain {:.2} dBi must not exceed uniform-aperture max {:.2} dBi",
+        gain_boresight,
+        uniform_max
     );
 }
 
@@ -289,9 +302,11 @@ fn test_regression_feed_at_focus() {
     let result = compute_gain_db(0.0, 0.0, &config, freq_hz, &IntegrationParams::fast()).unwrap();
     let gain = result.gain;
 
-    // Based on current implementation with full path-length coma model (surface RMS = 0.5mm)
-    // This locks in the current behavior to detect regressions
-    let expected_gain = 66.98; // Updated for full path-length coma model
+    // Locks in current behavior to detect regressions. Re-baselined for the
+    // aperture-directivity gain formula (taper efficiency built into the integral;
+    // no hardcoded aperture-efficiency constant). 34 m dish, q=10 feed, f/D=0.4,
+    // 0.5 mm RMS (≈0.14 dB Ruze loss at 8.45 GHz): boresight gain ≈ 63.5 dBi.
+    let expected_gain = 63.48;
     let tolerance = 0.5;
 
     assert!(

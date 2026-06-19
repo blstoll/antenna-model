@@ -11,22 +11,26 @@
   "vehicle_position": {
     "x": -19794863.29,
     "y": -37228723.27,
-    "z": 0.0
+    "z": 0.0,
+    "coordinate_system": "ecef"
   },
   "reflector_boresight": {
     "x": -2485073.18,
     "y": -4673742.9,
-    "z": 3546502.48
+    "z": 3546502.48,
+    "coordinate_system": "ecef"
   },
   "feed_position": {
     "x": -4831642.29,
     "y": -1948496.21,
-    "z": 3667577.84
+    "z": 3667577.84,
+    "coordinate_system": "ecef"
   },
   "emitter_position": {
     "x": -2225583.04,
     "y": -4185713.15,
-    "z": 4252983.55
+    "z": 4252983.55,
+    "coordinate_system": "ecef"
   },
   "frequency_mhz": 8450.0,
   "include_reference": true

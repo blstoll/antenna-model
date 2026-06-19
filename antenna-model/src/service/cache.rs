@@ -29,7 +29,14 @@ pub struct GainCacheKey {
 }
 
 impl GainCacheKey {
-    pub fn new(az_deg: f64, el_deg: f64, freq_mhz: f64, feed_x: f64, feed_y: f64, feed_z: f64) -> Self {
+    pub fn new(
+        az_deg: f64,
+        el_deg: f64,
+        freq_mhz: f64,
+        feed_x: f64,
+        feed_y: f64,
+        feed_z: f64,
+    ) -> Self {
         Self {
             az_millideg: (az_deg * 1000.0).round() as i32,
             el_millideg: (el_deg * 1000.0).round() as i32,
@@ -120,7 +127,8 @@ impl GainCache {
 
     /// Invalidate all cached entries for a specific feed.
     pub fn invalidate(&self, antenna_id: &str, feed_id: &str) {
-        self.caches.remove(&(antenna_id.to_string(), feed_id.to_string()));
+        self.caches
+            .remove(&(antenna_id.to_string(), feed_id.to_string()));
     }
 }
 
@@ -140,10 +148,11 @@ mod tests {
         let call_count = Arc::new(AtomicUsize::new(0));
         let cc = call_count.clone();
 
-        let result: crate::error::Result<f64> = cache.get_or_compute("ant1", "feed1", test_key(45.0), || {
-            cc.fetch_add(1, Ordering::SeqCst);
-            Ok(12.5)
-        });
+        let result: crate::error::Result<f64> =
+            cache.get_or_compute("ant1", "feed1", test_key(45.0), || {
+                cc.fetch_add(1, Ordering::SeqCst);
+                Ok(12.5)
+            });
 
         assert_eq!(result.unwrap(), 12.5);
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
@@ -156,17 +165,19 @@ mod tests {
 
         // Prime the cache
         let cc = call_count.clone();
-        let _: crate::error::Result<f64> = cache.get_or_compute("ant1", "feed1", test_key(45.0), || {
-            cc.fetch_add(1, Ordering::SeqCst);
-            Ok(12.5)
-        });
+        let _: crate::error::Result<f64> =
+            cache.get_or_compute("ant1", "feed1", test_key(45.0), || {
+                cc.fetch_add(1, Ordering::SeqCst);
+                Ok(12.5)
+            });
 
         // Second call should hit cache
         let cc = call_count.clone();
-        let result: crate::error::Result<f64> = cache.get_or_compute("ant1", "feed1", test_key(45.0), || {
-            cc.fetch_add(1, Ordering::SeqCst);
-            Ok(99.0)
-        });
+        let result: crate::error::Result<f64> =
+            cache.get_or_compute("ant1", "feed1", test_key(45.0), || {
+                cc.fetch_add(1, Ordering::SeqCst);
+                Ok(99.0)
+            });
 
         assert_eq!(result.unwrap(), 12.5); // got cached value, not 99.0
         assert_eq!(call_count.load(Ordering::SeqCst), 1); // compute only called once
@@ -176,17 +187,21 @@ mod tests {
     fn test_lru_eviction() {
         let cache = GainCache::new(true, 2); // max 2 entries
 
-        let _: crate::error::Result<f64> = cache.get_or_compute("ant1", "feed1", test_key(1.0), || Ok(1.0));
-        let _: crate::error::Result<f64> = cache.get_or_compute("ant1", "feed1", test_key(2.0), || Ok(2.0));
-        let _: crate::error::Result<f64> = cache.get_or_compute("ant1", "feed1", test_key(3.0), || Ok(3.0)); // evicts key(1.0)
+        let _: crate::error::Result<f64> =
+            cache.get_or_compute("ant1", "feed1", test_key(1.0), || Ok(1.0));
+        let _: crate::error::Result<f64> =
+            cache.get_or_compute("ant1", "feed1", test_key(2.0), || Ok(2.0));
+        let _: crate::error::Result<f64> =
+            cache.get_or_compute("ant1", "feed1", test_key(3.0), || Ok(3.0)); // evicts key(1.0)
 
         let call_count = Arc::new(AtomicUsize::new(0));
         // key(1.0) should be evicted — compute should be called again
         let cc = call_count.clone();
-        let _: crate::error::Result<f64> = cache.get_or_compute("ant1", "feed1", test_key(1.0), || {
-            cc.fetch_add(1, Ordering::SeqCst);
-            Ok(1.0)
-        });
+        let _: crate::error::Result<f64> =
+            cache.get_or_compute("ant1", "feed1", test_key(1.0), || {
+                cc.fetch_add(1, Ordering::SeqCst);
+                Ok(1.0)
+            });
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
     }
 
@@ -197,16 +212,26 @@ mod tests {
 
         // 45.0000 and 45.0004 are within 0.0005° → same quantized key (both round to 45000 millideg)
         let cc = call_count.clone();
-        let _: crate::error::Result<f64> = cache.get_or_compute("ant1", "feed1", GainCacheKey::new(45.0000, 10.0, 12000.0, 0.0, 0.0, 0.0), || {
-            cc.fetch_add(1, Ordering::SeqCst);
-            Ok(5.0)
-        });
+        let _: crate::error::Result<f64> = cache.get_or_compute(
+            "ant1",
+            "feed1",
+            GainCacheKey::new(45.0000, 10.0, 12000.0, 0.0, 0.0, 0.0),
+            || {
+                cc.fetch_add(1, Ordering::SeqCst);
+                Ok(5.0)
+            },
+        );
 
         let cc = call_count.clone();
-        let result: crate::error::Result<f64> = cache.get_or_compute("ant1", "feed1", GainCacheKey::new(45.0004, 10.0, 12000.0, 0.0, 0.0, 0.0), || {
-            cc.fetch_add(1, Ordering::SeqCst);
-            Ok(9.0)
-        });
+        let result: crate::error::Result<f64> = cache.get_or_compute(
+            "ant1",
+            "feed1",
+            GainCacheKey::new(45.0004, 10.0, 12000.0, 0.0, 0.0, 0.0),
+            || {
+                cc.fetch_add(1, Ordering::SeqCst);
+                Ok(9.0)
+            },
+        );
 
         assert_eq!(result.unwrap(), 5.0); // cache hit, same bucket
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
@@ -217,15 +242,17 @@ mod tests {
         let cache = GainCache::new(true, 100);
         let key = test_key(45.0);
 
-        let _: crate::error::Result<f64> = cache.get_or_compute("ant1", "feed1", key.clone(), || Ok(10.0));
+        let _: crate::error::Result<f64> =
+            cache.get_or_compute("ant1", "feed1", key.clone(), || Ok(10.0));
 
         let call_count = Arc::new(AtomicUsize::new(0));
         let cc = call_count.clone();
         // Different feed_id — should be a miss
-        let result: crate::error::Result<f64> = cache.get_or_compute("ant1", "feed2", key.clone(), || {
-            cc.fetch_add(1, Ordering::SeqCst);
-            Ok(20.0)
-        });
+        let result: crate::error::Result<f64> =
+            cache.get_or_compute("ant1", "feed2", key.clone(), || {
+                cc.fetch_add(1, Ordering::SeqCst);
+                Ok(20.0)
+            });
 
         assert_eq!(result.unwrap(), 20.0);
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
@@ -235,15 +262,17 @@ mod tests {
     fn test_invalidate_clears_feed() {
         let cache = GainCache::new(true, 100);
 
-        let _: crate::error::Result<f64> = cache.get_or_compute("ant1", "feed1", test_key(45.0), || Ok(7.0));
+        let _: crate::error::Result<f64> =
+            cache.get_or_compute("ant1", "feed1", test_key(45.0), || Ok(7.0));
         cache.invalidate("ant1", "feed1");
 
         let call_count = Arc::new(AtomicUsize::new(0));
         let cc = call_count.clone();
-        let _: crate::error::Result<f64> = cache.get_or_compute("ant1", "feed1", test_key(45.0), || {
-            cc.fetch_add(1, Ordering::SeqCst);
-            Ok(7.0)
-        });
+        let _: crate::error::Result<f64> =
+            cache.get_or_compute("ant1", "feed1", test_key(45.0), || {
+                cc.fetch_add(1, Ordering::SeqCst);
+                Ok(7.0)
+            });
 
         assert_eq!(call_count.load(Ordering::SeqCst), 1); // had to recompute
     }
@@ -253,18 +282,21 @@ mod tests {
         let cache = GainCache::new(true, 100);
         let key = test_key(45.0);
 
-        let _: crate::error::Result<f64> = cache.get_or_compute("ant1", "feed1", key.clone(), || Ok(1.0));
-        let _: crate::error::Result<f64> = cache.get_or_compute("ant1", "feed2", key.clone(), || Ok(2.0));
+        let _: crate::error::Result<f64> =
+            cache.get_or_compute("ant1", "feed1", key.clone(), || Ok(1.0));
+        let _: crate::error::Result<f64> =
+            cache.get_or_compute("ant1", "feed2", key.clone(), || Ok(2.0));
 
         cache.invalidate("ant1", "feed1"); // only clear feed1
 
         let call_count = Arc::new(AtomicUsize::new(0));
         let cc = call_count.clone();
         // feed2 should still be in cache
-        let result: crate::error::Result<f64> = cache.get_or_compute("ant1", "feed2", key.clone(), || {
-            cc.fetch_add(1, Ordering::SeqCst);
-            Ok(99.0)
-        });
+        let result: crate::error::Result<f64> =
+            cache.get_or_compute("ant1", "feed2", key.clone(), || {
+                cc.fetch_add(1, Ordering::SeqCst);
+                Ok(99.0)
+            });
         assert_eq!(result.unwrap(), 2.0);
         assert_eq!(call_count.load(Ordering::SeqCst), 0);
     }
@@ -276,10 +308,11 @@ mod tests {
 
         for _ in 0..3 {
             let cc = call_count.clone();
-            let _: crate::error::Result<f64> = cache.get_or_compute("ant1", "feed1", test_key(45.0), || {
-                cc.fetch_add(1, Ordering::SeqCst);
-                Ok(5.0)
-            });
+            let _: crate::error::Result<f64> =
+                cache.get_or_compute("ant1", "feed1", test_key(45.0), || {
+                    cc.fetch_add(1, Ordering::SeqCst);
+                    Ok(5.0)
+                });
         }
 
         assert_eq!(call_count.load(Ordering::SeqCst), 3); // called every time

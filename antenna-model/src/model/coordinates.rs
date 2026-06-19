@@ -135,7 +135,7 @@ impl EClockConeCoordinates {
 
     /// Convert to degrees (convenience function)
     pub fn to_degrees(&self) -> (f64, f64) {
-        (self.e_cone.to_radians(), self.e_clock.to_radians())
+        (self.e_cone.to_degrees(), self.e_clock.to_degrees())
     }
 
     /// Convert to far-field coordinates
@@ -721,5 +721,13 @@ mod tests {
         let (x180, y180, _) = ecc_180.to_feed_position(focal_length);
         assert!(x180 < -1.0, "Azimuth 180° should have large negative x");
         assert!(y180.abs() < 0.01, "Azimuth 180° should have y≈0");
+    }
+
+    #[test]
+    fn test_to_degrees_returns_degrees() {
+        let ecc = EClockConeCoordinates::new(PI / 2.0, PI);
+        let (cone_deg, clock_deg) = ecc.to_degrees();
+        assert!((cone_deg - 90.0).abs() < EPSILON, "cone_deg={cone_deg}");
+        assert!((clock_deg - 180.0).abs() < EPSILON, "clock_deg={clock_deg}");
     }
 }

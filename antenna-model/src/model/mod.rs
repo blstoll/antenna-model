@@ -39,8 +39,9 @@ pub use coordinates::{
 
 pub use coordinates_3d::{
     antenna_frame_to_spherical, apply_beam_squint_correction, compute_emitter_direction,
-    compute_feed_offset_v2, compute_feed_position_from_pointing, ecef_to_enu_rotation,
-    ecef_to_geodetic, geodetic_to_ecef, is_ecef_coordinates, validate_ecef, validate_geodetic,
+    compute_emitter_direction_with_attitude, compute_feed_offset_v2,
+    compute_feed_position_from_pointing, ecef_to_enu_rotation, ecef_to_geodetic, geodetic_to_ecef,
+    is_ecef_coordinates, normalize_azimuth_deg, quaternion_rotate, validate_ecef, validate_geodetic,
 };
 
 pub use correction_interpolator::{evaluate_correction, CorrectionResult};
@@ -62,8 +63,8 @@ pub use integration::{
 };
 
 pub use pattern::{
-    compute_beamwidth, compute_g_over_t, compute_gain, compute_gain_db, mesh_transparency,
-    overall_efficiency, ruze_efficiency, theoretical_max_gain,
+    compute_beamwidth, compute_g_over_t, compute_gain, compute_gain_db, overall_efficiency,
+    ruze_efficiency, theoretical_max_gain,
 };
 
 pub use phase::{
@@ -80,8 +81,8 @@ pub use surface::{
 pub use mesh::{
     angle_correction_factor, basic_transparency, cutoff_wavelength, effective_cutoff_wavelength,
     mesh_efficiency, mesh_efficiency_simple, mesh_reflection_coefficient,
-    mesh_transparency_polarized, mesh_transparency_with_angle, transparency_with_diameter,
-    Polarization,
+    mesh_reflection_efficiency, mesh_transparency_polarized, mesh_transparency_with_angle,
+    transparency_with_diameter, Polarization,
 };
 
 pub use edge_cases::{

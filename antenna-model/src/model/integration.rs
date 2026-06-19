@@ -46,10 +46,30 @@ pub struct IntegrationResult {
     pub field: Complex64,
 
     /// Estimated integration error (magnitude)
+    ///
+    /// On successful convergence this is the inter-iteration difference that
+    /// satisfied the tolerance.  On non-convergence it is the last computed
+    /// inter-iteration difference (an honest, if pessimistic, error estimate).
     pub error_estimate: f64,
 
     /// Number of function evaluations performed
     pub num_evaluations: usize,
+
+    /// Whether the integration converged within the allowed iterations.
+    ///
+    /// `true`  – the refinement loop exited because the relative error fell below
+    ///           `relative_tolerance` (or the absolute difference below
+    ///           `absolute_tolerance`).
+    /// `false` – the loop exhausted `max_iterations` (or hit the maximum grid
+    ///           size) without meeting tolerance.  The returned `field` is the
+    ///           best available estimate; `error_estimate` holds the last
+    ///           inter-iteration difference.
+    ///
+    /// When `error_estimate` is `f64::INFINITY` the loop ran only one iteration
+    /// and no inter-iteration comparison was possible.  A finite `error_estimate`
+    /// with `converged: false` means the maximum grid size was reached but the
+    /// difference between the last two iterations still exceeded the tolerance.
+    pub converged: bool,
 }
 
 /// Integration parameters for convergence control
@@ -241,6 +261,11 @@ pub fn integrate_aperture(
 
     let mut previous_result = Complex64::new(0.0, 0.0);
     let mut num_evaluations = 0;
+    // Tracks the last inter-iteration difference computed inside the loop.
+    // Initialised to INFINITY so that if the loop exits before any convergence
+    // check (e.g. max_iterations == 1, or the grid hits max on iteration 0),
+    // the non-converged error estimate is still a conservative, honest value.
+    let mut last_difference = f64::INFINITY;
 
     // Adaptive refinement loop: progressively refine the integration grid
     // until the result converges or we reach the maximum grid density.
@@ -278,6 +303,10 @@ pub fn integrate_aperture(
             let difference = (result - previous_result).norm();
             let magnitude = result.norm();
 
+            // Track the most recent inter-iteration difference for the
+            // non-converged fall-through error estimate below.
+            last_difference = difference;
+
             // Calculate relative error (or absolute if magnitude is too small)
             // This handles both large and small field values correctly
             let relative_error = if magnitude > params.absolute_tolerance {
@@ -294,6 +323,7 @@ pub fn integrate_aperture(
                     field: result,
                     error_estimate: difference,
                     num_evaluations,
+                    converged: true,
                 });
             }
         }
@@ -314,14 +344,25 @@ pub fn integrate_aperture(
         }
     }
 
-    // Did not converge within max iterations
-    let error_estimate =
-        (previous_result - Complex64::new(0.0, 0.0)).norm() * params.relative_tolerance;
+    // Did not converge within max iterations.
+    // Use the last inter-iteration difference as the error estimate — it is an
+    // honest (pessimistic) value rather than a fabricated |result| × tolerance.
+    // If the loop ran only a single iteration, no convergence check was ever
+    // performed so last_difference remains INFINITY, which correctly signals
+    // that the accuracy is completely unknown.
+    tracing::warn!(
+        theta,
+        phi,
+        last_difference,
+        "aperture integration did not converge within {} iterations",
+        params.max_iterations
+    );
 
     Ok(IntegrationResult {
         field: previous_result,
-        error_estimate,
+        error_estimate: last_difference,
         num_evaluations,
+        converged: false,
     })
 }
 
@@ -465,11 +506,12 @@ fn aperture_integrand(
     // Create aperture coordinates
     let aperture = ApertureCoordinates { rho, phi_prime };
 
-    // Calculate feed displacement from position
-    // NOTE: For coma aberration, we only use the radial (xy-plane) displacement
-    // not the full 3D displacement. Axial displacement (z) causes defocus, not coma.
+    // Calculate feed displacement from position.
+    // Lateral (xy-plane) displacement drives coma; axial (z) offset drives defocus.
     let feed_displacement = config.feed.position.radial_displacement();
     let feed_displacement_angle = config.feed.position.y.atan2(config.feed.position.x);
+    // Axial offset of the feed from the focal point: positive = away from vertex.
+    let feed_axial_offset = config.feed.position.z - config.reflector.focal_length;
 
     // Calculate angle of incidence (simplified - assumes small angles)
     // For parabolic reflector, theta_incident ≈ ρ/(2f)
@@ -504,6 +546,7 @@ fn aperture_integrand(
         config.reflector.focal_length,
         feed_displacement,
         feed_displacement_angle,
+        feed_axial_offset,
         surface_error,
         theta_incident,
         mesh_spacing,
@@ -527,6 +570,55 @@ fn aperture_integrand(
     let phase_factor = Complex64::new(0.0, total_phase).exp();
 
     amplitude * phase_factor
+}
+
+/// ∬ |A(ρ,φ')|² ρ dρ dφ' over the aperture — denominator of the aperture-directivity
+/// formula. Uses the same illumination model and Simpson scheme as the field integral.
+///
+/// The directivity of an aperture is
+/// ```text
+/// D(θ,φ) = (4π/λ²) · |∬ A e^{jΨ} ρ dρ dφ'|² / ∬ |A|² ρ dρ dφ'
+/// ```
+/// This function computes the (real, phase-free) denominator. The numerator is the
+/// raw aperture integral from [`integrate_aperture`] (i.e. `IntegrationResult::field`),
+/// NOT the normalized [`compute_far_field`] value.
+pub fn integrate_amplitude_squared(
+    config: &AntennaConfiguration,
+    n_rho: usize,
+    n_phi: usize,
+) -> f64 {
+    let rho_max = config.reflector.diameter / 2.0;
+
+    // Ensure odd number of points for Simpson's rule.
+    let n_rho = if n_rho.is_multiple_of(2) {
+        n_rho + 1
+    } else {
+        n_rho
+    };
+    let n_phi = if n_phi.is_multiple_of(2) {
+        n_phi + 1
+    } else {
+        n_phi
+    };
+
+    let h_rho = rho_max / (n_rho - 1) as f64;
+    let h_phi = 2.0 * PI / (n_phi - 1) as f64;
+
+    let mut sum = 0.0;
+    for j in 0..n_phi {
+        let phi_prime = j as f64 * h_phi;
+        let wj = simpson_weight(j, n_phi);
+        let mut inner = 0.0;
+        for i in 0..n_rho {
+            let rho = i as f64 * h_rho;
+            let a =
+                illumination_amplitude(rho, phi_prime, &config.feed, config.reflector.focal_length);
+            inner += a * a * rho * simpson_weight(i, n_rho);
+        }
+        sum += inner * wj;
+    }
+
+    sum * h_rho * h_phi / 9.0
 }
 
 /// Compute far-field normalization factor
@@ -705,7 +797,10 @@ mod tests {
         // Should have performed evaluations
         assert!(result.num_evaluations > 0);
 
-        // Error estimate should be reasonable
+        // On-axis integration with fast params must converge (smooth, no phase oscillation).
+        assert!(result.converged, "on-axis fast integration must converge");
+        // A converged result must have a finite, non-negative error estimate.
+        assert!(result.error_estimate.is_finite(), "converged error_estimate must be finite");
         assert!(result.error_estimate >= 0.0);
     }
 
@@ -738,6 +833,10 @@ mod tests {
         let accurate_result =
             integrate_aperture(0.0, 0.0, &config, 8.4e9, &accurate_params).unwrap();
 
+        // Both must converge so the error-estimate comparison below is meaningful.
+        assert!(fast_result.converged, "fast on-axis integration must converge");
+        assert!(accurate_result.converged, "accurate on-axis integration must converge");
+
         // High accuracy should have lower error estimate
         assert!(accurate_result.error_estimate <= fast_result.error_estimate * 2.0);
 
@@ -759,6 +858,22 @@ mod tests {
         // Invalid angle (NaN)
         let result = integrate_aperture(f64::NAN, 0.0, &config, 8.4e9, &params);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_integrate_amplitude_squared_positive_finite() {
+        let config = test_antenna();
+
+        // The denominator of the directivity formula must be a positive, finite
+        // real number for a physically-illuminated aperture.
+        let amp_sq = integrate_amplitude_squared(&config, 33, 65);
+        assert!(amp_sq.is_finite());
+        assert!(amp_sq > 0.0);
+
+        // Sanity upper bound: |A| <= 1 everywhere, so the integral is at most the
+        // area integral ∬ ρ dρ dφ' = π(D/2)² = π·0.25 ≈ 0.785 for the 1m test dish.
+        let area = PI * (config.reflector.diameter / 2.0).powi(2);
+        assert!(amp_sq <= area + 1e-9);
     }
 
     #[test]
@@ -803,6 +918,22 @@ mod tests {
 
         // Pattern should decrease off-axis
         assert!(field_off_axis.norm() < field_on_axis.norm());
+    }
+
+    #[test]
+    fn test_non_convergence_is_reported() {
+        let config = test_antenna();
+        let params = IntegrationParams {
+            max_iterations: 1,   // cannot converge: convergence check needs iteration > 0
+            relative_tolerance: 1e-15,
+            ..IntegrationParams::fast()
+        };
+        let result = integrate_aperture(0.3, 0.0, &config, 8.4e9, &params).unwrap();
+        assert!(!result.converged);
+        // With max_iterations == 1 the loop runs a single iteration and the convergence
+        // check (iteration > 0) is never reached, so no inter-iteration difference is
+        // ever computed.  last_difference remains at its INFINITY sentinel value.
+        assert_eq!(result.error_estimate, f64::INFINITY);
     }
 
     #[test]

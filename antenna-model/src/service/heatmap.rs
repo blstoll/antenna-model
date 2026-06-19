@@ -3,8 +3,8 @@
 //! Generates 2D loss heatmaps across antenna field of view.
 
 use crate::api::schemas::{
-    CalibrationStatusInfo, GainRequest, GridConfig, GridData, HeatmapMetadata, HeatmapRequest,
-    HeatmapResponse, Position3D, RangeConfig,
+    CalibrationStatusInfo, CoordinateSystem, GainRequest, GridConfig, GridData, HeatmapMetadata,
+    HeatmapRequest, HeatmapResponse, Position3D, RangeConfig,
 };
 use crate::data::repository::CalibrationRepository;
 use crate::error::{AntennaModelError, Result};
@@ -293,6 +293,7 @@ fn evaluate_grid_point(
         frequency_mhz: request.frequency_mhz,
         pointing_frequency_mhz: request.pointing_frequency_mhz,
         include_reference: false, // Don't need reference for heatmap
+        vehicle_attitude: None,   // Heatmap does not supply attitude
     };
 
     // Evaluate gain at this point
@@ -360,7 +361,11 @@ fn compute_emitter_position_from_angles(
     let dy = rot[0][1] * e + rot[1][1] * n + rot[2][1] * u;
     let dz = rot[0][2] * e + rot[1][2] * n + rot[2][2] * u;
 
-    Ok(Position3D::new(vx + dx, vy + dy, vz + dz))
+    // Tag as ECEF explicitly: Earth-surface values are ~2–6 Mm which is below
+    // the 6400 km auto-detect threshold and would otherwise misclassify as Geodetic.
+    let mut pos = Position3D::new(vx + dx, vy + dy, vz + dz);
+    pos.coordinate_system = Some(CoordinateSystem::ECEF);
+    Ok(pos)
 }
 
 #[cfg(test)]
