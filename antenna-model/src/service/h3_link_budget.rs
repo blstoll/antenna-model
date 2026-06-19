@@ -291,8 +291,10 @@ pub fn compute_h3_link_budget(
 
     let (antenna_config, feed_x, feed_y, feed_z) = build_antenna_config(calibration, request)?;
 
-    // Squint magnitude is constant per request (depends only on feed displacement and the
-    // frequency offset, not on cell direction). Compute once for the response field.
+    // Squint magnitude is constant per request: it is the freq-shift ratio times the
+    // feed-displacement ratio, independent of which (az, el) the squint is applied to.
+    // Evaluate at (0.0, 0.0) to extract that magnitude without a real direction, once,
+    // for the response field.
     let pointing_freq = request
         .pointing_frequency_mhz
         .unwrap_or(request.frequency_mhz);
@@ -921,7 +923,15 @@ mod tests {
             resp.beam_squint_deg
         );
 
+        // Displace the feed too, so this asserts None comes from pointing == None — not
+        // merely from zero feed displacement.
         let mut req_none = make_h3_test_request();
+        req_none.feed_position = Position3D::new(
+            req_none.reflector_boresight.x + 0.05,
+            req_none.reflector_boresight.y,
+            req_none.reflector_boresight.z,
+        );
+        req_none.feed_position.coordinate_system = Some(CoordinateSystem::Geodetic);
         req_none.pointing_frequency_mhz = None;
         let cache_none = GainCache::new(false, 1);
         let resp_none =
