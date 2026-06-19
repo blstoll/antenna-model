@@ -162,6 +162,13 @@ fn compute_cell_gain(
 
     // Compute az/el once; the result is returned to the caller so that
     // `compute_cell_result` does not need to call `compute_emitter_direction` again.
+    //
+    // TODO(squint): unlike the /gain evaluator, the H3 path does not apply
+    // `apply_beam_squint_correction` here, so a non-None `pointing_frequency_mhz` is
+    // currently ignored for H3 cell gains. Harmless while pointing == operating frequency
+    // (all current callers), but produces a different answer from /gain for the same
+    // geometry once a pointing offset is supplied. Apply the squint pipeline (using the
+    // attitude-aware feed_x/feed_y clock angle) before enabling frequency-offset H3 queries.
     let (az_deg, el_deg) = compute_emitter_direction_with_attitude(
         &cell_pos,
         &request.vehicle_position,

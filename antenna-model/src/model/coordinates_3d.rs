@@ -751,6 +751,9 @@ pub fn apply_beam_squint_correction(
         elevation_deg >= 0.0,
         "elevation must be polar angle >= 0"
     );
+    // Polar angle is non-negative by definition (acos range [0, 180]); enforce it in
+    // release builds too so the direction-cosine path below never sees a negative sin(theta).
+    let elevation_deg = elevation_deg.abs();
 
     // If frequencies are the same (within 0.1%), no correction needed
     if (pointing_freq_mhz - operating_freq_mhz).abs() / pointing_freq_mhz < 0.001 {
