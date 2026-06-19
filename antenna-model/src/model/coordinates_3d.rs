@@ -838,6 +838,8 @@ pub fn squint_corrected_direction(
     }
     let feed_displacement_m = feed_x.hypot(feed_y);
     let displacement_clock_angle_rad = feed_y.atan2(feed_x);
+    // Note: apply_beam_squint_correction takes (pointing, operating) in args 3-4 —
+    // the reverse of this wrapper's (operating, pointing) parameter order.
     apply_beam_squint_correction(
         az_deg,
         el_deg,
