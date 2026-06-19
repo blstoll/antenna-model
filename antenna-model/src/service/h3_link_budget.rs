@@ -291,6 +291,27 @@ pub fn compute_h3_link_budget(
 
     let (antenna_config, feed_x, feed_y, feed_z) = build_antenna_config(calibration, request)?;
 
+    // Squint magnitude is constant per request (depends only on feed displacement and the
+    // frequency offset, not on cell direction). Compute once for the response field.
+    let pointing_freq = request
+        .pointing_frequency_mhz
+        .unwrap_or(request.frequency_mhz);
+    let focal_length_m = calibration.physical_config.reflector.focal_length_m;
+    let (_, _, squint_magnitude_deg) = squint_corrected_direction(
+        0.0,
+        0.0,
+        request.frequency_mhz,
+        pointing_freq,
+        feed_x,
+        feed_y,
+        focal_length_m,
+    );
+    let beam_squint_deg = if squint_magnitude_deg > 0.001 {
+        Some(squint_magnitude_deg)
+    } else {
+        None
+    };
+
     // 5. Compute vehicle ECEF for distance calculations
     let (vehicle_ex, vehicle_ey, vehicle_ez) = pos_to_ecef(&request.vehicle_position)?;
 
@@ -316,10 +337,6 @@ pub fn compute_h3_link_budget(
 
         // Apply beam squint (honors pointing_frequency_mhz). Corrected angles are used for
         // BOTH the cache key and the gain evaluation so cached values match the angle used.
-        let pointing_freq = request
-            .pointing_frequency_mhz
-            .unwrap_or(request.frequency_mhz);
-        let focal_length_m = calibration.physical_config.reflector.focal_length_m;
         let (az_deg, el_deg, _squint_deg) = squint_corrected_direction(
             az_deg,
             el_deg,
@@ -487,6 +504,7 @@ pub fn compute_h3_link_budget(
             failed_points: failed_count,
         },
         calibration_status,
+        beam_squint_deg,
     })
 }
 
@@ -879,6 +897,39 @@ mod tests {
         assert_eq!(
             gains_none, gains_equal,
             "pointing == operating must not change gains"
+        );
+    }
+
+    #[test]
+    fn test_h3_reports_beam_squint_deg() {
+        let calibration = make_h3_test_calibration();
+
+        let mut req = make_h3_test_request();
+        req.feed_position = Position3D::new(
+            req.reflector_boresight.x + 0.05,
+            req.reflector_boresight.y,
+            req.reflector_boresight.z,
+        );
+        req.feed_position.coordinate_system = Some(CoordinateSystem::Geodetic);
+        req.pointing_frequency_mhz = Some(req.frequency_mhz * 1.4);
+        let cache = GainCache::new(false, 1);
+        let resp = compute_h3_link_budget(&req, &calibration, &cache, std::time::Instant::now())
+            .unwrap();
+        assert!(
+            resp.beam_squint_deg.is_some_and(|s| s > 0.0),
+            "expected Some(squint>0), got {:?}",
+            resp.beam_squint_deg
+        );
+
+        let mut req_none = make_h3_test_request();
+        req_none.pointing_frequency_mhz = None;
+        let cache_none = GainCache::new(false, 1);
+        let resp_none =
+            compute_h3_link_budget(&req_none, &calibration, &cache_none, std::time::Instant::now())
+                .unwrap();
+        assert!(
+            resp_none.beam_squint_deg.is_none(),
+            "no offset -> None"
         );
     }
 }

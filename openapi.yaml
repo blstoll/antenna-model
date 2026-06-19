@@ -809,6 +809,60 @@ components:
             heuristic (approximate and discontinuous near boresight parallel to Earth-Z).
             The quaternion must be normalised to unit length (norm within 1e-3 of 1.0).
 
+    H3LinkBudgetResponse:
+      type: object
+      properties:
+        antenna_id:
+          type: string
+          description: Antenna identifier
+        feed_id:
+          type: string
+          description: Feed identifier
+        frequency_mhz:
+          type: number
+          format: double
+          description: Operating frequency in MHz
+        center_cell_id:
+          type: string
+          description: H3 cell index of the center cell (string representation)
+        h3_resolution:
+          type: integer
+          description: H3 resolution used
+        cells:
+          type: array
+          description: Per-cell results
+          items:
+            type: object
+        warnings:
+          type: array
+          description: Warnings (e.g., extrapolated cells, out-of-range queries)
+          items:
+            type: string
+        metadata:
+          type: object
+          description: Computation metadata
+          properties:
+            points_evaluated:
+              type: integer
+            computation_time_ms:
+              type: number
+              format: double
+            peak_gain_db:
+              type: number
+              format: double
+            failed_points:
+              type: integer
+        calibration_status:
+          $ref: '#/components/schemas/CalibrationStatusInfo'
+        beam_squint_deg:
+          type: number
+          format: double
+          nullable: true
+          description: >-
+            Beam squint magnitude applied (degrees), present only when the request's
+            pointing_frequency_mhz differs from the operating frequency. Omitted when no
+            squint is applied.
+
     BatchGainResponse:
       type: object
       properties:
