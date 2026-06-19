@@ -125,11 +125,7 @@ paths:
                     x: 4510731.123
                     y: 4510731.456
                     z: 3488865.789
-                  vehicle_attitude:
-                    w: 1.0
-                    x: 0.0
-                    y: 0.0
-                    z: 0.0
+                  vehicle_attitude: [1.0, 0.0, 0.0, 0.0]
                   reflector_boresight:
                     x: 4510732.0
                     y: 4510732.0
@@ -153,10 +149,7 @@ paths:
                     x: -118.1234
                     y: 34.5678
                     z: 100.0
-                  vehicle_attitude:
-                    roll_deg: 0.0
-                    pitch_deg: 5.0
-                    yaw_deg: 180.0
+                  vehicle_attitude: [1.0, 0.0, 0.0, 0.0]
                   reflector_boresight:
                     x: -117.0
                     y: 35.0
@@ -348,11 +341,7 @@ paths:
                     x: 4510731.123
                     y: 4510731.456
                     z: 3488865.789
-                  vehicle_attitude:
-                    w: 1.0
-                    x: 0.0
-                    y: 0.0
-                    z: 0.0
+                  vehicle_attitude: [1.0, 0.0, 0.0, 0.0]
                   reflector_boresight:
                     x: 4510732.0
                     y: 4510732.0
@@ -546,46 +535,6 @@ components:
           description: |
             Optional explicit coordinate system override. When absent, auto-detected
             by magnitude. Setting this prevents misclassification for ambiguous positions.
-
-    Quaternion:
-      type: object
-      description: Quaternion attitude representation (must be normalized)
-      required:
-        - w
-        - x
-        - y
-        - z
-      properties:
-        w:
-          type: number
-          format: double
-        x:
-          type: number
-          format: double
-        y:
-          type: number
-          format: double
-        z:
-          type: number
-          format: double
-
-    EulerAngles:
-      type: object
-      description: Euler angles attitude representation
-      required:
-        - roll_deg
-        - pitch_deg
-        - yaw_deg
-      properties:
-        roll_deg:
-          type: number
-          format: double
-        pitch_deg:
-          type: number
-          format: double
-        yaw_deg:
-          type: number
-          format: double
 
     GainRequest:
       type: object
