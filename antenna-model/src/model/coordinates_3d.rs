@@ -353,6 +353,18 @@ pub fn antenna_frame_to_spherical(x: f64, y: f64, z: f64) -> Result<(f64, f64, f
 /// Rotate vector `v` by unit quaternion `q = [w, x, y, z]` (body → ECEF).
 ///
 /// Uses the efficient formula: v' = v + 2·qv × (qv × v + w·v)
+///
+/// # Assumptions
+///
+/// This function assumes `q` is a **unit quaternion** (‖q‖ = 1). For a unit quaternion the
+/// output vector has the same length as the input vector and the rotation is a pure isometry.
+/// If `q` is not normalised the output vector length is **not** preserved — the result will
+/// be scaled by ‖q‖² — and the rotation angle/axis will be incorrect.
+///
+/// Callers are responsible for normalising `q` before passing it in, or for validating it
+/// upstream (e.g. via `validate_quaternion_norm` in the service layer). In particular,
+/// `antenna_frame_axes` calls this function and relies on the caller having passed a valid
+/// unit quaternion through `validate_gain_request` / `validate_h3_link_budget_request`.
 pub fn quaternion_rotate(q: [f64; 4], v: (f64, f64, f64)) -> (f64, f64, f64) {
     let [w, x, y, z] = q;
     // v' = v + 2*qv × (qv × v + w*v), qv = (x, y, z)
@@ -368,6 +380,15 @@ pub fn quaternion_rotate(q: [f64; 4], v: (f64, f64, f64)) -> (f64, f64, f64) {
     )
 }
 
+/// Threshold below which body-X projection onto the boresight-perpendicular plane is treated
+/// as a hard error: the azimuth reference is completely degenerate (body X ∥ boresight).
+const X_MAG_HARD_ERROR_THRESHOLD: f64 = 1e-6;
+
+/// Threshold below which body-X is *nearly* parallel to boresight.
+/// `arccos(1e-2) ≈ 0.57°` — at this level the projected magnitude is < 1 % of the
+/// original, meaning the azimuth reference is numerically ill-conditioned.
+const X_MAG_NEAR_DEGENERATE_THRESHOLD: f64 = 1e-2;
+
 /// Shared helper: build the antenna frame X/Y/Z unit axes from the boresight Z-axis
 /// and an optional attitude quaternion.
 ///
@@ -378,7 +399,7 @@ pub fn quaternion_rotate(q: [f64; 4], v: (f64, f64, f64)) -> (f64, f64, f64) {
 ///
 /// # Attitude-absent (None) behaviour
 /// Uses a cross-product heuristic: prefers Earth Z-axis as reference, falls back to
-/// East when the boresight is within 8° of Earth Z.
+/// East when the boresight is within arccos(0.99) ≈ 8.1° of Earth Z.
 ///
 /// **Note**: the `None` fallback produces an azimuth-zero direction that is
 /// approximate and **discontinuous** near boresight ∥ Earth-Z (|z_z| ≈ 1).
@@ -427,13 +448,21 @@ fn antenna_frame_axes(
                 (bx - dot * z_x, by - dot * z_y, bz - dot * z_z);
             let x_mag =
                 (x_x_raw * x_x_raw + x_y_raw * x_y_raw + x_z_raw * x_z_raw).sqrt();
-            if x_mag < 1e-6 {
+            if x_mag < X_MAG_HARD_ERROR_THRESHOLD {
                 return Err(AntennaModelError::InvalidCoordinate {
                     param: "vehicle_attitude".to_string(),
                     reason: "attitude body X-axis is parallel to boresight; \
                              azimuth reference is degenerate"
                         .to_string(),
                 });
+            }
+            if x_mag < X_MAG_NEAR_DEGENERATE_THRESHOLD {
+                tracing::warn!(
+                    x_mag,
+                    "body X-axis is nearly parallel to boresight \
+                     (projected magnitude {x_mag:.2e} < {X_MAG_NEAR_DEGENERATE_THRESHOLD}); \
+                     azimuth reference is poorly conditioned"
+                );
             }
             (x_x_raw / x_mag, x_y_raw / x_mag, x_z_raw / x_mag)
         }
@@ -1205,6 +1234,88 @@ mod tests {
             assert!((lat2 - lat).abs() < 1e-9, "lat {lat}: got {lat2}");
             assert!((alt2 - 1000.0).abs() < 1e-3, "lat {lat}: alt {alt2}");
         }
+    }
+
+    // ========================================================================
+    // quaternion_rotate Direct Tests
+    // ========================================================================
+
+    /// Tolerance for quaternion_rotate output comparisons.
+    const Q_TOL: f64 = 1e-9;
+
+    #[test]
+    fn test_quaternion_rotate_identity() {
+        // Identity quaternion [1, 0, 0, 0] must leave every vector unchanged.
+        let q = [1.0_f64, 0.0, 0.0, 0.0];
+        let v = (1.0_f64, 2.0, 3.0);
+        let (rx, ry, rz) = quaternion_rotate(q, v);
+        assert!(
+            (rx - v.0).abs() < Q_TOL,
+            "identity rotate x: expected {}, got {}",
+            v.0,
+            rx
+        );
+        assert!(
+            (ry - v.1).abs() < Q_TOL,
+            "identity rotate y: expected {}, got {}",
+            v.1,
+            ry
+        );
+        assert!(
+            (rz - v.2).abs() < Q_TOL,
+            "identity rotate z: expected {}, got {}",
+            v.2,
+            rz
+        );
+    }
+
+    #[test]
+    fn test_quaternion_rotate_90deg_about_z() {
+        // +90° rotation about Z: q = [cos(45°), 0, 0, sin(45°)] = [√½, 0, 0, √½].
+        // Maps (1, 0, 0) → (0, 1, 0) by the right-hand rule.
+        let s = std::f64::consts::FRAC_1_SQRT_2; // ≈ 0.70710678
+        let q = [s, 0.0, 0.0, s]; // [w, x, y, z]
+        let v = (1.0_f64, 0.0, 0.0);
+        let (rx, ry, rz) = quaternion_rotate(q, v);
+        assert!(
+            (rx - 0.0).abs() < Q_TOL,
+            "+90° about Z: rx expected 0, got {}",
+            rx
+        );
+        assert!(
+            (ry - 1.0).abs() < Q_TOL,
+            "+90° about Z: ry expected 1, got {}",
+            ry
+        );
+        assert!(
+            (rz - 0.0).abs() < Q_TOL,
+            "+90° about Z: rz expected 0, got {}",
+            rz
+        );
+    }
+
+    #[test]
+    fn test_quaternion_rotate_180deg_about_x() {
+        // 180° rotation about X: q = [cos(90°), sin(90°), 0, 0] = [0, 1, 0, 0].
+        // Maps (0, 1, 0) → (0, -1, 0).
+        let q = [0.0_f64, 1.0, 0.0, 0.0]; // [w, x, y, z]
+        let v = (0.0_f64, 1.0, 0.0);
+        let (rx, ry, rz) = quaternion_rotate(q, v);
+        assert!(
+            (rx - 0.0).abs() < Q_TOL,
+            "180° about X: rx expected 0, got {}",
+            rx
+        );
+        assert!(
+            (ry - (-1.0)).abs() < Q_TOL,
+            "180° about X: ry expected -1, got {}",
+            ry
+        );
+        assert!(
+            (rz - 0.0).abs() < Q_TOL,
+            "180° about X: rz expected 0, got {}",
+            rz
+        );
     }
 
     // ========================================================================

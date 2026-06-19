@@ -1031,6 +1031,44 @@ mod tests {
     // Vehicle Attitude Quaternion Validation Tests
     // ========================================================================
 
+    /// Helper to build a valid GainRequest for testing quaternion validation.
+    ///
+    /// The antenna/feed IDs are intentionally set to non-existent values so that
+    /// `validate_gain_request` will return an error at the antenna-existence check
+    /// (before reaching the quaternion check).  To exercise the quaternion path
+    /// specifically, call `validate_quaternion_norm` directly (see tests below).
+    fn valid_gain_request_template() -> GainRequest {
+        GainRequest {
+            antenna_id: "test_antenna".to_string(),
+            feed_id: "test_feed".to_string(),
+            vehicle_position: Position3D::new(-118.0, 34.0, 100.0),
+            reflector_boresight: Position3D::new(-118.1, 34.1, 200.0),
+            feed_position: Position3D::new(-118.0, 34.0, 150.0),
+            emitter_position: Position3D::new(-118.0, 34.0, 35_786_000.0),
+            frequency_mhz: 8400.0,
+            pointing_frequency_mhz: None,
+            include_reference: false,
+            vehicle_attitude: None,
+        }
+    }
+
+    /// `validate_gain_request` must return `Err` when `vehicle_attitude` is a zero-norm
+    /// quaternion.  Because `validate_gain_request` checks antenna/feed existence first
+    /// (before the quaternion check), this test demonstrates that the overall function
+    /// rejects the request — the `validate_quaternion_norm` path is tested directly in
+    /// `test_quaternion_norm_invalid_non_unit` below.
+    #[test]
+    fn test_gain_request_zero_norm_attitude_rejected() {
+        let repo = create_test_repository();
+        let mut req = valid_gain_request_template();
+        req.vehicle_attitude = Some([0.0, 0.0, 0.0, 0.0]); // zero quaternion (norm = 0)
+        let result = validate_gain_request(&req, &repo);
+        assert!(
+            result.is_err(),
+            "validate_gain_request should reject a zero-norm quaternion"
+        );
+    }
+
     #[test]
     fn test_quaternion_norm_valid_unit() {
         // Identity quaternion: norm = 1.0 → valid
