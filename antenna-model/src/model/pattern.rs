@@ -26,6 +26,13 @@ use std::f64::consts::PI;
 
 use num_complex::Complex64;
 
+/// Warning message emitted when the aperture integration loop exhausts its
+/// iteration budget without meeting the convergence criterion.  Extracted as a
+/// constant so the text stays consistent across all four gain-computation helpers
+/// and the existing test can rely on `.contains("did not converge")`.
+const INTEGRATION_NONCONVERGENCE_WARNING: &str =
+    "aperture integration did not converge; gain accuracy may be degraded";
+
 use crate::error::{ComputationError, ComputationResult};
 use crate::model::{
     direct_path::compute_with_direct_path,
@@ -310,9 +317,7 @@ fn compute_gain_standard(
     let result = integrate_aperture(theta, phi, config, frequency_hz, &effective_params)?;
 
     if !result.converged {
-        warnings.push(
-            "aperture integration did not converge; gain accuracy may be degraded".to_string(),
-        );
+        warnings.push(INTEGRATION_NONCONVERGENCE_WARNING.to_string());
     }
 
     absolute_gain_from_integral(result.field, config, wavelength, &effective_params)
@@ -345,9 +350,7 @@ fn compute_gain_higher_order(
     let result = integrate_aperture(theta, phi, config, frequency_hz, &ho_params)?;
 
     if !result.converged {
-        warnings.push(
-            "aperture integration did not converge; gain accuracy may be degraded".to_string(),
-        );
+        warnings.push(INTEGRATION_NONCONVERGENCE_WARNING.to_string());
     }
 
     absolute_gain_from_integral(result.field, config, wavelength, &ho_params)
@@ -388,9 +391,7 @@ fn compute_gain_ray_tracing(
     let on_axis = integrate_aperture(0.0, 0.0, config, frequency_hz, params)?;
 
     if !on_axis.converged {
-        warnings.push(
-            "aperture integration did not converge; gain accuracy may be degraded".to_string(),
-        );
+        warnings.push(INTEGRATION_NONCONVERGENCE_WARNING.to_string());
     }
 
     let boresight_gain = absolute_gain_from_integral(on_axis.field, config, wavelength, params)?;
@@ -416,9 +417,7 @@ fn compute_gain_direct_path(
     let reflected = integrate_aperture(theta, phi, config, frequency_hz, &effective_params)?;
 
     if !reflected.converged {
-        warnings.push(
-            "aperture integration did not converge; gain accuracy may be degraded".to_string(),
-        );
+        warnings.push(INTEGRATION_NONCONVERGENCE_WARNING.to_string());
     }
 
     let reflected_gain =

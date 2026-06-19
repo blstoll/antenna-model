@@ -64,6 +64,11 @@ pub struct IntegrationResult {
     ///           size) without meeting tolerance.  The returned `field` is the
     ///           best available estimate; `error_estimate` holds the last
     ///           inter-iteration difference.
+    ///
+    /// When `error_estimate` is `f64::INFINITY` the loop ran only one iteration
+    /// and no inter-iteration comparison was possible.  A finite `error_estimate`
+    /// with `converged: false` means the maximum grid size was reached but the
+    /// difference between the last two iterations still exceeded the tolerance.
     pub converged: bool,
 }
 
@@ -792,7 +797,10 @@ mod tests {
         // Should have performed evaluations
         assert!(result.num_evaluations > 0);
 
-        // Error estimate should be reasonable
+        // On-axis integration with fast params must converge (smooth, no phase oscillation).
+        assert!(result.converged, "on-axis fast integration must converge");
+        // A converged result must have a finite, non-negative error estimate.
+        assert!(result.error_estimate.is_finite(), "converged error_estimate must be finite");
         assert!(result.error_estimate >= 0.0);
     }
 
@@ -824,6 +832,10 @@ mod tests {
         let fast_result = integrate_aperture(0.0, 0.0, &config, 8.4e9, &fast_params).unwrap();
         let accurate_result =
             integrate_aperture(0.0, 0.0, &config, 8.4e9, &accurate_params).unwrap();
+
+        // Both must converge so the error-estimate comparison below is meaningful.
+        assert!(fast_result.converged, "fast on-axis integration must converge");
+        assert!(accurate_result.converged, "accurate on-axis integration must converge");
 
         // High accuracy should have lower error estimate
         assert!(accurate_result.error_estimate <= fast_result.error_estimate * 2.0);
@@ -918,6 +930,10 @@ mod tests {
         };
         let result = integrate_aperture(0.3, 0.0, &config, 8.4e9, &params).unwrap();
         assert!(!result.converged);
+        // With max_iterations == 1 the loop runs a single iteration and the convergence
+        // check (iteration > 0) is never reached, so no inter-iteration difference is
+        // ever computed.  last_difference remains at its INFINITY sentinel value.
+        assert_eq!(result.error_estimate, f64::INFINITY);
     }
 
     #[test]
