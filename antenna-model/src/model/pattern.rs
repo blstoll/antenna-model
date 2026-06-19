@@ -570,7 +570,8 @@ pub fn compute_g_over_t(
 /// # Arguments
 /// - `config`: Antenna configuration
 /// - `frequency_hz`: Frequency in Hz
-/// - `gain_drop_db`: Gain drop from peak in dB (e.g., 3.0 for half-power beamwidth)
+/// - `gain_drop_db`: Gain drop from peak in dB (e.g., 3.0 for half-power beamwidth);
+///   must be > 0
 /// - `phi`: Azimuthal cut angle (radians, typically 0 for E-plane)
 /// - `params`: Integration parameters
 ///
@@ -595,6 +596,16 @@ pub fn compute_beamwidth(
     phi: f64,
     params: &IntegrationParams,
 ) -> ComputationResult<f64> {
+    const BISECTION_ITERS: usize = 30;
+    const BISECTION_TOL_RAD: f64 = 1e-5;
+
+    if gain_drop_db <= 0.0 {
+        return Err(ComputationError::NumericalInstability {
+            operation: "compute_beamwidth".to_string(),
+            reason: format!("gain_drop_db must be > 0, got {gain_drop_db}"),
+        });
+    }
+
     // On-axis peak gain and the target threshold.
     let result_peak = compute_gain_db(0.0, phi, config, frequency_hz, params)?;
     let target_gain = result_peak.gain - gain_drop_db;
@@ -622,8 +633,8 @@ pub fn compute_beamwidth(
         theta_hi += step;
     }
 
-    // Bisect within [theta_lo, theta_hi] to ~1e-5 rad precision.
-    for _ in 0..30 {
+    // Bisect within [theta_lo, theta_hi] to BISECTION_TOL_RAD precision.
+    for _ in 0..BISECTION_ITERS {
         let mid = 0.5 * (theta_lo + theta_hi);
         let g = compute_gain_db(mid, phi, config, frequency_hz, params)?.gain;
         if g > target_gain {
@@ -631,7 +642,7 @@ pub fn compute_beamwidth(
         } else {
             theta_hi = mid;
         }
-        if theta_hi - theta_lo < 1e-5 {
+        if theta_hi - theta_lo < BISECTION_TOL_RAD {
             break;
         }
     }
@@ -893,6 +904,22 @@ mod tests {
             "expected Err for unreachable gain_drop_db=200, got Ok({:?})",
             result.ok()
         );
+    }
+
+    #[test]
+    fn test_beamwidth_does_not_lock_on_sidelobe() {
+        let config = test_antenna();
+        let params = IntegrationParams::fast();
+        let hpbw = compute_beamwidth(&config, 32e9, 3.0, 0.0, &params).unwrap();
+        let first_null = 1.22 * wavelength_from_frequency(32e9) / 1.0; // diameter = 1.0 m
+        assert!(hpbw < first_null, "beamwidth {hpbw} beyond first null {first_null}");
+    }
+
+    #[test]
+    fn test_beamwidth_rejects_nonpositive_drop() {
+        let config = test_antenna();
+        let params = IntegrationParams::fast();
+        assert!(compute_beamwidth(&config, 8.4e9, 0.0, 0.0, &params).is_err());
     }
 
     #[test]
