@@ -835,6 +835,8 @@ mod tests {
             req_squint.reflector_boresight.y,
             req_squint.reflector_boresight.z,
         );
+        // Explicit tag (matches make_h3_test_request); don't rely on auto-detection.
+        req_squint.feed_position.coordinate_system = Some(CoordinateSystem::Geodetic);
         req_squint.pointing_frequency_mhz = Some(req_squint.frequency_mhz * 1.4);
         req_baseline.feed_position = req_squint.feed_position.clone();
 
