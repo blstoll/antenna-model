@@ -805,6 +805,45 @@ pub fn apply_beam_squint_correction(
     (corrected_azimuth, corrected_elevation, squint_rad.abs().to_degrees())
 }
 
+/// Apply frequency-offset beam squint to an emitter direction.
+///
+/// Computes the feed radial displacement and clock angle from `(feed_x, feed_y)` and,
+/// when the operating and pointing frequencies differ by more than 0.1 MHz, shifts the
+/// direction in direction-cosine `(u, v)` space via [`apply_beam_squint_correction`].
+/// Otherwise the input direction is returned unchanged.
+///
+/// This is the single source of truth shared by the `/gain` evaluator and the `/h3`
+/// link budget. The `pointing_frequency_mhz.unwrap_or(operating)` defaulting is the
+/// caller's responsibility; this function takes an explicit pointing frequency.
+///
+/// Returns `(az_deg, el_deg, squint_deg)`; `squint_deg == 0.0` when no correction applies.
+/// The returned `squint_deg` magnitude depends only on the feed displacement and the
+/// frequency offset, not on the input direction.
+pub fn squint_corrected_direction(
+    az_deg: f64,
+    el_deg: f64,
+    operating_freq_mhz: f64,
+    pointing_freq_mhz: f64,
+    feed_x: f64,
+    feed_y: f64,
+    focal_length_m: f64,
+) -> (f64, f64, f64) {
+    if (pointing_freq_mhz - operating_freq_mhz).abs() <= 0.1 {
+        return (az_deg, el_deg, 0.0);
+    }
+    let feed_displacement_m = (feed_x * feed_x + feed_y * feed_y).sqrt();
+    let displacement_clock_angle_rad = feed_y.atan2(feed_x);
+    apply_beam_squint_correction(
+        az_deg,
+        el_deg,
+        pointing_freq_mhz,
+        operating_freq_mhz,
+        feed_displacement_m,
+        focal_length_m,
+        displacement_clock_angle_rad,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1171,6 +1210,36 @@ mod tests {
         // original u = sin(2 deg)*cos(0) ~ 0.0349 - must be unchanged by a +Y squint
         assert!((u - 2.0_f64.to_radians().sin()).abs() < 1e-6, "u changed: {u}");
         assert!(el >= 0.0);
+    }
+
+    // ========================================================================
+    // squint_corrected_direction
+    // ========================================================================
+
+    #[test]
+    fn test_squint_corrected_direction_no_offset_passthrough() {
+        let (az, el, squint) =
+            squint_corrected_direction(45.0, 10.0, 8400.0, 8400.05, 0.5, 0.0, 13.6);
+        assert!((az - 45.0).abs() < 1e-9);
+        assert!((el - 10.0).abs() < 1e-9);
+        assert_eq!(squint, 0.0);
+    }
+
+    #[test]
+    fn test_squint_corrected_direction_applies_when_offset() {
+        let (az, el, squint) =
+            squint_corrected_direction(0.0, 2.0, 8400.0, 8800.0, 1.0, 0.0, 13.6);
+        assert!(squint > 0.0, "expected non-zero squint, got {squint}");
+        assert!((el - 2.0).abs() > 1e-6 || (az - 0.0).abs() > 1e-6, "direction should change");
+    }
+
+    #[test]
+    fn test_squint_corrected_direction_zero_displacement_no_squint() {
+        let (az, el, squint) =
+            squint_corrected_direction(30.0, 5.0, 8400.0, 8800.0, 0.0, 0.0, 13.6);
+        assert!((az - 30.0).abs() < 1e-9);
+        assert!((el - 5.0).abs() < 1e-9);
+        assert_eq!(squint, 0.0);
     }
 
     // ========================================================================
