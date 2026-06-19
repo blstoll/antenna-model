@@ -21,9 +21,9 @@ use crate::error::{AntennaModelError, Result};
 use crate::model::compute_gain_db;
 use crate::model::{
     compute_emitter_direction_with_attitude, compute_feed_position_from_pointing, ecef_to_geodetic,
-    evaluate_correction, geodetic_to_ecef, AntennaConfiguration, FeedParameters as ModelFeedParams,
-    FeedPosition, IntegrationParams, MeshParameters as ModelMeshParams,
-    ReflectorGeometry as ModelReflector,
+    evaluate_correction, geodetic_to_ecef, squint_corrected_direction, AntennaConfiguration,
+    FeedParameters as ModelFeedParams, FeedPosition, IntegrationParams,
+    MeshParameters as ModelMeshParams, ReflectorGeometry as ModelReflector,
 };
 use crate::service::{GainCache, GainCacheKey};
 use rayon::prelude::*;
@@ -162,19 +162,28 @@ fn compute_cell_gain(
 
     // Compute az/el once; the result is returned to the caller so that
     // `compute_cell_result` does not need to call `compute_emitter_direction` again.
-    //
-    // TODO(squint): unlike the /gain evaluator, the H3 path does not apply
-    // `apply_beam_squint_correction` here, so a non-None `pointing_frequency_mhz` is
-    // currently ignored for H3 cell gains. Harmless while pointing == operating frequency
-    // (all current callers), but produces a different answer from /gain for the same
-    // geometry once a pointing offset is supplied. Apply the squint pipeline (using the
-    // attitude-aware feed_x/feed_y clock angle) before enabling frequency-offset H3 queries.
     let (az_deg, el_deg) = compute_emitter_direction_with_attitude(
         &cell_pos,
         &request.vehicle_position,
         &request.reflector_boresight,
         request.vehicle_attitude,
     )?;
+
+    // Apply beam squint (honors pointing_frequency_mhz). Corrected angles are used for
+    // BOTH the cache key and the gain evaluation so cached values match the angle used.
+    let pointing_freq = request
+        .pointing_frequency_mhz
+        .unwrap_or(request.frequency_mhz);
+    let focal_length_m = calibration.physical_config.reflector.focal_length_m;
+    let (az_deg, el_deg, _squint_deg) = squint_corrected_direction(
+        az_deg,
+        el_deg,
+        request.frequency_mhz,
+        pointing_freq,
+        feed_x,
+        feed_y,
+        focal_length_m,
+    );
 
     let cache_key = GainCacheKey::new(
         az_deg,
@@ -304,6 +313,23 @@ pub fn compute_h3_link_budget(
             &request.reflector_boresight,
             request.vehicle_attitude,
         )?;
+
+        // Apply beam squint (honors pointing_frequency_mhz). Corrected angles are used for
+        // BOTH the cache key and the gain evaluation so cached values match the angle used.
+        let pointing_freq = request
+            .pointing_frequency_mhz
+            .unwrap_or(request.frequency_mhz);
+        let focal_length_m = calibration.physical_config.reflector.focal_length_m;
+        let (az_deg, el_deg, _squint_deg) = squint_corrected_direction(
+            az_deg,
+            el_deg,
+            request.frequency_mhz,
+            pointing_freq,
+            feed_x,
+            feed_y,
+            focal_length_m,
+        );
+
         let cache_key = GainCacheKey::new(
             az_deg,
             el_deg,
@@ -793,5 +819,64 @@ mod tests {
         // = 20*log10(4π * 1.2e15 / 2.998e8) = 20*log10(5.03e7) ≈ 154.0 dB
         let fspl = free_space_path_loss_db(100_000.0, 12e9);
         assert!((fspl - 154.0).abs() < 1.0, "FSPL={}", fspl);
+    }
+
+    #[test]
+    fn test_h3_squint_changes_cell_gains_with_pointing_offset() {
+        let calibration = make_h3_test_calibration();
+
+        let mut req_baseline = make_h3_test_request();
+        req_baseline.pointing_frequency_mhz = None;
+
+        let mut req_squint = make_h3_test_request();
+        // Steer the feed off boresight so feed displacement (hence squint) is non-zero.
+        req_squint.feed_position = Position3D::new(
+            req_squint.reflector_boresight.x + 0.05,
+            req_squint.reflector_boresight.y,
+            req_squint.reflector_boresight.z,
+        );
+        req_squint.pointing_frequency_mhz = Some(req_squint.frequency_mhz * 1.4);
+        req_baseline.feed_position = req_squint.feed_position.clone();
+
+        let cache1 = GainCache::new(false, 1);
+        let resp_baseline =
+            compute_h3_link_budget(&req_baseline, &calibration, &cache1, std::time::Instant::now())
+                .unwrap();
+        let cache2 = GainCache::new(false, 1);
+        let resp_squint =
+            compute_h3_link_budget(&req_squint, &calibration, &cache2, std::time::Instant::now())
+                .unwrap();
+
+        let gains_baseline: Vec<f64> = resp_baseline.cells.iter().map(|c| c.gain_db).collect();
+        let gains_squint: Vec<f64> = resp_squint.cells.iter().map(|c| c.gain_db).collect();
+        assert_eq!(gains_baseline.len(), gains_squint.len());
+        assert_ne!(
+            gains_baseline,
+            gains_squint,
+            "a large pointing-frequency offset with a steered feed must change cell gains"
+        );
+    }
+
+    #[test]
+    fn test_h3_no_pointing_offset_is_unchanged() {
+        let calibration = make_h3_test_calibration();
+        let mut req_none = make_h3_test_request();
+        req_none.pointing_frequency_mhz = None;
+        let mut req_equal = make_h3_test_request();
+        req_equal.pointing_frequency_mhz = Some(req_equal.frequency_mhz);
+        let cache1 = GainCache::new(false, 1);
+        let resp_none =
+            compute_h3_link_budget(&req_none, &calibration, &cache1, std::time::Instant::now())
+                .unwrap();
+        let cache2 = GainCache::new(false, 1);
+        let resp_equal =
+            compute_h3_link_budget(&req_equal, &calibration, &cache2, std::time::Instant::now())
+                .unwrap();
+        let gains_none: Vec<f64> = resp_none.cells.iter().map(|c| c.gain_db).collect();
+        let gains_equal: Vec<f64> = resp_equal.cells.iter().map(|c| c.gain_db).collect();
+        assert_eq!(
+            gains_none, gains_equal,
+            "pointing == operating must not change gains"
+        );
     }
 }
