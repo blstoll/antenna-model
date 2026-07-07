@@ -4,7 +4,6 @@
 //! may be inaccurate and selects appropriate computational methods:
 //!
 //! - **Large feed offsets** (> 0.3f): Switch to ray tracing
-//! - **Near-boresight with far feed**: Handle direct path interference
 //! - **Pattern nulls**: Apply numerical stability measures
 //!
 //! # References
@@ -29,9 +28,6 @@ pub const MIN_GAIN_FLOOR: f64 = 1e-6;
 /// Minimum gain floor in dB
 pub const MIN_GAIN_FLOOR_DB: f64 = -60.0;
 
-/// Near-boresight threshold in radians (approximately 1 degree)
-pub const NEAR_BORESIGHT_THRESHOLD: f64 = 0.017453; // 1 degree
-
 /// Classification of antenna configuration computational requirements
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComputationMode {
@@ -43,9 +39,6 @@ pub enum ComputationMode {
 
     /// Ray tracing required (large feed offsets > 0.5f)
     RayTracing,
-
-    /// Near-boresight with far feed (direct path interference)
-    NearBoresightDirectPath,
 }
 
 /// Edge case detection result
@@ -59,13 +52,6 @@ pub struct EdgeCaseAnalysis {
 
     /// Feed offset as fraction of focal length
     pub feed_offset_ratio: f64,
-
-    /// Whether near-boresight scenario is detected
-    #[allow(dead_code)] // Public API field
-    pub is_near_boresight: bool,
-
-    /// Whether direct feed path is significant
-    pub has_direct_path: bool,
 
     /// Expected spillover fraction (0.0 to 1.0)
     pub spillover_fraction: f64,
@@ -85,7 +71,7 @@ pub struct EdgeCaseAnalysis {
 /// Analysis of edge cases and recommended computation approach
 pub fn analyze_edge_cases(
     config: &AntennaConfiguration,
-    theta: f64,
+    _theta: f64,
     _phi: f64,
 ) -> EdgeCaseAnalysis {
     let _focal_length = config.reflector.focal_length;
@@ -99,17 +85,11 @@ pub fn analyze_edge_cases(
         offset_mag, offset_ratio, config.reflector.focal_length
     );
 
-    // Check if near boresight
-    let is_near_boresight = theta < NEAR_BORESIGHT_THRESHOLD;
-
     // Estimate spillover
     let spillover = estimate_spillover(config);
 
-    // Check for direct path significance
-    let has_direct_path = is_near_boresight && offset_ratio > 0.1;
-
     // Determine computation mode
-    let mode = select_computation_mode(offset_ratio, is_near_boresight, has_direct_path);
+    let mode = select_computation_mode(offset_ratio);
 
     // Generate warnings
     let mut warnings = Vec::new();
@@ -133,17 +113,10 @@ pub fn analyze_edge_cases(
         ));
     }
 
-    if has_direct_path {
-        warnings
-            .push("Near-boresight with offset feed: direct path interference modeled.".to_string());
-    }
-
     EdgeCaseAnalysis {
         mode,
         feed_offset_magnitude: offset_mag,
         feed_offset_ratio: offset_ratio,
-        is_near_boresight,
-        has_direct_path,
         spillover_fraction: spillover,
         warnings,
     }
@@ -161,20 +134,9 @@ fn calculate_feed_offset(config: &AntennaConfiguration) -> (f64, f64) {
 }
 
 /// Select appropriate computation mode based on edge case analysis
-fn select_computation_mode(
-    offset_ratio: f64,
-    _is_near_boresight: bool,
-    has_direct_path: bool,
-) -> ComputationMode {
-    // Priority: direct path > ray tracing > higher-order > standard
-
-    if has_direct_path {
-        info!(
-            "Near boresight direct path edge case detected (offset_ratio={:.3})",
-            offset_ratio
-        );
-        ComputationMode::NearBoresightDirectPath
-    } else if offset_ratio > SEVERE_OFFSET_THRESHOLD {
+fn select_computation_mode(offset_ratio: f64) -> ComputationMode {
+    // Priority: ray tracing > higher-order > standard
+    if offset_ratio > SEVERE_OFFSET_THRESHOLD {
         info!(
             "Severe offset threshold detected ({:.3} > {:.1}), switching to ray-tracing",
             offset_ratio, SEVERE_OFFSET_THRESHOLD
@@ -419,9 +381,8 @@ mod tests {
     #[test]
     fn test_moderate_offset_higher_order() {
         // E-cone = 20 degrees -> offset/f ≈ 0.35 > 0.3
-        // Use theta > NEAR_BORESIGHT_THRESHOLD to avoid direct path mode
         let config = test_antenna_offset(20.0);
-        let analysis = analyze_edge_cases(&config, 0.05, 0.0); // 2.86 degrees, well above near-boresight
+        let analysis = analyze_edge_cases(&config, 0.05, 0.0); // 2.86 degrees
 
         assert_eq!(analysis.mode, ComputationMode::HigherOrderAberrations);
         assert!(analysis.feed_offset_ratio > LARGE_OFFSET_THRESHOLD);
@@ -432,7 +393,6 @@ mod tests {
     #[test]
     fn test_large_offset_ray_tracing() {
         // E-cone = 35 degrees -> offset/f ≈ 0.6 > 0.5
-        // Use theta > NEAR_BORESIGHT_THRESHOLD to avoid direct path mode
         let config = test_antenna_offset(35.0);
         let analysis = analyze_edge_cases(&config, 0.05, 0.0);
 
@@ -442,16 +402,15 @@ mod tests {
     }
 
     #[test]
-    fn test_near_boresight_direct_path() {
-        // Small theta, moderate feed offset
+    fn test_near_boresight_moderate_offset_uses_standard_po() {
+        // θ < 1° with a 0.1f-0.3f offset previously selected the (removed)
+        // direct-path mode; it must now fall through to standard PO.
+        // E-cone = 10 degrees -> offset/f ≈ 0.175, within the 0.1f-0.3f band.
         let config = test_antenna_offset(10.0);
-        let theta = 0.01; // < NEAR_BORESIGHT_THRESHOLD
+        let theta = 0.01; // ~0.57 degrees, well under 1 degree
         let analysis = analyze_edge_cases(&config, theta, 0.0);
 
-        assert_eq!(analysis.mode, ComputationMode::NearBoresightDirectPath);
-        assert!(analysis.is_near_boresight);
-        assert!(analysis.has_direct_path);
-        assert!(analysis.warnings.iter().any(|w| w.contains("direct path")));
+        assert_eq!(analysis.mode, ComputationMode::StandardPhysicalOptics);
     }
 
     #[test]
@@ -534,20 +493,16 @@ mod tests {
 
     #[test]
     fn test_mode_selection_priority() {
-        // Direct path takes priority over ray tracing
-        let mode = select_computation_mode(0.6, true, true);
-        assert_eq!(mode, ComputationMode::NearBoresightDirectPath);
-
-        // Ray tracing when no direct path
-        let mode = select_computation_mode(0.6, false, false);
+        // Ray tracing for severe offsets
+        let mode = select_computation_mode(0.6);
         assert_eq!(mode, ComputationMode::RayTracing);
 
         // Higher-order when moderate offset
-        let mode = select_computation_mode(0.35, false, false);
+        let mode = select_computation_mode(0.35);
         assert_eq!(mode, ComputationMode::HigherOrderAberrations);
 
         // Standard when small offset
-        let mode = select_computation_mode(0.1, false, false);
+        let mode = select_computation_mode(0.1);
         assert_eq!(mode, ComputationMode::StandardPhysicalOptics);
     }
 }

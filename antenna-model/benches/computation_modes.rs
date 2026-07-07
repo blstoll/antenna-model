@@ -2,11 +2,10 @@
 //!
 //! Task 8.2: Performance optimization and benchmarking of computation modes
 //!
-//! Benchmarks the four computation modes:
+//! Benchmarks the three computation modes:
 //! - StandardPhysicalOptics
 //! - HigherOrderAberrations
 //! - RayTracing
-//! - NearBoresightDirectPath
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::hint::black_box;
@@ -60,23 +59,6 @@ fn antenna_large_offset() -> AntennaConfiguration {
     AntennaConfiguration::new(
         "bench_large_offset".to_string(),
         "Benchmark Large Offset".to_string(),
-        ReflectorGeometry::new(34.0, focal_length, 0.0003).unwrap(),
-        FeedParameters::new(FeedPosition::new(x, y, z), 8.0, 0.0, 1.0).unwrap(),
-        None,
-    )
-    .unwrap()
-}
-
-/// Create antenna with offset feed for near-boresight direct path mode
-fn antenna_direct_path() -> AntennaConfiguration {
-    let focal_length = 13.6;
-    // E-cone ~10 degrees with offset ratio >0.1 triggers direct path mode
-    let ecc = EClockConeCoordinates::from_degrees(10.0, 0.0);
-    let (x, y, z) = ecc.to_feed_position(focal_length);
-
-    AntennaConfiguration::new(
-        "bench_direct_path".to_string(),
-        "Benchmark Direct Path".to_string(),
         ReflectorGeometry::new(34.0, focal_length, 0.0003).unwrap(),
         FeedParameters::new(FeedPosition::new(x, y, z), 8.0, 0.0, 1.0).unwrap(),
         None,
@@ -141,7 +123,6 @@ fn bench_higher_order_aberrations(c: &mut Criterion) {
         ("fast", IntegrationParams::fast()),
         ("default", IntegrationParams::default()),
     ] {
-        // Use theta > 0.017 to avoid direct path mode
         group.bench_with_input(
             BenchmarkId::new("moderate_offset", name),
             &params,
@@ -172,9 +153,7 @@ fn bench_ray_tracing(c: &mut Criterion) {
 
     // Ray tracing at various angles
     for angle_deg in [0.0_f64, 1.0, 5.0] {
-        let angle_rad = angle_deg.to_radians();
-        // Use theta > 0.017 to avoid direct path mode
-        let theta = if angle_rad < 0.018 { 0.05 } else { angle_rad };
+        let theta = angle_deg.to_radians();
 
         group.bench_with_input(
             BenchmarkId::new("large_offset", format!("{:.0}deg", angle_deg)),
@@ -187,38 +166,6 @@ fn bench_ray_tracing(c: &mut Criterion) {
                         black_box(&config),
                         black_box(frequency_hz),
                         black_box(&params),
-                    )
-                })
-            },
-        );
-    }
-
-    group.finish();
-}
-
-/// Benchmark direct path interference mode
-fn bench_direct_path(c: &mut Criterion) {
-    let config = antenna_direct_path();
-    let frequency_hz = 8.4e9;
-
-    let mut group = c.benchmark_group("direct_path");
-
-    for (name, params) in [
-        ("fast", IntegrationParams::fast()),
-        ("default", IntegrationParams::default()),
-    ] {
-        // Near boresight (theta < 0.017) with offset feed triggers direct path mode
-        group.bench_with_input(
-            BenchmarkId::new("near_boresight", name),
-            &params,
-            |b, params| {
-                b.iter(|| {
-                    compute_gain(
-                        black_box(0.01), // ~0.6 degrees
-                        black_box(0.0),
-                        black_box(&config),
-                        black_box(frequency_hz),
-                        black_box(params),
                     )
                 })
             },
@@ -334,20 +281,6 @@ fn bench_mode_comparison(c: &mut Criterion) {
         })
     });
 
-    // Direct path mode
-    let config_dp = antenna_direct_path();
-    group.bench_function("NearBoresightDirectPath", |b| {
-        b.iter(|| {
-            compute_gain(
-                black_box(0.01),
-                black_box(0.0),
-                black_box(&config_dp),
-                black_box(frequency_hz),
-                black_box(&params),
-            )
-        })
-    });
-
     group.finish();
 }
 
@@ -356,7 +289,6 @@ criterion_group!(
     bench_standard_physical_optics,
     bench_higher_order_aberrations,
     bench_ray_tracing,
-    bench_direct_path,
     bench_gain_db,
     bench_adaptive_integration,
     bench_mode_comparison,

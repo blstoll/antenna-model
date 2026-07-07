@@ -4,13 +4,13 @@
     {
       "id": 1,
       "subject": "Task 1: Fix the 180° feed-steering clock flip",
-      "status": "pending",
+      "status": "completed",
       "description": "**Goal:** A feed aimed at clock angle φ is physically displaced at φ+180° so the beam lands at φ; add regression tests that fail against current code.\n\n**Files:** Modify antenna-model/src/model/coordinates.rs (to_feed_displacement, from_feed_position, 3 tests), direct_path.rs:308 test, ray_trace.rs:379 test; Create antenna-model/tests/beam_steering_direction.rs.\n\n**Verify:** cargo test -p antenna-model\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/coordinates.rs\", \"antenna-model/src/model/direct_path.rs\", \"antenna-model/src/model/ray_trace.rs\", \"antenna-model/tests/beam_steering_direction.rs\"], \"verifyCommand\": \"cargo test -p antenna-model\", \"acceptanceCriteria\": [\"gain at requested steering side exceeds opposite side by >30 dB (az=0 and az=90 cases)\", \"round-trip test passes unmodified\", \"cargo test -p antenna-model green\"]}\n```"
     },
     {
       "id": 2,
       "subject": "Task 2: Apply beam deviation factor to steering displacement",
-      "status": "pending",
+      "status": "completed",
       "blockedBy": [1],
       "description": "**Goal:** Scale steering displacement by 1/BDF (Lo 1960, K=0.36) so the PO beam peak lands at the requested angle.\n\n**Files:** coordinates.rs (_with_bdf variants), coordinates_3d.rs (beam_deviation_factor, diameter param on compute_feed_position_from_pointing), mod.rs export, evaluator.rs:141, h3_link_budget.rs:87, evaluator test ~992, tests/beam_steering_direction.rs.\n\n**Verify:** cargo test -p antenna-model\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/coordinates.rs\", \"antenna-model/src/model/coordinates_3d.rs\", \"antenna-model/src/model/mod.rs\", \"antenna-model/src/service/evaluator.rs\", \"antenna-model/src/service/h3_link_budget.rs\", \"antenna-model/tests/beam_steering_direction.rs\"], \"verifyCommand\": \"cargo test -p antenna-model\", \"acceptanceCriteria\": [\"beam_deviation_factor(0.5) in [0.86,0.88] and (10.0) > 0.99\", \"2 deg steer peaks within 0.15 deg of 2.0 deg on 10m/5m dish\", \"both service callers pass diameter\"]}\n```"
     },
@@ -60,5 +60,5 @@
       "description": "**Goal:** fmt, clippy, full test suite, doc build, and the steering regression file all clean/pass; commit any fmt fallout.\n\n**Verify:** cargo fmt --all -- --check && cargo clippy --all -- -D warnings && cargo test --all && cargo test -p antenna-model --test beam_steering_direction\n\n```json:metadata\n{\"files\": [], \"verifyCommand\": \"cargo fmt --all -- --check && cargo clippy --all -- -D warnings && cargo test --all && cargo test -p antenna-model --test beam_steering_direction\", \"acceptanceCriteria\": [\"fmt/clippy/test/doc all clean\", \"beam_steering_direction regression tests pass\"]}\n```"
     }
   ],
-  "lastUpdated": "2026-07-02T00:00:00Z"
+  "lastUpdated": "2026-07-07T00:00:00Z"
 }

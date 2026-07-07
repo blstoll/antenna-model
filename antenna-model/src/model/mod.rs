@@ -11,15 +11,13 @@
 //! - **Pattern**: Far-field pattern computation, gain, and G/T calculations
 //! - **Surface**: Surface error modeling (Ruze equation, Zernike polynomials)
 //! - **Mesh**: Wire mesh reflector physics (transparency, angle effects, polarization)
-//! - **Edge Cases**: Detection and handling of edge cases (large offsets, near-boresight)
+//! - **Edge Cases**: Detection and handling of edge cases (large feed offsets, spillover)
 //! - **Ray Trace**: Ray tracing for large feed offset scenarios
-//! - **Direct Path**: Near-boresight direct path interference modeling
 //! - **Numerical Stability**: Adaptive integration, Kaiser windowing, noise floor management
 
 pub mod coordinates;
 pub mod coordinates_3d;
 pub mod correction_interpolator;
-pub mod direct_path;
 pub mod edge_cases;
 pub mod geometry;
 pub mod illumination;
@@ -89,12 +87,10 @@ pub use mesh::{
 pub use edge_cases::{
     analyze_edge_cases, apply_gain_floor, apply_gain_floor_db, higher_order_aberrations,
     needs_adaptive_integration, ComputationMode, EdgeCaseAnalysis, LARGE_OFFSET_THRESHOLD,
-    MIN_GAIN_FLOOR, MIN_GAIN_FLOOR_DB, NEAR_BORESIGHT_THRESHOLD, SEVERE_OFFSET_THRESHOLD,
+    MIN_GAIN_FLOOR, MIN_GAIN_FLOOR_DB, SEVERE_OFFSET_THRESHOLD,
 };
 
 pub use ray_trace::{compute_gain_ray_trace, ray_trace_aperture, Ray, RayTraceResult};
-
-pub use direct_path::{compute_with_direct_path, should_include_direct_path, DirectPathResult};
 
 pub use numerical_stability::{
     adaptive_integration_params, apply_kaiser_taper, kaiser_window, smooth_to_floor,

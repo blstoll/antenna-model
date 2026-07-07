@@ -35,15 +35,12 @@ const INTEGRATION_NONCONVERGENCE_WARNING: &str =
 
 use crate::error::{ComputationError, ComputationResult};
 use crate::model::{
-    direct_path::compute_with_direct_path,
     edge_cases::{
         analyze_edge_cases, apply_gain_floor, apply_gain_floor_db, needs_adaptive_integration,
         ComputationMode,
     },
     geometry::AntennaConfiguration,
-    integration::{
-        far_field_normalization, integrate_amplitude_squared, integrate_aperture, IntegrationParams,
-    },
+    integration::{integrate_amplitude_squared, integrate_aperture, IntegrationParams},
     ray_trace::compute_gain_ray_trace,
     wavelength_from_frequency,
 };
@@ -256,9 +253,6 @@ pub fn compute_gain(
             );
             compute_gain_ray_tracing(theta, phi, config, frequency_hz, wavelength, params, &mut warnings)?
         }
-        ComputationMode::NearBoresightDirectPath => {
-            compute_gain_direct_path(theta, phi, config, frequency_hz, wavelength, params, &mut warnings)?
-        }
     };
 
     // Apply gain floor for numerical stability
@@ -397,51 +391,6 @@ fn compute_gain_ray_tracing(
     let boresight_gain = absolute_gain_from_integral(on_axis.field, config, wavelength, params)?;
 
     Ok(boresight_gain * relative_gain)
-}
-
-/// Direct path interference gain computation for near-boresight scenarios
-fn compute_gain_direct_path(
-    theta: f64,
-    phi: f64,
-    config: &AntennaConfiguration,
-    frequency_hz: f64,
-    wavelength: f64,
-    params: &IntegrationParams,
-    warnings: &mut Vec<String>,
-) -> ComputationResult<f64> {
-    // Select integration parameters (adaptive near nulls)
-    let effective_params = select_integration_params(theta, phi, config, params);
-
-    // Raw reflected-only aperture integral I = ∬ A e^{jΨ} ρ dρ dφ'. Its directivity is
-    // the absolute reflected-path gain.
-    let reflected = integrate_aperture(theta, phi, config, frequency_hz, &effective_params)?;
-
-    if !reflected.converged {
-        warnings.push(INTEGRATION_NONCONVERGENCE_WARNING.to_string());
-    }
-
-    let reflected_gain =
-        absolute_gain_from_integral(reflected.field, config, wavelength, &effective_params)?;
-
-    // The direct-path module combines a *normalized* reflected far field with a direct
-    // contribution. We apply its effect as a dimensionless ratio
-    // |total|² / |reflected|², which is invariant to the (shared) normalization, then
-    // scale the absolute reflected-path gain by it. This keeps the direct-path result on
-    // the same absolute (directivity) scale as the standard PO path.
-    //
-    // Derive the normalized field from the already-computed `reflected.field` to avoid
-    // running the aperture integral a second time with identical arguments.
-    let e_reflected_normalized = far_field_normalization(wavelength) * reflected.field;
-    let direct = compute_with_direct_path(config, theta, phi, wavelength, e_reflected_normalized);
-
-    let reflected_norm_sq = e_reflected_normalized.norm_sqr();
-    let direct_path_factor = if reflected_norm_sq > 1e-30 {
-        direct.total_field.norm_sqr() / reflected_norm_sq
-    } else {
-        1.0
-    };
-
-    Ok(reflected_gain * direct_path_factor)
 }
 
 /// Compute antenna gain in dB
