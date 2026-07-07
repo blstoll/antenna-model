@@ -303,8 +303,8 @@ mod tests {
         let config = test_antenna(12.0);
         let pos = get_feed_position(&config);
 
-        // Should have non-zero x (E-clock = 0 means x-axis)
-        assert!(pos.0 > 0.0);
+        // E-clock = 0 aims the beam at +x, so the feed sits at -x
+        assert!(pos.0 < 0.0);
         assert!(pos.1.abs() < 1e-6); // E-clock = 0 → y = 0
     }
 

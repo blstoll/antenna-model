@@ -191,12 +191,14 @@ impl EClockConeCoordinates {
     /// Calculate feed displacement from focal point
     ///
     /// This is the key transformation from pointing angles to physical feed position.
-    /// Based on design doc Section 2.5:
+    /// A lateral feed offset steers the beam to the OPPOSITE side of boresight
+    /// (beam deviation): to point the beam at clock angle φ, the feed must be
+    /// displaced at clock angle φ+π. Hence the negated x/y components below.
     /// ```text
-    /// displacement = 2*f*tan(cone_angle/2)
-    /// x_feed = displacement*cos(clock_angle)
-    /// y_feed = displacement*sin(clock_angle)
-    /// z_feed = -displacement^2/(4f)  for large displacements
+    /// displacement = 2·f·tan(cone_angle/2)
+    /// x_feed = -displacement·cos(clock_angle)
+    /// y_feed = -displacement·sin(clock_angle)
+    /// z_feed = -displacement²/(4f)   (defocus term, keeps feed near focal surface)
     /// ```
     ///
     /// # Arguments
@@ -208,12 +210,12 @@ impl EClockConeCoordinates {
         // Radial displacement in xy-plane
         let displacement = 2.0 * focal_length * (self.e_cone / 2.0).tan();
 
-        // Cartesian components
-        let x_feed = displacement * self.e_clock.cos();
-        let y_feed = displacement * self.e_clock.sin();
+        // Cartesian components — NEGATED: beam deviation puts the feed on the
+        // side opposite the desired beam direction.
+        let x_feed = -displacement * self.e_clock.cos();
+        let y_feed = -displacement * self.e_clock.sin();
 
         // For large displacements, include z-component (defocus)
-        // This keeps the feed on the paraboloid surface
         let z_feed = -displacement * displacement / (4.0 * focal_length);
 
         (x_feed, y_feed, z_feed)
@@ -257,8 +259,9 @@ impl EClockConeCoordinates {
         // cone = 2·atan(displacement / (2f))
         let e_cone = 2.0 * (radial_displacement / (2.0 * focal_length)).atan();
 
-        // Clock angle is simply the azimuthal angle in xy-plane
-        let e_clock = y.atan2(x);
+        // Clock angle: the feed sits opposite the beam direction, so the beam's
+        // clock angle is the direction from the feed BACK through the axis.
+        let e_clock = (-y).atan2(-x);
 
         Self::new(e_cone, e_clock)
     }
@@ -402,9 +405,9 @@ mod tests {
         let ecc = EClockConeCoordinates::new(e_cone, e_clock);
         let (x, y, z) = ecc.to_feed_displacement(focal_length);
 
-        // For small angles, displacement ≈ f·cone
+        // Feed is displaced OPPOSITE the aim direction (beam deviation)
         let expected_displacement = 2.0 * focal_length * (e_cone / 2.0).tan();
-        assert!((x - expected_displacement).abs() < 0.01);
+        assert!((x + expected_displacement).abs() < 0.01);
         assert!(y.abs() < EPSILON);
 
         // z-component should be small for small displacements
@@ -423,9 +426,9 @@ mod tests {
         // z should be close to focal_length for small displacements
         assert!((z - focal_length).abs() < 0.1);
 
-        // x, y should reflect the clock angle
+        // x, y should reflect the clock angle, on the OPPOSITE side of the axis
         let _radial = (x * x + y * y).sqrt();
-        let angle = y.atan2(x);
+        let angle = (-y).atan2(-x);
         assert!((angle - e_clock).abs() < EPSILON);
     }
 
@@ -704,22 +707,22 @@ mod tests {
         let focal_length = 13.6;
         let el_deg = 5.0;
 
-        // Azimuth 0° should place feed along +X axis
+        // Azimuth 0° aims the beam along +X, so the feed goes to -X
         let ecc_0 = EClockConeCoordinates::from_azimuth_elevation(0.0, el_deg);
         let (x0, y0, _) = ecc_0.to_feed_position(focal_length);
-        assert!(x0 > 1.0, "Azimuth 0° should have large positive x");
+        assert!(x0 < -1.0, "Azimuth 0° should have large negative x");
         assert!(y0.abs() < 0.01, "Azimuth 0° should have y≈0");
 
-        // Azimuth 90° should place feed along +Y axis
+        // Azimuth 90° aims along +Y, so the feed goes to -Y
         let ecc_90 = EClockConeCoordinates::from_azimuth_elevation(90.0, el_deg);
         let (x90, y90, _) = ecc_90.to_feed_position(focal_length);
         assert!(x90.abs() < 0.01, "Azimuth 90° should have x≈0");
-        assert!(y90 > 1.0, "Azimuth 90° should have large positive y");
+        assert!(y90 < -1.0, "Azimuth 90° should have large negative y");
 
-        // Azimuth 180° should place feed along -X axis
+        // Azimuth 180° aims along -X, so the feed goes to +X
         let ecc_180 = EClockConeCoordinates::from_azimuth_elevation(180.0, el_deg);
         let (x180, y180, _) = ecc_180.to_feed_position(focal_length);
-        assert!(x180 < -1.0, "Azimuth 180° should have large negative x");
+        assert!(x180 > 1.0, "Azimuth 180° should have large positive x");
         assert!(y180.abs() < 0.01, "Azimuth 180° should have y≈0");
     }
 

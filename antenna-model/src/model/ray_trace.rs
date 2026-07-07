@@ -374,9 +374,9 @@ mod tests {
         let displacement = (pos.0.powi(2) + pos.1.powi(2) + pos.2.powi(2)).sqrt();
         assert!(displacement > 0.0);
 
-        // For E-clock=0, should be along x-axis
+        // For E-clock=0 (beam toward +x), feed is displaced toward -x
         assert!((pos.1.abs()) < 1e-6);
-        assert!(pos.0 > 0.0);
+        assert!(pos.0 < 0.0);
     }
 
     #[test]
