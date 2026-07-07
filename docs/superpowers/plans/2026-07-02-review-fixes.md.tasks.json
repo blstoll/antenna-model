@@ -1,0 +1,64 @@
+{
+  "planPath": "docs/superpowers/plans/2026-07-02-review-fixes.md",
+  "tasks": [
+    {
+      "id": 1,
+      "subject": "Task 1: Fix the 180° feed-steering clock flip",
+      "status": "pending",
+      "description": "**Goal:** A feed aimed at clock angle φ is physically displaced at φ+180° so the beam lands at φ; add regression tests that fail against current code.\n\n**Files:** Modify antenna-model/src/model/coordinates.rs (to_feed_displacement, from_feed_position, 3 tests), direct_path.rs:308 test, ray_trace.rs:379 test; Create antenna-model/tests/beam_steering_direction.rs.\n\n**Verify:** cargo test -p antenna-model\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/coordinates.rs\", \"antenna-model/src/model/direct_path.rs\", \"antenna-model/src/model/ray_trace.rs\", \"antenna-model/tests/beam_steering_direction.rs\"], \"verifyCommand\": \"cargo test -p antenna-model\", \"acceptanceCriteria\": [\"gain at requested steering side exceeds opposite side by >30 dB (az=0 and az=90 cases)\", \"round-trip test passes unmodified\", \"cargo test -p antenna-model green\"]}\n```"
+    },
+    {
+      "id": 2,
+      "subject": "Task 2: Apply beam deviation factor to steering displacement",
+      "status": "pending",
+      "blockedBy": [1],
+      "description": "**Goal:** Scale steering displacement by 1/BDF (Lo 1960, K=0.36) so the PO beam peak lands at the requested angle.\n\n**Files:** coordinates.rs (_with_bdf variants), coordinates_3d.rs (beam_deviation_factor, diameter param on compute_feed_position_from_pointing), mod.rs export, evaluator.rs:141, h3_link_budget.rs:87, evaluator test ~992, tests/beam_steering_direction.rs.\n\n**Verify:** cargo test -p antenna-model\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/coordinates.rs\", \"antenna-model/src/model/coordinates_3d.rs\", \"antenna-model/src/model/mod.rs\", \"antenna-model/src/service/evaluator.rs\", \"antenna-model/src/service/h3_link_budget.rs\", \"antenna-model/tests/beam_steering_direction.rs\"], \"verifyCommand\": \"cargo test -p antenna-model\", \"acceptanceCriteria\": [\"beam_deviation_factor(0.5) in [0.86,0.88] and (10.0) > 0.99\", \"2 deg steer peaks within 0.15 deg of 2.0 deg on 10m/5m dish\", \"both service callers pass diameter\"]}\n```"
+    },
+    {
+      "id": 3,
+      "subject": "Task 3: Remove near-boresight direct-path interference mode",
+      "status": "pending",
+      "blockedBy": [1],
+      "description": "**Goal:** Delete the physically unsound direct-path model; near-boresight offset-feed queries fall through to standard PO.\n\n**Files:** Delete direct_path.rs; Modify pattern.rs (imports, dispatch arm 259-261, compute_gain_direct_path 402-445), edge_cases.rs (variant, fields, select_computation_mode, 2 tests), mod.rs:16,22,97.\n\n**Verify:** cargo test --all + empty grep for direct_path/NearBoresightDirectPath/has_direct_path/is_near_boresight\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/direct_path.rs\", \"antenna-model/src/model/pattern.rs\", \"antenna-model/src/model/edge_cases.rs\", \"antenna-model/src/model/mod.rs\"], \"verifyCommand\": \"cargo test --all\", \"acceptanceCriteria\": [\"ComputationMode reduced to 3 variants\", \"near-boresight moderate-offset selects StandardPhysicalOptics\", \"no direct_path references remain in either crate\"]}\n```"
+    },
+    {
+      "id": 4,
+      "subject": "Task 4: Wire phase_center_offset into axial defocus",
+      "status": "pending",
+      "description": "**Goal:** Make the ignored phase_center_offset parameter contribute to feed axial defocus; delete never-called phase_center_offset_phase.\n\n**Files:** integration.rs:513-514 + test, illumination.rs (delete fn ~357 + tests ~578-607), mod.rs:57, geometry.rs:184-186 (sign doc).\n\n**Verify:** cargo test -p antenna-model\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/integration.rs\", \"antenna-model/src/model/illumination.rs\", \"antenna-model/src/model/mod.rs\", \"antenna-model/src/model/geometry.rs\"], \"verifyCommand\": \"cargo test -p antenna-model\", \"acceptanceCriteria\": [\"pco=0.05m costs >1 dB at boresight vs pco=0\", \"phase_center_offset_phase deleted everywhere\"]}\n```"
+    },
+    {
+      "id": 5,
+      "subject": "Task 5: Use calibration temperature_const for correction lookups",
+      "status": "pending",
+      "description": "**Goal:** Replace three hardcoded 290.0 K args with calibration.validity_ranges.temperature_const.\n\n**Files:** evaluator.rs:271 + test test_correction_uses_calibration_temperature, h3_link_budget.rs:235 and :383 + comment 130-143.\n\n**Verify:** cargo test -p antenna-model test_correction_uses_calibration_temperature\n\n```json:metadata\n{\"files\": [\"antenna-model/src/service/evaluator.rs\", \"antenna-model/src/service/h3_link_budget.rs\"], \"verifyCommand\": \"cargo test -p antenna-model test_correction_uses_calibration_temperature\", \"acceptanceCriteria\": [\"300 K artifact produces no temperature extrapolation warning\", \"no hardcoded 290.0 in evaluate_correction call sites\"]}\n```"
+    },
+    {
+      "id": 6,
+      "subject": "Task 6: Guard malformed correction-surface knot vectors",
+      "status": "pending",
+      "description": "**Goal:** Return ComputationError::InterpolationFailed instead of panicking when a knot vector is shorter than spline_order+1.\n\n**Files:** correction_interpolator.rs — guard loop in evaluate_correction (~line 105) + test test_short_knot_vector_returns_error_not_panic.\n\n**Verify:** cargo test -p antenna-model correction_interpolator\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/correction_interpolator.rs\"], \"verifyCommand\": \"cargo test -p antenna-model correction_interpolator\", \"acceptanceCriteria\": [\"short knot vector returns Err instead of panicking\", \"existing interpolator tests unchanged and green\"]}\n```"
+    },
+    {
+      "id": 7,
+      "subject": "Task 7: Correct API semantics docs and stale claims",
+      "status": "pending",
+      "description": "**Goal:** Document feed_position aim-point semantics; fix z-sign doc, loss comment, example expectations, CLAUDE.md Zernike claim. No behavior change.\n\n**Files:** schemas.rs:239-240 and :316-321, openapi.yaml ~560 (+ sites ~133/157/349), evaluator.rs:295,316 comments, examples/requests/geo_feed_emitter_colocated_offset.json, examples/README_GEO_EXAMPLES.md, CLAUDE.md.\n\n**Verify:** cargo build --all\n\n```json:metadata\n{\"files\": [\"antenna-model/src/api/schemas.rs\", \"openapi.yaml\", \"antenna-model/src/service/evaluator.rs\", \"examples/requests/geo_feed_emitter_colocated_offset.json\", \"examples/README_GEO_EXAMPLES.md\", \"CLAUDE.md\"], \"verifyCommand\": \"cargo build --all\", \"acceptanceCriteria\": [\"feed_position documented as Earth aim point\", \"feed_offset_meters z-sign doc matches phase.rs convention\"]}\n```"
+    },
+    {
+      "id": 8,
+      "subject": "Task 8: Remove dead code and add f/D consistency validation",
+      "status": "pending",
+      "blockedBy": [3, 4],
+      "description": "**Goal:** Delete production-dead code (numerical_stability.rs, compute_feed_offset_v2, AzElCoordinates, unused surface/mesh items — pre-verified unused by calibrate) and cross-validate f_over_d_ratio (1% tolerance) in ReflectorGeometry::validate.\n\n**Files:** delete numerical_stability.rs; mod.rs, coordinates_3d.rs, coordinates.rs, surface.rs, mesh.rs, data/types.rs + test.\n\n**Verify:** cargo test --all && cargo clippy --all -- -D warnings\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/numerical_stability.rs\", \"antenna-model/src/model/mod.rs\", \"antenna-model/src/model/coordinates_3d.rs\", \"antenna-model/src/model/coordinates.rs\", \"antenna-model/src/model/surface.rs\", \"antenna-model/src/model/mesh.rs\", \"antenna-model/src/data/types.rs\"], \"verifyCommand\": \"cargo test --all && cargo clippy --all -- -D warnings\", \"acceptanceCriteria\": [\"dead items deleted\", \"surface.rs/mesh.rs pruned to items with real callers\", \"f_over_d_ratio inconsistency > 1% rejected\"]}\n```"
+    },
+    {
+      "id": 9,
+      "subject": "Task 9: Final verification sweep",
+      "status": "pending",
+      "blockedBy": [1, 2, 3, 4, 5, 6, 7, 8],
+      "description": "**Goal:** fmt, clippy, full test suite, doc build, and the steering regression file all clean/pass; commit any fmt fallout.\n\n**Verify:** cargo fmt --all -- --check && cargo clippy --all -- -D warnings && cargo test --all && cargo test -p antenna-model --test beam_steering_direction\n\n```json:metadata\n{\"files\": [], \"verifyCommand\": \"cargo fmt --all -- --check && cargo clippy --all -- -D warnings && cargo test --all && cargo test -p antenna-model --test beam_steering_direction\", \"acceptanceCriteria\": [\"fmt/clippy/test/doc all clean\", \"beam_steering_direction regression tests pass\"]}\n```"
+    }
+  ],
+  "lastUpdated": "2026-07-02T00:00:00Z"
+}
