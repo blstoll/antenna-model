@@ -630,6 +630,27 @@ pub fn compute_feed_offset_v2(
 // Feed Position Computation from Pointing Directions
 // ============================================================================
 
+/// Beam deviation factor for a paraboloid with a laterally displaced feed.
+///
+/// A feed tilted by angle ψ off-axis steers the beam by only BDF·ψ. Using the
+/// classical approximation (Y.T. Lo, "On the beam deviation factor of a
+/// parabolic reflector", 1960):
+/// ```text
+/// BDF = (1 + K·(D/4f)²) / (1 + (D/4f)²),  K ≈ 0.36 for typical tapers
+/// ```
+/// For f/D = 0.5 this gives ≈ 0.871; BDF → 1 as f/D → ∞ (flat reflector limit).
+///
+/// Steering code divides the required lateral displacement by BDF so the beam
+/// lands at the requested angle.
+///
+/// Requires `f_over_d > 0` (a physical reflector); callers obtain it from a
+/// validated `ReflectorGeometry`. At `f_over_d = 0` the result is `NaN`.
+pub fn beam_deviation_factor(f_over_d: f64) -> f64 {
+    const K: f64 = 0.36;
+    let x = 1.0 / (4.0 * f_over_d);
+    (1.0 + K * x * x) / (1.0 + x * x)
+}
+
 /// Compute physical feed position from pointing directions (Earth positions).
 ///
 /// When the API provides `feed_position` and `reflector_boresight` as Earth positions
@@ -641,6 +662,8 @@ pub fn compute_feed_offset_v2(
 /// - `reflector_pointing_pos`: Earth position where reflector is aimed (ECEF or Geodetic)
 /// - `vehicle_pos`: Satellite/antenna position (ECEF or Geodetic)
 /// - `focal_length`: Antenna focal length in meters
+/// - `reflector_diameter`: Antenna reflector diameter in meters (used to compute the
+///   beam deviation factor so the steered beam peak lands at the requested angle)
 /// - `attitude`: Optional unit quaternion `[w, x, y, z]` body → ECEF.
 ///   When `Some`, body +X defines azimuth zero for consistent E-clock reference.
 ///   When `None`, uses the Earth-Z heuristic (approximate, discontinuous near boresight ∥ Earth-Z).
@@ -652,6 +675,7 @@ pub fn compute_feed_position_from_pointing(
     reflector_pointing_pos: &Position3D,
     vehicle_pos: &Position3D,
     focal_length: f64,
+    reflector_diameter: f64,
     attitude: Option<[f64; 4]>,
 ) -> Result<(f64, f64, f64)> {
     // Compute pointing directions for both feed and reflector
@@ -686,9 +710,10 @@ pub fn compute_feed_position_from_pointing(
     use crate::model::coordinates::EClockConeCoordinates;
     let ecc = EClockConeCoordinates::from_azimuth_elevation(delta_az, delta_el);
 
-    // Convert angular offset to absolute physical feed position
-    // Returns (x, y, z) position in antenna frame with origin at reflector vertex
-    let (x, y, z) = ecc.to_feed_position(focal_length);
+    // Convert angular offset to physical feed position, correcting for the
+    // beam deviation factor so the steered beam lands at the requested angle.
+    let bdf = beam_deviation_factor(focal_length / reflector_diameter);
+    let (x, y, z) = ecc.to_feed_position_with_bdf(focal_length, bdf);
 
     Ok((x, y, z))
 }

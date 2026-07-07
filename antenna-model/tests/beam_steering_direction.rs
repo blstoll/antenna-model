@@ -70,3 +70,41 @@ fn feed_is_displaced_opposite_the_aim_direction() {
     assert!(fx < -0.1, "aim at +x must displace the feed toward -x, got fx={fx}");
     assert!(fy.abs() < 1e-9, "no y component expected, got fy={fy}");
 }
+
+/// With the beam deviation factor applied, the beam peak must land at the
+/// requested steering angle (within a tenth of the ~0.25° beamwidth grid).
+/// Without BDF the peak sits at ~2°·0.87 ≈ 1.75° and this test fails.
+#[test]
+fn steered_beam_peaks_at_requested_angle() {
+    use antenna_model::model::beam_deviation_factor;
+
+    // BDF unit checks (Lo 1960, K = 0.36)
+    let bdf_half = beam_deviation_factor(0.5);
+    assert!(
+        (0.86..=0.88).contains(&bdf_half),
+        "BDF(f/D=0.5) = {bdf_half}, expected ~0.871"
+    );
+    assert!(beam_deviation_factor(10.0) > 0.99);
+
+    // Steer 2° at az=0 on the D=10 m, f=5 m dish via the E-cone path directly
+    // (unit-level; the service path is exercised by evaluator tests).
+    let ecc = EClockConeCoordinates::from_azimuth_elevation(0.0, 2.0);
+    let (fx, fy, fz) = ecc.to_feed_position_with_bdf(5.0, bdf_half);
+    let config = dish_with_feed(fx, fy, fz);
+
+    // Scan elevation on the az=0 cut for the peak.
+    let mut peak = (0.0_f64, f64::NEG_INFINITY);
+    let mut el = 1.0_f64;
+    while el <= 3.0 {
+        let g = gain_db(&config, el, 0.0);
+        if g > peak.1 {
+            peak = (el, g);
+        }
+        el += 0.05;
+    }
+    assert!(
+        (peak.0 - 2.0).abs() <= 0.15,
+        "beam peak at {:.2}°, expected 2.00° ± 0.15°",
+        peak.0
+    );
+}

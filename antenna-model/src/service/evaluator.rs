@@ -143,6 +143,7 @@ pub fn compute_gain_from_request(
         &request.reflector_boresight,
         &request.vehicle_position,
         focal_length_m,
+        diameter_m,
         request.vehicle_attitude,
     )?;
 
@@ -989,11 +990,13 @@ mod tests {
         // Compute the expected physical feed position directly using the same helper
         // the evaluator uses. focal_length_m = 5.0 (from create_test_calibration).
         let focal_length_m = 5.0_f64;
+        let diameter_m = 10.0_f64;
         let (steer_x, steer_y, steer_z) = compute_feed_position_from_pointing(
             &request.feed_position,
             &request.reflector_boresight,
             &request.vehicle_position,
             focal_length_m,
+            diameter_m,
             None,
         )
         .expect("compute_feed_position_from_pointing failed in test");

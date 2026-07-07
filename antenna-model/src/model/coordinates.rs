@@ -188,14 +188,20 @@ impl EClockConeCoordinates {
         Self::new(e_cone, e_clock)
     }
 
-    /// Calculate feed displacement from focal point
+    /// `to_feed_displacement` with an explicit beam deviation factor.
     ///
     /// This is the key transformation from pointing angles to physical feed position.
     /// A lateral feed offset steers the beam to the OPPOSITE side of boresight
     /// (beam deviation): to point the beam at clock angle φ, the feed must be
     /// displaced at clock angle φ+π. Hence the negated x/y components below.
+    ///
+    /// Additionally, the physical-optics beam peak deviates by only BDF·ψ for a
+    /// feed displaced by angle ψ (see `beam_deviation_factor` in
+    /// `coordinates_3d.rs`). Dividing the displacement by `bdf` corrects for
+    /// this so the beam lands at `e_cone` rather than `BDF·e_cone`. Pass `1.0`
+    /// to reproduce the geometric (no-BDF) mapping.
     /// ```text
-    /// displacement = 2·f·tan(cone_angle/2)
+    /// displacement = 2·f·tan(cone_angle/2) / bdf
     /// x_feed = -displacement·cos(clock_angle)
     /// y_feed = -displacement·sin(clock_angle)
     /// z_feed = -displacement²/(4f)   (defocus term, keeps feed near focal surface)
@@ -203,12 +209,14 @@ impl EClockConeCoordinates {
     ///
     /// # Arguments
     /// - `focal_length`: Focal length of the parabolic reflector (meters)
+    /// - `bdf`: Beam deviation factor (see `beam_deviation_factor`); use `1.0` for
+    ///   the uncorrected geometric mapping
     ///
     /// # Returns
     /// Feed position (x, y, z) in Cartesian coordinates relative to focal point
-    pub fn to_feed_displacement(&self, focal_length: f64) -> (f64, f64, f64) {
-        // Radial displacement in xy-plane
-        let displacement = 2.0 * focal_length * (self.e_cone / 2.0).tan();
+    pub fn to_feed_displacement_with_bdf(&self, focal_length: f64, bdf: f64) -> (f64, f64, f64) {
+        // Radial displacement in xy-plane, corrected for beam deviation
+        let displacement = 2.0 * focal_length * (self.e_cone / 2.0).tan() / bdf;
 
         // Cartesian components — NEGATED: beam deviation puts the feed on the
         // side opposite the desired beam direction.
@@ -221,7 +229,30 @@ impl EClockConeCoordinates {
         (x_feed, y_feed, z_feed)
     }
 
-    /// Calculate feed position from E-clock/E-cone
+    /// Calculate feed displacement from focal point (geometric mapping, BDF=1).
+    ///
+    /// See `to_feed_displacement_with_bdf` for the beam-deviation-corrected variant.
+    pub fn to_feed_displacement(&self, focal_length: f64) -> (f64, f64, f64) {
+        self.to_feed_displacement_with_bdf(focal_length, 1.0)
+    }
+
+    /// `to_feed_position` with an explicit beam deviation factor (see
+    /// `to_feed_displacement_with_bdf`).
+    ///
+    /// Returns absolute feed position (not relative to focal point)
+    ///
+    /// # Arguments
+    /// - `focal_length`: Focal length of the parabolic reflector (meters)
+    /// - `bdf`: Beam deviation factor; use `1.0` for the uncorrected geometric mapping
+    ///
+    /// # Returns
+    /// Feed position (x, y, z) with origin at reflector vertex
+    pub fn to_feed_position_with_bdf(&self, focal_length: f64, bdf: f64) -> (f64, f64, f64) {
+        let (dx, dy, dz) = self.to_feed_displacement_with_bdf(focal_length, bdf);
+        (dx, dy, focal_length + dz)
+    }
+
+    /// Calculate feed position from E-clock/E-cone (geometric mapping, BDF=1).
     ///
     /// Returns absolute feed position (not relative to focal point)
     ///
@@ -231,8 +262,7 @@ impl EClockConeCoordinates {
     /// # Returns
     /// Feed position (x, y, z) with origin at reflector vertex
     pub fn to_feed_position(&self, focal_length: f64) -> (f64, f64, f64) {
-        let (dx, dy, dz) = self.to_feed_displacement(focal_length);
-        (dx, dy, focal_length + dz)
+        self.to_feed_position_with_bdf(focal_length, 1.0)
     }
 
     /// Calculate E-clock/E-cone from feed position

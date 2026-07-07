@@ -332,12 +332,18 @@ async fn test_physics_model_computation() {
         .expect("Gain computation failed");
 
     // Physics model should compute reasonable gain. The shared request steers the
-    // feed far off boresight (feed near vehicle, boresight at the satellite), so the
-    // 3.7 m test_uncalibrated antenna is evaluated well off its boresight maximum.
-    // With the aperture-directivity formula (no hardcoded efficiency constant) the
-    // off-axis gain is ≈ 15.8 dBi. Bound to [10, 50] dBi.
+    // feed far off boresight (feed near vehicle, boresight at the satellite; a ~96.6°
+    // cone-angle offset), so the 3.7 m test_uncalibrated antenna (f/D = 0.5) is
+    // evaluated well off its boresight maximum.
+    //
+    // Since the beam-deviation-factor fix (2026-07), `compute_feed_position_from_pointing`
+    // divides the steering displacement by BDF(f/D=0.5) ≈ 0.872 so the physical-optics
+    // beam peak lands at the requested angle. That larger displacement produces more
+    // defocus loss at this extreme steering angle, dropping off-axis gain from the
+    // pre-BDF ≈ 14.1 dBi (with the Task-1 sign fix but bdf=1) to ≈ 8.9 dBi.
+    // Bound to [5, 50] dBi.
     assert!(
-        response.gain_db > 10.0 && response.gain_db < 50.0,
+        response.gain_db > 5.0 && response.gain_db < 50.0,
         "Gain {} outside physically reasonable range",
         response.gain_db
     );

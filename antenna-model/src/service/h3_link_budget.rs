@@ -89,6 +89,7 @@ fn build_antenna_config(
         &request.reflector_boresight,
         &request.vehicle_position,
         focal_length_m,
+        diameter_m,
         request.vehicle_attitude,
     )?;
 

@@ -38,8 +38,8 @@ pub use coordinates::{
 };
 
 pub use coordinates_3d::{
-    antenna_frame_to_spherical, apply_beam_squint_correction, compute_emitter_direction,
-    compute_emitter_direction_with_attitude, compute_feed_offset_v2,
+    antenna_frame_to_spherical, apply_beam_squint_correction, beam_deviation_factor,
+    compute_emitter_direction, compute_emitter_direction_with_attitude, compute_feed_offset_v2,
     compute_feed_position_from_pointing, ecef_to_enu_rotation, ecef_to_geodetic, geodetic_to_ecef,
     is_ecef_coordinates, normalize_azimuth_deg, quaternion_rotate, squint_corrected_direction,
     validate_ecef, validate_geodetic,
