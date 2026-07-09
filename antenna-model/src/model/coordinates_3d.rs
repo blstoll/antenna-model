@@ -883,6 +883,76 @@ mod tests {
     const EPSILON: f64 = 1e-6;
 
     // ========================================================================
+    // Domain-contract invariants (docs/domain-contract.md)
+    // ========================================================================
+
+    /// ENU rotation matrix must be orthogonal: R · Rᵀ = I. (Contract: Transforms.)
+    #[test]
+    fn test_ecef_to_enu_rotation_is_orthogonal() {
+        let cases: [(f64, f64); 4] = [(0.0, 0.0), (45.0, -122.0), (89.0, 179.0), (-45.0, 30.0)];
+        for (lat_deg, lon_deg) in cases {
+            let r = ecef_to_enu_rotation(lat_deg.to_radians(), lon_deg.to_radians());
+            for i in 0..3 {
+                for j in 0..3 {
+                    let dot: f64 = (0..3).map(|k| r[i][k] * r[j][k]).sum();
+                    let expected = if i == j { 1.0 } else { 0.0 };
+                    assert!(
+                        (dot - expected).abs() < 1e-10,
+                        "R*R^T[{i}][{j}] = {dot}, expected {expected} at lat={lat_deg} lon={lon_deg}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// ENU→ECEF must use Rᵀ, not R (the anchor bug). A pure "Up" ENU vector must
+    /// map, via Rᵀ, to the local vertical in ECEF. (Contract: ENU axis gotcha.)
+    #[test]
+    fn test_enu_ecef_roundtrip_uses_transpose() {
+        let (lat_deg, lon_deg): (f64, f64) = (34.2, -118.1);
+        let (lat, lon) = (lat_deg.to_radians(), lon_deg.to_radians());
+        let r = ecef_to_enu_rotation(lat, lon);
+        // enu_up = (0, 0, 1); Rᵀ·enu_up selects row 2 of R (the Up basis vector in ECEF).
+        let enu_up = (0.0, 0.0, 1.0);
+        let ecef = (
+            r[0][0] * enu_up.0 + r[1][0] * enu_up.1 + r[2][0] * enu_up.2,
+            r[0][1] * enu_up.0 + r[1][1] * enu_up.1 + r[2][1] * enu_up.2,
+            r[0][2] * enu_up.0 + r[1][2] * enu_up.1 + r[2][2] * enu_up.2,
+        );
+        let expected = (lat.cos() * lon.cos(), lat.cos() * lon.sin(), lat.sin());
+        assert!((ecef.0 - expected.0).abs() < 1e-10, "up.x {} vs {}", ecef.0, expected.0);
+        assert!((ecef.1 - expected.1).abs() < 1e-10, "up.y {} vs {}", ecef.1, expected.1);
+        assert!((ecef.2 - expected.2).abs() < 1e-10, "up.z {} vs {}", ecef.2, expected.2);
+    }
+
+    /// normalize_azimuth_deg output is always in [0, 360). (Contract: Transforms.)
+    #[test]
+    fn test_normalize_azimuth_deg_boundaries() {
+        assert_eq!(normalize_azimuth_deg(360.0), 0.0);
+        assert!((0.0..360.0).contains(&normalize_azimuth_deg(-0.0001)));
+        assert!((normalize_azimuth_deg(720.5) - 0.5).abs() < 1e-9);
+        assert!((0.0..360.0).contains(&normalize_azimuth_deg(-720.5)));
+    }
+
+    /// The squint wrapper passes (pointing, operating) to apply_beam_squint_correction,
+    /// the reverse of its own (operating, pointing) parameter order. If that internal
+    /// swap is ever un-done, the two calls diverge. (Contract: squint arg-order trap.)
+    #[test]
+    fn test_squint_corrected_direction_frequency_argument_order() {
+        // squint_corrected_direction(az, el, operating, pointing, feed_x, feed_y, focal)
+        let (az, el, squint) = squint_corrected_direction(10.0, 5.0, 8500.0, 8400.0, 0.5, 0.0, 5.0);
+        // Equivalent direct call: apply_beam_squint_correction(az, el, pointing, operating,
+        //   feed_displacement = hypot(feed_x, feed_y), focal, clock = atan2(feed_y, feed_x)).
+        let (az2, el2, squint2) =
+            apply_beam_squint_correction(10.0, 5.0, 8400.0, 8500.0, 0.5, 5.0, 0.0);
+        assert!((az - az2).abs() < 1e-9, "az {az} vs {az2}");
+        assert!((el - el2).abs() < 1e-9, "el {el} vs {el2}");
+        assert!((squint - squint2).abs() < 1e-9, "squint {squint} vs {squint2}");
+        // Sanity: with a 100 MHz gap and real feed offset, a correction actually occurred.
+        assert!(squint.abs() > 0.0, "expected a nonzero squint correction");
+    }
+
+    // ========================================================================
     // Coordinate System Detection
     // ========================================================================
 
