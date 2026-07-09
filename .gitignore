@@ -1,7 +1,8 @@
 # Rust build artifacts
 /target/
 **/target/
-Cargo.lock
+# Cargo.lock IS committed — this is an application/binary workspace, so the
+# lockfile is tracked for reproducible CI builds (and stable cargo-audit input).
 
 # Debug and release builds
 debug/
