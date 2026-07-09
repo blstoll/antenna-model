@@ -297,55 +297,6 @@ impl EClockConeCoordinates {
     }
 }
 
-/// Azimuth/Elevation coordinates
-///
-/// Alternative pointing coordinate system using azimuth (horizontal angle)
-/// and elevation (vertical angle from horizon)
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct AzElCoordinates {
-    /// Azimuth angle (radians, 0 to 2π, typically 0 = North, π/2 = East)
-    pub azimuth: f64,
-    /// Elevation angle (radians, 0 = horizon, π/2 = zenith)
-    pub elevation: f64,
-}
-
-impl AzElCoordinates {
-    /// Create new azimuth/elevation coordinates
-    pub fn new(azimuth: f64, elevation: f64) -> Self {
-        Self { azimuth, elevation }
-    }
-
-    /// Create from degrees
-    pub fn from_degrees(azimuth_deg: f64, elevation_deg: f64) -> Self {
-        Self {
-            azimuth: azimuth_deg.to_radians(),
-            elevation: elevation_deg.to_radians(),
-        }
-    }
-
-    /// Convert to degrees
-    pub fn to_degrees(&self) -> (f64, f64) {
-        (self.azimuth.to_degrees(), self.elevation.to_degrees())
-    }
-
-    /// Convert to far-field spherical coordinates (θ, φ)
-    ///
-    /// Note: θ is measured from zenith, elevation is measured from horizon
-    /// So: θ = π/2 - elevation
-    pub fn to_far_field(&self) -> FarFieldCoordinates {
-        let theta = PI / 2.0 - self.elevation;
-        let phi = self.azimuth;
-        FarFieldCoordinates::new(theta, phi)
-    }
-
-    /// Create from far-field coordinates
-    pub fn from_far_field(far_field: FarFieldCoordinates) -> Self {
-        let elevation = PI / 2.0 - far_field.theta;
-        let azimuth = far_field.phi;
-        Self::new(azimuth, elevation)
-    }
-}
-
 /// Normalize angle to [0, 2π) range
 pub fn normalize_angle(angle: f64) -> f64 {
     let mut normalized = angle % (2.0 * PI);
@@ -496,24 +447,6 @@ mod tests {
                 ecc2.e_clock
             );
         }
-    }
-
-    #[test]
-    fn test_azel_to_far_field() {
-        // Zenith (elevation = 90°) should give θ = 0
-        let azel = AzElCoordinates::from_degrees(0.0, 90.0);
-        let ff = azel.to_far_field();
-        assert!(ff.theta.abs() < EPSILON);
-
-        // Horizon (elevation = 0°) should give θ = π/2
-        let azel = AzElCoordinates::from_degrees(0.0, 0.0);
-        let ff = azel.to_far_field();
-        assert!((ff.theta - PI / 2.0).abs() < EPSILON);
-
-        // Round-trip
-        let azel2 = AzElCoordinates::from_far_field(ff);
-        assert!((azel2.elevation - azel.elevation).abs() < EPSILON);
-        assert!((azel2.azimuth - azel.azimuth).abs() < EPSILON);
     }
 
     #[test]

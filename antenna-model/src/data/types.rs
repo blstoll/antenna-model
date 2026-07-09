@@ -363,6 +363,19 @@ impl ReflectorGeometry {
             });
         }
 
+        // f_over_d_ratio is redundant with focal_length_m / diameter_m; reject
+        // artifacts where the stored ratio contradicts the geometry (>1%).
+        let implied_f_over_d = self.focal_length_m / self.diameter_m;
+        if (self.f_over_d_ratio - implied_f_over_d).abs() > 0.01 * implied_f_over_d {
+            return Err(ValidationError::InvalidPhysicalParameter {
+                parameter: "f_over_d_ratio".to_string(),
+                value: self.f_over_d_ratio,
+                reason: format!(
+                    "inconsistent with focal_length_m/diameter_m = {implied_f_over_d:.4}"
+                ),
+            });
+        }
+
         if self.surface_rms_mm < 0.0 {
             return Err(ValidationError::InvalidPhysicalParameter {
                 parameter: "surface_rms_mm".to_string(),
@@ -1389,6 +1402,25 @@ fn is_non_decreasing(v: &[f64]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_reflector_geometry_rejects_inconsistent_f_over_d() {
+        let geom = ReflectorGeometry {
+            diameter_m: 10.0,
+            focal_length_m: 5.0,
+            f_over_d_ratio: 0.6, // truth is 0.5
+            surface_rms_mm: 0.5,
+        };
+        assert!(geom.validate().is_err());
+
+        let consistent = ReflectorGeometry {
+            diameter_m: 10.0,
+            focal_length_m: 5.0,
+            f_over_d_ratio: 0.5,
+            surface_rms_mm: 0.5,
+        };
+        assert!(consistent.validate().is_ok());
+    }
 
     // Helper function to create a test physical config
     fn create_test_physical_config() -> PhysicalAntennaConfig {

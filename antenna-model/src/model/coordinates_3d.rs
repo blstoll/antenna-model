@@ -40,7 +40,7 @@
 //! **IMPORTANT**: This module uses polar angle throughout. When interfacing with
 //! other coordinate systems, ensure consistent interpretation of "elevation".
 
-use crate::api::schemas::{Position3D, Vector3D};
+use crate::api::schemas::Position3D;
 use crate::error::{AntennaModelError, Result};
 
 // ============================================================================
@@ -568,62 +568,6 @@ pub fn compute_emitter_direction(
     boresight_pos: &Position3D,
 ) -> Result<(f64, f64)> {
     compute_emitter_direction_with_attitude(emitter_pos, vehicle_pos, boresight_pos, None)
-}
-
-/// Compute feed offset from reflector boresight using boresight-based orientation.
-///
-/// # Arguments
-/// - `feed_pos`: Feed position (ECEF or Geodetic)
-/// - `boresight_pos`: Reflector boresight position (ECEF or Geodetic)
-/// - `vehicle_pos`: Vehicle position (ECEF or Geodetic)
-///
-/// # Returns
-/// Feed offset vector in antenna frame (meters)
-pub fn compute_feed_offset_v2(
-    feed_pos: &Position3D,
-    boresight_pos: &Position3D,
-    vehicle_pos: &Position3D,
-) -> Result<Vector3D> {
-    // Convert all to ECEF
-    let (feed_x, feed_y, feed_z) = position_to_ecef(feed_pos)?;
-    let (bore_x, bore_y, bore_z) = position_to_ecef(boresight_pos)?;
-    let (vehicle_x, vehicle_y, vehicle_z) = position_to_ecef(vehicle_pos)?;
-
-    // Compute feed offset directly in ECEF, then transform to antenna frame
-    // Boresight vector (defines antenna Z-axis)
-    let bore_dx = bore_x - vehicle_x;
-    let bore_dy = bore_y - vehicle_y;
-    let bore_dz = bore_z - vehicle_z;
-    let bore_mag = (bore_dx * bore_dx + bore_dy * bore_dy + bore_dz * bore_dz).sqrt();
-
-    if bore_mag < 1e-6 {
-        return Err(AntennaModelError::InvalidCoordinate {
-            param: "reflector_boresight".to_string(),
-            reason: "Boresight position too close to vehicle position (< 1mm separation)"
-                .to_string(),
-        });
-    }
-
-    // Normalize boresight vector
-    let z_x = bore_dx / bore_mag;
-    let z_y = bore_dy / bore_mag;
-    let z_z = bore_dz / bore_mag;
-
-    // Feed offset vector in ECEF
-    let feed_offset_dx = feed_x - bore_x;
-    let feed_offset_dy = feed_y - bore_y;
-    let feed_offset_dz = feed_z - bore_z;
-
-    // Define antenna frame axes using shared helper (None = Earth-Z heuristic)
-    let ((x_x, x_y, x_z), (y_x, y_y, y_z), _) =
-        antenna_frame_axes((z_x, z_y, z_z), None)?;
-
-    // Transform feed offset to antenna frame
-    let offset_x = feed_offset_dx * x_x + feed_offset_dy * x_y + feed_offset_dz * x_z;
-    let offset_y = feed_offset_dx * y_x + feed_offset_dy * y_y + feed_offset_dz * y_z;
-    let offset_z = feed_offset_dx * z_x + feed_offset_dy * z_y + feed_offset_dz * z_z;
-
-    Ok(Vector3D::new(offset_x, offset_y, offset_z))
 }
 
 // ============================================================================
