@@ -269,7 +269,7 @@ pub fn compute_gain_from_request(
                 corrected_az,
                 corrected_el,
                 request.frequency_mhz,
-                290.0,
+                calibration.validity_ranges.temperature_const,
             )?;
             correction_extrapolated = result.extrapolated;
             warnings.extend(result.warnings);
@@ -705,6 +705,39 @@ mod tests {
 
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("Correction surface not applied"));
+    }
+
+    /// The correction surface must be evaluated at the calibration's
+    /// temperature_const, not a hardcoded 290 K. This artifact is calibrated
+    /// at 300 K; with the old hardcoded 290 K the temperature dimension
+    /// extrapolated and emitted a warning.
+    #[test]
+    fn test_correction_uses_calibration_temperature() {
+        let mut repo = CalibrationRepository::new();
+        let mut calibration = create_test_calibration(CalibrationStatus::FullyCalibrated {
+            accuracy_estimate_db: 1.0,
+        });
+        calibration.validity_ranges.temperature_const = 300.0;
+        calibration.correction_surface = Some(crate::data::types::BSplineModel4D {
+            coefficients: vec![1.0; 2 * 2 * 2 * 1],
+            shape: [2, 2, 2, 1],
+            knots_azimuth: vec![0.0, 0.0, 0.0, 360.0, 360.0, 360.0],
+            knots_elevation: vec![0.0, 0.0, 0.0, 90.0, 90.0, 90.0],
+            knots_frequency: vec![8000.0, 8000.0, 8000.0, 9000.0, 9000.0, 9000.0],
+            knots_temperature: vec![300.0, 300.0, 300.0, 300.0, 300.0, 300.0],
+            spline_order: 3,
+        });
+        repo.add_calibration(calibration);
+
+        let request = create_test_request();
+        let response = compute_gain_from_request(&request, &repo).unwrap();
+
+        assert!(
+            !response.warnings.iter().any(|w| w.contains("temperature")),
+            "no temperature extrapolation warning expected, got: {:?}",
+            response.warnings
+        );
+        assert!(!response.metadata.extrapolated);
     }
 
     #[test]

@@ -222,8 +222,8 @@ fn compute_cell_gain(
         })?;
 
     // Apply correction surface (post-cache). Uses the same gating logic as
-    // `service::evaluator::compute_gain_from_request` (290.0 K temperature constant,
-    // `is_in_coverage` for optional-coverage gating).
+    // `service::evaluator::compute_gain_from_request` (the calibration's
+    // `temperature_const`, `is_in_coverage` for optional-coverage gating).
     let mut correction_applied = false;
     let mut gain_db = physics_gain_db;
     if let Some(ref surface) = calibration.correction_surface {
@@ -233,7 +233,13 @@ fn compute_cell_gain(
             el_deg,
             request.frequency_mhz,
         ) {
-            let corr = evaluate_correction(surface, az_deg, el_deg, request.frequency_mhz, 290.0)?;
+            let corr = evaluate_correction(
+                surface,
+                az_deg,
+                el_deg,
+                request.frequency_mhz,
+                calibration.validity_ranges.temperature_const,
+            )?;
             gain_db += corr.correction_db;
             captured_warnings.extend(corr.warnings);
             correction_applied = true;
@@ -380,8 +386,13 @@ pub fn compute_h3_link_budget(
                 el_deg,
                 request.frequency_mhz,
             ) {
-                let corr =
-                    evaluate_correction(surface, az_deg, el_deg, request.frequency_mhz, 290.0)?;
+                let corr = evaluate_correction(
+                    surface,
+                    az_deg,
+                    el_deg,
+                    request.frequency_mhz,
+                    calibration.validity_ranges.temperature_const,
+                )?;
                 physics_gain + corr.correction_db
             } else {
                 physics_gain
