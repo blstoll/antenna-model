@@ -10,7 +10,7 @@ Antenna Model Service is a high-performance REST API for parabolic dish antenna 
 1. **Physical optics computation** - Aperture integration with phase functions (path, coma, surface error via the statistical Ruze efficiency, mesh effects)
 2. **Correction surface** - B-spline interpolation for residual error corrections (measured - physics model)
 
-The system is in **Sprint 5** (of 8) - Core API endpoints are being implemented.
+Sprints 1–7 of 8 are complete (see `docs/implementation-plan.md`): physics engine, calibration tool, core + advanced REST endpoints, partial-calibration support, and boresight calibration are all built and tested.
 
 ## Commands
 
@@ -94,7 +94,7 @@ antenna-model/           # Cargo workspace root
 │       ├── correction_surface.rs # B-spline/RBF fitting
 │       ├── validator.rs          # Cross-validation
 │       └── serializer.rs         # Binary artifact generation
-└── calibration_data/   # Pre-computed calibration artifacts (*.bin, antennas.toml)
+└── calibration_data/   # Calibration config (antennas.yaml) + generated *.bin artifacts (none checked in; see roadmap D9)
 ```
 
 ### Data Flow: API Request → Response
@@ -122,14 +122,14 @@ antenna-model/           # Cargo workspace root
      - Phase accumulation: path + coma + mesh (`model/phase.rs`); surface error is applied statistically as a Ruze efficiency in `model/pattern.rs`, not as a per-point aperture phase
      - Feed illumination pattern (`model/illumination.rs`)
      - Apply Ruze efficiency and mesh transparency
-   - Interpolate **correction surface** (B-spline, not yet implemented in Sprint 5)
+   - Interpolate **correction surface** (4D B-spline — implemented and live in `model/correction_interpolator.rs`, applied in `service/evaluator.rs`)
    - Combine: `Gain_final = Gain_physics + Correction`
    - Generate warnings for out-of-range queries
 
 4. **Data Layer** (`src/data/types.rs`) - `AntennaCalibration` structure
    - `physical_config: PhysicalAntennaConfig` - reflector geometry, feed parameters
    - `correction_surface: Option<BSplineModel4D>` - residual corrections
-   - Loaded from binary `.bin` files at startup
+   - Loaded at startup from `.bin` artifacts referenced by `antennas.yaml`. **No `.bin` artifacts ship in-repo: the four `antennas.yaml` entries that reference a `.bin` calibration file are `enabled: false`, while the four uncalibrated design-spec antennas are `enabled: true` and load from `calibration_data/design_specs/` — see roadmap unit D9.**
 
 ### Key Physics Modules (`antenna-model/src/model/`)
 
@@ -139,8 +139,10 @@ antenna-model/           # Cargo workspace root
 - **`illumination.rs`** - Feed pattern: cos^q with q-factor
 - **`integration.rs`** - Adaptive Simpson's rule aperture integration
 - **`pattern.rs`** - Far-field pattern computation with Ruze efficiency
-- **`edge_cases.rs`, `direct_path.rs`, `ray_trace.rs`** - Special case handling
-- **`surface.rs`, `mesh.rs`** - Surface RMS (Ruze equation), mesh transparency
+- **`coordinates_3d.rs`** - 3D position → antenna-frame direction transforms (ECEF/geodetic vehicle geometry)
+- **`correction_interpolator.rs`** - 4D B-spline evaluation of the residual correction surface
+- **`edge_cases.rs`, `ray_trace.rs`** - Special case / large-feed-offset handling
+- **`mesh.rs`** - Mesh transparency (wire-mesh reflection efficiency). Surface RMS / Ruze efficiency lives in `pattern.rs`.
 
 ### Coma Aberration Model
 
@@ -172,8 +174,8 @@ The `calibrate` tool processes measurement data:
 ### Configuration System
 
 - **Service config**: `config/service.toml` or environment variables
-- **Antenna configs**: `calibration_data/antennas.toml` - lists available antennas
-- **Calibration data**: Binary `.bin` files referenced by `antennas.toml`
+- **Antenna configs**: `calibration_data/antennas.yaml` - lists available antennas
+- **Calibration data**: Binary `.bin` artifacts referenced by `antennas.yaml` (generated locally; none committed — see D9)
 - Uses `config` crate for hierarchical config (file + env vars)
 
 ## Important Design Constraints
@@ -211,7 +213,7 @@ The `calibrate` tool processes measurement data:
 
 - Unit tests for all physics functions (with known reference values)
 - Integration tests with realistic calibration data
-- Property-based tests for coordinate transforms (round-trip accuracy)
+- Property-based tests for coordinate transforms (round-trip accuracy) — *planned; not yet implemented, see roadmap unit D7*
 - Benchmarks for performance-critical paths (aperture integration is hottest)
 - Target: >80% test coverage
 
@@ -222,20 +224,18 @@ The `calibrate` tool processes measurement data:
 - Log at appropriate levels: DEBUG for physics details, INFO for requests, WARN for extrapolation
 - JSON format in production for structured parsing
 
-## Current Sprint Status (Sprint 5)
+## Project Status
 
-**Completed:**
-- ✅ Task 5.1: API Server Enhancement & Middleware (RequestId, RequestLogger, ErrorHandler, RequestSizeTracker)
+Per `docs/implementation-plan.md`, Sprints 1–7 are complete:
+- Physics engine (aperture integration, phase functions, far-field pattern, Ruze/mesh efficiency).
+- Calibration tool (parameter tuning, correction-surface fitting, boresight calibration).
+- REST API: single gain, batch, rectangular heatmap, H3 link budget, antenna/feed listing,
+  partial-calibration statuses, multi-feed support.
+- The **4D B-spline correction surface is implemented and live** (`model/correction_interpolator.rs`,
+  applied at `service/evaluator.rs:265-287`).
 
-**In Progress:**
-- Task 5.2: Request/Response Schemas (3D coordinate-based API)
-- Task 5.3: Enhanced Health & Status Endpoints
-- Task 5.4: Calibration Data Repository (loading antenna configs + correction surfaces)
-- Task 5.5: Gain Computation Endpoint (coordinate transforms → physics → correction)
-- Task 5.6: Input Validation Layer
-- Task 5.7: Coordinate Transformation Module
-
-**Key Integration Point:** Task 5.5 combines all components - coordinate transforms, physics engine, correction surface interpolation. The **B-spline interpolation for correction surfaces** is not yet implemented.
+Active hardening and debt work is tracked in `docs/roadmap-2026-07.md` and
+`docs/roadmap-2026-07-work-units.md`.
 
 ## Common Pitfalls
 
@@ -243,7 +243,7 @@ The `calibrate` tool processes measurement data:
 
 2. **Aperture Integration Performance**: This is the computational bottleneck. The adaptive Simpson's rule must converge accurately within time budget.
 
-3. **Phase Wrapping**: Phase functions must handle 2π wrapping correctly; see `model/numerical_stability.rs`.
+3. **Phase Wrapping**: Phase functions must handle 2π wrapping correctly (see the phase accumulation in `model/phase.rs`).
 
 4. **Feed Offset Sign Conventions**: Coma lobe direction depends on feed displacement sign; follow right-hand rule.
 
