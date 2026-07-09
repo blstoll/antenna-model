@@ -8,12 +8,7 @@
         "y": 0.0,
         "z": 0.0
       },
-      "vehicle_attitude": {
-        "w": 1.0,
-        "x": 0.0,
-        "y": 0.0,
-        "z": 0.0
-      },
+      "vehicle_attitude": [1.0, 0.0, 0.0, 0.0],
       "reflector_boresight": {
         "x": 6500010.0,
         "y": 0.0,
@@ -40,12 +35,7 @@
         "y": 0.0,
         "z": 0.0
       },
-      "vehicle_attitude": {
-        "w": 1.0,
-        "x": 0.0,
-        "y": 0.0,
-        "z": 0.0
-      },
+      "vehicle_attitude": [1.0, 0.0, 0.0, 0.0],
       "reflector_boresight": {
         "x": 6500010.0,
         "y": 0.0,
@@ -72,12 +62,7 @@
         "y": 0.0,
         "z": 0.0
       },
-      "vehicle_attitude": {
-        "w": 1.0,
-        "x": 0.0,
-        "y": 0.0,
-        "z": 0.0
-      },
+      "vehicle_attitude": [1.0, 0.0, 0.0, 0.0],
       "reflector_boresight": {
         "x": 6500010.0,
         "y": 0.0,

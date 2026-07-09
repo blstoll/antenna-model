@@ -45,7 +45,7 @@ curl -X POST http://localhost:3000/api/v1/gain \
     "antenna_id": "dsn_34m_uncalibrated",
     "feed_id": "x_band",
     "vehicle_position": {"x": 6500000.0, "y": 0.0, "z": 0.0},
-    "vehicle_attitude": {"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0},
+    "vehicle_attitude": [1.0, 0.0, 0.0, 0.0],
     "reflector_boresight": {"x": 6500010.0, "y": 0.0, "z": 0.0},
     "feed_position": {"x": 6500005.0, "y": 0.0, "z": 0.0},
     "emitter_position": {"x": 7000000.0, "y": 0.0, "z": 500000.0},
@@ -65,7 +65,7 @@ response = requests.post(
         "antenna_id": "dsn_34m_uncalibrated",
         "feed_id": "x_band",
         "vehicle_position": {"x": 6500000.0, "y": 0.0, "z": 0.0},
-        "vehicle_attitude": {"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0},
+        "vehicle_attitude": [1.0, 0.0, 0.0, 0.0],
         "reflector_boresight": {"x": 6500010.0, "y": 0.0, "z": 0.0},
         "feed_position": {"x": 6500005.0, "y": 0.0, "z": 0.0},
         "emitter_position": {"x": 7000000.0, "y": 0.0, "z": 500000.0},
@@ -117,23 +117,11 @@ Used otherwise (longitude, latitude in degrees, altitude in meters):
 
 ## Attitude Representation
 
-### Quaternion (normalized):
-```json
-{
-  "w": 1.0,
-  "x": 0.0,
-  "y": 0.0,
-  "z": 0.0
-}
-```
+The optional `vehicle_attitude` field is a normalized quaternion, supplied as a
+JSON array in `[w, x, y, z]` (w-first) order. The identity rotation is:
 
-### Euler Angles (roll-pitch-yaw in degrees):
 ```json
-{
-  "roll_deg": 0.0,
-  "pitch_deg": 10.0,
-  "yaw_deg": 45.0
-}
+"vehicle_attitude": [1.0, 0.0, 0.0, 0.0]
 ```
 
 ## Common Tasks

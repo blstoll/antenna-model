@@ -79,7 +79,7 @@ class AntennaModelClient:
         antenna_id: str,
         feed_id: str,
         vehicle_position: Dict[str, float],
-        vehicle_attitude: Dict[str, float],
+        vehicle_attitude: List[float],
         reflector_boresight: Dict[str, float],
         feed_position: Dict[str, float],
         emitter_position: Dict[str, float],
@@ -94,7 +94,7 @@ class AntennaModelClient:
             antenna_id: Antenna identifier
             feed_id: Feed identifier
             vehicle_position: Vehicle position dict with x, y, z
-            vehicle_attitude: Attitude dict (quaternion with w,x,y,z or Euler with roll_deg, pitch_deg, yaw_deg)
+            vehicle_attitude: Normalized quaternion as a [w, x, y, z] list
             reflector_boresight: Reflector boresight position dict with x, y, z
             feed_position: Feed position dict with x, y, z
             emitter_position: Emitter position dict with x, y, z
@@ -148,7 +148,6 @@ class AntennaModelClient:
         antenna_id: str,
         feed_id: str,
         vehicle_position: Dict[str, float],
-        vehicle_attitude: Dict[str, float],
         reflector_boresight: Dict[str, float],
         feed_position: Dict[str, float],
         frequency_mhz: float,
@@ -162,7 +161,6 @@ class AntennaModelClient:
             antenna_id: Antenna identifier
             feed_id: Feed identifier
             vehicle_position: Vehicle position dict with x, y, z
-            vehicle_attitude: Attitude dict
             reflector_boresight: Reflector boresight position dict
             feed_position: Feed position dict
             frequency_mhz: Operating frequency in MHz
@@ -176,7 +174,6 @@ class AntennaModelClient:
             "antenna_id": antenna_id,
             "feed_id": feed_id,
             "vehicle_position": vehicle_position,
-            "vehicle_attitude": vehicle_attitude,
             "reflector_boresight": reflector_boresight,
             "feed_position": feed_position,
             "frequency_mhz": frequency_mhz,
@@ -242,7 +239,7 @@ def main():
                     antenna_id=antenna_id,
                     feed_id=feed_id,
                     vehicle_position={"x": 6500000.0, "y": 0.0, "z": 0.0},
-                    vehicle_attitude={"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0},
+                    vehicle_attitude=[1.0, 0.0, 0.0, 0.0],
                     reflector_boresight={"x": 6500010.0, "y": 0.0, "z": 0.0},
                     feed_position={"x": 6500005.0, "y": 0.0, "z": 0.0},
                     emitter_position={"x": 7000000.0, "y": 0.0, "z": 500000.0},
@@ -266,7 +263,7 @@ def main():
                             "antenna_id": antenna_id,
                             "feed_id": feed_id,
                             "vehicle_position": {"x": 6500000.0, "y": 0.0, "z": 0.0},
-                            "vehicle_attitude": {"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0},
+                            "vehicle_attitude": [1.0, 0.0, 0.0, 0.0],
                             "reflector_boresight": {"x": 6500010.0, "y": 0.0, "z": 0.0},
                             "feed_position": {"x": 6500005.0, "y": 0.0, "z": 0.0},
                             "emitter_position": {"x": 7000000.0, "y": y, "z": 500000.0},

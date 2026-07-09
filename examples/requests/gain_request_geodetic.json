@@ -6,11 +6,7 @@
     "y": 34.0,
     "z": 500.0
   },
-  "vehicle_attitude": {
-    "roll_deg": 0.0,
-    "pitch_deg": 0.0,
-    "yaw_deg": 0.0
-  },
+  "vehicle_attitude": [1.0, 0.0, 0.0, 0.0],
   "reflector_boresight": {
     "x": -118.0,
     "y": 34.0,

@@ -133,18 +133,14 @@ Geodetic coordinates (longitude, latitude in degrees; altitude in meters) are au
 }
 ```
 
-### Quaternion vs Euler Angles
+### Vehicle Attitude (Quaternion)
 
-The service accepts either quaternion or Euler angles for attitude:
+The `vehicle_attitude` field is an optional normalized quaternion, given as a
+JSON array in `[w, x, y, z]` (w-first) order. The example below is the identity
+rotation:
 
-**Quaternion (normalized):**
 ```json
-"vehicle_attitude": {"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0}
-```
-
-**Euler Angles (roll-pitch-yaw):**
-```json
-"vehicle_attitude": {"roll_deg": 0.0, "pitch_deg": 0.0, "yaw_deg": 0.0}
+"vehicle_attitude": [1.0, 0.0, 0.0, 0.0]
 ```
 
 ## Response Examples

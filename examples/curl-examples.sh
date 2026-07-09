@@ -120,7 +120,7 @@ execute_curl \
 
 print_header "9. Single Gain Computation (Geodetic Coordinates)"
 execute_curl \
-    "Compute gain using Geodetic coordinates and Euler angles" \
+    "Compute gain using Geodetic coordinates with quaternion attitude" \
     "curl -s -X POST $API_BASE_URL/api/v1/gain \
         -H 'Content-Type: application/json' \
         -d @$EXAMPLES_DIR/requests/gain_request_geodetic.json"
