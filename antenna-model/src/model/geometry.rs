@@ -181,8 +181,10 @@ pub struct FeedParameters {
     /// Typical range: 6-10 for 10 dB edge taper, 10-12 for 12 dB edge taper
     pub q_factor: f64,
 
-    /// Phase center offset in meters (distance from physical feed to phase center)
-    /// Typically ±λ/4, frequency-dependent
+    /// Phase center offset in meters (distance from physical feed to phase center,
+    /// along the feed axis; positive = away from the reflector vertex).
+    /// Typically ±λ/4, frequency-dependent. Enters the physics as an additional
+    /// axial defocus term in the aperture phase.
     pub phase_center_offset: f64,
 
     /// Asymmetry factor for E-plane vs H-plane patterns (1.0 = symmetric)

@@ -321,44 +321,6 @@ pub fn q_factor_from_taper(edge_taper_db: f64, f_over_d: f64) -> f64 {
     taper_log10 / cos_psi.log10()
 }
 
-/// Calculate phase center offset contribution to illumination phase
-///
-/// The phase center of a feed horn is typically offset from its physical
-/// aperture. This offset introduces an additional phase term that varies
-/// with the angle ψ from boresight.
-///
-/// # Formula
-/// ```text
-/// Δφ = -k · d_pc · (1 - cos(ψ))
-/// ```
-/// where d_pc is the phase center offset and k is the wavenumber.
-///
-/// # Arguments
-/// - `psi`: Angle from feed boresight (radians)
-/// - `phase_center_offset`: Offset distance in meters (typically ±λ/4)
-/// - `wavelength`: Wavelength in meters
-///
-/// # Returns
-/// Phase offset in radians
-///
-/// # Examples
-/// ```
-/// use antenna_model::model::illumination::phase_center_offset_phase;
-/// use std::f64::consts::PI;
-///
-/// // At boresight (ψ=0), phase offset is zero
-/// let phase = phase_center_offset_phase(0.0, 0.01, 0.036);
-/// assert!(phase.abs() < 1e-10);
-///
-/// // Off-axis, there is a phase contribution
-/// let phase = phase_center_offset_phase(PI / 4.0, 0.01, 0.036);
-/// assert!(phase.abs() > 0.0);
-/// ```
-pub fn phase_center_offset_phase(psi: f64, phase_center_offset: f64, wavelength: f64) -> f64 {
-    let k = 2.0 * PI / wavelength;
-    -k * phase_center_offset * (1.0 - psi.cos())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -570,45 +532,6 @@ mod tests {
         // -40 dB edge taper should give higher q (more focused)
         let q_40db = q_factor_from_taper(-40.0, 0.5);
         assert!(q_40db > q);
-    }
-
-    #[test]
-    fn test_phase_center_offset_zero_on_axis() {
-        // On boresight, phase center offset contributes no phase
-        let phase = phase_center_offset_phase(0.0, 0.01, 0.036);
-        assert!(phase.abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_phase_center_offset_increases_off_axis() {
-        // Phase contribution increases with angle
-        let wavelength = 0.036; // ~8.4 GHz
-        let offset = 0.009; // λ/4
-
-        let phase_30 = phase_center_offset_phase(PI / 6.0, offset, wavelength);
-        let phase_45 = phase_center_offset_phase(PI / 4.0, offset, wavelength);
-
-        // Magnitude should increase with angle
-        assert!(phase_45.abs() > phase_30.abs());
-    }
-
-    #[test]
-    fn test_phase_center_offset_sign() {
-        // For positive offset, phase should be negative (additional path length)
-        let phase = phase_center_offset_phase(PI / 4.0, 0.01, 0.036);
-        assert!(phase < 0.0);
-    }
-
-    #[test]
-    fn test_phase_center_offset_magnitude() {
-        // For offset = λ/4 at 45°, phase should be on order of radians
-        let wavelength = 0.036;
-        let offset = wavelength / 4.0;
-        let phase = phase_center_offset_phase(PI / 4.0, offset, wavelength);
-
-        // Should be a few radians (not tiny, not huge)
-        assert!(phase.abs() > 0.1);
-        assert!(phase.abs() < 10.0);
     }
 
     #[test]

@@ -510,8 +510,11 @@ fn aperture_integrand(
     // Lateral (xy-plane) displacement drives coma; axial (z) offset drives defocus.
     let feed_displacement = config.feed.position.radial_displacement();
     let feed_displacement_angle = config.feed.position.y.atan2(config.feed.position.x);
-    // Axial offset of the feed from the focal point: positive = away from vertex.
-    let feed_axial_offset = config.feed.position.z - config.reflector.focal_length;
+    // Axial offset of the feed's PHASE CENTER from the focal point:
+    // physical z-offset plus the phase-center offset along the feed axis
+    // (positive = away from the vertex, matching phase_feed_displacement's delta_z).
+    let feed_axial_offset = config.feed.position.z - config.reflector.focal_length
+        + config.feed.phase_center_offset;
 
     // Calculate angle of incidence (simplified - assumes small angles)
     // For parabolic reflector, theta_incident ≈ ρ/(2f)
@@ -963,5 +966,41 @@ mod tests {
 
         // Should have performed expected number of evaluations
         assert_eq!(evals, 17 * 33);
+    }
+
+    /// phase_center_offset must act as an axial defocus. Before the fix it was
+    /// parsed and validated but never entered the physics, so both gains were
+    /// identical and this test failed.
+    #[test]
+    fn test_phase_center_offset_produces_defocus_loss() {
+        let feed_focused =
+            FeedParameters::new(FeedPosition::at_focus(0.5), 8.0, 0.0, 1.0).unwrap();
+        let feed_pco = FeedParameters::new(FeedPosition::at_focus(0.5), 8.0, 0.05, 1.0).unwrap();
+
+        let mk = |feed| {
+            AntennaConfiguration::new(
+                "t".into(),
+                "T".into(),
+                ReflectorGeometry::new(1.0, 0.5, 0.0).unwrap(),
+                feed,
+                None,
+            )
+            .unwrap()
+        };
+
+        let params = crate::model::integration::IntegrationParams::default();
+        let g_focused =
+            crate::model::pattern::compute_gain_db(0.0, 0.0, &mk(feed_focused), 8.4e9, &params)
+                .unwrap()
+                .gain;
+        let g_pco =
+            crate::model::pattern::compute_gain_db(0.0, 0.0, &mk(feed_pco), 8.4e9, &params)
+                .unwrap()
+                .gain;
+
+        assert!(
+            g_focused - g_pco > 1.0,
+            "5 cm phase-center offset must cost >1 dB defocus at 8.4 GHz: focused={g_focused:.2}, pco={g_pco:.2}"
+        );
     }
 }

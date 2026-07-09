@@ -52,8 +52,7 @@ pub use geometry::{
 };
 
 pub use illumination::{
-    cos_q_pattern, edge_taper_db, feed_angle, illumination_amplitude, phase_center_offset_phase,
-    q_factor_from_taper,
+    cos_q_pattern, edge_taper_db, feed_angle, illumination_amplitude, q_factor_from_taper,
 };
 
 pub use integration::{
