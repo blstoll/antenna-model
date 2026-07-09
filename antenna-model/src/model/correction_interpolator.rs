@@ -104,6 +104,33 @@ pub fn evaluate_correction(
         .into());
     }
 
+    // Guard against malformed knot vectors: find_knot_span indexes
+    // knots[order-1] and knots[len-order], which panics if len < order+1.
+    let order = model.spline_order as usize;
+    for (name, knots) in [
+        ("azimuth", &model.knots_azimuth),
+        ("elevation", &model.knots_elevation),
+        ("frequency", &model.knots_frequency),
+        ("temperature", &model.knots_temperature),
+    ] {
+        if knots.len() < order + 1 {
+            return Err(ComputationError::InterpolationFailed {
+                azimuth: azimuth_deg,
+                elevation: elevation_deg,
+                frequency: frequency_mhz,
+                temperature: temperature_k,
+                reason: format!(
+                    "{} knot vector has {} knots; a spline of order {} needs at least {}",
+                    name,
+                    knots.len(),
+                    order,
+                    order + 1
+                ),
+            }
+            .into());
+        }
+    }
+
     // Find knot span indices for each dimension
     let (az_idx, az_extrapolated) =
         find_knot_span(&model.knots_azimuth, azimuth_deg, model.spline_order);
@@ -467,6 +494,23 @@ mod tests {
             "Correction {} should be reasonable magnitude",
             result.correction_db
         );
+    }
+
+    /// A knot vector shorter than spline_order+1 must produce an error, not an
+    /// out-of-bounds panic in find_knot_span.
+    #[test]
+    fn test_short_knot_vector_returns_error_not_panic() {
+        let model = BSplineModel4D {
+            coefficients: vec![1.0; 2 * 2 * 2 * 1],
+            shape: [2, 2, 2, 1],
+            knots_azimuth: vec![0.0, 0.0, 0.0, 10.0, 10.0, 10.0],
+            knots_elevation: vec![0.0, 0.0, 0.0, 20.0, 20.0, 20.0],
+            knots_frequency: vec![8000.0, 8000.0, 8000.0, 9000.0, 9000.0, 9000.0],
+            knots_temperature: vec![290.0], // malformed: needs >= order+1 = 4
+            spline_order: 3,
+        };
+        let result = evaluate_correction(&model, 5.0, 10.0, 8500.0, 290.0);
+        assert!(result.is_err(), "expected Err for short knot vector");
     }
 
     #[test]
