@@ -127,11 +127,15 @@ T = 1/(1 + (λ₀/λ)²)  for λ > 10·mesh_spacing
 
 ### 2.5 Coordinate Transformations
 
-E-clock/E-cone to physical feed position:
+E-clock/E-cone to physical feed position. A lateral feed displacement steers
+the beam to the OPPOSITE side, so to aim the beam at clock angle `clock_angle`
+the feed is displaced at `clock_angle + 180°` (hence the negative x/y). The
+displacement is divided by the beam deviation factor (BDF, Lo 1960) so the PO
+beam peak lands at the requested angle:
 ```
-displacement = 2·f·tan(cone_angle/2)
-x_feed = displacement·cos(clock_angle)
-y_feed = displacement·sin(clock_angle)
+displacement = 2·f·tan(cone_angle/2) / BDF
+x_feed = -displacement·cos(clock_angle)
+y_feed = -displacement·sin(clock_angle)
 z_feed = -displacement²/(4f)  for large displacements
 ```
 

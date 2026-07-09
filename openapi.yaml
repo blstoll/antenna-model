@@ -558,7 +558,12 @@ components:
         reflector_boresight:
           $ref: '#/components/schemas/Position3D'
         feed_position:
-          $ref: '#/components/schemas/Position3D'
+          allOf:
+            - $ref: '#/components/schemas/Position3D'
+          description: >-
+            Earth location the feed's beam is aimed at (NOT the feed's physical
+            location on the antenna). Set equal to reflector_boresight for an
+            unsteered/focused feed.
         emitter_position:
           $ref: '#/components/schemas/Position3D'
         frequency_mhz:
@@ -764,7 +769,12 @@ components:
         reflector_boresight:
           $ref: '#/components/schemas/Position3D'
         feed_position:
-          $ref: '#/components/schemas/Position3D'
+          allOf:
+            - $ref: '#/components/schemas/Position3D'
+          description: >-
+            Earth location the feed's beam is aimed at (NOT the feed's physical
+            location on the antenna). Set equal to reflector_boresight for an
+            unsteered/focused feed.
         frequency_mhz:
           type: number
           format: double
@@ -902,7 +912,12 @@ components:
         reflector_boresight:
           $ref: '#/components/schemas/Position3D'
         feed_position:
-          $ref: '#/components/schemas/Position3D'
+          allOf:
+            - $ref: '#/components/schemas/Position3D'
+          description: >-
+            Earth location the feed's beam is aimed at (NOT the feed's physical
+            location on the antenna). Set equal to reflector_boresight for an
+            unsteered/focused feed.
         frequency_mhz:
           type: number
         pointing_frequency_mhz:

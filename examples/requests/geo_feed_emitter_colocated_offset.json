@@ -1,6 +1,6 @@
 {
   "_comment": "Example 1b: 5\u00b0 Offset - Feed and emitter co-located 5\u00b0 from boresight",
-  "_description": "Feed steered 5\u00b0 off-axis (lateral ~1.19m at focal plane). Emitter at ground location 5\u00b0 from boresight in same direction. Expected gain: 50-55 dBi (sidelobe region, -12 to -17 dB from peak)",
+  "_description": "Feed steered 5\u00b0 off-axis (lateral ~1.37m at focal plane incl. BDF). Emitter at ground location 5\u00b0 from boresight in same direction, i.e. aligned with the steered beam. Expected: gain near the steered-beam peak; the peak itself is well below boresight gain because a 5\u00b0 steer is many beamwidths for a 34 m dish (severe coma/scan loss). Re-derive the numeric expectation from the service after the steering-sign fix.",
   "_geodetic_satellite": {
     "lon": -118.0,
     "lat": 0.0,

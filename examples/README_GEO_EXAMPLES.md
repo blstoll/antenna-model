@@ -59,7 +59,9 @@ Expected:    67.7 - 0.14 ≈ 67.6 dBi
 
 **Configuration:**
 - Feed steered 5° off-axis (lateral displacement ~1.19m at focal plane)
-- Emitter at ground location 5° from boresight (same direction as feed)
+- Emitter at ground location 5° from boresight (same direction as feed) — the
+  emitter sits in the *steered beam*, so the response reports gain near the
+  steered-beam peak (heavily reduced by scan loss), not a value 180° away.
 - Feed and emitter co-located angularly
 
 **Expected Results:**

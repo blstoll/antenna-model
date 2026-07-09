@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Antenna Model Service is a high-performance REST API for parabolic dish antenna gain modeling using **physical optics computation** with calibrated correction surfaces. The system computes G/T (Gain-to-Temperature) predictions based on 3D geometry, supporting real-time queries with <100ms p95 latency.
 
 **Key Architecture:** Hybrid physics-based model combining:
-1. **Physical optics computation** - Aperture integration with phase functions (path, coma, surface error via Zernike polynomials, mesh effects)
+1. **Physical optics computation** - Aperture integration with phase functions (path, coma, surface error via the statistical Ruze efficiency, mesh effects)
 2. **Correction surface** - B-spline interpolation for residual error corrections (measured - physics model)
 
 The system is in **Sprint 5** (of 8) - Core API endpoints are being implemented.
@@ -119,7 +119,7 @@ antenna-model/           # Cargo workspace root
    - Compute emitter direction (azimuth, elevation) from geometry
    - Evaluate **physics model** (`model/pattern.rs`):
      - Aperture integration over reflector surface (`model/integration.rs`)
-     - Phase accumulation: path + coma + surface (Zernike) + mesh (`model/phase.rs`)
+     - Phase accumulation: path + coma + mesh (`model/phase.rs`); surface error is applied statistically as a Ruze efficiency in `model/pattern.rs`, not as a per-point aperture phase
      - Feed illumination pattern (`model/illumination.rs`)
      - Apply Ruze efficiency and mesh transparency
    - Interpolate **correction surface** (B-spline, not yet implemented in Sprint 5)
@@ -135,7 +135,7 @@ antenna-model/           # Cargo workspace root
 
 - **`coordinates.rs`** - ECEF ↔ Geodetic ↔ Antenna Frame ↔ Spherical transforms
 - **`geometry.rs`** - `ReflectorGeometry`, `FeedParameters`, `MeshParameters`
-- **`phase.rs`** - Phase functions: path length, coma (full path-length model), surface error (Zernike), mesh
+- **`phase.rs`** - Phase functions: path length, coma (full path-length model), surface error (statistical Ruze model; per-point Zernike maps are not implemented — the aperture integrand uses `surface_error = 0.0` and the calibration correction surface absorbs systematic surface deviations), mesh
 - **`illumination.rs`** - Feed pattern: cos^q with q-factor
 - **`integration.rs`** - Adaptive Simpson's rule aperture integration
 - **`pattern.rs`** - Far-field pattern computation with Ruze efficiency

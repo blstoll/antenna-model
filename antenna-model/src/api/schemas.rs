@@ -236,7 +236,14 @@ pub struct GainRequest {
     /// antenna Z-axis.
     pub reflector_boresight: Position3D,
 
-    /// Feed position (ECEF or Geodetic)
+    /// Feed pointing target (ECEF or Geodetic).
+    ///
+    /// **This is the Earth location the feed's beam is aimed at — NOT the
+    /// feed's physical location on the antenna.** The service converts the
+    /// angular offset between this aim point and `reflector_boresight` into a
+    /// physical feed displacement in the antenna frame (including the beam
+    /// deviation factor). To model an unsteered (focused) feed, set this equal
+    /// to `reflector_boresight`.
     pub feed_position: Position3D,
 
     /// Emitter position (ECEF or Geodetic)
@@ -316,7 +323,8 @@ pub struct GeometryInfo {
     /// Physical feed offset from the focal point in the antenna frame (meters).
     ///
     /// `x` and `y` are the lateral displacement of the feed from the optical axis;
-    /// `z` is the axial displacement from the focal point (positive toward the reflector vertex).
+    /// `z` is the axial displacement from the focal point (**positive = away from
+    /// the reflector vertex**, matching the phase model's `delta_z` convention).
     /// For an on-axis (boresight-aimed) feed all three components are ~zero.
     pub feed_offset_meters: Vector3D,
 
@@ -413,7 +421,14 @@ pub struct HeatmapRequest {
     /// Reflector boresight position (ECEF or Geodetic)
     pub reflector_boresight: Position3D,
 
-    /// Feed position (ECEF or Geodetic)
+    /// Feed pointing target (ECEF or Geodetic).
+    ///
+    /// **This is the Earth location the feed's beam is aimed at — NOT the
+    /// feed's physical location on the antenna.** The service converts the
+    /// angular offset between this aim point and `reflector_boresight` into a
+    /// physical feed displacement in the antenna frame (including the beam
+    /// deviation factor). To model an unsteered (focused) feed, set this equal
+    /// to `reflector_boresight`.
     pub feed_position: Position3D,
 
     /// Operating frequency in MHz
@@ -564,7 +579,14 @@ pub struct H3LinkBudgetRequest {
     /// Reflector boresight position (ECEF or Geodetic)
     pub reflector_boresight: Position3D,
 
-    /// Feed position (ECEF or Geodetic)
+    /// Feed pointing target (ECEF or Geodetic).
+    ///
+    /// **This is the Earth location the feed's beam is aimed at — NOT the
+    /// feed's physical location on the antenna.** The service converts the
+    /// angular offset between this aim point and `reflector_boresight` into a
+    /// physical feed displacement in the antenna frame (including the beam
+    /// deviation factor). To model an unsteered (focused) feed, set this equal
+    /// to `reflector_boresight`.
     pub feed_position: Position3D,
 
     /// Operating frequency in MHz

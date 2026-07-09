@@ -314,7 +314,8 @@ pub fn compute_gain_from_request(
         let reference =
             compute_gain_db(0.0, 0.0, &ideal_config, frequency_hz, &integration_params)?;
 
-        // Loss is reference minus actual gain (without correction surface).
+        // Loss is reference minus actual gain (final gain, including the
+        // correction surface when it was applied).
         (Some(reference.gain), Some(reference.gain - final_gain_db))
     } else {
         (None, None)
