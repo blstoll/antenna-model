@@ -466,7 +466,7 @@ mod tests {
         // Create a simple 2x2x2x1 B-spline model (minimal for order 3)
         // This requires at least order+1 = 4 knots per dimension
         let model = BSplineModel4D {
-            coefficients: vec![1.0; 2 * 2 * 2 * 1], // All corrections = 1.0 dB
+            coefficients: vec![1.0; 2 * 2 * 2], // All corrections = 1.0 dB
             shape: [2, 2, 2, 1],
             knots_azimuth: vec![0.0, 0.0, 0.0, 10.0, 10.0, 10.0],
             knots_elevation: vec![0.0, 0.0, 0.0, 20.0, 20.0, 20.0],
@@ -501,7 +501,7 @@ mod tests {
     #[test]
     fn test_short_knot_vector_returns_error_not_panic() {
         let model = BSplineModel4D {
-            coefficients: vec![1.0; 2 * 2 * 2 * 1],
+            coefficients: vec![1.0; 2 * 2 * 2],
             shape: [2, 2, 2, 1],
             knots_azimuth: vec![0.0, 0.0, 0.0, 10.0, 10.0, 10.0],
             knots_elevation: vec![0.0, 0.0, 0.0, 20.0, 20.0, 20.0],
@@ -516,7 +516,7 @@ mod tests {
     #[test]
     fn test_evaluate_correction_extrapolation() {
         let model = BSplineModel4D {
-            coefficients: vec![1.0; 2 * 2 * 2 * 1],
+            coefficients: vec![1.0; 2 * 2 * 2],
             shape: [2, 2, 2, 1],
             knots_azimuth: vec![0.0, 0.0, 0.0, 10.0, 10.0, 10.0],
             knots_elevation: vec![0.0, 0.0, 0.0, 20.0, 20.0, 20.0],
@@ -537,7 +537,7 @@ mod tests {
     #[test]
     fn test_evaluate_correction_invalid_input() {
         let model = BSplineModel4D {
-            coefficients: vec![1.0; 2 * 2 * 2 * 1],
+            coefficients: vec![1.0; 2 * 2 * 2],
             shape: [2, 2, 2, 1],
             knots_azimuth: vec![0.0, 0.0, 0.0, 10.0, 10.0, 10.0],
             knots_elevation: vec![0.0, 0.0, 0.0, 20.0, 20.0, 20.0],

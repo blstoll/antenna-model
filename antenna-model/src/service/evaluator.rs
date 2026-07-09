@@ -720,7 +720,7 @@ mod tests {
         });
         calibration.validity_ranges.temperature_const = 300.0;
         calibration.correction_surface = Some(crate::data::types::BSplineModel4D {
-            coefficients: vec![1.0; 2 * 2 * 2 * 1],
+            coefficients: vec![1.0; 2 * 2 * 2],
             shape: [2, 2, 2, 1],
             knots_azimuth: vec![0.0, 0.0, 0.0, 360.0, 360.0, 360.0],
             knots_elevation: vec![0.0, 0.0, 0.0, 90.0, 90.0, 90.0],

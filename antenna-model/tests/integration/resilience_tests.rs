@@ -50,10 +50,11 @@ antennas:
     );
     std::fs::write(&antenna_config, config_content).unwrap();
 
-    let mut config = CalibrationConfig::default();
-    config.antenna_config_file = antenna_config.clone();
-    config.data_directory = temp_dir.clone();
-    config.fail_fast = false; // Should continue loading despite errors
+    let config = CalibrationConfig {
+        antenna_config_file: antenna_config.clone(),
+        data_directory: temp_dir.clone(),
+        fail_fast: false, // Should continue loading despite errors
+    };
 
     let result = CalibrationRepository::load_from_config(&config);
 

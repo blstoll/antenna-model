@@ -1564,7 +1564,7 @@ mod tests {
         assert_eq!(info.accuracy_estimate_db, 1.0);
         assert_eq!(info.loss_accuracy_estimate_db, None);
         assert_eq!(info.coverage, None);
-        assert_eq!(info.correction_applied, false);
+        assert!(!info.correction_applied);
         assert_eq!(info.parameters_source, "measurement_tuned");
     }
 
@@ -1591,7 +1591,7 @@ mod tests {
         assert_eq!(info.accuracy_estimate_db, 1.5);
         assert_eq!(info.loss_accuracy_estimate_db, None);
         assert!(info.coverage.is_some());
-        assert_eq!(info.correction_applied, false);
+        assert!(!info.correction_applied);
         assert_eq!(info.parameters_source, "measurement_tuned");
 
         let coverage_info = info.coverage.unwrap();
@@ -1617,7 +1617,7 @@ mod tests {
         assert_eq!(info.accuracy_estimate_db, 3.0);
         assert_eq!(info.loss_accuracy_estimate_db, Some(2.0));
         assert_eq!(info.coverage, None);
-        assert_eq!(info.correction_applied, false);
+        assert!(!info.correction_applied);
         assert_eq!(info.parameters_source, "design_specifications");
     }
 

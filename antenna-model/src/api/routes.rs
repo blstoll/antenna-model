@@ -406,13 +406,11 @@ mod tests {
             .build()
             .unwrap();
 
-        let mesh1 = Some(
-            MeshParameters::builder()
-                .mesh_spacing_mm(5.0)
-                .wire_diameter_mm(0.5)
-                .build()
-                .unwrap(),
-        );
+        let mesh1 = MeshParameters::builder()
+            .mesh_spacing_mm(5.0)
+            .wire_diameter_mm(0.5)
+            .build()
+            .unwrap();
 
         let feed_x = FeedParameters::builder()
             .position(0.05, 0.02, 0.01)
@@ -431,14 +429,14 @@ mod tests {
         let physical_config_x = PhysicalAntennaConfig::builder()
             .reflector(reflector1.clone())
             .feed(feed_x)
-            .mesh(mesh1.clone().unwrap())
+            .mesh(mesh1.clone())
             .build()
             .unwrap();
 
         let physical_config_s = PhysicalAntennaConfig::builder()
             .reflector(reflector1)
             .feed(feed_s)
-            .mesh(mesh1.unwrap())
+            .mesh(mesh1)
             .build()
             .unwrap();
 
@@ -555,7 +553,7 @@ mod tests {
         let ant1 = antennas.get(0).object();
         assert_eq!(ant1.get("id").string(), "antenna_1");
         assert_eq!(ant1.get("name").string(), "Deep Space Network 34m");
-        assert_eq!(ant1.get("enabled").bool(), true);
+        assert!(ant1.get("enabled").bool());
         assert_eq!(ant1.get("feed_count").i64(), 2);
 
         let feed_ids = ant1.get("feed_ids").array();
@@ -587,7 +585,7 @@ mod tests {
 
         assert_eq!(json_value.get("id").string(), "antenna_1");
         assert_eq!(json_value.get("name").string(), "Deep Space Network 34m");
-        assert_eq!(json_value.get("enabled").bool(), true);
+        assert!(json_value.get("enabled").bool());
 
         // Check feeds
         let feeds = json_value.get("feeds").array();
@@ -802,7 +800,7 @@ mod tests {
             let feed = feeds.get(i);
             let feed_id = feed.object().get("id").string();
             let feed_response = cli
-                .get(&format!("/api/v1/antennas/antenna_1/feeds/{}", feed_id))
+                .get(format!("/api/v1/antennas/antenna_1/feeds/{}", feed_id))
                 .send()
                 .await;
             feed_response.assert_status_is_ok();
@@ -922,7 +920,7 @@ mod tests {
             calibration_status.get("loss_accuracy_estimate_db").f64(),
             2.0
         );
-        assert_eq!(calibration_status.get("correction_applied").bool(), false);
+        assert!(!calibration_status.get("correction_applied").bool());
         assert_eq!(
             calibration_status.get("parameters_source").string(),
             "design_specifications"
@@ -1035,7 +1033,7 @@ mod tests {
             "partially_calibrated"
         );
         assert_eq!(calibration_status.get("accuracy_estimate_db").f64(), 1.5);
-        assert_eq!(calibration_status.get("correction_applied").bool(), false);
+        assert!(!calibration_status.get("correction_applied").bool());
         assert_eq!(
             calibration_status.get("parameters_source").string(),
             "measurement_tuned"
@@ -1043,7 +1041,7 @@ mod tests {
 
         // Check coverage info
         let coverage = calibration_status.get("coverage").object();
-        assert_eq!(coverage.get("is_boresight_only").bool(), true);
+        assert!(coverage.get("is_boresight_only").bool());
         let freq_range = coverage.get("frequency_range_mhz").array();
         assert_eq!(freq_range.get(0).f64(), 8000.0);
         assert_eq!(freq_range.get(1).f64(), 9000.0);
@@ -1141,7 +1139,7 @@ mod tests {
             "fully_calibrated"
         );
         assert_eq!(calibration_status.get("accuracy_estimate_db").f64(), 1.0);
-        assert_eq!(calibration_status.get("correction_applied").bool(), false);
+        assert!(!calibration_status.get("correction_applied").bool());
         assert_eq!(
             calibration_status.get("parameters_source").string(),
             "measurement_tuned"
@@ -1229,7 +1227,7 @@ mod tests {
         // The schema uses Option<CalibrationStatusInfo> with skip_serializing_if = "Option::is_none"
         // which means None values are not serialized to JSON
         // We verify backward compatibility by ensuring the response is still valid without it
-        assert_eq!(json_value.get("enabled").bool(), true);
+        assert!(json_value.get("enabled").bool());
         let feeds = json_value.get("feeds").array();
         assert_eq!(feeds.len(), 1);
     }

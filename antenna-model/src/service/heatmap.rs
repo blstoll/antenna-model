@@ -536,8 +536,8 @@ mod tests {
     #[test]
     fn test_parallel_threshold() {
         // Verify parallel threshold is reasonable
-        assert!(PARALLEL_THRESHOLD > 0);
-        assert!(PARALLEL_THRESHOLD < 1000);
+        const { assert!(PARALLEL_THRESHOLD > 0) };
+        const { assert!(PARALLEL_THRESHOLD < 1000) };
     }
 
     #[test]

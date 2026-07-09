@@ -74,9 +74,11 @@ async fn test_startup_with_corrupted_antenna_config() {
     // Write invalid YAML
     std::fs::write(&corrupted_config, "invalid: yaml: content: [[[").unwrap();
 
-    let mut config = CalibrationConfig::default();
-    config.antenna_config_file = corrupted_config.clone();
-    config.fail_fast = true;
+    let config = CalibrationConfig {
+        antenna_config_file: corrupted_config.clone(),
+        fail_fast: true,
+        ..Default::default()
+    };
 
     let result = CalibrationRepository::load_from_config(&config);
     assert!(
@@ -126,10 +128,11 @@ antennas:
     );
     std::fs::write(&antenna_config, config_content).unwrap();
 
-    let mut config = CalibrationConfig::default();
-    config.antenna_config_file = antenna_config.clone();
-    config.data_directory = temp_dir.clone();
-    config.fail_fast = false; // Should continue loading other antennas
+    let config = CalibrationConfig {
+        antenna_config_file: antenna_config.clone(),
+        data_directory: temp_dir.clone(),
+        fail_fast: false, // Should continue loading other antennas
+    };
 
     let result = CalibrationRepository::load_from_config(&config);
     // With fail_fast=false, repository might succeed or fail depending on whether

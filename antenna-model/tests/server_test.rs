@@ -94,7 +94,7 @@ async fn test_status_uptime_increases() {
     let uptime2 = json2["uptime_seconds"].as_u64().expect("Invalid uptime");
 
     // Uptime should have increased by at least 1 second
-    assert!(uptime2 >= uptime1 + 1);
+    assert!(uptime2 > uptime1);
 
     server_handle.abort();
 }

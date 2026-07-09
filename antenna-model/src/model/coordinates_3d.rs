@@ -1107,7 +1107,7 @@ mod tests {
         assert!(el > 0.0, "el={el}");
 
         // Azimuth should still be near 0° (or 360°) since clock is 0°
-        let az_near_zero = az < 1.0 || az > 359.0;
+        let az_near_zero = !(1.0..=359.0).contains(&az);
         assert!(az_near_zero, "az={az} should be near 0°/360° for clock=0°");
     }
 
@@ -1135,7 +1135,7 @@ mod tests {
         assert!(el > 30.0, "el={el}");
 
         // Azimuth should remain near 0° (clock=0° → squint along u axis)
-        let az_near_zero = az < 5.0 || az > 355.0;
+        let az_near_zero = !(5.0..=355.0).contains(&az);
         assert!(az_near_zero, "az={az} should be near 0°/360° for clock=0°");
     }
 
@@ -1174,7 +1174,7 @@ mod tests {
         assert!(squint > 0.0, "squint should be non-zero");
         assert!(el >= 0.0, "elevation must be >= 0, got {el}");
         // Beam squint along +x means azimuth stays near 0° (or 360°)
-        let az_near_zero = az < 5.0 || az > 355.0;
+        let az_near_zero = !(5.0..=355.0).contains(&az);
         assert!(
             az_near_zero,
             "clock=0° squint should be along u; az={az} should be ~0 or ~360"
@@ -1230,7 +1230,7 @@ mod tests {
             0.0, 13.6, 0.0,
         );
         assert!(
-            az >= 0.0 && az < 360.0,
+            (0.0..360.0).contains(&az),
             "azimuth must be in [0,360), got {az}"
         );
         assert!(el >= 0.0, "elevation must be >= 0, got {el}");
@@ -1317,12 +1317,12 @@ mod tests {
 
         // Azimuth is now normalized to [0, 360) by compute_emitter_direction
         assert!(
-            azimuth >= 0.0 && azimuth < 360.0,
+            (0.0..360.0).contains(&azimuth),
             "Azimuth {} out of range [0, 360)",
             azimuth
         );
         assert!(
-            elevation >= 0.0 && elevation <= 180.0,
+            (0.0..=180.0).contains(&elevation),
             "Elevation {} out of range",
             elevation
         );
