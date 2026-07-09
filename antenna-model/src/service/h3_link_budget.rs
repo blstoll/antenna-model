@@ -873,20 +873,27 @@ mod tests {
         req_baseline.feed_position = req_squint.feed_position.clone();
 
         let cache1 = GainCache::new(false, 1);
-        let resp_baseline =
-            compute_h3_link_budget(&req_baseline, &calibration, &cache1, std::time::Instant::now())
-                .unwrap();
+        let resp_baseline = compute_h3_link_budget(
+            &req_baseline,
+            &calibration,
+            &cache1,
+            std::time::Instant::now(),
+        )
+        .unwrap();
         let cache2 = GainCache::new(false, 1);
-        let resp_squint =
-            compute_h3_link_budget(&req_squint, &calibration, &cache2, std::time::Instant::now())
-                .unwrap();
+        let resp_squint = compute_h3_link_budget(
+            &req_squint,
+            &calibration,
+            &cache2,
+            std::time::Instant::now(),
+        )
+        .unwrap();
 
         let gains_baseline: Vec<f64> = resp_baseline.cells.iter().map(|c| c.gain_db).collect();
         let gains_squint: Vec<f64> = resp_squint.cells.iter().map(|c| c.gain_db).collect();
         assert_eq!(gains_baseline.len(), gains_squint.len());
         assert_ne!(
-            gains_baseline,
-            gains_squint,
+            gains_baseline, gains_squint,
             "a large pointing-frequency offset with a steered feed must change cell gains"
         );
     }
@@ -927,8 +934,8 @@ mod tests {
         req.feed_position.coordinate_system = Some(CoordinateSystem::Geodetic);
         req.pointing_frequency_mhz = Some(req.frequency_mhz * 1.4);
         let cache = GainCache::new(false, 1);
-        let resp = compute_h3_link_budget(&req, &calibration, &cache, std::time::Instant::now())
-            .unwrap();
+        let resp =
+            compute_h3_link_budget(&req, &calibration, &cache, std::time::Instant::now()).unwrap();
         assert!(
             resp.beam_squint_deg.is_some_and(|s| s > 0.0),
             "expected Some(squint>0), got {:?}",
@@ -946,12 +953,13 @@ mod tests {
         req_none.feed_position.coordinate_system = Some(CoordinateSystem::Geodetic);
         req_none.pointing_frequency_mhz = None;
         let cache_none = GainCache::new(false, 1);
-        let resp_none =
-            compute_h3_link_budget(&req_none, &calibration, &cache_none, std::time::Instant::now())
-                .unwrap();
-        assert!(
-            resp_none.beam_squint_deg.is_none(),
-            "no offset -> None"
-        );
+        let resp_none = compute_h3_link_budget(
+            &req_none,
+            &calibration,
+            &cache_none,
+            std::time::Instant::now(),
+        )
+        .unwrap();
+        assert!(resp_none.beam_squint_deg.is_none(), "no offset -> None");
     }
 }

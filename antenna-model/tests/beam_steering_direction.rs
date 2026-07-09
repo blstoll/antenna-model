@@ -67,7 +67,10 @@ fn steered_beam_lands_on_requested_azimuth_y() {
 fn feed_is_displaced_opposite_the_aim_direction() {
     let ecc = EClockConeCoordinates::from_azimuth_elevation(0.0, 5.0);
     let (fx, fy, _fz) = ecc.to_feed_position(5.0);
-    assert!(fx < -0.1, "aim at +x must displace the feed toward -x, got fx={fx}");
+    assert!(
+        fx < -0.1,
+        "aim at +x must displace the feed toward -x, got fx={fx}"
+    );
     assert!(fy.abs() < 1e-9, "no y component expected, got fy={fy}");
 }
 

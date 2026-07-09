@@ -436,18 +436,15 @@ fn antenna_frame_axes(
             let x_x_raw = ref_y * z_z - ref_z * z_y;
             let x_y_raw = ref_z * z_x - ref_x * z_z;
             let x_z_raw = ref_x * z_y - ref_y * z_x;
-            let x_mag =
-                (x_x_raw * x_x_raw + x_y_raw * x_y_raw + x_z_raw * x_z_raw).sqrt();
+            let x_mag = (x_x_raw * x_x_raw + x_y_raw * x_y_raw + x_z_raw * x_z_raw).sqrt();
             (x_x_raw / x_mag, x_y_raw / x_mag, x_z_raw / x_mag)
         }
         Some(q) => {
             // Body X rotated into ECEF, projected onto the plane ⊥ boresight (Z-axis):
             let (bx, by, bz) = quaternion_rotate(q, (1.0, 0.0, 0.0));
             let dot = bx * z_x + by * z_y + bz * z_z;
-            let (x_x_raw, x_y_raw, x_z_raw) =
-                (bx - dot * z_x, by - dot * z_y, bz - dot * z_z);
-            let x_mag =
-                (x_x_raw * x_x_raw + x_y_raw * x_y_raw + x_z_raw * x_z_raw).sqrt();
+            let (x_x_raw, x_y_raw, x_z_raw) = (bx - dot * z_x, by - dot * z_y, bz - dot * z_z);
+            let x_mag = (x_x_raw * x_x_raw + x_y_raw * x_y_raw + x_z_raw * x_z_raw).sqrt();
             if x_mag < X_MAG_HARD_ERROR_THRESHOLD {
                 return Err(AntennaModelError::InvalidCoordinate {
                     param: "vehicle_attitude".to_string(),
@@ -528,8 +525,7 @@ pub fn compute_emitter_direction_with_attitude(
     let emitter_dz = emitter_z - vehicle_z;
 
     // Build antenna frame axes (X, Y, Z unit vectors)
-    let ((x_x, x_y, x_z), (y_x, y_y, y_z), _) =
-        antenna_frame_axes((z_x, z_y, z_z), attitude)?;
+    let ((x_x, x_y, x_z), (y_x, y_y, y_z), _) = antenna_frame_axes((z_x, z_y, z_z), attitude)?;
 
     // Transform emitter to antenna frame
     let antenna_x = emitter_dx * x_x + emitter_dy * x_y + emitter_dz * x_z;
@@ -716,30 +712,19 @@ pub fn apply_beam_squint_correction(
     focal_length_m: f64,
     displacement_clock_angle_rad: f64,
 ) -> (f64, f64, f64) {
-    debug_assert!(
-        elevation_deg >= 0.0,
-        "elevation must be polar angle >= 0"
-    );
+    debug_assert!(elevation_deg >= 0.0, "elevation must be polar angle >= 0");
     // Polar angle is non-negative by definition (acos range [0, 180]); enforce it in
     // release builds too so the direction-cosine path below never sees a negative sin(theta).
     let elevation_deg = elevation_deg.abs();
 
     // If frequencies are the same (within 0.1%), no correction needed
     if (pointing_freq_mhz - operating_freq_mhz).abs() / pointing_freq_mhz < 0.001 {
-        return (
-            normalize_azimuth_deg(azimuth_deg),
-            elevation_deg.abs(),
-            0.0,
-        );
+        return (normalize_azimuth_deg(azimuth_deg), elevation_deg.abs(), 0.0);
     }
 
     // If no feed displacement, no beam squint
     if feed_displacement_m < 1e-6 {
-        return (
-            normalize_azimuth_deg(azimuth_deg),
-            elevation_deg.abs(),
-            0.0,
-        );
+        return (normalize_azimuth_deg(azimuth_deg), elevation_deg.abs(), 0.0);
     }
 
     // Beam squint magnitude: Δθ ≈ (f_op - f_point) / f_point × (δ / f)
@@ -771,7 +756,11 @@ pub fn apply_beam_squint_correction(
     let corrected_elevation = theta_new_rad.to_degrees(); // >= 0 by construction
     let corrected_azimuth = normalize_azimuth_deg(phi_new_rad.to_degrees());
 
-    (corrected_azimuth, corrected_elevation, squint_rad.abs().to_degrees())
+    (
+        corrected_azimuth,
+        corrected_elevation,
+        squint_rad.abs().to_degrees(),
+    )
 }
 
 /// Apply frequency-offset beam squint to an emitter direction.
@@ -864,9 +853,24 @@ mod tests {
             r[0][2] * enu_up.0 + r[1][2] * enu_up.1 + r[2][2] * enu_up.2,
         );
         let expected = (lat.cos() * lon.cos(), lat.cos() * lon.sin(), lat.sin());
-        assert!((ecef.0 - expected.0).abs() < 1e-10, "up.x {} vs {}", ecef.0, expected.0);
-        assert!((ecef.1 - expected.1).abs() < 1e-10, "up.y {} vs {}", ecef.1, expected.1);
-        assert!((ecef.2 - expected.2).abs() < 1e-10, "up.z {} vs {}", ecef.2, expected.2);
+        assert!(
+            (ecef.0 - expected.0).abs() < 1e-10,
+            "up.x {} vs {}",
+            ecef.0,
+            expected.0
+        );
+        assert!(
+            (ecef.1 - expected.1).abs() < 1e-10,
+            "up.y {} vs {}",
+            ecef.1,
+            expected.1
+        );
+        assert!(
+            (ecef.2 - expected.2).abs() < 1e-10,
+            "up.z {} vs {}",
+            ecef.2,
+            expected.2
+        );
     }
 
     /// normalize_azimuth_deg output is always in [0, 360). (Contract: Transforms.)
@@ -891,7 +895,10 @@ mod tests {
             apply_beam_squint_correction(10.0, 5.0, 8400.0, 8500.0, 0.5, 5.0, 0.0);
         assert!((az - az2).abs() < 1e-9, "az {az} vs {az2}");
         assert!((el - el2).abs() < 1e-9, "el {el} vs {el2}");
-        assert!((squint - squint2).abs() < 1e-9, "squint {squint} vs {squint2}");
+        assert!(
+            (squint - squint2).abs() < 1e-9,
+            "squint {squint} vs {squint2}"
+        );
         // Sanity: with a 100 MHz gap and real feed offset, a correction actually occurred.
         assert!(squint.abs() > 0.0, "expected a nonzero squint correction");
     }
@@ -1158,13 +1165,10 @@ mod tests {
     #[test]
     fn test_beam_squint_clock_angle_x_direction() {
         let (az, el, squint) = apply_beam_squint_correction(
-            0.0,    // boresight
-            0.0,
-            8400.0,
-            8500.0, // 100 MHz above pointing frequency
+            0.0, // boresight
+            0.0, 8400.0, 8500.0, // 100 MHz above pointing frequency
             1.0,    // 1 m lateral displacement
-            13.6,
-            0.0_f64, // clock = 0° → feed along +x axis
+            13.6, 0.0_f64, // clock = 0° → feed along +x axis
         );
 
         assert!(squint > 0.0, "squint should be non-zero");
@@ -1183,7 +1187,7 @@ mod tests {
     #[test]
     fn test_beam_squint_clock_angle_y_direction() {
         let (az, el, squint) = apply_beam_squint_correction(
-            0.0,    // boresight
+            0.0, // boresight
             0.0,
             8400.0,
             8500.0, // 100 MHz above pointing frequency
@@ -1208,13 +1212,9 @@ mod tests {
         // Drive the squint in a negative direction (lower operating freq) from a small
         // positive elevation to try to push elevation negative.
         let (_, el, _) = apply_beam_squint_correction(
-            0.0,
-            0.5,    // small positive elevation
-            8400.0,
-            8300.0, // lower operating freq → negative squint in u
-            2.0,
-            13.6,
-            0.0, // clock = 0°
+            0.0, 0.5, // small positive elevation
+            8400.0, 8300.0, // lower operating freq → negative squint in u
+            2.0, 13.6, 0.0, // clock = 0°
         );
         assert!(el >= 0.0, "elevation must be >= 0, got {el}");
     }
@@ -1224,13 +1224,10 @@ mod tests {
     fn test_beam_squint_azimuth_normalised() {
         // Use a negative raw azimuth input to exercise the normalisation path.
         let (az, el, _) = apply_beam_squint_correction(
-            -30.0,  // raw azimuth outside [0,360) – function should normalise
-            10.0,
-            8400.0,
+            -30.0, // raw azimuth outside [0,360) – function should normalise
+            10.0, 8400.0,
             8400.0, // same freq → passthrough, but normalisation still applied
-            0.0,
-            13.6,
-            0.0,
+            0.0, 13.6, 0.0,
         );
         assert!(
             az >= 0.0 && az < 360.0,
@@ -1244,9 +1241,12 @@ mod tests {
         // Feed displaced along +Y (clock = 90°). Squint must move the beam in the
         // v (sin(theta)*sin(phi)) direction, leaving u (sin(theta)*cos(phi)) unchanged.
         let (az, el, squint) = apply_beam_squint_correction(
-            0.0, 2.0,            // pointing: az=0, el=2 deg polar
-            8400.0, 8800.0,      // freq offset
-            1.0, 13.6,           // displacement, focal length
+            0.0,
+            2.0, // pointing: az=0, el=2 deg polar
+            8400.0,
+            8800.0, // freq offset
+            1.0,
+            13.6,                        // displacement, focal length
             std::f64::consts::FRAC_PI_2, // feed clock angle = +Y
         );
         assert!(squint > 0.0);
@@ -1254,7 +1254,10 @@ mod tests {
         let phi = az.to_radians();
         let u = theta.sin() * phi.cos();
         // original u = sin(2 deg)*cos(0) ~ 0.0349 - must be unchanged by a +Y squint
-        assert!((u - 2.0_f64.to_radians().sin()).abs() < 1e-6, "u changed: {u}");
+        assert!(
+            (u - 2.0_f64.to_radians().sin()).abs() < 1e-6,
+            "u changed: {u}"
+        );
         assert!(el >= 0.0);
     }
 
@@ -1273,10 +1276,12 @@ mod tests {
 
     #[test]
     fn test_squint_corrected_direction_applies_when_offset() {
-        let (az, el, squint) =
-            squint_corrected_direction(0.0, 2.0, 8400.0, 8800.0, 1.0, 0.0, 13.6);
+        let (az, el, squint) = squint_corrected_direction(0.0, 2.0, 8400.0, 8800.0, 1.0, 0.0, 13.6);
         assert!(squint > 0.0, "expected non-zero squint, got {squint}");
-        assert!((el - 2.0).abs() > 1e-6 || (az - 0.0).abs() > 1e-6, "direction should change");
+        assert!(
+            (el - 2.0).abs() > 1e-6 || (az - 0.0).abs() > 1e-6,
+            "direction should change"
+        );
     }
 
     #[test]
@@ -1487,10 +1492,7 @@ mod tests {
         let (az_b, _el) =
             compute_emitter_direction_with_attitude(&emitter, &vehicle, &boresight, Some(q_b))
                 .unwrap();
-        assert!(
-            (az_b - 270.0).abs() < 1e-6,
-            "rotated frame: az {az_b}"
-        );
+        assert!((az_b - 270.0).abs() < 1e-6, "rotated frame: az {az_b}");
     }
 
     #[test]

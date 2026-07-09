@@ -839,10 +839,7 @@ mod tests {
         let calibration_warnings: Vec<_> = response
             .warnings
             .iter()
-            .filter(|w| {
-                !w.contains("did not converge")
-                    && !w.contains("aperture integration")
-            })
+            .filter(|w| !w.contains("did not converge") && !w.contains("aperture integration"))
             .collect();
         assert!(
             calibration_warnings.is_empty(),
@@ -1131,10 +1128,7 @@ mod tests {
         let calibration_warnings: Vec<_> = response
             .warnings
             .iter()
-            .filter(|w| {
-                !w.contains("did not converge")
-                    && !w.contains("aperture integration")
-            })
+            .filter(|w| !w.contains("did not converge") && !w.contains("aperture integration"))
             .collect();
         assert!(
             calibration_warnings.is_empty(),

@@ -539,8 +539,7 @@ mod tests {
         // Feed at focus with q=8, f/D=0.5 (D=1 normalized, so f=0.5, R=0.5)
         let feed_pos = FeedPosition::at_focus(0.5);
         let feed_params = FeedParameters::new(
-            feed_pos,
-            8.0, // q_factor
+            feed_pos, 8.0, // q_factor
             0.0, // phase_center_offset
             1.0, // asymmetry_factor (symmetric)
         )
@@ -549,7 +548,10 @@ mod tests {
         let psi_edge = feed_angle(0.5, 0.0, &feed_params.position, 0.5);
         let pure_cos_q = cos_q_pattern(psi_edge, 8.0);
         let amp = illumination_amplitude(0.5, 0.0, &feed_params, 0.5);
-        assert!(amp < pure_cos_q, "space loss must add taper: {amp} vs {pure_cos_q}");
+        assert!(
+            amp < pure_cos_q,
+            "space loss must add taper: {amp} vs {pure_cos_q}"
+        );
 
         // Boresight (vertex) unchanged at 1.0: rho=0 → psi=0 → (1+cos(0))/2 = 1.0
         let amp0 = illumination_amplitude(0.0, 0.0, &feed_params, 0.5);

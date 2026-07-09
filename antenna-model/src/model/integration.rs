@@ -513,8 +513,8 @@ fn aperture_integrand(
     // Axial offset of the feed's PHASE CENTER from the focal point:
     // physical z-offset plus the phase-center offset along the feed axis
     // (positive = away from the vertex, matching phase_feed_displacement's delta_z).
-    let feed_axial_offset = config.feed.position.z - config.reflector.focal_length
-        + config.feed.phase_center_offset;
+    let feed_axial_offset =
+        config.feed.position.z - config.reflector.focal_length + config.feed.phase_center_offset;
 
     // Calculate angle of incidence (simplified - assumes small angles)
     // For parabolic reflector, theta_incident ≈ ρ/(2f)
@@ -803,7 +803,10 @@ mod tests {
         // On-axis integration with fast params must converge (smooth, no phase oscillation).
         assert!(result.converged, "on-axis fast integration must converge");
         // A converged result must have a finite, non-negative error estimate.
-        assert!(result.error_estimate.is_finite(), "converged error_estimate must be finite");
+        assert!(
+            result.error_estimate.is_finite(),
+            "converged error_estimate must be finite"
+        );
         assert!(result.error_estimate >= 0.0);
     }
 
@@ -837,8 +840,14 @@ mod tests {
             integrate_aperture(0.0, 0.0, &config, 8.4e9, &accurate_params).unwrap();
 
         // Both must converge so the error-estimate comparison below is meaningful.
-        assert!(fast_result.converged, "fast on-axis integration must converge");
-        assert!(accurate_result.converged, "accurate on-axis integration must converge");
+        assert!(
+            fast_result.converged,
+            "fast on-axis integration must converge"
+        );
+        assert!(
+            accurate_result.converged,
+            "accurate on-axis integration must converge"
+        );
 
         // High accuracy should have lower error estimate
         assert!(accurate_result.error_estimate <= fast_result.error_estimate * 2.0);
@@ -927,7 +936,7 @@ mod tests {
     fn test_non_convergence_is_reported() {
         let config = test_antenna();
         let params = IntegrationParams {
-            max_iterations: 1,   // cannot converge: convergence check needs iteration > 0
+            max_iterations: 1, // cannot converge: convergence check needs iteration > 0
             relative_tolerance: 1e-15,
             ..IntegrationParams::fast()
         };
@@ -973,8 +982,7 @@ mod tests {
     /// identical and this test failed.
     #[test]
     fn test_phase_center_offset_produces_defocus_loss() {
-        let feed_focused =
-            FeedParameters::new(FeedPosition::at_focus(0.5), 8.0, 0.0, 1.0).unwrap();
+        let feed_focused = FeedParameters::new(FeedPosition::at_focus(0.5), 8.0, 0.0, 1.0).unwrap();
         let feed_pco = FeedParameters::new(FeedPosition::at_focus(0.5), 8.0, 0.05, 1.0).unwrap();
 
         let mk = |feed| {
@@ -993,10 +1001,9 @@ mod tests {
             crate::model::pattern::compute_gain_db(0.0, 0.0, &mk(feed_focused), 8.4e9, &params)
                 .unwrap()
                 .gain;
-        let g_pco =
-            crate::model::pattern::compute_gain_db(0.0, 0.0, &mk(feed_pco), 8.4e9, &params)
-                .unwrap()
-                .gain;
+        let g_pco = crate::model::pattern::compute_gain_db(0.0, 0.0, &mk(feed_pco), 8.4e9, &params)
+            .unwrap()
+            .gain;
 
         assert!(
             g_focused - g_pco > 1.0,

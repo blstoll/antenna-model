@@ -233,15 +233,29 @@ pub fn compute_gain(
     // Dispatch based on computation mode
     let mut warnings = analysis.warnings;
     let gain = match analysis.mode {
-        ComputationMode::StandardPhysicalOptics => {
-            compute_gain_standard(theta, phi, config, frequency_hz, wavelength, params, &mut warnings)?
-        }
+        ComputationMode::StandardPhysicalOptics => compute_gain_standard(
+            theta,
+            phi,
+            config,
+            frequency_hz,
+            wavelength,
+            params,
+            &mut warnings,
+        )?,
         ComputationMode::HigherOrderAberrations => {
             tracing::debug!(
                 "Using higher-order aberrations mode (feed offset ratio: {:.3})",
                 analysis.feed_offset_ratio
             );
-            compute_gain_higher_order(theta, phi, config, frequency_hz, wavelength, params, &mut warnings)?
+            compute_gain_higher_order(
+                theta,
+                phi,
+                config,
+                frequency_hz,
+                wavelength,
+                params,
+                &mut warnings,
+            )?
         }
         ComputationMode::RayTracing => {
             // Ray tracing is a stub: aperture sampling is used but true spillover and
@@ -251,7 +265,15 @@ pub fn compute_gain(
                  gain accuracy may be degraded."
                     .to_string(),
             );
-            compute_gain_ray_tracing(theta, phi, config, frequency_hz, wavelength, params, &mut warnings)?
+            compute_gain_ray_tracing(
+                theta,
+                phi,
+                config,
+                frequency_hz,
+                wavelength,
+                params,
+                &mut warnings,
+            )?
         }
     };
 
@@ -861,7 +883,10 @@ mod tests {
         let params = IntegrationParams::fast();
         let hpbw = compute_beamwidth(&config, 32e9, 3.0, 0.0, &params).unwrap();
         let first_null = 1.22 * wavelength_from_frequency(32e9) / 1.0; // diameter = 1.0 m
-        assert!(hpbw < first_null, "beamwidth {hpbw} beyond first null {first_null}");
+        assert!(
+            hpbw < first_null,
+            "beamwidth {hpbw} beyond first null {first_null}"
+        );
     }
 
     #[test]
