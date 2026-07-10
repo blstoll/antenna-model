@@ -1,0 +1,747 @@
+# Roadmap Work Units — July 2026
+
+Companion to [`roadmap-2026-07.md`](roadmap-2026-07.md) (narrative, themes, decision
+register). This document is the execution artifact: bite-sized, criticality-ordered units
+of work, each specified so a focused coding agent can execute it in one session with high
+likelihood of success.
+
+**Legend**
+- **Effort:** S (≤ half a session), M (one session), L (multiple sessions — split before executing).
+- **`[DECISION]`:** unit starts by getting a decision-register row (see roadmap §5) decided
+  by the maintainer; the recommended default is stated. Do not silently apply the default
+  to code without the row being marked Decided.
+- File:line references verified 2026-07-08 at `d65f780`. **Re-verify each reference before
+  editing** — if a cited line no longer matches its description, stop and re-locate it;
+  do not guess.
+
+## Standing rules for all units
+
+1. **Do not trust CLAUDE.md until G2 merges.** Trust code and `docs/domain-contract.md`.
+2. **Never change a physics formula, sign, or coefficient in a non-physics unit.** In
+   particular, never touch the feed-steering / beam-deviation sign convention
+   (`coordinates.rs` negation + BDF) anywhere, in any unit.
+3. After any change under `antenna-model/src/model/`, run `cargo test --workspace`, not
+   just the touched module's tests.
+4. `openapi.yaml` is hand-maintained: any request/response schema change must be mirrored
+   there manually until unit C7's drift guard exists.
+5. If a doc and the code disagree and no work unit covers it, **stop and file it as a new
+   decision item** — never "fix" code to match a doc.
+6. All paths are relative to the repo root.
+7. Exit criteria are the definition of done. If an exit criterion cannot be met, the unit
+   is not done — report why instead of narrowing the criterion.
+
+## Dependency graph
+
+```
+G1 ─┬─ G2 ── G3
+    ├─ P4, P5, P2 (parallel)      P1 ─┬─ P1b (coordinate w/ D2)
+    │                                 └─ P3 ─┐
+    │                             P5 ────────┼─ P6 ─ D8, D5
+    ├─ S1 ─ S2 ─ S3(after Phase 1) ─ S4 ─ S5 │
+    ├─ S6                                    │
+    ├─ C3 ─ C4 ─ C2 ─ C8 ─ C7                │
+    │  C1(after S6; may fold into C8 stage 4)│
+    ├─ D1 ─ D2 ─ D3;  D6                     │
+    └─ (Phases 1–3 done) ─ D4 ─ D7
+Superseded by C8 (do not implement): S7, C5, C6
+Phase 5: F1..F6 gated on register rows (P3, P5/F4, F5, D9); P1 + C8 DECIDED 2026-07-08
+```
+
+---
+
+## Phase 0 — Guardrails (execute in order: G1 → G2 → G3)
+
+### G1 — Stand up CI (ready-to-activate) — Effort: M
+
+- **Entrance criteria / read first:** There is no `.github/workflows/` and **no git remote**
+  (verified 2026-07-08). Read: root `Cargo.toml` (workspace members), CLAUDE.md's
+  "Code Quality" section, `docs/code-review-checklist.md`, `calibrate/Cargo.toml`
+  (ndarray-linalg/OpenBLAS features).
+- **Key knowledge:** GitHub Actions for Rust workspaces; BLAS system dependencies.
+- **Exit criteria:**
+  1. `.github/workflows/ci.yml` committed with jobs: `cargo fmt --check`,
+     `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`,
+     `cargo audit` (non-blocking initially, with a tracked allowlist). Activates the moment
+     a GitHub remote is added.
+  2. A documented local gate (`scripts/check.sh` or a make target) running the same
+     commands, **verified green on current HEAD** before merging.
+  3. Decision-register row **G1-hosting** filed (default: GitHub).
+- **Assumptions:** current HEAD passes `clippy -D warnings`. If it doesn't, fix only
+  mechanical lints; defer anything touching `antenna-model/src/model/` semantics and list
+  the deferred items in the PR description.
+- **Gotchas:** Linux CI needs a BLAS backend for `calibrate` (e.g. `libopenblas-dev`) —
+  check `calibrate/Cargo.toml` features before writing the workflow. The macOS
+  LDFLAGS/CPPFLAGS note in CLAUDE.md applies to local macOS builds, not Linux CI. Do not
+  add auto-fix steps to CI.
+- **Depends on:** nothing. **Blocks:** everything else (softly).
+
+### G2 — Make CLAUDE.md true — Effort: S/M
+
+- **Entrance / read first:** CLAUDE.md in full. Truth sources: `docs/implementation-plan.md`
+  (sprints 5–7 marked complete), `antenna-model/src/model/correction_interpolator.rs` +
+  `antenna-model/src/service/evaluator.rs:265-287` (B-spline correction is live),
+  `ls antenna-model/src/model/`, `calibration_data/antennas.yaml`.
+- **Exit criteria:**
+  1. No claim that B-spline correction is unimplemented; sprint status matches
+     `implementation-plan.md`.
+  2. No references to deleted modules `direct_path.rs`, `surface.rs`,
+     `numerical_stability.rs` (currently at CLAUDE.md:142-143 and :246).
+  3. `antennas.toml` corrected to `calibration_data/antennas.yaml`.
+  4. The property-based-tests claim (CLAUDE.md:214) annotated "planned — see roadmap unit D7".
+  5. The precomputed-artifacts claim corrected (no `.bin` files ship; see D9).
+  6. The module map matches `ls antenna-model/src/**` reality.
+- **Gotchas:** Docs-only — zero code changes. Other docs (architecture.md, design doc) are
+  unit D5's job; do not drift into them.
+- **Depends on:** nothing. **Blocks:** all later agent-executed units (standing rule 1).
+
+### G3 — Fix broken example requests + lock them with a test — Effort: S
+
+- **Entrance / read first:** `antenna-model/src/api/schemas.rs:276` and `:623`
+  (`vehicle_attitude: Option<[f64; 4]>` — **confirm the component order documented in the
+  field's doc comment before converting; do not assume w-first**). Broken files:
+  `examples/requests/gain_request.json`, `batch_request.json`, `heatmap_request.json`
+  (object form `{"w":…,"x":…}`), `gain_request_geodetic.json` (Euler form
+  `{"roll_deg":…}`). The newer `geo_*.json` files omit attitude and are fine.
+- **Exit criteria:**
+  1. Every file in `examples/requests/` deserializes into its corresponding request type.
+  2. A test iterates the directory and `serde_json::from_str`s each file against the
+     correct schema type (map filename → type explicitly), failing on any new drift.
+  3. Test runs in the CI / local gate from G1.
+- **Assumptions:** the schema (array quaternion) is correct and the examples are wrong —
+  confirmed by audit. Convert object values faithfully; convert the Euler example to an
+  equivalent quaternion, or replace with a documented identity attitude if conversion is
+  nontrivial.
+- **Gotchas:** grep all of `examples/` for `"w":` and `roll_deg` — `curl-examples.sh`,
+  `postman_collection.json`, and any Python examples may embed the same broken shapes; fix
+  consistently. **Do not change the schema.**
+- **Depends on:** G1 (test must run in the gate).
+
+---
+
+## Phase 1 — Prediction correctness & physics scope
+
+### P1 — Spillover efficiency on the uncalibrated path — Effort: M
+**[DECIDED 2026-07-08 — staged implement]**
+
+- **Decision (recorded):** The maintainer anticipates missing calibration data for many
+  antenna systems, so the unmodeled spillover bias (~0.4–1 dB optimistic) is unacceptable
+  on the uncalibrated path. Staged approach: **spillover now** (this unit); **blockage =
+  F3** (data-gated on geometry parameters that don't exist in the config yet);
+  **cross-pol out of scope** (<0.1 dB on-axis for symmetric prime-focus dishes).
+- **Entrance / read first:** `antenna-model/src/model/pattern.rs:130-141`
+  (`overall_efficiency` = Ruze × mesh only); `edge_cases.rs:170` (`estimate_spillover` —
+  currently computed for warnings only, never multiplied into gain);
+  `service/evaluator.rs:265-287` (correction-surface application + calibration-status
+  logic); the `q_factor` glossary entry in `docs/domain-contract.md` (this codebase's edge
+  taper is the *combined* pattern × space-loss definition — relevant to sanity-checking
+  spillover magnitudes).
+- **Design constraints (must-follow):**
+  1. **Double-counting gate:** apply spillover ONLY when the antenna has **no correction
+     surface at all** (whole-antenna gate). Do NOT apply it per-query for out-of-coverage
+     points on calibrated antennas — that would create a gain discontinuity at the coverage
+     boundary. If boundary behavior should change later, that is a new decision item.
+  2. The gate lives in the **service layer** (the evaluator knows calibration state; the
+     model layer must not inspect calibration) — thread a flag into the gain-computation
+     options rather than importing calibration types into `pattern.rs`.
+  3. Keep the existing spillover *warning* path.
+- **Exit criteria:**
+  1. For an antenna without a correction surface, gain is reduced by the spillover
+     efficiency (`10·log10(η_spill)`); a test asserts the applied loss equals what
+     `estimate_spillover` predicts for the fixture, plus a sanity bound (loss in
+     ~0.3–1.5 dB for q=8, f/D=0.5).
+  2. Outputs for antennas WITH a correction surface are **unchanged** — all existing tests
+     pass untouched, plus an explicit test asserting identical gain before/after for a
+     calibrated fixture.
+  3. Response warnings/metadata indicate when physical spillover was applied, so consumers
+     can tell which model variant produced the number (schema addition → mirror in
+     openapi.yaml, standing rule 4).
+  4. `docs/domain-contract.md` gains a "Modeled vs unmodeled efficiency terms" section:
+     spillover modeled on the uncalibrated path (this unit); blockage/cross-pol unmodeled
+     (blockage = F3); `docs/api-documentation.md` accuracy caveats updated.
+- **Gotchas:** verify whether `estimate_spillover` returns the *captured*-power fraction or
+  the *lost* fraction before converting to dB — get the sign right (an efficiency η ≤ 1
+  multiplies gain). Do not alter the aperture integral or any phase math. Honest caveat for
+  docs: parameter uncertainty (guessed q-factor, assumed surface RMS) still limits
+  uncalibrated accuracy; this removes a known systematic bias, it does not make
+  uncalibrated predictions calibrated-grade.
+- **Depends on:** G1, G2. Do before P3/P6 (shares domain-contract edits). Companion: P1b.
+
+### P1b — Physics-model version stamp in calibration artifacts — Effort: S
+
+- **Rationale:** correction surfaces are fitted to `measured − physics` residuals; any
+  change to the physics model (P1 here, F2/F3 later) invalidates surfaces fitted against
+  the older model. Artifacts must record which physics-model version they were fitted
+  against, or future recalibrations will silently mix eras.
+- **Entrance / read first:** the metadata struct in `antenna-model/src/data/types.rs`; the
+  version checks in `data/loader.rs` (around `:165`); the writer in
+  `calibrate/src/artifact_export.rs`; unit D2 (the two existing version axes) — coordinate
+  so this doesn't become a third, uncoordinated version mechanism.
+- **Exit criteria:** an integer `physics_model_version` field in artifact metadata; the
+  calibrate writer stamps the current constant; the loader compares against the service's
+  constant and **warns** (not errors) on mismatch, naming both values; the bump policy
+  documented (bump whenever a change alters `gain_physics` output for identical inputs);
+  a test with a mismatched fixture.
+- **Gotchas:** adding a field to the bincode-encoded struct is a schema change — confirm
+  how decode handles missing fields for older artifacts. Mitigating fact: **no `.bin`
+  artifacts exist in the wild** (none checked in; the four entries that reference a `.bin`
+  are `enabled: false`, the four uncalibrated design-spec antennas are `enabled: true`), so
+  breaking old-artifact decode is currently cheap — but say so explicitly in the PR and
+  handle it via the ANTC header version path documented in D2 if needed.
+- **Depends on:** P1 (motivates it); coordinate with D2.
+
+### P2 `[DECISION]` — Seidel higher-order aberration coefficients: verify or fence — Effort: M
+
+- **Question:** `higher_order_aberrations` (`antenna-model/src/model/edge_cases.rs:250`)
+  adds astigmatism/field-curvature/distortion terms with heuristic coefficient 1 (and one
+  bare `/2`), consumed on the live path via `integration.rs:559-570`. No citation.
+- **Recommended default:** **Fence, don't fix:** (a) annotate the function
+  "HEURISTIC — unverified, see roadmap P2"; (b) add a response-level warning when the
+  higher-order term contributes more than 0.1 dB to the result, reusing the existing
+  warnings plumbing (trace how `edge_cases.rs` warnings reach `GainResponse` via
+  `service/evaluator.rs`); (c) file a follow-up for a domain-expert citation (Seidel
+  aberration theory for offset-fed reflectors). **Do not change any coefficient without a
+  citation.**
+- **Exit criteria:** register row Decided; annotation + threshold warning implemented with
+  a test that triggers it; **all existing gain tests pass with unchanged values**.
+- **Gotchas for the executing agent:** You are adding a *warning*, not altering math. If
+  any existing gain test changes value, you broke something — revert and retry.
+- **Depends on:** G1.
+
+### P3 `[DECISION]` — Ray-trace stub (feed offsets > 0.5·f) disposition — Effort: S
+
+- **Question:** Offsets > 0.5·f route to an acknowledged stub (`pattern.rs:260-270` pushes
+  a degraded-accuracy warning; `ray_trace.rs:336` TODO: all aperture points "hit" by
+  definition). Options: implement real ray tracing (L — feature F2), reject such requests
+  (breaking), or document + strengthen flagging.
+- **Recommended default:** **Document + flag.** Verify the unreliable warning reaches all
+  four compute endpoints (gain, batch, heatmap, h3-heatmap), not just single-gain; add the
+  limitation to `docs/domain-contract.md` and the relevant `openapi.yaml` descriptions.
+- **Exit criteria:** register row Decided; one test per endpoint proving the warning
+  appears for a > 0.5·f request (`examples/requests/geo_large_feed_offset.json` is a ready
+  fixture); docs updated. **Do not modify `ray_trace.rs` math.**
+- **Depends on:** P1 (both edit domain-contract.md — sequence to avoid conflicts).
+
+### P4 — f_over_d out-of-range: fail loudly — Effort: S
+
+- **Entrance / read first:** `antenna-model/src/model/geometry.rs:100-105` — the
+  `if !(0.2..=1.0).contains(&f_over_d)` block has an **empty body** (silent no-op). Trace
+  where f/D originates: `data/loader.rs`, `calibrate/src/antenna_config.rs`,
+  `calibration_data/design_specs/*.yaml` — it comes from artifacts/config, not requests, so
+  the primary fix is load-time validation.
+- **Exit criteria:** out-of-range f/D produces a typed error at artifact/config load (and
+  the geometry.rs silent branch becomes a real error path — no panics, per repo rule);
+  unit test for the out-of-range case; in-range behavior unchanged (existing tests pass).
+- **Assumptions:** the encoded range [0.2, 1.0] is correct; don't widen or narrow it.
+- **Depends on:** G1.
+
+### P5 — Unify G/T computation; fix stale G/T docs — Effort: S
+
+- **Entrance / read first:** `antenna-model/src/model/pattern.rs:512`
+  (`compute_g_over_t` — zero non-test callers) vs the inline duplicate at
+  `service/h3_link_budget.rs:585` (`gain_db - 10.0 * t.log10()`); `service/evaluator.rs:61`
+  — the module doc diagram advertises a `g_over_t_db` output that `GainResponse`
+  (`api/schemas.rs`) does not have.
+- **Exit criteria:** h3_link_budget calls `pattern::compute_g_over_t` (one implementation);
+  the evaluator doc header corrected; a test pinning h3 G/T output unchanged for a known
+  input; `docs/domain-contract.md` notes T is a user-supplied passthrough (noise-temperature
+  modeling = F4).
+- **Gotchas:** **Verify the two formulas are numerically identical before consolidating.**
+  If they differ, STOP and escalate as a new decision item — do not pick one.
+- **Depends on:** G1. Feeds S6 (temperature *validation* happens there, not here).
+
+### P6 — Refresh `docs/domain-contract.md` "Open items" — Effort: S (phase closer)
+
+- **Exit criteria:**
+  1. Resolved items marked resolved with pointers: `phase_center_offset_phase` → now axial
+     defocus at `integration.rs:516-517` (glossary entry at contract :76 also updated);
+     duplicate Ruze in `surface.rs` → file deleted (glossary :77 updated).
+  2. `transparency_at_wavelength` open item cross-references unit D8; f_over_d item
+     cross-references P4.
+  3. P1/P2/P3/P5 outcomes recorded in the contract where relevant.
+  4. The design-doc-drift process item (contract :110-114) **re-verified** against the
+     post-`aee11f9` design doc — it may already be resolved; check, don't assume.
+- **Depends on:** P1–P5.
+
+---
+
+## Phase 2 — Safety & operational correctness
+
+### S1 — Enforce the configured body-size limit — Effort: S/M (top of phase)
+
+- **Entrance / read first:** `config/settings.rs:46-48` (`max_body_size_bytes`),
+  `api/mod.rs:193` (limit only logged), `api/middleware.rs:320-333` (`RequestSizeTracker`
+  warns, never rejects). Find the existing test:
+  `grep -rn test_request_body_size_limit antenna-model/` — **its current pass is for the
+  wrong reason** (11 MB blob fails JSON parse → 400 after full buffering); treat it as
+  untrustworthy. Check the pinned poem version's `SizeLimit` middleware availability.
+- **Exit criteria:** requests exceeding the configured limit get **413** with the project's
+  standard JSON error body; the test rewritten to send a *well-formed* oversized body and
+  assert 413; limit remains configurable.
+- **Gotchas:** batch and heatmap requests are legitimately large — confirm the default in
+  `config/service.yaml` comfortably exceeds a maximum-size 1000-item batch before
+  enforcing; if not, raise the default in the same change and say so.
+- **Depends on:** G1.
+
+### S2 — Enforce the configured request timeout — Effort: S
+
+- **Entrance / read first:** `settings.rs:42-44`, `api/routes.rs` middleware stack (no
+  timeout of any kind), `api/mod.rs:194` (log-only).
+- **Exit criteria:** timeout middleware wired to `request_timeout_secs`; an integration
+  test (tiny configured timeout + heavy heatmap request) asserting the timeout status
+  (504 or project-standard); documented in api-documentation.md.
+- **Gotchas:** a poem-layer timeout does **not** cancel rayon work already submitted
+  (dropping the future doesn't stop the pool) — state this in a code comment; compute-side
+  bounding is S3's job. Don't claim more than the middleware delivers.
+- **Depends on:** G1. Pairs with S3.
+
+### S3 — Wall-clock budget inside aperture integration — Effort: M
+
+- **Entrance / read first:** `model/integration.rs` `IntegrationParams` presets
+  (max_iterations 3/5/8 — the only bound today); how many integrations a single heatmap
+  (up to 100k points) or batch (up to 1000 items) fans out to (`service/heatmap.rs`,
+  `service/batch.rs`).
+- **Exit criteria:** integration checks elapsed time at iteration boundaries against a
+  configurable budget; over-budget returns a **typed error** (never a silently degraded
+  result); default budget generous enough that **all existing tests pass unchanged**;
+  config knob in `settings.rs` + `config/service.yaml` with docs; a tiny-budget test
+  asserting the error surfaces as a clean 4xx/5xx.
+- **Assumptions:** per-integration (not per-request) granularity is acceptable for v1.
+- **Gotchas:** check the clock at iteration boundaries only (cheap). **Do not change
+  convergence math.** Note the existing behavior where non-convergence yields a warning —
+  that stays; the budget is a separate, harder stop.
+- **Depends on:** S2; after Phase 1 (touches the model layer).
+
+### S4 — Admission control + resolve dead `worker_threads` config — Effort: M
+
+- **Entrance / read first:** `settings.rs` performance section; `service/batch.rs`,
+  `service/heatmap.rs`, `service/h3_link_budget.rs` all use rayon's **global** pool; no
+  concurrency-limit middleware anywhere.
+- **Exit criteria:**
+  1. `performance.worker_threads` wired via `rayon::ThreadPoolBuilder::build_global` at
+     startup (recommended) — or removed from config; recommended: wire it.
+  2. A semaphore caps concurrent heavy requests (batch/heatmap/h3-heatmap); when saturated,
+     return 429 or 503 with the standard JSON error; limit configurable.
+- **Gotchas:** `build_global` can only be called once and errors if a pool already exists
+  (tests may have initialized it) — handle the `Err` gracefully. Do not create per-request
+  rayon pools.
+- **Depends on:** S1, S2 (same middleware stack — land sequentially).
+
+### S5 — Real graceful shutdown, readiness lifecycle, honor `fail_fast` — Effort: M
+
+- **Entrance / read first:** `api/mod.rs:72` (readiness defaults `true` at construction),
+  `:178-186` (total calibration-load failure → warn + empty repository + healthy server,
+  regardless of `calibration.fail_fast`), `:301-316` (`shutdown_cleanup()` is a no-op that
+  nothing invokes); health/ready handlers in `api/handlers.rs`; `data/repository.rs`.
+- **Exit criteria:**
+  1. Readiness starts false; flips true only after calibration load completes.
+  2. All-loads-failed + `fail_fast` → process exits nonzero at startup; without
+     `fail_fast`, the server starts but readiness/health reflect the degraded state
+     (keep the existing response *shapes*).
+  3. On shutdown signal: readiness flips false, `shutdown_cleanup()` is actually invoked,
+     in-flight requests drain.
+  4. Tests for the fail_fast path and the readiness flip.
+- **Assumptions:** Kubernetes-style deployment (a `helm/` dir exists), so
+  readiness-false-before-drain is the right pattern.
+- **Gotchas:** do not change the `/health` and `/ready` response schemas (they're in
+  openapi.yaml). Distinguish "zero antennas *enabled*" from "configured but failed to
+  load". **Note (2026-07-09):** the current `antennas.yaml` is NOT all-disabled — it has
+  four `enabled: true` uncalibrated design-spec antennas (which load without a `.bin`) and
+  four `enabled: false` entries that reference absent `.bin` files. So the live default
+  state is "four antennas loaded, uncalibrated," not "zero configured." Test both the
+  loaded-uncalibrated path and a genuine load-failure. See D9.
+- **Depends on:** S4 (same startup code region).
+
+### S6 — Close H3 link-budget validator gaps — Effort: S
+
+- **Entrance / read first:** `service/validator.rs:203-226`
+  (`validate_h3_link_budget_request` — validates positions, `frequency_mhz`, `n_rings`,
+  quaternion; **skips** the fields below). Copy the gain endpoint's validation style and
+  error codes exactly.
+- **Exit criteria:**
+  1. `temperature_k`: must be > 0 (a non-positive value currently reaches
+     `t.log10()` at `h3_link_budget.rs:585` → NaN in the response) with a sane upper bound
+     (match any existing temperature bound; if none, require > 0 and ≤ 10000 K).
+  2. `pointing_frequency_mhz`: validated with the same `validate_frequency` call the gain
+     and heatmap validators already use (`validator.rs:96,182`).
+  3. `h3_resolution`: range-checked in the validator (0–15, or narrower if
+     `h3_link_budget.rs` assumes so — today invalid values are caught late by
+     `h3o::Resolution::try_from` at `h3_link_budget.rs:273`; validation belongs in the
+     validator layer for consistency).
+  4. Tests for each rejection + one passing boundary case; openapi.yaml constraint
+     descriptions mirrored (standing rule 4).
+- **Gotchas:** reuse the existing snake_case error codes and message format — don't invent
+  new ones (C3 owns vocabulary).
+- **Depends on:** G1. Independent of Phase 3.
+
+### S7 — GEO coordinate-ambiguity policy — **SUPERSEDED by C8 (decided 2026-07-08)**
+
+The warn-everywhere + `strict_coordinates` design existed only because breaking the API was
+assumed off-limits. With pre-production confirmed, C8 stage 2 makes `coordinate_system`
+**required**, eliminating the auto-detection ambiguity instead of warning about it. Do not
+implement this unit. The stale threshold comments this unit would have fixed
+(`schemas.rs:9` says 1000 km, constant is 6400 km; `validator.rs:266` says 10,000 km,
+constant is 400,000 km) move into C8 stage 2.
+
+---
+
+## Phase 3 — API contract quality
+
+Sequencing: **C3 → C4 → C2** share the handler error paths — land in that order, then
+**C8** (the consolidated breaking pass), then **C7** (drift guard) freezes the result.
+C1 can run in parallel with C3–C2. C5 and C6 are superseded by C8.
+
+### C1 — Document `/api/v1/h3-heatmap` — Effort: S/M
+
+- **Entrance / read first:** `api/routes.rs` (the registered route + method), the h3
+  handler in `api/handlers.rs`, the orphaned schemas at `openapi.yaml:750,822`
+  (`H3LinkBudgetRequest`/`Response` exist but no path references them), existing openapi
+  path entries as a style reference, `docs/api-documentation.md` endpoint sections.
+- **Exit criteria:** an `/api/v1/h3-heatmap` path entry in openapi.yaml wired to the
+  existing schemas, with error responses matching **current** behavior (including its
+  current status-code quirks — C2 owns changing them, and updates the spec again);
+  an api-documentation.md section with a working example (reuse a passing request body
+  from `tests/integration/h3_link_budget_tests.rs`); that example added under
+  `examples/requests/` (automatically covered by G3's deserialization test).
+- **Note:** may be absorbed into C8 stage 4 instead of running standalone — if C8 is
+  imminent, fold it in; if C8 is far off, land this first (documenting current behavior is
+  cheap and gives C8 a baseline) and let C8 update it.
+- **Depends on:** G3, S6 (new validation constraints must appear in the spec).
+
+### C3 — Single error-code vocabulary; delete dead PascalCase constructors — Effort: S
+
+- **Entrance / read first:** `api/schemas.rs:~1085-1110` — `ErrorResponse` convenience
+  constructors emitting PascalCase codes (`"AntennaNotFound"`, `"FeedNotFound"`,
+  `"InvalidParameter"`); handlers emit snake_case codes (`"validation_error"`,
+  `"antenna_not_found"`, …).
+- **Exit criteria:** PascalCase constructors deleted (**grep-confirm zero callers for each
+  first**); the set of live snake_case codes enumerated in api-documentation.md and in the
+  openapi.yaml error-schema description; a small unit test or const list preventing typo
+  drift if cheap.
+- **Gotchas:** if any constructor *does* have a caller, converting that call site changes
+  wire output — flag it explicitly in the PR description.
+- **Depends on:** G1.
+
+### C4 — Error bodies as `application/json` — Effort: S
+
+- **Entrance / read first:** the `poem::Error::from_string(serde_json::to_string(…))`
+  pattern (e.g. `handlers.rs:203-206`) — poem serves these as `text/plain`. **Find all
+  sites by grep**, not just the cited one.
+- **Exit criteria:** one shared error-response helper replaces the ad-hoc pattern at all
+  sites; all error responses carry `Content-Type: application/json`; **body bytes
+  unchanged** — an integration test asserts both the header and the body on a 422 and a 400.
+- **Depends on:** C3.
+
+### C2 `[DECISION]` — Unify validation status codes — Effort: M
+
+- **Question:** validation failures return 422 from the pre-check path
+  (`handlers.rs:205,428,905`) but 400 when the same class of error surfaces from the
+  service layer (`handlers.rs:341,463,976`); batch=400 vs single=422 for equivalent inputs.
+  Changing codes is a behavioral API change.
+- **Recommended default:** **400 = malformed/undeserializable body; 422 = well-formed but
+  semantically invalid** — both layers, all endpoints. Treat as bug-fix-grade in v1 (no
+  client can have relied on the inconsistency), with a changelog note.
+- **Exit criteria:** register row Decided; an integration test matrix
+  (endpoint × {malformed, invalid}) **written first**, then codes fixed until it passes;
+  openapi.yaml responses updated for every endpoint; api-documentation.md error section
+  updated.
+- **Gotchas:** grep handlers.rs for every `StatusCode`/`from_status` site (~6); the matrix
+  test is the net that catches a missed one. Don't touch error *bodies* here (C3/C4 own
+  those).
+- **Depends on:** C3, C4 (land after, to avoid triple-editing the same lines).
+
+### C5 — `/heatmap` H3 grid-type stub — **SUPERSEDED by C8 (decided 2026-07-08)**
+
+The variant removal happens in C8 stage 4 alongside the rest of the endpoint-coherence
+work. Do not implement standalone. (Full H3-into-`/heatmap` merge remains feature F5,
+still gated.)
+
+### C6 — `feed_position` naming trap — **SUPERSEDED by C8 (decided 2026-07-08)**
+
+The docs-only design existed only under the no-breaking-changes assumption. With
+pre-production confirmed, C8 stage 1 performs the actual rename to
+`feed_pointing_location`. Do not implement the docs-only variant.
+
+### C8 — v1 contract finalization (the one sanctioned breaking pass) — Effort: L
+**[DECIDED 2026-07-08 — pre-production confirmed: no consumers exist; break once now, then freeze]**
+
+- **Rationale (recorded):** The maintainer confirmed nothing consumes this API yet
+  (no remote, no shipped `.bin` artifacts, only uncalibrated design-spec antennas enabled). Breaking cost is
+  ~zero today and permanent after the first integration. All desirable breaking changes
+  land in this single pass; C7's drift guard freezes the contract immediately after. A
+  full redesign was considered and rejected: there is no efficiency case (aperture
+  integration dominates latency, not JSON shape), so only naming/consistency/safety
+  changes are in scope.
+- **Effort note:** L — execute as **four sequential stages, one PR each**, in this order.
+  Each stage leaves the workspace green (`cargo test --workspace`) and openapi.yaml +
+  `examples/requests/` + `docs/api-documentation.md` updated (G3's example test is the net
+  that catches missed examples).
+
+**Stage 1 — Rename the aim-point fields.**
+- `feed_position` → `feed_pointing_location` on all three request types (fields at
+  `schemas.rs:247,432,590`). Review the two *physical*-offset response fields
+  (`GeometryInfo.feed_offset_meters`, `FeedInfo.position_offset`) and align them to one
+  naming scheme that cannot be confused with the aim point (e.g.
+  `physical_feed_offset_m`); keep units in the name or the docs, consistently.
+- **No serde aliases, no deprecation shims** — clean break.
+- Update `docs/domain-contract.md`'s parameter-glossary entry **in the same commit**
+  (contract rule: contract and code change together).
+- Exit: grep for `feed_position` finds zero hits outside historical docs
+  (`review-findings-*.md`, superpowers plans) and the contract's changelog note.
+
+**Stage 2 — Make `coordinate_system` required (remove auto-detection).**
+- `Position3D.coordinate_system` becomes a required field; missing → deserialization/
+  validation error naming the exact field path. Delete the magnitude-based auto-detection
+  (`Position3D::coordinate_system()` heuristic, `ECEF_THRESHOLD_M` at `schemas.rs:126`) and
+  the now-dead `coordinate_ambiguity_warnings` plumbing (`validator.rs:451-463`,
+  `evaluator.rs:105`); **keep** per-system range validation (ECEF magnitude, geodetic
+  lon/lat/alt bounds).
+- Fix the stale threshold comments while in the area (`schemas.rs:9`, `validator.rs:266`) —
+  or delete them with the machinery they describe.
+- Update the domain contract's frame table + GEO-trap gotcha (the trap no longer exists —
+  record it as resolved-by-design, don't silently delete the history).
+- Exit: a geodetic GEO-altitude position without a tag is now a 4xx with a clear message
+  (test); all examples carry explicit `coordinate_system`; contract updated.
+- Gotcha: `test_explicit_coordinate_system_overrides_detection` (`schemas.rs:1180`) and the
+  detection unit tests must be rewritten to assert the new required-field behavior, not
+  deleted wholesale.
+
+**Stage 3 — Typed warnings.**
+- `warnings: Vec<String>` → `Vec<ApiWarning> { code, message }` on all response types
+  (currently at `schemas.rs:307,511,691`). Enumerate the code set from existing producers
+  (grep `warnings.push` / warning constructors): expect at least `extrapolated`,
+  `out_of_coverage`, `ray_trace_degraded`, `non_convergence`, plus the codes added by
+  roadmap units P1 (`spillover_applied`) and P2 (`higher_order_heuristic`) — coordinate
+  with those units if they land first (strings then; codes now).
+- Exit: every producer emits a code + human message; the code enum documented in
+  api-documentation.md + openapi; integration tests assert codes, not string matches.
+
+**Stage 4 — Endpoint coherence + spec completeness.**
+- Remove the `/heatmap` H3 grid-type stub variant (`heatmap.rs:168-171,215-218`); unknown
+  grid types become normal validation failures (absorbs old C5).
+- `/h3-heatmap` fully documented (absorbs C1 if it hasn't landed; if C1 landed, update it
+  for stages 1–3's changes).
+- Decide-and-document endpoint naming: keep two endpoints (`/heatmap` rectangular,
+  `/h3-heatmap` link budget) — a full merge remains feature F5.
+- Exit: openapi.yaml describes every registered route with post-C8 schemas; ready for C7.
+
+- **Depends on:** C3 → C4 → C2 landed first (error contract settled before the breaking
+  pass); G3 (example test); S6 (validation constraints exist to document). **Blocks:** C7.
+- **Out of scope (explicitly):** batch shared-context request shape (additive later via
+  optional top-level defaults); poem-openapi codegen migration; any physics/semantics
+  change — this pass renames and reshapes, it must not alter any computed value (existing
+  numeric assertions in tests are the net: they may change *field names*, never *values*).
+
+### C7 — OpenAPI drift guard — Effort: M
+
+- **Entrance / read first:** `api/routes.rs` route registration; openapi.yaml paths.
+- **Exit criteria:** a CI test that parses openapi.yaml (serde_yaml) and asserts the
+  path+method set equals the registered route set — failing when a route exists without a
+  spec entry or vice versa. Stretch (optional): validate G3's example files against the
+  openapi component schemas. A note in docs about the guard.
+- **Assumptions:** migrating to poem-openapi codegen is **out of scope** — register it as a
+  possible future item in the roadmap doc, not part of this unit.
+- **Depends on:** C8 (the contract must be finalized first — this guard is what freezes it).
+
+---
+
+## Phase 4 — Structure, debt, docs
+
+### D1 — Retire the deprecated legacy serializer in calibrate — Effort: S
+
+- **Entrance / read first:** `calibrate/src/serializer.rs` — 612 lines, header honestly
+  marked DEPRECATED (`:3-7`): it serializes the legacy `CalibrationArtifact` (3D surface)
+  which the service **cannot** load (wrong struct + serde-bincode mode), and says it is
+  "retained only for the optional `--metadata`/`--report` JSON sidecars and existing
+  tests". Its only workspace-visible consumer is the re-export at `calibrate/src/lib.rs:57`.
+- **Exit criteria:** verify whether the `--metadata`/`--report` sidecar paths in
+  `calibrate/src/main.rs` actually use this module. If yes: extract only the JSON-sidecar
+  helpers and delete the binary-artifact (`save_artifact`/`load_artifact`) surface. If no:
+  delete the module and the `lib.rs:57` re-export entirely. Workspace builds + tests green;
+  `docs/calibration-workflow-guide.md` checked for references.
+- **Gotchas:** never delete a live code path — migrate callers to `artifact_export.rs`
+  first. The dangerous part is specifically the binary writer that produces unloadable
+  artifacts; that must not survive.
+- **Depends on:** G1.
+
+### D2 — Reconcile the two artifact version axes — Effort: S
+
+- **Entrance / read first:** `data/loader.rs` — ANTC header `u32` version (=1) vs
+  `metadata.format_version` string ("2.0" expected, warned at `loader.rs:165`); the writer
+  side in `calibrate/src/artifact_export.rs`.
+- **Exit criteria:** the relationship defined in a doc comment + a section in
+  `calibration-workflow-guide.md` (recommend: header u32 = container/binary layout version;
+  `format_version` = semantic schema version); the loader validates both with clear errors
+  on mismatch; one test with a wrong-version fixture. **Do not bump either version.**
+- **Depends on:** D1.
+
+### D3 — Round-trip test for the 3D→4D correction-surface bridge — Effort: M
+
+- **Entrance / read first:** `calibrate/src/artifact_export.rs` (`to_bspline_4d` —
+  dimension remap + coefficient reindex + synthetic flat temperature axis),
+  `calibrate/src/correction_surface.rs` (3D), `model/correction_interpolator.rs` (4D
+  consumer).
+- **Exit criteria:** a test that fits a small synthetic surface in calibrate → exports →
+  loads via the antenna-model loader → evaluates at sample points → asserts agreement with
+  the pre-export surface within tolerance; edge tests (single-frequency, boundary knots).
+- **Gotchas:** **test-only unit.** If a bug falls out, STOP and file it as a new
+  correctness item — no drive-by fixes.
+- **Follow-up flagged 2026-07-09 (Phase 0 / G1):** this test already exists as
+  `calibrate::artifact_export::tests::test_round_trip_matches_3d_evaluation` (so D3's "add
+  the test" exit criterion is partly satisfied — verify/extend its edge coverage rather
+  than duplicating). More important: on the first CI run it **stack-overflowed on the Linux
+  debug build** (SIGABRT) while passing on macOS — the 3D→4D round-trip B-spline evaluation
+  is stack-hungry and exceeded libtest's ~2 MiB worker-thread stack. Phase 0 worked around
+  it with `RUST_MIN_STACK=16 MiB` in CI + `scripts/check.sh` (commit `4b439c0`). **D3 should
+  investigate the recursion depth in the evaluation path (`to_bspline_4d` / the B-spline
+  evaluator) and make it iterative / bounded so the workaround can be removed.** This is a
+  robustness item, not a correctness bug (the numeric result is right: max round-trip error
+  ~4e-15).
+- **Depends on:** D1, D2.
+
+### D4 `[DECISION]` — Crate split: extract `antenna-core` — Effort: L
+
+- **Question:** `calibrate` depends on the whole `antenna-model` crate, compiling
+  poem/h3o/the web stack for a CLI; `ndarray` 0.15.6 and 0.16.1 are both in the tree
+  (calibrate pinned via ndarray-linalg 0.16).
+- **Recommended default:** **Do it.** Extract `antenna-core` (contents of
+  `antenna-model/src/model/` + `data/types.rs`) as a third workspace member; service and
+  calibrate both depend on it. Attempt ndarray unification during the split; if
+  ndarray-linalg blocks it, document and accept dual versions.
+- **Exit criteria:** three-crate workspace; `cargo tree -p calibrate` shows no
+  poem/h3o/tokio-web deps; all tests pass; CI green; CLAUDE.md + architecture.md module
+  maps updated.
+- **Gotchas for the executing agent:** this is a mechanical **move**, not a rewrite —
+  `git mv` files, fix `use` paths, change nothing else; commit in reviewable steps. **If
+  any test value changes, the move went wrong.**
+- **Depends on:** Phases 1–3 complete (merge-conflict avoidance).
+
+### D5 — Design-docs truth sweep — Effort: M
+
+- **Entrance / read first:** `docs/architecture.md:~1350-1372` (lists nonexistent
+  `interpolation.rs`/`bspline.rs`/`extrapolation.rs`; calibrate `fitter.rs`);
+  `docs/antenna-model-design-doc.md` — Zernike per-point sections (:269,317 —
+  unimplemented; the correction surface absorbs surface error), direct-path interference
+  (:170 — the mode was removed in `c850165`), feed-steering sign section (:130-132);
+  `docs/review-findings-2026-06-10.md`.
+- **Exit criteria:**
+  1. architecture.md module lists match `ls` reality for both crates.
+  2. Design-doc sections either corrected or marked "historical — not implemented".
+  3. The feed-steering sign section **verified against `model/coordinates.rs` code**
+     (post-`aee11f9` it may already match): add a "verified 2026-07 vs code" note if it
+     agrees, or file a NEW decision item if it genuinely disagrees — do not edit that
+     section's math without verification.
+  4. review-findings-2026-06-10.md gets a status column mapping each finding to
+     resolved-commit or roadmap unit ID.
+- **Gotchas:** docs-only. Standing rule 2 applies doubly here.
+- **Depends on:** P6, G2 (after physics docs settle); after D4 if D4 happens (module map).
+
+### D6 — Repo hygiene: tarpaulin artifact, S3 dependency gating — Effort: S
+
+- **Exit criteria:** the committed `tarpaulin-report.html` (3.1 MB, repo root) deleted and
+  the pattern gitignored; `aws-sdk-s3` + `aws-config` in `calibrate` (used in exactly one
+  file, `parser.rs`, for optional S3 CSV input) moved behind an off-by-default cargo
+  feature (e.g. `s3-input`) with a clear CLI error when invoked without it; CI/clippy stays
+  green for both feature states.
+- **Follow-up flagged 2026-07-09 (Phase 0 / G1):** the first CI run's `cargo audit` job
+  (non-blocking, `continue-on-error`) reported **17 vulnerabilities + 9 warnings**. The
+  large majority come from the AWS SDK subtree pulled in by `aws-sdk-s3` + `aws-config`:
+  `aws-lc-sys` (RUSTSEC-2026-0044/45/46/47/48 — sig-bypass/timing/name-constraint),
+  `rustls-webpki`, `rustls-pemfile`, `tar`, `time`, `bytes`. **Gating that subtree behind
+  the off-by-default `s3-input` feature (this unit) removes ~11 of the 17 advisories from
+  the default build.** The remainder are non-AWS and stay for triage/allowlist:
+  `bincode 2.0.1` (unmaintained), `anyhow` (unsound `downcast_mut`), `rand`/`lru`/
+  `crossbeam-epoch` (unsound), `instant`/`paste` (unmaintained). **Elevate this unit's
+  priority** — it is now the primary lever on the advisory count. After it lands, add
+  explicit `cargo audit --ignore RUSTSEC-…` entries (with rationale) for any accepted
+  residual advisories, turning the tracked-allowlist mechanism on.
+- **Depends on:** G1.
+
+### D7 — Property-based tests (make CLAUDE.md's claim true) — Effort: M
+
+- **Entrance / read first:** `model/coordinates.rs`, `model/coordinates_3d.rs` (transform
+  pairs), `model/pattern.rs` (bounds candidates), existing test style. Knowledge: proptest.
+- **Exit criteria:** proptest as dev-dependency; properties implemented: coordinate
+  round-trips within tolerance over valid domains; gain finite and ≤ the ideal-aperture
+  bound for random valid inputs; Ruze efficiency ∈ (0,1] and monotone-decreasing in surface
+  RMS; runs in CI within reasonable time (cap case counts); the CLAUDE.md:214 annotation
+  from G2 updated to "implemented".
+- **Gotchas:** constrain generators to the *validated physical domain* (positive diameters,
+  frequencies within [100, 50000] MHz, etc.) or you'll "discover" inputs that validation
+  already rejects upstream. **Property failures are findings to file, not things to fix
+  inline.**
+- **Depends on:** Phase 1 complete (physics stable); D4 optional.
+
+### D8 — Remove dead `MeshParameters::transparency_at_wavelength` — Effort: S
+
+- **Entrance:** `model/geometry.rs:437`; only callers are its own unit tests
+  (`geometry.rs:752,756`).
+- **Exit criteria:** function + its tests removed (the P1 decision — staged spillover —
+  does not wire this simplified mesh-transparency path; the live path keeps
+  `mesh::mesh_reflection_efficiency`). `docs/domain-contract.md` open item updated (P6
+  cross-reference).
+- **Depends on:** P6.
+
+### D9 `[DECISION]` — Calibration-artifact shipping story — Effort: S
+
+- **Question:** `calibration_data/antennas.yaml` has four `enabled: false` entries (each
+  references an absent `.bin` calibration file) and four `enabled: true` uncalibrated
+  design-spec entries (which load without a `.bin`); no `.bin` artifacts exist anywhere in
+  the repo; CLAUDE.md claimed precomputed artifacts ship. Commit binaries, generate in CI,
+  or docs-only? **(Corrected 2026-07-09: this row previously said "all entries are
+  `enabled: false`" — wrong; 4 of 8 are enabled. The README quickstart and `/health`/
+  `/status` copy must describe the four-uncalibrated-antennas default, not an empty repo.)**
+- **Recommended default:** **Docs-only, no binaries in the repo.** Document the generation
+  command (extending `calibration-workflow-guide.md`) and add a `scripts/` helper or make
+  target that produces artifacts locally from `calibration_data/`; verify the path once
+  locally.
+- **Exit criteria:** register row Decided; a documented, once-verified generation path; a
+  README quickstart section explaining the empty-by-default state and how `/health` and
+  `/status` reflect it.
+- **Depends on:** G2, S5 (readiness semantics for the zero-artifact state).
+
+---
+
+## Phase 5 — Decision-gated features
+
+Do not start any of these until the corresponding decision-register row is Decided.
+
+### F1 — Calibration hot-reload — Effort: M/L
+
+Recommend an authenticated admin endpoint (`POST /admin/reload-calibrations`) over
+file-watching (k8s configmap semantics make watching fragile). Uses the existing
+`RwLock<HashMap>` in `data/repository.rs`. Exit: reload swaps the repository atomically;
+in-flight requests unaffected; a failed reload keeps the old data and returns an error;
+test with two artifact versions. **Gotcha:** never hold the write lock across artifact
+parsing — parse first, swap second.
+
+### F2 — Real ray tracing for feed offsets > 0.5·f — Effort: L (gated on P3 flipping)
+
+Requires domain-expert input (`ray_trace.rs:336` TODO — occlusion/blockage geometry).
+Explicitly requires physics review of results against published offset-fed reflector data
+before the degraded-accuracy warning may be removed.
+
+### F3 — Physical blockage efficiency term — Effort: M/L (spillover already done in P1)
+
+Feed/strut aperture blockage (~0.1–0.5 dB typical). Data-gated: requires new antenna-config
+geometry parameters (feed package diameter, strut widths) that don't exist today — the term
+applies only when the parameters are present, and is skipped with a scope note when absent.
+Reuses P1's double-counting gate (uncalibrated path only) and bumps P1b's
+`physics_model_version`.
+
+### F4 — Antenna noise-temperature model for G/T — Effort: L (gated on P5/F4 row)
+
+Sky/ground pickup + spillover-noise contributions. Same double-counting caveat as F3.
+
+### F5 — Merge H3 into `/heatmap` — Effort: M/L (gated: C8 kept two endpoints)
+
+C8 stage 4 settled on two documented endpoints; this feature would merge them behind a
+grid-type-discriminated contract. Contract design first (discriminated response union),
+then implementation delegating to `service/h3_link_budget.rs`. Requires a new register
+decision — and note it would be a post-C8 breaking change, so it needs v2-grade
+justification per roadmap principle 4.
+
+### F6 — Cross-platform `/status` memory metric — Effort: S
+
+`/status` `memory_bytes` reads `/proc/self/statm` (Linux-only). Use the `sysinfo` crate or
+report an explicit `supported: false` off-Linux. Low risk; schedulable any time after
+Phase 2.

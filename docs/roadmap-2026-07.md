@@ -108,8 +108,13 @@ clean of `unwrap`/`expect`/`panic`). The problems are of a different kind:
   the artifact format has two unrelated version axes (ANTC header `u32` = 1 vs
   `metadata.format_version` string "2.0", `loader.rs:165`); a 3.1 MB `tarpaulin-report.html`
   is committed at the repo root; no property-based tests exist despite CLAUDE.md claiming
-  them; no `.bin` calibration artifacts exist anywhere (all `antennas.yaml` entries are
-  `enabled: false`) although CLAUDE.md claims precomputed artifacts ship.
+  them; no `.bin` calibration artifacts exist anywhere (the four `antennas.yaml` entries
+  that reference a `.bin` calibration file are `enabled: false`; the four uncalibrated
+  design-spec antennas are `enabled: true` and load without a `.bin`) although CLAUDE.md
+  claims precomputed artifacts ship. **Correction (2026-07-09): earlier drafts of this
+  document said "all `antennas.yaml` entries are `enabled: false`" — that is false; 4 of 8
+  are enabled. Units D9, S5, and P1b were written against the wrong premise — see their
+  updated notes.**
 
 ---
 
@@ -126,8 +131,8 @@ clean of `unwrap`/`expect`/`panic`). The problems are of a different kind:
    default. The maintainer is deliberately not a domain expert in this physics; ambiguity
    resolution is theirs.
 4. **Break once, then freeze.** The maintainer confirmed on 2026-07-08 that nothing
-   consumes this API yet (pre-production: no remote, no shipped artifacts, all antennas
-   disabled). Breaking changes are therefore cheapest *now* and get progressively more
+   consumes this API yet (pre-production: no remote, no shipped `.bin` artifacts, only
+   uncalibrated design-spec antennas enabled). Breaking changes are therefore cheapest *now* and get progressively more
    expensive from the first integration onward. The roadmap concentrates every desirable
    breaking change into one consolidated pass (unit **C8 — v1 contract finalization**),
    lands the openapi drift guard (C7) immediately after, and treats the contract as frozen
