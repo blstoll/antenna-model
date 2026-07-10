@@ -209,8 +209,11 @@ pub fn compute_gain_from_request(
     // Use fast integration parameters for <100ms target
     let mut integration_params = IntegrationParams::fast();
     // Double-counting gate: physical spillover only when NO correction surface exists
-    // (the surface otherwise absorbs it). Whole-antenna gate — never per query. Shared
-    // with the ideal-reference computation below, so base spillover cancels in loss_db.
+    // (the surface otherwise absorbs it). Whole-antenna gate — never per query. Note the
+    // model layer further restricts spillover to StandardPhysicalOptics mode, so a large
+    // feed offset may leave this flag on yet apply no spillover. The ideal-reference
+    // computation below tracks the ACTUAL result's spillover state (not this raw flag) so
+    // that base spillover cancels in loss_db without introducing a one-sided bias.
     integration_params.apply_spillover = calibration.correction_surface.is_none();
 
     // Convert frequency from MHz to Hz for physics model
@@ -315,8 +318,14 @@ pub fn compute_gain_from_request(
             antenna_config.mesh.clone(),
         )
         .map_err(|e| AntennaModelError::Generic(format!("ideal config: {e}")))?;
-        let reference =
-            compute_gain_db(0.0, 0.0, &ideal_config, frequency_hz, &integration_params)?;
+        // Match the reference's spillover to the ACTUAL path: if the actual was in a mode
+        // where spillover was folded in (StandardPhysicalOptics), apply it to the ideal
+        // reference too so the base spillover cancels in loss_db; if the actual did NOT get
+        // spillover (large offset / non-standard mode, or calibrated), the reference must
+        // not either, keeping loss_db free of a one-sided spillover bias.
+        let mut reference_params = integration_params.clone();
+        reference_params.apply_spillover = result.spillover_loss_db.is_some();
+        let reference = compute_gain_db(0.0, 0.0, &ideal_config, frequency_hz, &reference_params)?;
 
         // Loss is reference minus actual gain (final gain, including the
         // correction surface when it was applied).
@@ -959,6 +968,150 @@ mod tests {
         assert!(
             loss_uncalibrated.abs() < 0.6,
             "boresight focused-feed loss should be ~0 dB, got {loss_uncalibrated}"
+        );
+    }
+
+    /// Build a request whose feed is steered far off boresight, so the actual
+    /// gain routes to a non-StandardPhysicalOptics mode (large feed offset) and
+    /// the model layer applies no spillover. Mirrors the ECEF geometry the
+    /// integration tests use for their large-offset cases (feed near the vehicle,
+    /// boresight/emitter at a 400 km satellite ~96° away).
+    fn create_large_offset_request() -> GainRequest {
+        use crate::model::coordinates_3d::geodetic_to_ecef;
+        let (veh_x, veh_y, veh_z) = geodetic_to_ecef(-118.1234, 34.5678, 100.0).unwrap();
+        let (emit_x, emit_y, emit_z) = geodetic_to_ecef(-117.0, 35.0, 400_000.0).unwrap();
+        let (feed_x, feed_y, feed_z) = geodetic_to_ecef(-118.124, 34.568, 105.0).unwrap();
+
+        let ecef = |x: f64, y: f64, z: f64| {
+            let mut p = Position3D::new(x, y, z);
+            p.coordinate_system = Some(CoordinateSystem::ECEF);
+            p
+        };
+
+        GainRequest {
+            antenna_id: "test_antenna".to_string(),
+            feed_id: "test_feed".to_string(),
+            vehicle_position: ecef(veh_x, veh_y, veh_z),
+            reflector_boresight: ecef(emit_x, emit_y, emit_z),
+            feed_position: ecef(feed_x, feed_y, feed_z),
+            emitter_position: ecef(emit_x, emit_y, emit_z),
+            frequency_mhz: 8400.0,
+            pointing_frequency_mhz: None,
+            include_reference: true,
+            vehicle_attitude: None,
+        }
+    }
+
+    /// Regression test for the reference/actual spillover asymmetry: for an
+    /// uncalibrated antenna at a LARGE feed offset, the actual gain routes to a
+    /// non-standard-PO mode and gets NO spillover. The ideal reference (always a
+    /// focused feed → standard PO) must therefore also skip spillover, tracking
+    /// the actual's state — otherwise `loss_db` carries a one-sided spillover bias
+    /// while `metadata.spillover_loss_db` reports `None`.
+    ///
+    /// We prove consistency by comparing `loss_db` against a CALIBRATED antenna
+    /// (correction surface → no spillover on either side) for the SAME geometry:
+    /// with the fix they must be numerically identical.
+    #[test]
+    fn test_large_offset_uncalibrated_reference_has_no_spillover_bias() {
+        let request = create_large_offset_request();
+
+        // Uncalibrated: apply_spillover flag on, but actual is large-offset → no spillover.
+        let mut repo_uncalibrated = CalibrationRepository::new();
+        let calibration = create_test_calibration(CalibrationStatus::Uncalibrated {
+            accuracy_estimate_db: 3.0,
+            loss_accuracy_estimate_db: 2.0,
+        });
+        assert!(calibration.correction_surface.is_none());
+        repo_uncalibrated.add_calibration(calibration);
+        let response_uncalibrated =
+            compute_gain_from_request(&request, &repo_uncalibrated).unwrap();
+
+        // The actual got no spillover (non-standard-PO mode gate in the model layer).
+        assert!(
+            response_uncalibrated.metadata.spillover_loss_db.is_none(),
+            "large-offset actual should not report spillover, got {:?}",
+            response_uncalibrated.metadata.spillover_loss_db
+        );
+        let loss_uncalibrated = response_uncalibrated
+            .loss_db
+            .expect("reference requested (uncalibrated)");
+
+        // Calibrated baseline: correction surface present → apply_spillover off on both sides.
+        let mut repo_calibrated = CalibrationRepository::new();
+        let mut calibration_with_surface =
+            create_test_calibration(CalibrationStatus::FullyCalibrated {
+                accuracy_estimate_db: 1.0,
+            });
+        calibration_with_surface.correction_surface = Some(crate::data::types::BSplineModel4D {
+            coefficients: vec![0.0; 2 * 2 * 2],
+            shape: [2, 2, 2, 1],
+            knots_azimuth: vec![0.0, 0.0, 0.0, 360.0, 360.0, 360.0],
+            knots_elevation: vec![0.0, 0.0, 0.0, 90.0, 90.0, 90.0],
+            knots_frequency: vec![8000.0, 8000.0, 8000.0, 9000.0, 9000.0, 9000.0],
+            knots_temperature: vec![290.0, 290.0, 290.0, 290.0, 290.0, 290.0],
+            spline_order: 3,
+        });
+        repo_calibrated.add_calibration(calibration_with_surface);
+        let response_calibrated = compute_gain_from_request(&request, &repo_calibrated).unwrap();
+        assert!(response_calibrated.metadata.spillover_loss_db.is_none());
+        let loss_calibrated = response_calibrated
+            .loss_db
+            .expect("reference requested (calibrated baseline)");
+
+        // With the reference tracking the actual's (absent) spillover, loss_db must match
+        // the no-spillover calibrated baseline exactly — no one-sided bias.
+        assert!(
+            (loss_uncalibrated - loss_calibrated).abs() < 1e-6,
+            "reference spillover must track the actual: uncalibrated large-offset loss = \
+             {loss_uncalibrated}, calibrated (no spillover) loss = {loss_calibrated}"
+        );
+    }
+
+    /// Spillover keys on correction-surface *presence* (whole-antenna gate), NOT
+    /// on per-query coverage. An antenna WITH a surface whose coverage excludes the
+    /// query (so `correction_applied` is false but `correction_surface.is_some()`)
+    /// must still get NO spillover.
+    #[test]
+    fn test_spillover_not_applied_when_surface_present_but_out_of_coverage() {
+        let mut repo = CalibrationRepository::new();
+
+        // Coverage restricted to a narrow region the default request falls outside.
+        let coverage = CalibrationCoverage::builder()
+            .azimuth_range(0.0, 5.0)
+            .elevation_range(0.0, 5.0)
+            .frequency_range(8000.0, 9000.0)
+            .num_measurements(100)
+            .has_correction_surface(true)
+            .build()
+            .unwrap();
+        let mut calibration = create_test_calibration(CalibrationStatus::PartiallyCalibrated {
+            accuracy_estimate_db: 1.5,
+            coverage,
+        });
+        // Attach a valid surface so `correction_surface.is_some()` even though the query
+        // is out of coverage (→ correction not applied).
+        calibration.correction_surface = Some(crate::data::types::BSplineModel4D {
+            coefficients: vec![0.0; 2 * 2 * 2],
+            shape: [2, 2, 2, 1],
+            knots_azimuth: vec![0.0, 0.0, 0.0, 5.0, 5.0, 5.0],
+            knots_elevation: vec![0.0, 0.0, 0.0, 5.0, 5.0, 5.0],
+            knots_frequency: vec![8000.0, 8000.0, 8000.0, 9000.0, 9000.0, 9000.0],
+            knots_temperature: vec![290.0, 290.0, 290.0, 290.0, 290.0, 290.0],
+            spline_order: 3,
+        });
+        repo.add_calibration(calibration);
+
+        let request = create_test_request();
+        let response = compute_gain_from_request(&request, &repo).unwrap();
+
+        // Surface exists but wasn't applied here (out of coverage → extrapolated).
+        assert!(response.metadata.extrapolated);
+        // Whole-antenna gate: presence of a surface suppresses spillover regardless.
+        assert!(
+            response.metadata.spillover_loss_db.is_none(),
+            "spillover must key on surface presence, not coverage; got {:?}",
+            response.metadata.spillover_loss_db
         );
     }
 
