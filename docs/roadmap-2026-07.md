@@ -152,7 +152,7 @@ clean of `unwrap`/`expect`/`panic`). The problems are of a different kind:
 
 | Phase | Goal | Exit criteria |
 |---|---|---|
-| **0 — Guardrails** | Regression net + truthful onboarding docs before anything else. | CI config committed and green locally; CLAUDE.md true; all examples deserialize under a drift test. |
+| **0 — Guardrails** ✅ **DONE 2026-07-09** | Regression net + truthful onboarding docs before anything else. | ✅ CI committed, live & green on `main` (github.com/blstoll/antenna-model); CLAUDE.md true; all examples deserialize under a drift test. Commits G1 `f48b23c`, G2 `8c65946`, G3 `c2dceee` (+ CI hardening `c13e196`/`4b439c0`, deps `bf18d60`). |
 | **1 — Prediction correctness & physics scope** | No unexplained numbers on the live path; scope decisions recorded. | P1–P3 decisions in the register; spillover applied on the uncalibrated path with calibrated outputs unchanged (P1) and artifacts stamped with a physics-model version (P1b); f/D fails loudly; single G/T implementation; domain-contract open items current. |
 | **2 — Safety & operational correctness** | Config promises kept; bounded work; honest lifecycle. | Oversized → 413; slow → timeout; integration has a wall-clock budget; concurrency capped; readiness/fail_fast/shutdown real; H3 validator complete. (Coordinate-ambiguity handling moved to C8, which removes the ambiguity instead of warning about it.) |
 | **3 — API contract quality** | A client can trust the spec and the error contract — finalized once, then frozen. | One error vocabulary, JSON bodies, one status-code policy (C2–C4); **C8 contract finalization landed**: `feed_position` renamed, `coordinate_system` required, typed warnings, coherent heatmap endpoints, `/h3-heatmap` documented; openapi drift guard (C7) in CI freezing the result. |
@@ -166,7 +166,7 @@ Defaults are recommendations; the maintainer decides.
 
 | ID | Question | Options | Recommended default | Status | Decided by / date |
 |----|----------|---------|---------------------|--------|-------------------|
-| G1-hosting | Where will this repo live? (No remote configured today.) | GitHub / other forge / local-only | GitHub; CI committed ready-to-activate. Repo created at github.com/blstoll/antenna-model; CI committed ready-to-activate. | **Decided** | Maintainer, 2026-07-08 |
+| G1-hosting | Where will this repo live? (No remote configured today.) | GitHub / other forge / local-only | GitHub — repo created at github.com/blstoll/antenna-model; CI committed and live (green on `main` 2026-07-09). | **Decided** | Maintainer, 2026-07-08 |
 | P1 | Model spillover / blockage / cross-pol physically? | Implement / document-as-scope / staged | **Staged implement**: spillover promoted into the gain path for antennas *without* a correction surface (double-counting gated, see unit P1); blockage = F3 (data-gated); cross-pol out of scope. Rationale: many antenna systems are expected to lack calibration data, and the unmodeled spillover bias (~0.4–1 dB) alone can consume the <1 dB accuracy budget on the uncalibrated path. | **Decided** | Maintainer, 2026-07-08 |
 | P2 | Unverified Seidel higher-order coefficients on the live path | Verify vs literature / fence with warning / remove | Fence: annotate + warn when contribution > 0.1 dB; seek citation | Open | — |
 | P3 | Ray-trace stub for feed offsets > 0.5·f | Implement (F2) / reject requests / document + flag | Document + flag on all endpoints | Open | — |

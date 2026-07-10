@@ -51,7 +51,17 @@ Phase 5: F1..F6 gated on register rows (P3, P5/F4, F5, D9); P1 + C8 DECIDED 2026
 
 ## Phase 0 — Guardrails (execute in order: G1 → G2 → G3)
 
+> **STATUS — ✅ Phase 0 COMPLETE, executed & merged to `main` 2026-07-09.**
+> G1 `f48b23c` (+ hardening `c13e196`, `4b439c0`), G2 `8c65946`, G3 `c2dceee`. Repo is live
+> at github.com/blstoll/antenna-model; CI runs on every push and is green (`rustfmt` +
+> `clippy + test` gate; `cargo audit` non-blocking). Extra work beyond the original units,
+> driven by the first CI run: committed `Cargo.lock`; `RUST_MIN_STACK` fix for a Linux-only
+> libtest stack overflow in the calibrate 3D→4D round-trip test (see D3 follow-up);
+> targeted dependency bump clearing 5 advisories (`bf18d60`); two follow-ups filed as GitHub
+> issues #1 (D3 stack) and #2 (D6 audit).
+
 ### G1 — Stand up CI (ready-to-activate) — Effort: M
+**✅ DONE 2026-07-09** — `f48b23c`; hardening in `c13e196` (PR de-dup + concurrency, `Cargo.lock` tracked) and `4b439c0` (`RUST_MIN_STACK`, `checkout@v5`). CI live & green on `main`; local gate is `scripts/check.sh`. Note: HEAD had 27 clippy 1.95.0 lints (not 3) — all mechanical, incl. 10 in `#[cfg(test)]` modules of `src/model/` (maintainer-approved to fix).
 
 - **Entrance criteria / read first:** There is no `.github/workflows/` and **no git remote**
   (verified 2026-07-08). Read: root `Cargo.toml` (workspace members), CLAUDE.md's
@@ -76,6 +86,7 @@ Phase 5: F1..F6 gated on register rows (P3, P5/F4, F5, D9); P1 + C8 DECIDED 2026
 - **Depends on:** nothing. **Blocks:** everything else (softly).
 
 ### G2 — Make CLAUDE.md true — Effort: S/M
+**✅ DONE 2026-07-09** — `8c65946`. All six exit criteria met (live B-spline, Sprints 1–7, deleted-module refs, `antennas.yaml`, property-tests→D7 annotation, precomputed-artifact claim, module map). Also caught & corrected the false "all `antennas.yaml` disabled" claim (4 of 8 are enabled) — see the notes in D9/S5/P1b below.
 
 - **Entrance / read first:** CLAUDE.md in full. Truth sources: `docs/implementation-plan.md`
   (sprints 5–7 marked complete), `antenna-model/src/model/correction_interpolator.rs` +
@@ -95,6 +106,7 @@ Phase 5: F1..F6 gated on register rows (P3, P5/F4, F5, D9); P1 + C8 DECIDED 2026
 - **Depends on:** nothing. **Blocks:** all later agent-executed units (standing rule 1).
 
 ### G3 — Fix broken example requests + lock them with a test — Effort: S
+**✅ DONE 2026-07-09** — `c2dceee`. Four broken examples fixed to `[w,x,y,z]` arrays (heatmap's non-schema attitude removed); consistency swept across all of `examples/`; drift test `antenna-model/tests/example_requests_deserialize.rs` maps filename→type and panics on any unmapped file (empirically verified). Runs in the G1 gate.
 
 - **Entrance / read first:** `antenna-model/src/api/schemas.rs:276` and `:623`
   (`vehicle_attitude: Option<[f64; 4]>` — **confirm the component order documented in the
