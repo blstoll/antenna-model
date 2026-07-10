@@ -10,6 +10,10 @@ if [[ "$(uname)" == "Darwin" ]]; then
   export CPPFLAGS="${CPPFLAGS:-} -I/opt/homebrew/opt/openblas/include"
 fi
 
+# Match CI: give libtest worker threads a larger stack. The calibrate 3D→4D
+# round-trip evaluation overflows the ~2 MiB default on Linux debug builds.
+export RUST_MIN_STACK="${RUST_MIN_STACK:-16777216}"
+
 echo "==> cargo fmt --all -- --check"
 cargo fmt --all -- --check
 

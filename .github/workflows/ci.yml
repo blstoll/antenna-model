@@ -12,13 +12,18 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # libtest runs each test on a worker thread with a ~2 MiB default stack. The
+  # calibrate 3D→4D correction-surface round-trip evaluation is stack-hungry and
+  # overflows that on the Linux debug build (it passes on macOS). Give test
+  # threads more headroom. (Making the evaluation iterative is roadmap unit D3.)
+  RUST_MIN_STACK: "16777216"
 
 jobs:
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -28,7 +33,7 @@ jobs:
     name: clippy + test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install OpenBLAS (calibrate uses ndarray-linalg openblas-system)
         run: sudo apt-get update && sudo apt-get install -y libopenblas-dev gfortran pkg-config
       - uses: dtolnay/rust-toolchain@stable
@@ -45,7 +50,7 @@ jobs:
     runs-on: ubuntu-latest
     continue-on-error: true  # advisories are tracked, not gating, until the allowlist policy is set
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
