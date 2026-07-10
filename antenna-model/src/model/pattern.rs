@@ -283,7 +283,15 @@ pub fn compute_gain(
 
     // Physical spillover efficiency (uncalibrated path only; gated by the caller).
     // `analysis.spillover_fraction` is the LOST fraction, so η = 1 − fraction.
-    let (gain, spillover_loss_db) = if params.apply_spillover {
+    //
+    // Only fold spillover in where the physical-optics model AND estimate_spillover are
+    // valid — the StandardPhysicalOptics regime (small feed offsets). In higher-order /
+    // ray-tracing modes (large offsets) estimate_spillover's linear offset extrapolation
+    // saturates to ~100%; those cases already carry degraded-accuracy warnings and keep
+    // their pre-P1 gain. (Roadmap P1 finding, 2026-07-09.)
+    let (gain, spillover_loss_db) = if params.apply_spillover
+        && matches!(analysis.mode, ComputationMode::StandardPhysicalOptics)
+    {
         let eta = (1.0 - analysis.spillover_fraction).clamp(1e-6, 1.0);
         (gain * eta, Some(10.0 * eta.log10()))
     } else {
@@ -1011,6 +1019,44 @@ mod tests {
         assert!(
             reported > -3.0,
             "spillover loss implausibly large: {reported}"
+        );
+    }
+
+    #[test]
+    fn test_spillover_not_applied_outside_standard_po() {
+        // Large feed offset (0.35 lateral, f = 0.5 → offset ratio 0.7 > 0.5) routes to
+        // RayTracing mode, where estimate_spillover's linear extrapolation is invalid.
+        // Even with apply_spillover = true, no spillover must be folded in there.
+        let reflector = ReflectorGeometry::builder()
+            .diameter(1.0)
+            .focal_length(0.5)
+            .surface_rms(0.001)
+            .build()
+            .unwrap();
+        let feed = FeedParameters::builder()
+            .position(FeedPosition::new(0.35, 0.0, 0.5)) // 0.35 m from focus → ratio 0.7
+            .q_factor(8.0)
+            .build()
+            .unwrap();
+        let config = AntennaConfiguration::builder()
+            .id("spill_large")
+            .name("Spill Large Offset")
+            .reflector(reflector)
+            .feed(feed)
+            .build()
+            .unwrap();
+
+        // Confirm this geometry does NOT route through standard physical optics.
+        let analysis = analyze_edge_cases(&config, 0.05, 0.0);
+        assert_ne!(analysis.mode, ComputationMode::StandardPhysicalOptics);
+
+        let mut params = IntegrationParams::fast();
+        params.apply_spillover = true;
+        let result = compute_gain_db(0.05, 0.0, &config, 8.4e9, &params).unwrap();
+        assert!(
+            result.spillover_loss_db.is_none(),
+            "spillover must not be applied outside StandardPhysicalOptics, got {:?}",
+            result.spillover_loss_db
         );
     }
 
