@@ -293,7 +293,13 @@ pub fn compute_h3_link_budget(
     let cells: Vec<h3o::CellIndex> = center_cell.grid_disk(request.n_rings);
 
     // 4. Build antenna configuration
-    let integration_params = IntegrationParams::fast();
+    let mut integration_params = IntegrationParams::fast();
+    // Double-counting gate: physical spillover only when NO correction surface exists
+    // (the surface otherwise absorbs it). Whole-antenna gate — never per query. Shared
+    // by both `compute_gain_db` call sites below (boresight reference and per-cell),
+    // matching `service::evaluator::compute_gain_from_request` so the /gain, heatmap,
+    // and h3 endpoints agree on an uncalibrated antenna's gain.
+    integration_params.apply_spillover = calibration.correction_surface.is_none();
     let frequency_hz = request.frequency_mhz * 1e6;
 
     let (antenna_config, feed_x, feed_y, feed_z) = build_antenna_config(calibration, request)?;
@@ -746,26 +752,38 @@ mod tests {
     }
 
     /// Core correctness test: a constant +2 dB correction surface must shift
-    /// every cell's gain by exactly +2 dB relative to the physics-only run.
+    /// every cell's gain by exactly +2 dB relative to a "base" run.
     ///
-    /// Also checks that `correction_applied` is truthfully reported.
+    /// The base fixture uses a 0 dB constant correction surface rather than no
+    /// surface at all. This is deliberate (P1 follow-up): since `correction_surface`
+    /// presence also gates `apply_spillover` off (a real correction surface
+    /// empirically absorbs physical spillover — see
+    /// `service::evaluator::compute_gain_from_request`), comparing against a truly
+    /// uncalibrated (no-surface) baseline would leak the small physical-spillover
+    /// delta into the +2 dB comparison. Giving both fixtures *a* surface (0 dB vs.
+    /// 2 dB) holds `apply_spillover` constant across the comparison, isolating the
+    /// correction-surface delta exactly.
+    ///
+    /// `correction_applied` truthfulness (true/false) is checked separately below
+    /// against a genuinely uncalibrated fixture.
     #[test]
     fn test_h3_applies_correction_surface() {
         let request = make_h3_test_request();
 
-        // Physics-only calibration (no correction surface).
-        let cal_no_corr = make_h3_test_calibration();
+        // "Base": a 0 dB (no-op) constant correction surface, so apply_spillover
+        // is OFF — same as the +2 dB fixture below, isolating the surface delta.
+        let mut cal_base = make_h3_test_calibration();
+        cal_base.correction_surface = Some(constant_surface_db(0.0));
+        cal_base.calibration_coverage = None; // unrestricted → correction applies everywhere
 
         // Same calibration but with a +2 dB correction surface and unrestricted coverage.
-        let mut cal_corr = cal_no_corr.clone();
+        let mut cal_corr = cal_base.clone();
         cal_corr.correction_surface = Some(constant_surface_db(2.0));
-        cal_corr.calibration_coverage = None; // unrestricted → correction applies everywhere
 
         // Disable the cache so each run computes fresh (avoids cross-test key collisions).
         let cache1 = GainCache::new(false, 1);
-        let base =
-            compute_h3_link_budget(&request, &cal_no_corr, &cache1, std::time::Instant::now())
-                .expect("physics-only H3 run failed");
+        let base = compute_h3_link_budget(&request, &cal_base, &cache1, std::time::Instant::now())
+            .expect("base (0 dB surface) H3 run failed");
 
         let cache2 = GainCache::new(false, 1);
         let corrected =
@@ -793,7 +811,7 @@ mod tests {
             );
         }
 
-        // correction_applied must be true when surface was applied.
+        // correction_applied must be true when a (non-degenerate) surface was applied.
         assert!(
             corrected
                 .calibration_status
@@ -803,9 +821,17 @@ mod tests {
             "correction_applied should be true when correction surface was applied"
         );
 
-        // correction_applied must be false when no surface present.
+        // correction_applied must be false when no surface is present at all
+        // (checked against a genuinely uncalibrated fixture, distinct from `base`
+        // above which has a 0 dB surface purely to control the spillover gate).
+        let cal_no_corr = make_h3_test_calibration();
+        assert!(cal_no_corr.correction_surface.is_none());
+        let cache3 = GainCache::new(false, 1);
+        let uncalibrated =
+            compute_h3_link_budget(&request, &cal_no_corr, &cache3, std::time::Instant::now())
+                .expect("uncalibrated H3 run failed");
         assert!(
-            !base
+            !uncalibrated
                 .calibration_status
                 .as_ref()
                 .map(|s| s.correction_applied)
@@ -961,5 +987,99 @@ mod tests {
         )
         .unwrap();
         assert!(resp_none.beam_squint_deg.is_none(), "no offset -> None");
+    }
+
+    /// P1 cross-endpoint consistency: for an uncalibrated antenna (no correction
+    /// surface), the h3 endpoint must apply the same physical spillover reduction
+    /// as the `/gain` endpoint for the identical geometry.
+    ///
+    /// `make_h3_test_request` uses `n_rings: 0`, so `compute_h3_link_budget` yields
+    /// exactly one cell (the center cell) and its `azimuth_deg`/`elevation_deg` are
+    /// derived from that same center cell used as the boresight reference — so
+    /// `loss_db` is 0 and `gain_db` is the raw (spillover-gated) physics+correction
+    /// gain for that single point. We reconstruct the identical emitter geometry
+    /// (feed lat/lon -> H3 center cell -> ECEF at alt 0, same resolution-selection
+    /// logic) and feed it through `compute_gain_from_request` (the `/gain` path,
+    /// already spillover-wired by P1 task 2) to check both endpoints agree to
+    /// within numerical noise.
+    #[test]
+    fn test_h3_consistent_with_gain_endpoint_for_uncalibrated_antenna() {
+        use crate::api::schemas::GainRequest;
+        use crate::data::repository::CalibrationRepository;
+        use crate::service::evaluator::compute_gain_from_request;
+
+        let calibration = make_h3_test_calibration();
+        assert!(
+            calibration.correction_surface.is_none(),
+            "fixture must be uncalibrated (no correction surface) for this test to be meaningful"
+        );
+
+        let request = make_h3_test_request();
+        assert_eq!(request.n_rings, 0, "test relies on a single-cell grid");
+
+        let cache = GainCache::new(false, 1);
+        let h3_response =
+            compute_h3_link_budget(&request, &calibration, &cache, std::time::Instant::now())
+                .expect("h3 link budget computation failed");
+        assert_eq!(
+            h3_response.cells.len(),
+            1,
+            "n_rings=0 must yield exactly one cell"
+        );
+        let cell = &h3_response.cells[0];
+
+        // Reconstruct the exact emitter ECEF position h3 used for the center cell:
+        // same resolution-selection logic, same feed lat/lon -> H3 cell -> ECEF at alt 0.
+        let resolution = request
+            .h3_resolution
+            .unwrap_or_else(|| h3_resolution_from_frequency(request.frequency_mhz));
+        let h3_res = h3o::Resolution::try_from(resolution).expect("valid H3 resolution");
+        let (feed_ex, feed_ey, feed_ez) =
+            pos_to_ecef(&request.feed_position).expect("feed position to ECEF");
+        let (feed_lon_deg, feed_lat_deg, _) =
+            ecef_to_geodetic(feed_ex, feed_ey, feed_ez).expect("feed ECEF to geodetic");
+        let center_latlng =
+            h3o::LatLng::new(feed_lat_deg, feed_lon_deg).expect("valid feed lat/lon");
+        let center_cell = center_latlng.to_cell(h3_res);
+        let cell_latlng = h3o::LatLng::from(center_cell);
+        let (cell_ex, cell_ey, cell_ez) =
+            geodetic_to_ecef(cell_latlng.lng(), cell_latlng.lat(), 0.0)
+                .expect("cell lat/lon to ECEF");
+
+        let mut emitter_position = Position3D::new(cell_ex, cell_ey, cell_ez);
+        emitter_position.coordinate_system = Some(CoordinateSystem::ECEF);
+
+        let gain_request = GainRequest {
+            antenna_id: request.antenna_id.clone(),
+            feed_id: request.feed_id.clone(),
+            vehicle_position: request.vehicle_position.clone(),
+            reflector_boresight: request.reflector_boresight.clone(),
+            feed_position: request.feed_position.clone(),
+            emitter_position,
+            frequency_mhz: request.frequency_mhz,
+            pointing_frequency_mhz: request.pointing_frequency_mhz,
+            include_reference: false,
+            vehicle_attitude: request.vehicle_attitude,
+        };
+
+        let mut repo = CalibrationRepository::new();
+        repo.add_calibration(calibration);
+        let gain_response = compute_gain_from_request(&gain_request, &repo)
+            .expect("/gain computation failed for the reconstructed geometry");
+
+        // Sanity: confirm spillover was actually applied on the /gain path, so this
+        // comparison is non-vacuous (both endpoints reduce gain, not both skip it).
+        assert!(
+            gain_response.metadata.spillover_loss_db.is_some(),
+            "expected spillover to be applied on the /gain path for an uncalibrated antenna"
+        );
+
+        assert!(
+            (cell.gain_db - gain_response.gain_db).abs() < 1e-6,
+            "h3 cell gain {:.9} dB should match /gain endpoint gain {:.9} dB for the same \
+             geometry (both spillover-gated identically for an uncalibrated antenna)",
+            cell.gain_db,
+            gain_response.gain_db
+        );
     }
 }

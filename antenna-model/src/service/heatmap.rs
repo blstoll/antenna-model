@@ -698,4 +698,144 @@ mod tests {
             }
         }
     }
+
+    /// P1 cross-endpoint consistency: for an uncalibrated antenna (no correction
+    /// surface), a heatmap cell must apply the same physical spillover reduction
+    /// as the `/gain` endpoint (`compute_gain_from_request`) for the identical
+    /// geometry.
+    ///
+    /// `generate_heatmap` delegates every grid point to `compute_gain_from_request`
+    /// (see `evaluate_grid_point` above) rather than calling `compute_gain_db`
+    /// directly, so this endpoint already inherits the `apply_spillover` gate wired
+    /// into the evaluator. This test proves that inheritance holds for a real,
+    /// small-offset (standard physical-optics) uncalibrated query: a single-point
+    /// grid's `peak_gain_db` (the only point, so it equals that point's raw gain)
+    /// must match the `/gain` gain for the reconstructed identical `GainRequest`.
+    #[test]
+    fn test_heatmap_consistent_with_gain_endpoint_for_uncalibrated_antenna() {
+        use crate::data::types::{
+            AntennaCalibration, CalibrationMetadata, CalibrationStatus, FeedParameters,
+            MeshParameters, PhysicalAntennaConfig, ReflectorGeometry, ValidityRanges,
+        };
+
+        let metadata = CalibrationMetadata::builder()
+            .antenna_name("Heatmap Consistency Test Antenna")
+            .calibration_date("2025-01-01T00:00:00Z")
+            .format_version("2.0")
+            .data_source("test")
+            .rmse_db(0.5)
+            .r_squared(0.99)
+            .num_measurements(10)
+            .build()
+            .unwrap();
+        let calibration = AntennaCalibration::builder()
+            .antenna_id("heatmap_consistency_antenna")
+            .feed_id("heatmap_consistency_feed")
+            .metadata(metadata)
+            .physical_config(PhysicalAntennaConfig {
+                reflector: ReflectorGeometry {
+                    diameter_m: 10.0,
+                    focal_length_m: 5.0,
+                    f_over_d_ratio: 0.5,
+                    surface_rms_mm: 0.5,
+                },
+                // Zero design feed offset -> zero physical feed-offset ratio ->
+                // ComputationMode::StandardPhysicalOptics, so spillover actually applies.
+                feed: FeedParameters {
+                    position: (0.0, 0.0, 0.0),
+                    q_factor: 8.0,
+                    phase_center_offset_m: 0.0,
+                },
+                mesh: Some(MeshParameters {
+                    mesh_spacing_mm: 5.0,
+                    wire_diameter_mm: 0.5,
+                }),
+            })
+            .validity_ranges(ValidityRanges {
+                azimuth_min_max: (0.0, 360.0),
+                elevation_min_max: (0.0, 90.0),
+                frequency_min_max: (1000.0, 10000.0),
+                temperature_const: 290.0,
+            })
+            .calibration_status(CalibrationStatus::FullyCalibrated {
+                accuracy_estimate_db: 1.0,
+            })
+            .build()
+            .unwrap();
+        assert!(
+            calibration.correction_surface.is_none(),
+            "fixture must be uncalibrated (no correction surface) for this test to be meaningful"
+        );
+
+        let mut repository = CalibrationRepository::new();
+        repository.add_calibration(calibration);
+
+        let vehicle_position = Position3D::new(0.0, 0.0, 0.0); // geodetic: equator, prime meridian
+        let reflector_boresight = Position3D::new(0.0, 0.0, 10.0);
+        let feed_position = Position3D::new(0.0, 0.0, 10.0); // focused (unsteered) feed
+        let frequency_mhz = 8400.0;
+        let azimuth_deg = 30.0;
+        let elevation_deg = 20.0;
+
+        // Single-point rectangular grid: min == max means exactly one grid cell,
+        // so `peak_gain_db` (max over all successful points) equals that one
+        // point's raw gain, with no other cell competing for "peak".
+        let grid_config = GridConfig::Rectangular {
+            azimuth_range_deg: RangeConfig::new(azimuth_deg, azimuth_deg, 1.0),
+            elevation_range_deg: RangeConfig::new(elevation_deg, elevation_deg, 1.0),
+        };
+
+        let heatmap_request = HeatmapRequest {
+            antenna_id: "heatmap_consistency_antenna".to_string(),
+            feed_id: "heatmap_consistency_feed".to_string(),
+            vehicle_position: vehicle_position.clone(),
+            reflector_boresight: reflector_boresight.clone(),
+            feed_position: feed_position.clone(),
+            frequency_mhz,
+            pointing_frequency_mhz: None,
+            grid_config,
+        };
+
+        let heatmap_response =
+            generate_heatmap(&heatmap_request, &repository).expect("heatmap computation failed");
+        assert_eq!(heatmap_response.metadata.points_evaluated, 1);
+        assert_eq!(heatmap_response.metadata.failed_points, 0);
+
+        // Reconstruct the exact emitter position the heatmap used for this cell
+        // (same private helper `evaluate_grid_point` calls internally).
+        let emitter_position =
+            compute_emitter_position_from_angles(&vehicle_position, azimuth_deg, elevation_deg)
+                .expect("failed to compute emitter position");
+
+        let gain_request = GainRequest {
+            antenna_id: "heatmap_consistency_antenna".to_string(),
+            feed_id: "heatmap_consistency_feed".to_string(),
+            vehicle_position,
+            reflector_boresight,
+            feed_position,
+            emitter_position,
+            frequency_mhz,
+            pointing_frequency_mhz: None,
+            include_reference: false,
+            vehicle_attitude: None,
+        };
+
+        let gain_response = compute_gain_from_request(&gain_request, &repository)
+            .expect("/gain computation failed for the reconstructed geometry");
+
+        // Sanity: confirm spillover was actually applied on the /gain path, so this
+        // comparison is non-vacuous (both endpoints reduce gain, not both skip it).
+        assert!(
+            gain_response.metadata.spillover_loss_db.is_some(),
+            "expected spillover to be applied on the /gain path for an uncalibrated antenna"
+        );
+
+        assert!(
+            (heatmap_response.metadata.peak_gain_db - gain_response.gain_db).abs() < 1e-6,
+            "heatmap cell gain {:.9} dB should match /gain endpoint gain {:.9} dB for the same \
+             geometry (both spillover-gated identically for an uncalibrated antenna)",
+            heatmap_response.metadata.peak_gain_db,
+            gain_response.gain_db
+        );
+    }
 }
