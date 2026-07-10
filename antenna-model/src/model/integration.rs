@@ -101,6 +101,13 @@ pub struct IntegrationParams {
     /// When true, adds astigmatism, field curvature, and distortion terms
     /// for feeds with moderate offsets (0.3f - 0.5f).
     pub use_higher_order_aberrations: bool,
+
+    /// Fold physical feed-spillover efficiency into the returned gain.
+    ///
+    /// Decided by the SERVICE layer (set only for antennas with no correction
+    /// surface — the surface otherwise absorbs spillover empirically). The model
+    /// itself never inspects calibration; it only reads this bool.
+    pub apply_spillover: bool,
 }
 
 impl Default for IntegrationParams {
@@ -114,6 +121,7 @@ impl Default for IntegrationParams {
             absolute_tolerance: 1e-8, // Absolute error floor
             max_iterations: 5,        // Refinement iteration limit
             use_higher_order_aberrations: false,
+            apply_spillover: false,
         }
     }
 }
@@ -130,6 +138,7 @@ impl IntegrationParams {
             absolute_tolerance: 1e-7,
             max_iterations: 3,
             use_higher_order_aberrations: false,
+            apply_spillover: false,
         }
     }
 
@@ -144,6 +153,7 @@ impl IntegrationParams {
             absolute_tolerance: 1e-10,
             max_iterations: 8,
             use_higher_order_aberrations: false,
+            apply_spillover: false,
         }
     }
 

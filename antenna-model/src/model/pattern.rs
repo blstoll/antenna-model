@@ -56,6 +56,10 @@ pub struct GainComputationResult {
 
     /// Warnings from edge case analysis and computation
     pub warnings: Vec<String>,
+
+    /// Physical spillover loss (dB, negative) folded into `gain` when
+    /// `IntegrationParams::apply_spillover` was set; `None` otherwise.
+    pub spillover_loss_db: Option<f64>,
 }
 
 /// Select integration parameters based on angle and configuration
@@ -277,10 +281,23 @@ pub fn compute_gain(
         }
     };
 
+    // Physical spillover efficiency (uncalibrated path only; gated by the caller).
+    // `analysis.spillover_fraction` is the LOST fraction, so η = 1 − fraction.
+    let (gain, spillover_loss_db) = if params.apply_spillover {
+        let eta = (1.0 - analysis.spillover_fraction).clamp(1e-6, 1.0);
+        (gain * eta, Some(10.0 * eta.log10()))
+    } else {
+        (gain, None)
+    };
+
     // Apply gain floor for numerical stability
     let gain = apply_gain_floor(gain);
 
-    Ok(GainComputationResult { gain, warnings })
+    Ok(GainComputationResult {
+        gain,
+        warnings,
+        spillover_loss_db,
+    })
 }
 
 /// Absolute gain from the raw aperture integral (standard directivity formula):
@@ -451,6 +468,7 @@ pub fn compute_gain_db(
     Ok(GainComputationResult {
         gain: apply_gain_floor_db(gain_db),
         warnings: result.warnings,
+        spillover_loss_db: result.spillover_loss_db,
     })
 }
 
@@ -938,6 +956,61 @@ mod tests {
             has_convergence_warning,
             "Expected a convergence warning but got: {:?}",
             result.warnings
+        );
+    }
+
+    #[test]
+    fn test_spillover_applied_only_when_flagged() {
+        let reflector = ReflectorGeometry::builder()
+            .diameter(1.0)
+            .focal_length(0.5) // f/D = 0.5
+            .surface_rms(0.001)
+            .build()
+            .unwrap();
+        let feed = FeedParameters::builder()
+            .at_focus(0.5)
+            .q_factor(8.0)
+            .build()
+            .unwrap();
+        let config = AntennaConfiguration::builder()
+            .id("spill")
+            .name("Spill")
+            .reflector(reflector)
+            .feed(feed)
+            .build()
+            .unwrap();
+
+        let analysis = analyze_edge_cases(&config, 0.0, 0.0);
+        let expected_loss_db = 10.0 * (1.0 - analysis.spillover_fraction).log10();
+
+        let mut params = IntegrationParams::fast();
+
+        let base = compute_gain_db(0.0, 0.0, &config, 8.4e9, &params).unwrap();
+        assert!(base.spillover_loss_db.is_none());
+
+        params.apply_spillover = true;
+        let with = compute_gain_db(0.0, 0.0, &config, 8.4e9, &params).unwrap();
+        let reported = with.spillover_loss_db.expect("loss reported when applied");
+
+        assert!(
+            (reported - expected_loss_db).abs() < 1e-9,
+            "reported {reported} vs {expected_loss_db}"
+        );
+        assert!(
+            (with.gain - base.gain - expected_loss_db).abs() < 1e-6,
+            "gain delta must equal reported loss"
+        );
+        // Over-tapered feeds (q=8, f/D=0.5) spill very little power past the rim, so the
+        // modeled loss is small in magnitude — but it must be negative (it reduces gain)
+        // and physically bounded. (The ~0.4-1 dB textbook spillover figure applies to
+        // broad feeds q~2-4, not these highly-directive designs — see roadmap P1 finding.)
+        assert!(
+            reported < 0.0,
+            "spillover loss must reduce gain: {reported}"
+        );
+        assert!(
+            reported > -3.0,
+            "spillover loss implausibly large: {reported}"
         );
     }
 
