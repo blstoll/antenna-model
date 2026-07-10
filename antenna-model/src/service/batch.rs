@@ -203,6 +203,7 @@ fn create_error_response(request: &GainRequest, error: AntennaModelError) -> Gai
             physics_model_ms: None,
             correction_surface_ms: None,
             extrapolated: false,
+            spillover_loss_db: None,
         },
         calibration_status: None, // Will be populated in Task 6.8
     }

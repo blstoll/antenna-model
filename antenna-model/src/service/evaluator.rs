@@ -207,7 +207,11 @@ pub fn compute_gain_from_request(
     })?;
 
     // Use fast integration parameters for <100ms target
-    let integration_params = IntegrationParams::fast();
+    let mut integration_params = IntegrationParams::fast();
+    // Double-counting gate: physical spillover only when NO correction surface exists
+    // (the surface otherwise absorbs it). Whole-antenna gate — never per query. Shared
+    // with the ideal-reference computation below, so base spillover cancels in loss_db.
+    integration_params.apply_spillover = calibration.correction_surface.is_none();
 
     // Convert frequency from MHz to Hz for physics model
     let frequency_hz = request.frequency_mhz * 1e6;
@@ -356,6 +360,7 @@ pub fn compute_gain_from_request(
             physics_model_ms: None,
             correction_surface_ms: None,
             extrapolated,
+            spillover_loss_db: result.spillover_loss_db,
         },
         calibration_status: calibration_status_info,
     })
@@ -811,6 +816,150 @@ mod tests {
         // Loss should be positive (gain < reference)
         let loss = response.loss_db.unwrap();
         assert!(loss >= 0.0);
+    }
+
+    /// Uncalibrated antennas (no correction surface) should have physical
+    /// spillover folded in: `apply_spillover` gated on, and the applied loss
+    /// (small negative dB, per P1 magnitude finding) surfaced on metadata.
+    #[test]
+    fn test_spillover_applied_for_uncalibrated_antenna() {
+        let mut repo = CalibrationRepository::new();
+        let calibration = create_test_calibration(CalibrationStatus::Uncalibrated {
+            accuracy_estimate_db: 3.0,
+            loss_accuracy_estimate_db: 2.0,
+        });
+        assert!(calibration.correction_surface.is_none());
+        repo.add_calibration(calibration);
+
+        let request = create_test_request();
+        let response = compute_gain_from_request(&request, &repo).unwrap();
+
+        let spillover = response
+            .metadata
+            .spillover_loss_db
+            .expect("spillover should be applied and reported for an uncalibrated antenna");
+        assert!(
+            spillover < 0.0,
+            "spillover loss must be negative, got {spillover}"
+        );
+    }
+
+    /// Calibrated antennas (correction surface present) must NOT have physical
+    /// spillover folded in — the surface already absorbs it empirically. The
+    /// flag must be off, so `spillover_loss_db` is `None`.
+    #[test]
+    fn test_spillover_not_applied_for_calibrated_antenna() {
+        let mut repo = CalibrationRepository::new();
+        let mut calibration = create_test_calibration(CalibrationStatus::FullyCalibrated {
+            accuracy_estimate_db: 1.0,
+        });
+        // Valid order-3 B-spline knot vectors (>=4 knots each), matching the pattern used by
+        // `test_correction_uses_calibration_temperature`, so the surface actually evaluates.
+        calibration.correction_surface = Some(crate::data::types::BSplineModel4D {
+            coefficients: vec![1.0; 2 * 2 * 2],
+            shape: [2, 2, 2, 1],
+            knots_azimuth: vec![0.0, 0.0, 0.0, 360.0, 360.0, 360.0],
+            knots_elevation: vec![0.0, 0.0, 0.0, 90.0, 90.0, 90.0],
+            knots_frequency: vec![8000.0, 8000.0, 8000.0, 9000.0, 9000.0, 9000.0],
+            knots_temperature: vec![290.0, 290.0, 290.0, 290.0, 290.0, 290.0],
+            spline_order: 3,
+        });
+        repo.add_calibration(calibration);
+
+        let request = create_test_request();
+        let response = compute_gain_from_request(&request, &repo).unwrap();
+
+        assert!(
+            response.metadata.spillover_loss_db.is_none(),
+            "calibrated antenna must not report spillover_loss_db, got {:?}",
+            response.metadata.spillover_loss_db
+        );
+    }
+
+    /// Reference invariant: the ideal reference computation shares the same
+    /// `integration_params` (and thus the same `apply_spillover` gate) as the
+    /// actual gain computation, so the *base* spillover applied to both should
+    /// cancel out of `loss_db` entirely, leaving only the physics baseline
+    /// delta that already exists for the calibrated path (surface-RMS Ruze
+    /// loss on the real antenna vs. a perfect ideal reference — see the sibling
+    /// `test_loss_near_zero_for_boresight_focused_feed`, tolerance 0.6 dB).
+    ///
+    /// We assert this directly by comparing the uncalibrated (spillover ON)
+    /// loss against the calibrated (spillover OFF) loss for the *same*
+    /// physical geometry: if spillover truly cancels, the two losses must be
+    /// numerically identical (not just both "small").
+    #[test]
+    fn test_loss_near_zero_for_boresight_focused_feed_uncalibrated() {
+        let mut boresight_request = create_test_request();
+        // Aim emitter along the boresight direction (on-axis) and feed at boresight (focused):
+        boresight_request.emitter_position = boresight_request.reflector_boresight.clone();
+        boresight_request.feed_position = boresight_request.reflector_boresight.clone();
+        boresight_request.include_reference = true;
+
+        // Baseline: calibrated (correction surface present) -> apply_spillover is off.
+        // `correction_surface` is a distinct field from `calibration_status`, so it must
+        // be attached explicitly even for `FullyCalibrated` (see other tests in this module).
+        let mut repo_calibrated = CalibrationRepository::new();
+        let mut calibration_with_surface =
+            create_test_calibration(CalibrationStatus::FullyCalibrated {
+                accuracy_estimate_db: 1.0,
+            });
+        calibration_with_surface.correction_surface = Some(crate::data::types::BSplineModel4D {
+            coefficients: vec![1.0; 2 * 2 * 2],
+            shape: [2, 2, 2, 1],
+            knots_azimuth: vec![0.0, 0.0, 0.0, 360.0, 360.0, 360.0],
+            knots_elevation: vec![0.0, 0.0, 0.0, 90.0, 90.0, 90.0],
+            knots_frequency: vec![8000.0, 8000.0, 8000.0, 9000.0, 9000.0, 9000.0],
+            knots_temperature: vec![290.0, 290.0, 290.0, 290.0, 290.0, 290.0],
+            spline_order: 3,
+        });
+        assert!(calibration_with_surface.correction_surface.is_some());
+        repo_calibrated.add_calibration(calibration_with_surface);
+        let response_calibrated =
+            compute_gain_from_request(&boresight_request, &repo_calibrated).unwrap();
+        assert!(response_calibrated.metadata.spillover_loss_db.is_none());
+        let loss_calibrated = response_calibrated
+            .loss_db
+            .expect("reference requested (calibrated baseline)");
+
+        // Uncalibrated: no correction surface -> apply_spillover is on for both
+        // the actual and ideal-reference computations.
+        let mut repo_uncalibrated = CalibrationRepository::new();
+        let calibration = create_test_calibration(CalibrationStatus::Uncalibrated {
+            accuracy_estimate_db: 3.0,
+            loss_accuracy_estimate_db: 2.0,
+        });
+        assert!(calibration.correction_surface.is_none());
+        repo_uncalibrated.add_calibration(calibration);
+        let response_uncalibrated =
+            compute_gain_from_request(&boresight_request, &repo_uncalibrated).unwrap();
+
+        // Confirm spillover was actually applied on this path (otherwise the
+        // invariant would hold trivially and prove nothing about cancellation).
+        let spillover = response_uncalibrated
+            .metadata
+            .spillover_loss_db
+            .expect("spillover should be applied on the uncalibrated path");
+        assert!(spillover < 0.0);
+
+        let loss_uncalibrated = response_uncalibrated
+            .loss_db
+            .expect("reference requested (uncalibrated)");
+
+        // The base spillover efficiency applies identically to the actual and
+        // ideal-reference computations (same q-factor, f/D, and on-axis/zero
+        // feed offset in both), so it must cancel exactly out of loss_db.
+        assert!(
+            (loss_uncalibrated - loss_calibrated).abs() < 1e-6,
+            "spillover should cancel out of loss_db entirely: calibrated (no spillover) = {loss_calibrated}, \
+             uncalibrated (spillover applied to both actual and reference) = {loss_uncalibrated}"
+        );
+
+        // Sanity: still within the same loose bound as the calibrated sibling test.
+        assert!(
+            loss_uncalibrated.abs() < 0.6,
+            "boresight focused-feed loss should be ~0 dB, got {loss_uncalibrated}"
+        );
     }
 
     #[test]

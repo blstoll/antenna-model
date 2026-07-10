@@ -359,6 +359,14 @@ pub struct ComputationMetadata {
 
     /// Whether the query was extrapolated (outside calibrated range)
     pub extrapolated: bool,
+
+    /// Physical spillover loss folded into `gain_db`, in dB (a small **negative**
+    /// value). `null` when physical spillover was NOT applied — i.e. the antenna
+    /// has a correction surface (which absorbs spillover empirically). Present only
+    /// on the uncalibrated path, so consumers can tell which model variant produced
+    /// the number.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spillover_loss_db: Option<f64>,
 }
 
 // ============================================================================
@@ -1803,6 +1811,7 @@ mod tests {
                 physics_model_ms: Some(30.0),
                 correction_surface_ms: Some(5.0),
                 extrapolated: false,
+                spillover_loss_db: None,
             },
             calibration_status: Some(CalibrationStatusInfo::from(&status)),
         };

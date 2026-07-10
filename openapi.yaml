@@ -676,6 +676,13 @@ components:
           nullable: true
         extrapolated:
           type: boolean
+        spillover_loss_db:
+          type: number
+          nullable: true
+          description: >-
+            Physical feed-spillover loss (dB, negative) folded into gain_db on the
+            uncalibrated path. Null when not applied (antenna has a correction
+            surface, which absorbs spillover empirically).
 
     CalibrationStatusInfo:
       type: object
