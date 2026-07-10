@@ -159,8 +159,22 @@ Phase 5: F1..F6 gated on register rows (P3, P5/F4, F5, D9); P1 + C8 DECIDED 2026
 - **Exit criteria:**
   1. For an antenna without a correction surface, gain is reduced by the spillover
      efficiency (`10·log10(η_spill)`); a test asserts the applied loss equals what
-     `estimate_spillover` predicts for the fixture, plus a sanity bound (loss in
-     ~0.3–1.5 dB for q=8, f/D=0.5).
+     `estimate_spillover` predicts for the fixture, plus a *true* sanity bound (loss
+     negative and bounded, `(-3, 0)` dB). **CORRECTED 2026-07-09 (during execution):**
+     the original "~0.3–1.5 dB for q=8, f/D=0.5" band was WRONG. With the code's existing
+     `estimate_spillover`, all four enabled design-spec antennas (q=8–11, f/D=0.4–0.5) are
+     heavily over-tapered, so modeled spillover is only ~**0.001–0.05 dB**, not 0.3–1.5 dB.
+     The ~0.4–1 dB textbook figure applies to broad feeds (q≈2–4), not these highly
+     directive designs. The mechanism is still correct and worth shipping (future-proofs
+     broad-feed antennas); its impact on *current* antennas is negligible. See the register
+     note on P1.
+     **SCOPE REFINEMENT 2026-07-09 (during execution):** spillover is applied only in
+     `ComputationMode::StandardPhysicalOptics` (small feed offsets). At large offsets
+     (>0.3·f) `estimate_spillover`'s linear offset extrapolation saturates to ~100%,
+     which clamped gain to a degenerate −60 dB and crushed 6 realistic off-boresight
+     integration scenarios. Those large-offset cases already carry degraded-accuracy
+     warnings and now keep their exact pre-P1 gain (maintainer-approved, zero regression).
+     A proper large-offset spillover model is F2/ray-tracing territory, not P1.
   2. Outputs for antennas WITH a correction surface are **unchanged** — all existing tests
      pass untouched, plus an explicit test asserting identical gain before/after for a
      calibrated fixture.

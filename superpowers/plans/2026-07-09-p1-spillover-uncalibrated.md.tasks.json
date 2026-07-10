@@ -1,0 +1,33 @@
+{
+  "planPath": "superpowers/plans/2026-07-09-p1-spillover-uncalibrated.md",
+  "tasks": [
+    {
+      "id": 1,
+      "subject": "Task 1: Model layer — apply spillover behind a flag, expose the loss",
+      "status": "completed",
+      "description": "**Goal:** compute_gain/compute_gain_db reduce gain by 10*log10(1-spillover) when params.apply_spillover is set, and return the applied loss; default (flag off) behavior byte-identical to today.\n\n**Files:** integration.rs:77-148 (IntegrationParams + Default/fast/high_accuracy); pattern.rs:52-59 (GainComputationResult), :216-284 (compute_gain), :431-455 (compute_gain_db); test in pattern.rs.\n\n**Acceptance Criteria:** apply_spillover:bool false in all constructors; flag off => unchanged + spillover_loss_db None + existing tests pass; flag on => gain reduced by 10*log10(1-analyze_edge_cases.spillover_fraction) and spillover_loss_db Some(that); q=8 f/D=0.5 boresight loss in [-1.5,-0.3] dB.\n\n**Verify:** cargo test -p antenna-model --lib model::pattern && cargo test --workspace\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/integration.rs\", \"antenna-model/src/model/pattern.rs\"], \"verifyCommand\": \"cargo test -p antenna-model --lib model::pattern && cargo test --workspace\", \"acceptanceCriteria\": [\"apply_spillover:bool added, false in all constructors\", \"flag off => gain unchanged, spillover_loss_db None, existing tests pass\", \"flag on => gain reduced by 10*log10(1-spillover_fraction), spillover_loss_db Some(that)\", \"q=8 f/D=0.5 boresight loss in [-1.5,-0.3] dB\"], \"modelTier\": \"standard\"}\n```"
+    },
+    {
+      "id": 2,
+      "subject": "Task 2: Service wiring (gain + batch) + response field + openapi",
+      "status": "completed",
+      "blockedBy": [1],
+      "description": "**Goal:** compute_gain_from_request enables spillover when correction_surface.is_none() and reports the loss on ComputationMetadata.spillover_loss_db; calibrated unchanged; mirrored in openapi.\n\n**Files:** schemas.rs:344-362 (ComputationMetadata) + :1800 (test literal); evaluator.rs:210 (params) + :353-359 (metadata); batch.rs:200-205 (metadata literal); openapi.yaml:663-678.\n\n**Acceptance Criteria:** spillover_loss_db Option<f64> skip_serializing_if none; uncalibrated => reduced + Some; calibrated => identical + None; uncalibrated boresight focused include_reference => loss_db ~0; openapi lists the field.\n\n**Verify:** cargo test -p antenna-model --lib service::evaluator && cargo test --workspace\n\n```json:metadata\n{\"files\": [\"antenna-model/src/api/schemas.rs\", \"antenna-model/src/service/evaluator.rs\", \"antenna-model/src/service/batch.rs\", \"openapi.yaml\"], \"verifyCommand\": \"cargo test -p antenna-model --lib service::evaluator && cargo test --workspace\", \"acceptanceCriteria\": [\"ComputationMetadata.spillover_loss_db Option<f64> skip_serializing_if none\", \"uncalibrated => gain reduced + spillover_loss_db Some\", \"calibrated => gain identical + spillover_loss_db None\", \"uncalibrated boresight focused include_reference => loss_db ~0\", \"openapi ComputationMetadata lists spillover_loss_db\"], \"modelTier\": \"standard\"}\n```"
+    },
+    {
+      "id": 3,
+      "subject": "Task 3: Cross-endpoint consistency — heatmap + h3-heatmap",
+      "status": "completed",
+      "blockedBy": [1],
+      "description": "**Goal:** heatmap and h3 apply the identical spillover gate so an uncalibrated antenna returns the same reduced gain from every endpoint (they call compute_gain_db directly, bypassing the evaluator).\n\n**Files:** heatmap.rs (IntegrationParams near :186); h3_link_budget.rs:213 and :372 (both compute_gain_db sites; correction at :229,:382); tests in both modules.\n\n**Acceptance Criteria:** both paths set apply_spillover = correction_surface.is_none() on the params passed to compute_gain_db; uncalibrated boresight cell/point equals /gain result < 1e-6 dB; calibrated unchanged.\n\n**Verify:** cargo test -p antenna-model --lib service::heatmap service::h3_link_budget && cargo test --workspace\n\n```json:metadata\n{\"files\": [\"antenna-model/src/service/heatmap.rs\", \"antenna-model/src/service/h3_link_budget.rs\"], \"verifyCommand\": \"cargo test -p antenna-model --lib service::heatmap service::h3_link_budget && cargo test --workspace\", \"acceptanceCriteria\": [\"heatmap + both h3 compute_gain_db sites set apply_spillover from correction_surface.is_none()\", \"uncalibrated boresight cell/point equals /gain result < 1e-6 dB\", \"calibrated unchanged\"], \"modelTier\": \"standard\"}\n```"
+    },
+    {
+      "id": 4,
+      "subject": "Task 4: Documentation — scope contract + accuracy caveats",
+      "status": "completed",
+      "blockedBy": [2],
+      "description": "**Goal:** domain-contract.md gains a 'Modeled vs unmodeled efficiency terms' section; api-documentation.md accuracy notes state uncalibrated-path spillover is now modeled, honest about residual uncertainty.\n\n**Files:** docs/domain-contract.md (new subsection before Open items, :101); docs/api-documentation.md:86-91.\n\n**Acceptance Criteria:** domain-contract section w/ efficiency-terms table + double-counting gate + spillover_loss_db + blockage=F3/cross-pol OOS; api-documentation uncalibrated note mentions spillover folded in + honest caveat; docs only.\n\n**Verify:** rg -n 'Modeled vs unmodeled' docs/domain-contract.md\n\n```json:metadata\n{\"files\": [\"docs/domain-contract.md\", \"docs/api-documentation.md\"], \"verifyCommand\": \"rg -n 'Modeled vs unmodeled' docs/domain-contract.md\", \"acceptanceCriteria\": [\"domain-contract has 'Modeled vs unmodeled efficiency terms' section w/ gate + spillover_loss_db + F3/cross-pol scope\", \"api-documentation uncalibrated note mentions spillover folded in + honest caveat\", \"docs only, no code\"], \"modelTier\": \"mechanical\"}\n```"
+    }
+  ],
+  "lastUpdated": "2026-07-09"
+}
