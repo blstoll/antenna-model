@@ -98,6 +98,46 @@ at `:1180`), but it is a standing trap for **any new endpoint or example that co
 | Reflector boresight position must not coincide with vehicle position | Yes — enforced with an error (`coordinates_3d.rs:513-515,600-602`) |
 | `vehicle_position` ≡ reflector vertex (single antenna-frame origin, no offset modeled) | No executable test — a documented modeling assumption (see frame table); future code must not add a vehicle-to-vertex offset without a contract change |
 
+## Modeled vs unmodeled efficiency terms
+
+The live gain path multiplies these efficiency factors into directivity:
+
+| Term | Where | Applies to |
+|---|---|---|
+| Ruze (surface roughness) | `pattern.rs::overall_efficiency` (`ruze_efficiency`) | all antennas |
+| Mesh reflection | `pattern.rs::overall_efficiency` (`mesh::mesh_reflection_efficiency`) | mesh reflectors |
+| **Feed spillover** | `pattern.rs::compute_gain` behind `IntegrationParams::apply_spillover` (roadmap **P1**) | **uncalibrated antennas, StandardPhysicalOptics mode only** |
+
+**Double-counting gate:** spillover is applied *only* when the antenna has no correction
+surface at all (whole-antenna gate, decided in the service layer — `compute_gain_from_request`,
+and mirrored on the h3 path). For calibrated antennas the fitted correction surface already
+absorbs spillover empirically, so applying it again would double-count.
+
+**Mode gate:** spillover is additionally applied only in
+`ComputationMode::StandardPhysicalOptics` (small feed offsets). At large offsets (>0.3·f,
+routing to higher-order / ray-tracing modes) `estimate_spillover`'s linear offset
+extrapolation is unvalidated and saturates to ~100%; those cases already carry
+degraded-accuracy warnings and retain their exact pre-P1 gain. So `spillover_loss_db` is
+`null` for large-offset queries even on uncalibrated antennas.
+
+**Signal:** the applied loss is reported as `ComputationMetadata.spillover_loss_db`
+(dB, negative; `null` when not applied — calibrated antenna, or large-offset/non-standard-PO).
+
+**Magnitude reality (finding 2026-07-09):** for the four currently-enabled design-spec
+antennas (q=8–11, f/D=0.4–0.5 — all highly over-tapered) the modeled spillover loss is only
+~**0.001–0.05 dB**, not the ~0.4–1 dB textbook figure (which applies to broad feeds, q≈2–4).
+The correction removes a known systematic bias where it is material, but for these directive
+designs its impact is small; it is not what limits their uncalibrated accuracy.
+
+**Unmodeled (by decision):**
+- **Blockage** (feed/strut aperture blockage, ~0.1–0.5 dB) — deferred to feature **F3**;
+  data-gated on antenna-config geometry parameters that do not exist yet.
+- **Cross-polarization** — out of scope (<0.1 dB on-axis for symmetric prime-focus dishes).
+
+**Honest caveat:** modeling spillover removes a known systematic bias on the uncalibrated
+path, but does **not** make uncalibrated predictions calibrated-grade — guessed q-factor and
+assumed surface RMS still dominate the uncertainty there.
+
 ## Open items surfaced while mining (not fixed here)
 
 - `phase_center_offset_phase` computed/tested but apparently not consumed by the live

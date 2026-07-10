@@ -87,6 +87,12 @@ The API supports multiple calibration statuses:
 - **Partially Calibrated (Boresight)**: ±1 dB at boresight, ±1-2 dB loss
 - **Partially Calibrated (Limited Coverage)**: ±1-1.5 dB in-coverage, ±2-3 dB extrapolated
 - **Uncalibrated**: ±3-5 dB absolute gain, ±2-3 dB loss (design specs only)
+  - Physical feed-spillover efficiency is now folded into the returned gain on this path
+    (reported per-response as `metadata.spillover_loss_db`, dB and negative; applied only for
+    small-offset/standard-physical-optics queries). For the enabled directive design-spec
+    antennas this correction is small (~0.001–0.05 dB); the ±3-5 dB accuracy above remains
+    limited by design-spec parameter uncertainty (q-factor, surface RMS) and by unmodeled
+    blockage/cross-pol — it is not calibrated-grade.
 
 All responses include a `calibration_status` field with accuracy estimates.
 
