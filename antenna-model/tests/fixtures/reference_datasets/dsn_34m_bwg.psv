@@ -33,7 +33,7 @@
 #     +0.17 dB from measured; the residual is the honest prime-focus-vs-shaped-Cassegrain
 #     topology gap.
 #   Ka-band 1.5 dB — P7 auto-refocus compensates the phase-center defocus (the design's
-#     0.008 m = 0.85λ at Ka previously cost ~3.3 dB); the model lands +0.01 dB from
+#     0.008 m = 0.85λ at Ka previously cost ~3.4 dB); the model lands +0.01 dB from
 #     measured. Was 5.0 dB while the defocus was unmodeled.
 #     See docs/findings-2026-07-10-ka-phase-center-defocus.md (resolved by roadmap P7).
 dsn_34m_uncalibrated | x_band  |  8420.0 | 45.0 | 68.0 | 0.70 | 1.0 | DESCANSO Monograph 4 Ch.8 (34-m BWG) / DSN 810-005 Mod.104 — X-band ~70% aperture efficiency near 45 deg elevation

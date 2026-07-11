@@ -206,6 +206,7 @@ antennas:
           name: "S-Band Feed"
           position: [0.0, 0.0, 0.0]
           q_factor: 1.14  # ~-11 dB edge taper at f/D 0.4 (was 8.5; see q_factor_from_taper / illumination.rs)
+          # datasheet values; compensated by the model (auto-refocus, P7) — see reference-validation note below
           phase_center_offset_m: 0.02
           frequency_range: [2200.0, 2300.0]
 
