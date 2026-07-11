@@ -814,6 +814,7 @@ antennas:
           position: [0.0, 0.0, 0.0]
           q_factor: 8.0
           phase_center_offset_m: 0.0
+          axial_defocus_m: 0.03
           frequency_range: [7100.0, 8500.0]
 "#;
         let config_path = data_dir.join("antennas.yaml");
@@ -841,6 +842,8 @@ antennas:
         assert_eq!(cal.physical_config.reflector.f_over_d_ratio, 0.5);
         assert_eq!(cal.physical_config.reflector.surface_rms_mm, 1.5);
         assert_eq!(cal.physical_config.feed.q_factor, 8.0);
+        // YAML -> data seam: explicit axial_defocus_m reaches the loaded calibration (P7)
+        assert_eq!(cal.physical_config.feed.axial_defocus_m, 0.03);
         assert!(cal.physical_config.mesh.is_none());
         assert!(cal.correction_surface.is_none());
 

@@ -413,7 +413,7 @@ pub struct FeedParameters {
     /// Deliberate axial defocus of the feed phase center from the focal point, in
     /// meters. Default 0 (focused). `phase_center_offset_m` is compensated by the
     /// model (auto-refocus, roadmap P7) and does not produce defocus; this field is
-    /// the explicit defocus knob. NOTE: bincode layout change — see P1b caveat.
+    /// the explicit defocus knob.
     #[serde(default)]
     pub axial_defocus_m: f64,
 }
