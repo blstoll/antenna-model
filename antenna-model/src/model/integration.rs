@@ -520,11 +520,13 @@ fn aperture_integrand(
     // Lateral (xy-plane) displacement drives coma; axial (z) offset drives defocus.
     let feed_displacement = config.feed.position.radial_displacement();
     let feed_displacement_angle = config.feed.position.y.atan2(config.feed.position.x);
-    // Axial offset of the feed's PHASE CENTER from the focal point:
-    // physical z-offset plus the phase-center offset along the feed axis
-    // (positive = away from the vertex, matching phase_feed_displacement's delta_z).
+    // Axial offset of the feed's PHASE CENTER from the focal point: physical
+    // z-offset plus any DELIBERATE defocus (positive = away from the vertex,
+    // matching phase_feed_displacement's delta_z). The feed's own
+    // phase_center_offset is assumed compensated by per-band feed positioning
+    // (auto-refocus, roadmap P7 decided 2026-07-10) and does not contribute.
     let feed_axial_offset =
-        config.feed.position.z - config.reflector.focal_length + config.feed.phase_center_offset;
+        config.feed.position.z - config.reflector.focal_length + config.feed.axial_defocus;
 
     // Calculate angle of incidence (simplified - assumes small angles)
     // For parabolic reflector, theta_incident ≈ ρ/(2f)
@@ -987,11 +989,11 @@ mod tests {
         assert_eq!(evals, 17 * 33);
     }
 
-    /// phase_center_offset must act as an axial defocus. Before the fix it was
-    /// parsed and validated but never entered the physics, so both gains were
-    /// identical and this test failed.
+    /// Auto-refocus (roadmap P7): phase_center_offset is a recorded feed property
+    /// the model compensates — it must NOT change gain. Deliberate defocus goes
+    /// through the explicit axial_defocus field instead.
     #[test]
-    fn test_phase_center_offset_produces_defocus_loss() {
+    fn test_phase_center_offset_alone_produces_no_defocus_loss() {
         let feed_focused = FeedParameters::new(FeedPosition::at_focus(0.5), 8.0, 0.0, 1.0).unwrap();
         let feed_pco = FeedParameters::new(FeedPosition::at_focus(0.5), 8.0, 0.05, 1.0).unwrap();
 
@@ -1016,8 +1018,47 @@ mod tests {
             .gain;
 
         assert!(
-            g_focused - g_pco > 1.0,
-            "5 cm phase-center offset must cost >1 dB defocus at 8.4 GHz: focused={g_focused:.2}, pco={g_pco:.2}"
+            (g_focused - g_pco).abs() < 1e-9,
+            "phase_center_offset is auto-refocused and must not change gain: \
+             focused={g_focused:.6}, pco={g_pco:.6}"
+        );
+    }
+
+    /// The defocus math stays live through the explicit field: a 5 cm deliberate
+    /// axial defocus must cost >1 dB at 8.4 GHz (same physics the old
+    /// test_phase_center_offset_produces_defocus_loss pinned).
+    #[test]
+    fn test_axial_defocus_produces_defocus_loss() {
+        let feed_focused = FeedParameters::new(FeedPosition::at_focus(0.5), 8.0, 0.0, 1.0).unwrap();
+        let mut feed_defocused =
+            FeedParameters::new(FeedPosition::at_focus(0.5), 8.0, 0.0, 1.0).unwrap();
+        feed_defocused.axial_defocus = 0.05;
+
+        let mk = |feed| {
+            AntennaConfiguration::new(
+                "t".into(),
+                "T".into(),
+                ReflectorGeometry::new(1.0, 0.5, 0.0).unwrap(),
+                feed,
+                None,
+            )
+            .unwrap()
+        };
+
+        let params = crate::model::integration::IntegrationParams::default();
+        let g_focused =
+            crate::model::pattern::compute_gain_db(0.0, 0.0, &mk(feed_focused), 8.4e9, &params)
+                .unwrap()
+                .gain;
+        let g_defocused =
+            crate::model::pattern::compute_gain_db(0.0, 0.0, &mk(feed_defocused), 8.4e9, &params)
+                .unwrap()
+                .gain;
+
+        assert!(
+            g_focused - g_defocused > 1.0,
+            "5 cm axial_defocus must cost >1 dB defocus at 8.4 GHz: \
+             focused={g_focused:.2}, defocused={g_defocused:.2}"
         );
     }
 }

@@ -304,6 +304,7 @@ mod tests {
                 position: FeedPosition::new(x, y, z),
                 q_factor: 8.0,
                 phase_center_offset: 0.0,
+                axial_defocus: 0.0,
                 asymmetry_factor: 1.0,
             },
             mesh: None,

@@ -183,9 +183,20 @@ pub struct FeedParameters {
 
     /// Phase center offset in meters (distance from physical feed to phase center,
     /// along the feed axis; positive = away from the reflector vertex).
-    /// Typically ±λ/4, frequency-dependent. Enters the physics as an additional
-    /// axial defocus term in the aperture phase.
+    /// Typically ±λ/4, frequency-dependent.
+    ///
+    /// AUTO-REFOCUS (roadmap P7, decided 2026-07-10): recorded feed property only.
+    /// The model assumes the feed is positioned so its phase center sits at the
+    /// focal point (real antennas are refocused per band), so this field does NOT
+    /// enter the gain computation. Use `axial_defocus` for deliberate defocus.
     pub phase_center_offset: f64,
+
+    /// Deliberate axial defocus of the feed's phase center from the focal point,
+    /// in meters (positive = away from the reflector vertex). Default 0 (focused).
+    /// This is the explicit knob for intentional defocus; it enters the aperture
+    /// phase as a quadratic (defocus) term in `integration.rs`.
+    #[serde(default)]
+    pub axial_defocus: f64,
 
     /// Asymmetry factor for E-plane vs H-plane patterns (1.0 = symmetric)
     /// Values > 1.0 indicate broader E-plane pattern
@@ -204,6 +215,7 @@ impl FeedParameters {
             position,
             q_factor,
             phase_center_offset,
+            axial_defocus: 0.0,
             asymmetry_factor,
         };
         params.validate()?;
@@ -304,6 +316,7 @@ pub struct FeedParametersBuilder {
     q_factor: Option<f64>,
     phase_center_offset: Option<f64>,
     asymmetry_factor: Option<f64>,
+    axial_defocus: Option<f64>,
 }
 
 impl FeedParametersBuilder {
@@ -337,6 +350,12 @@ impl FeedParametersBuilder {
         self
     }
 
+    /// Set deliberate axial defocus (meters from the focal point; default 0)
+    pub fn axial_defocus(mut self, defocus: f64) -> Self {
+        self.axial_defocus = Some(defocus);
+        self
+    }
+
     /// Build the `FeedParameters` with validation
     pub fn build(self) -> ValidationResult<FeedParameters> {
         let position = self.position.ok_or_else(|| ValidationError::InvalidValue {
@@ -352,7 +371,10 @@ impl FeedParametersBuilder {
         let phase_center_offset = self.phase_center_offset.unwrap_or(0.0);
         let asymmetry_factor = self.asymmetry_factor.unwrap_or(1.0); // Default to symmetric
 
-        FeedParameters::new(position, q_factor, phase_center_offset, asymmetry_factor)
+        let mut params =
+            FeedParameters::new(position, q_factor, phase_center_offset, asymmetry_factor)?;
+        params.axial_defocus = self.axial_defocus.unwrap_or(0.0);
+        Ok(params)
     }
 }
 

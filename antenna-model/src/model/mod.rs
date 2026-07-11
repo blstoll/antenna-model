@@ -40,7 +40,9 @@ pub mod ray_trace;
 /// # History
 /// - 1: baseline at introduction (P1b) — post-P1 model (spillover applied on the
 ///   uncalibrated path, fractional-q spillover fix)
-pub const PHYSICS_MODEL_VERSION: u32 = 1;
+/// - 2: P7 auto-refocus — `phase_center_offset` no longer contributes axial defocus
+///   (compensated feed property); deliberate defocus via the new `axial_defocus` field
+pub const PHYSICS_MODEL_VERSION: u32 = 2;
 
 // Re-export commonly used types
 pub use coordinates::{
