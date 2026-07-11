@@ -413,6 +413,13 @@ pub struct FeedSpecConfig {
     /// Phase center offset in meters
     pub phase_center_offset_m: f64,
 
+    /// Deliberate axial defocus of the feed phase center from the focal point,
+    /// in meters (optional; default 0 = focused). phase_center_offset_m is
+    /// compensated by the model (auto-refocus, roadmap P7) — this is the explicit
+    /// knob for intentional defocus.
+    #[serde(default)]
+    pub axial_defocus_m: f64,
+
     /// Frequency range [min, max] in MHz
     pub frequency_range: [f64; 2],
 }
@@ -1115,6 +1122,34 @@ antennas:
         assert_eq!(specs.feeds.len(), 2);
         assert_eq!(specs.feeds[0].id, "x_band_downlink");
         assert_eq!(specs.feeds[1].id, "ka_band");
+    }
+
+    #[test]
+    fn test_feed_spec_axial_defocus_default_and_explicit() {
+        // Absent key -> defaults to 0.0 (all existing configs stay valid)
+        let yaml_absent = r#"
+          id: "f1"
+          name: "Feed 1"
+          position: [0.0, 0.0, 0.0]
+          q_factor: 1.14
+          phase_center_offset_m: 0.01
+          frequency_range: [8000.0, 8500.0]
+        "#;
+        let feed: FeedSpecConfig = serde_yaml::from_str(yaml_absent).unwrap();
+        assert_eq!(feed.axial_defocus_m, 0.0);
+
+        // Explicit key -> preserved
+        let yaml_explicit = r#"
+          id: "f2"
+          name: "Feed 2"
+          position: [0.0, 0.0, 0.0]
+          q_factor: 1.14
+          phase_center_offset_m: 0.0
+          axial_defocus_m: 0.05
+          frequency_range: [8000.0, 8500.0]
+        "#;
+        let feed: FeedSpecConfig = serde_yaml::from_str(yaml_explicit).unwrap();
+        assert_eq!(feed.axial_defocus_m, 0.05);
     }
 
     #[test]

@@ -226,6 +226,7 @@ impl CalibrationRepository {
                 ),
                 q_factor: feed_spec.q_factor,
                 phase_center_offset_m: feed_spec.phase_center_offset_m,
+                axial_defocus_m: feed_spec.axial_defocus_m,
             };
 
             let mesh = design.mesh.as_ref().map(|m| MeshParameters {

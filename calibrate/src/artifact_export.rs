@@ -288,6 +288,8 @@ pub fn export_full_calibration(
         position: physical.feed_position_m,
         q_factor: physical.q_factor,
         phase_center_offset_m: physical.phase_center_offset_m,
+        // deliberate defocus is service-config only; not exposed by the calibrate CLI
+        axial_defocus_m: 0.0,
     };
     let mut config_builder = PhysicalAntennaConfigBuilder::default()
         .reflector(reflector)

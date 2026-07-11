@@ -409,6 +409,13 @@ pub struct FeedParameters {
 
     /// Phase center offset from feed aperture in meters
     pub phase_center_offset_m: f64,
+
+    /// Deliberate axial defocus of the feed phase center from the focal point, in
+    /// meters. Default 0 (focused). `phase_center_offset_m` is compensated by the
+    /// model (auto-refocus, roadmap P7) and does not produce defocus; this field is
+    /// the explicit defocus knob. NOTE: bincode layout change — see P1b caveat.
+    #[serde(default)]
+    pub axial_defocus_m: f64,
 }
 
 impl FeedParameters {
@@ -1270,6 +1277,7 @@ pub struct FeedParametersBuilder {
     position: Option<(f64, f64, f64)>,
     q_factor: Option<f64>,
     phase_center_offset_m: Option<f64>,
+    axial_defocus_m: Option<f64>,
 }
 
 impl FeedParametersBuilder {
@@ -1288,11 +1296,17 @@ impl FeedParametersBuilder {
         self
     }
 
+    pub fn axial_defocus_m(mut self, defocus: f64) -> Self {
+        self.axial_defocus_m = Some(defocus);
+        self
+    }
+
     pub fn build(self) -> Result<FeedParameters, String> {
         Ok(FeedParameters {
             position: self.position.ok_or("position is required")?,
             q_factor: self.q_factor.ok_or("q_factor is required")?,
             phase_center_offset_m: self.phase_center_offset_m.unwrap_or(0.0),
+            axial_defocus_m: self.axial_defocus_m.unwrap_or(0.0),
         })
     }
 }

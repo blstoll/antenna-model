@@ -589,6 +589,8 @@ pub fn build_calibration_artifact(
         ),
         q_factor: calibration_result.tuned_params.q_factor,
         phase_center_offset_m: feed_spec.phase_center_offset_m,
+        // deliberate defocus is service-config only; not exposed by the calibrate CLI
+        axial_defocus_m: 0.0,
     };
 
     // Build mesh parameters with tuned values (if applicable) (using data types)

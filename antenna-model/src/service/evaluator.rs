@@ -183,6 +183,7 @@ pub fn compute_gain_from_request(
         .position(feed_position)
         .q_factor(calibration.physical_config.feed.q_factor)
         .phase_center_offset(calibration.physical_config.feed.phase_center_offset_m)
+        .axial_defocus(calibration.physical_config.feed.axial_defocus_m)
         .build()
         .map_err(|e| AntennaModelError::Generic(format!("Failed to build feed: {}", e)))?;
 
@@ -502,6 +503,7 @@ mod tests {
                     position: (0.0, 0.0, 0.0),
                     q_factor: 8.0,
                     phase_center_offset_m: 0.0,
+                    axial_defocus_m: 0.0,
                 },
                 mesh: Some(MeshParameters {
                     mesh_spacing_mm: 5.0,
@@ -781,6 +783,52 @@ mod tests {
         // Should have warning about uncalibrated
         assert!(!response.warnings.is_empty());
         assert!(response.warnings.iter().any(|w| w.contains("uncalibrated")));
+    }
+
+    /// Evaluate a boresight-pointed request (emitter and feed both aimed along the
+    /// reflector boresight, as in `test_loss_near_zero_for_boresight_focused_feed`)
+    /// against an uncalibrated fixture whose feed has been mutated by `mutate` —
+    /// returns the served gain_db. Boresight pointing is used (rather than the
+    /// default off-axis `create_test_request()` geometry) so that gain changes are
+    /// attributable to the feed mutation rather than to which sidelobe the default
+    /// off-axis direction happens to land in.
+    fn gain_with_feed_mutation(mutate: impl FnOnce(&mut FeedParameters)) -> f64 {
+        let mut calibration = create_test_calibration(CalibrationStatus::Uncalibrated {
+            accuracy_estimate_db: 3.0,
+            loss_accuracy_estimate_db: 2.0,
+        });
+        mutate(&mut calibration.physical_config.feed);
+        let mut repo = CalibrationRepository::new();
+        repo.add_calibration(calibration);
+        let mut request = create_test_request();
+        request.emitter_position = request.reflector_boresight.clone();
+        request.feed_position = request.reflector_boresight.clone();
+        compute_gain_from_request(&request, &repo).unwrap().gain_db
+    }
+
+    /// P7 auto-refocus, end-to-end: a config-level phase_center_offset_m must not
+    /// change the served gain (it is a compensated feed property).
+    #[test]
+    fn test_phase_center_offset_m_is_inert_at_service_level() {
+        let g_zero = gain_with_feed_mutation(|_| {});
+        let g_pco = gain_with_feed_mutation(|feed| feed.phase_center_offset_m = 0.02);
+        // Same deterministic code path, same physics inputs -> bit-identical.
+        assert_eq!(
+            g_zero, g_pco,
+            "phase_center_offset_m must be inert (auto-refocus, P7)"
+        );
+    }
+
+    /// P7: axial_defocus_m is the live deliberate-defocus knob, end-to-end.
+    #[test]
+    fn test_axial_defocus_m_reduces_gain_at_service_level() {
+        let g_focused = gain_with_feed_mutation(|_| {});
+        let g_defocused = gain_with_feed_mutation(|feed| feed.axial_defocus_m = 0.05);
+        assert!(
+            g_focused - g_defocused > 0.5,
+            "5 cm axial_defocus_m at 8.4 GHz must cost measurable gain: \
+             focused={g_focused:.2}, defocused={g_defocused:.2}"
+        );
     }
 
     #[test]
@@ -1398,6 +1446,7 @@ mod tests {
                     position: (0.0, 0.0, 0.0),
                     q_factor: 8.0,
                     phase_center_offset_m: 0.0,
+                    axial_defocus_m: 0.0,
                 },
                 mesh: Some(MeshParameters {
                     mesh_spacing_mm: 5.0,

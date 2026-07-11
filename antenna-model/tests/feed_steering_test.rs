@@ -47,6 +47,7 @@ fn create_test_calibration(antenna_id: &str, feed_id: &str) -> AntennaCalibratio
                 position: (0.0, 0.0, 0.0), // Zero offset from focal point
                 q_factor: 10.0,
                 phase_center_offset_m: 0.0,
+                axial_defocus_m: 0.0,
             },
             mesh: Some(MeshParameters {
                 mesh_spacing_mm: 5.0,

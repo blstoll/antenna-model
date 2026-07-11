@@ -751,6 +751,16 @@ mod tests {
 
         assert_eq!(feed.q_factor, 8.0);
         assert_eq!(feed.asymmetry_factor, 1.0); // Default
+        assert_eq!(feed.axial_defocus, 0.0); // Default when not set
+
+        let defocused = FeedParameters::builder()
+            .at_focus(17.0)
+            .q_factor(8.0)
+            .phase_center_offset(0.01)
+            .axial_defocus(0.05)
+            .build()
+            .unwrap();
+        assert_eq!(defocused.axial_defocus, 0.05); // Explicit value preserved
     }
 
     #[test]
