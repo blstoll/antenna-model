@@ -29,11 +29,12 @@
 #   antenna_id | feed_id | frequency_mhz | elevation_deg | reference_gain_dbi | reference_efficiency | tolerance_db | source
 #
 # tolerance_db notes:
-#   X-band 1.5 dB — a real guard: after the q_factor fix (2026-07-10) the model lands -0.73 dB
-#     from measured, so the residual is the honest prime-focus-vs-shaped-Cassegrain topology gap.
-#   Ka-band 5.0 dB — deliberately LOOSE: model sits ~3.5 dB low (eff 0.29 vs 0.66). Diagnosed as
-#     phase-center axial DEFOCUS (phase_center_offset_m = 0.008 m = 0.85λ at Ka), NOT spillover
-#     (spillover is 0.192 at both bands) and NOT an integration artifact. Zeroing the phase center
-#     recovers Ka to ~-0.1 dB. See docs/findings-2026-07-10-ka-phase-center-defocus.md; fix deferred.
-dsn_34m_uncalibrated | x_band  |  8420.0 | 45.0 | 68.0 | 0.70 | 1.5 | DESCANSO Monograph 4 Ch.8 (34-m BWG) / DSN 810-005 Mod.104 — X-band ~70% aperture efficiency near 45 deg elevation
-dsn_34m_uncalibrated | ka_band | 32000.0 | 45.5 | 79.3 | 0.66 | 5.0 | DESCANSO Monograph 4 Ch.8 (34-m BWG) — Ka-band peak aperture efficiency ~66% near 45.5 deg elevation
+#   X-band 1.0 dB — after the q_factor fix and P7 auto-refocus (2026-07-10) the model lands
+#     +0.17 dB from measured; the residual is the honest prime-focus-vs-shaped-Cassegrain
+#     topology gap.
+#   Ka-band 1.5 dB — P7 auto-refocus compensates the phase-center defocus (the design's
+#     0.008 m = 0.85λ at Ka previously cost ~3.3 dB); the model lands +0.01 dB from
+#     measured. Was 5.0 dB while the defocus was unmodeled.
+#     See docs/findings-2026-07-10-ka-phase-center-defocus.md (resolved by roadmap P7).
+dsn_34m_uncalibrated | x_band  |  8420.0 | 45.0 | 68.0 | 0.70 | 1.0 | DESCANSO Monograph 4 Ch.8 (34-m BWG) / DSN 810-005 Mod.104 — X-band ~70% aperture efficiency near 45 deg elevation
+dsn_34m_uncalibrated | ka_band | 32000.0 | 45.5 | 79.3 | 0.66 | 1.5 | DESCANSO Monograph 4 Ch.8 (34-m BWG) — Ka-band peak aperture efficiency ~66% near 45.5 deg elevation

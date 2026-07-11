@@ -240,8 +240,11 @@ antennas:
   # These uncalibrated entries mirror real, publicly-documented antennas so the
   # physics model can be scored against measured peak gain / aperture efficiency
   # (see antenna-model/tests/reference_validation.rs and the .psv fixtures).
-  # Feeds are set FOCUSED: q_factor at a ~-11 dB edge taper (via q_factor_from_taper)
-  # and phase_center_offset_m = 0 (see docs/findings-2026-07-10-ka-phase-center-defocus.md).
+  # Feeds are set to a ~-11 dB edge taper q_factor (via q_factor_from_taper).
+  # phase_center_offset_m is a recorded feed property the model COMPENSATES
+  # (auto-refocus, roadmap P7, 2026-07-10) — it does not produce defocus; use
+  # axial_defocus_m (default 0) for deliberate defocus studies.
+  # (see docs/findings-2026-07-10-ka-phase-center-defocus.md)
 
   - id: "dsn_70m_uncalibrated"
     name: "DSN 70m - Uncalibrated (reference)"
@@ -259,7 +262,7 @@ antennas:
           name: "X-Band Feed"
           position: [0.0, 0.0, 0.0]
           q_factor: 1.39  # ~-11 dB edge taper at f/D 0.43
-          phase_center_offset_m: 0.0  # focused
+          phase_center_offset_m: 0.0  # recorded feed property; compensated (P7)
           frequency_range: [8400.0, 8500.0]
 
       mesh: null

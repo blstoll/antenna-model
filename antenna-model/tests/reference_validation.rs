@@ -22,8 +22,8 @@
 //! These are design-spec (uncalibrated) antennas with feeds set to a sensible edge taper; the
 //! real dishes are dual-reflector while the model is prime-focus, so a small systematic offset is
 //! expected. Tolerances are regression guards, not accuracy claims. The tables printed with
-//! `--nocapture` are the real deliverable. Known open item: Ka-band phase-center defocus
-//! (`docs/findings-2026-07-10-ka-phase-center-defocus.md`).
+//! `--nocapture` are the real deliverable. Ka-band phase-center defocus resolved by P7
+//! auto-refocus (2026-07-10) — `phase_center_offset_m` is compensated; see the fixture notes.
 //!
 //! Run with:
 //!   cargo test -p antenna-model --test reference_validation -- --nocapture --test-threads=1
