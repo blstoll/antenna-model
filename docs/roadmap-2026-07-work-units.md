@@ -37,6 +37,7 @@ G1 ─┬─ G2 ── G3
     ├─ P4, P5, P2 (parallel)      P1 ─┬─ P1b (coordinate w/ D2)
     │                                 └─ P3 ─┐
     │                             P5 ────────┼─ P6 ─ D8, D5
+    │  P1b ─ P7;  P8 (independent) ──────────┤
     ├─ S1 ─ S2 ─ S3(after Phase 1) ─ S4 ─ S5 │
     ├─ S6                                    │
     ├─ C3 ─ C4 ─ C2 ─ C8 ─ C7                │
@@ -44,7 +45,8 @@ G1 ─┬─ G2 ── G3
     ├─ D1 ─ D2 ─ D3;  D6                     │
     └─ (Phases 1–3 done) ─ D4 ─ D7
 Superseded by C8 (do not implement): S7, C5, C6
-Phase 5: F1..F6 gated on register rows (P3, P5/F4, F5, D9); P1 + C8 DECIDED 2026-07-08
+Phase 5: F1..F7 gated on register rows (P3, P5/F4, F5, D9, F7); P1 + C8 DECIDED 2026-07-08;
+P7 DECIDED 2026-07-10 (auto-refocus)
 ```
 
 ---
@@ -175,6 +177,13 @@ Phase 5: F1..F6 gated on register rows (P3, P5/F4, F5, D9); P1 + C8 DECIDED 2026
      integration scenarios. Those large-offset cases already carry degraded-accuracy
      warnings and now keep their exact pre-P1 gain (maintainer-approved, zero regression).
      A proper large-offset spillover model is F2/ray-tracing territory, not P1.
+     **REVISED 2026-07-10 (post-execution):** the 07-09 "negligible" magnitude was itself
+     an artifact of the over-tapered q-factors it was measured against. After the
+     reference-validation feed-taper fix (q≈1.1–3.1), spillover on the served antennas is
+     **material: ~0.8 dB** — the original 0.4–1 dB premise was right. A fractional-q
+     truncation in `estimate_spillover` (`powi` → `powf`) was fixed in the same session
+     (regression: `edge_cases.rs::test_spillover_honors_fractional_q`). See the register
+     row and `docs/domain-contract.md` "Magnitude reality".
   2. Outputs for antennas WITH a correction surface are **unchanged** — all existing tests
      pass untouched, plus an explicit test asserting identical gain before/after for a
      calibrated fixture.
@@ -275,6 +284,81 @@ Phase 5: F1..F6 gated on register rows (P3, P5/F4, F5, D9); P1 + C8 DECIDED 2026
   If they differ, STOP and escalate as a new decision item — do not pick one.
 - **Depends on:** G1. Feeds S6 (temperature *validation* happens there, not here).
 
+### P7 — Auto-refocus `phase_center_offset`; tighten Ka reference tolerance — Effort: M
+**[DECIDED 2026-07-10 — model auto-refocus]**
+
+- **Decision (recorded):** `phase_center_offset_m` is a **raw feed property** that the model
+  compensates: the evaluator positions the feed axially so the phase center lands at the
+  focal point (matching how real antennas are operated — large dishes refocus per band), so
+  the field no longer produces an uncompensated defocus. Deliberate defocus becomes a new
+  explicit field. Chosen over "config realism" (redefine the field as residual-after-focus
+  and set ≈0 by convention) on correctness/long-term grounds: the convention leaves a
+  standing trap where entering a datasheet phase-center value (0.005–0.02 m — exactly what
+  the old design specs had) silently costs multi-dB at Ka. Full diagnosis:
+  `docs/findings-2026-07-10-ka-phase-center-defocus.md`.
+- **Entrance / read first:** the findings doc above (decomposition table + root cause);
+  `antenna-model/src/model/integration.rs:526` (`feed_axial_offset =
+  position.z − focal_length + phase_center_offset` — the term to change);
+  `test_phase_center_offset_produces_defocus_loss` (`integration.rs:994`);
+  the `phase_center_offset` glossary entry in `docs/domain-contract.md`; the harness fixture
+  `antenna-model/tests/fixtures/reference_datasets/dsn_34m_bwg.psv` (Ka tolerance 5.0 dB,
+  deliberately loose pending this unit).
+- **Design constraints (must-follow):**
+  1. `phase_center_offset` stops contributing to the defocus term — the model assumes the
+     feed is positioned so its phase center sits at the focus. A **new explicit config
+     field** (e.g. `axial_defocus_m`, default 0) expresses deliberate defocus; the defocus
+     *math* stays intact and reachable through it.
+  2. `position.z − focal_length` remains a live defocus contribution — it represents actual
+     feed placement, not a feed property.
+  3. **Scope: the axial term only.** Do not touch lateral/steering math or sign conventions
+     (standing rule 2 — this unit is a sanctioned physics change, but only to the axial
+     defocus expression).
+  4. This changes `gain_physics` output for identical inputs → **bump
+     `physics_model_version`** per P1b's policy.
+- **Exit criteria:**
+  1. Harness DSN 34-m residuals ≈ 0.1 dB at **both** X and Ka (per the findings-doc
+     decomposition); **Ka tolerance in `dsn_34m_bwg.psv` tightened 5.0 → 1.5 dB** (and X to
+     ~1.0 dB if the residual supports it).
+  2. `test_phase_center_offset_produces_defocus_loss` reworked to pin the new explicit
+     field; a companion test asserts a nonzero `phase_center_offset` alone produces **no**
+     defocus loss.
+  3. All workspace tests green; `docs/domain-contract.md` glossary entry + open-items bullet
+     updated **in the same change** (contract rule).
+  4. Stretch: add a second multi-band reference antenna (e.g. DSN 34-m HEF) to confirm the
+     fix generalizes across D/λ.
+- **Gotchas:** the dead `illumination::phase_center_offset_phase` (`illumination.rs:357`) is
+  a *different*, unused implementation — do not wire it in; remove it or leave it for the
+  dead-code sweep, but don't confuse it with the live path.
+- **Depends on:** P1b (the version-stamp mechanism this unit bumps).
+
+### P8 — Off-axis honesty warning — Effort: S
+
+- **Rationale:** the model's off-axis (sidelobe) gain is systematically optimistic
+  (~8–13 dB below the ITU-R S.580 mask; see the contract's "Off-axis pattern / sidelobe
+  fidelity" section) and must not be silently served for interference / off-axis-EIRP use.
+  Until/unless F7 lands, the honest answer is a warning.
+- **Entrance / read first:** contract section above;
+  `service/evaluator.rs:411` (`generate_calibration_warnings` — the implementation site;
+  `corrected_el` is already at the call site, `:339`); the existing warning kinds it emits
+  (uncalibrated / partially-calibrated / outside-calibrated-region), to avoid double-warning.
+- **Design constraints:**
+  1. Warn when a query on an **uncalibrated** antenna is beyond the validated
+     main-beam/near-in region. Calibrated-but-out-of-coverage already gets the
+     extrapolation warning — do not stack a second warning there.
+  2. Threshold expressed in units of λ/D (beamwidth-relative, not a fixed angle — a 34-m Ka
+     beam is ~0.017° wide): e.g. θ beyond ~3× the first-null angle (≈1.6·λ/D rad for tapered
+     illumination). Executor picks the exact constant and documents it in the contract.
+  3. Message points consumers at the ITU mask / calibration data for off-axis use
+     (mirror the contract's language: sidelobe levels are optimistic; shape is validated,
+     levels are not).
+  4. String warning now; C8 stage 3 converts it to typed code `off_axis_unvalidated`
+     (already added to C8's enumerated list).
+- **Exit criteria:** warning appears on all four compute endpoints for a large-θ
+  uncalibrated query (test per endpoint); no warning inside the main beam; existing tests
+  untouched; `docs/api-documentation.md` accuracy-caveat section updated; openapi.yaml
+  mirrored (standing rule 4).
+- **Depends on:** G1. Independent of P7. Sequence before or with C8 stage 3.
+
 ### P6 — Refresh `docs/domain-contract.md` "Open items" — Effort: S (phase closer)
 
 - **Exit criteria:**
@@ -283,10 +367,10 @@ Phase 5: F1..F6 gated on register rows (P3, P5/F4, F5, D9); P1 + C8 DECIDED 2026
      duplicate Ruze in `surface.rs` → file deleted (glossary :77 updated).
   2. `transparency_at_wavelength` open item cross-references unit D8; f_over_d item
      cross-references P4.
-  3. P1/P2/P3/P5 outcomes recorded in the contract where relevant.
+  3. P1/P2/P3/P5/P7/P8 outcomes recorded in the contract where relevant.
   4. The design-doc-drift process item (contract :110-114) **re-verified** against the
      post-`aee11f9` design doc — it may already be resolved; check, don't assume.
-- **Depends on:** P1–P5.
+- **Depends on:** P1–P5, P7, P8.
 
 ---
 
@@ -536,8 +620,9 @@ pre-production confirmed, C8 stage 1 performs the actual rename to
   (currently at `schemas.rs:307,511,691`). Enumerate the code set from existing producers
   (grep `warnings.push` / warning constructors): expect at least `extrapolated`,
   `out_of_coverage`, `ray_trace_degraded`, `non_convergence`, plus the codes added by
-  roadmap units P1 (`spillover_applied`) and P2 (`higher_order_heuristic`) — coordinate
-  with those units if they land first (strings then; codes now).
+  roadmap units P1 (`spillover_applied`), P2 (`higher_order_heuristic`), and P8
+  (`off_axis_unvalidated`) — coordinate with those units if they land first (strings then;
+  codes now).
 - Exit: every producer emits a code + human message; the code enum documented in
   api-documentation.md + openapi; integration tests assert codes, not string matches.
 
@@ -771,3 +856,22 @@ justification per roadmap principle 4.
 `/status` `memory_bytes` reads `/proc/self/statm` (Linux-only). Use the `sysinfo` crate or
 report an explicit `supported: false` off-Linux. Low risk; schedulable any time after
 Phase 2.
+
+### F7 — Statistical sidelobe envelope/floor model — Effort: M/L (gated on register row F7 **and** reference sidelobe data)
+
+Makes off-axis predictions *envelope-conservative* instead of systematically optimistic
+(today: ~8–13 dB below the ITU-R S.580 mask — contract "Off-axis pattern / sidelobe
+fidelity"). Approach: an angle-dependent floor applied at the existing spillover seam in
+`pattern.rs::compute_gain` (`pattern.rs:284-302`, where `theta` is already in scope) — e.g.
+`max(pattern, floor(θ))` — **without touching the aperture integral**, which also sidesteps
+the numerical infeasibility of integrating far sidelobes for electrically huge dishes.
+Candidate floor mechanisms: Ruze scattered-power floor derived from `surface_rms`
+(the power the scalar Ruze efficiency removes from boresight has to go *somewhere*);
+blockage-raised sidelobes when F3's geometry parameters exist; an optional ITU-mask
+envelope output mode for regulatory screening. Reuses P1's uncalibrated-only gate
+(calibrated antennas' correction surfaces absorb real sidelobe behavior within coverage);
+bumps P1b's `physics_model_version`. **Data gate:** the S.580 harness test validates
+pattern *shape* only — floor *levels* need real reference sidelobe data before this can
+claim accuracy; without such data the unit must not start. **Explicitly out of scope**
+(roadmap §6): physical edge-diffraction and strut-scatter modeling — domain-expert
+territory, same class as F2. Until this lands, unit P8's warning is the honest answer.

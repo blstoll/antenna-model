@@ -72,8 +72,8 @@ at `:1180`), but it is a standing trap for **any new endpoint or example that co
 | `GainRequest.feed_position` / `H3LinkBudgetRequest.feed_position` | **The feed *pointing* location** — an Earth position the feed is aimed at (off the reflector boresight), NOT the feed's physical location in the antenna | Position3D | n/a | THE anchor bug. The feed's *physical* position (rel. to the vertex) is a derived property — the displacement the feed moves to in order to achieve this aim, given the pointing frequency (which may differ from the collected frequency for multi-receiver feeds). Do not confuse with `model::geometry::FeedPosition` (`geometry.rs:249`), which *is* the physical antenna-frame offset. The API field doc comment is still bare ("Feed position (ECEF or Geodetic)", `schemas.rs:239`); field occurs at `schemas.rs:240,417,568`. Consider renaming to `feed_pointing_location` in a future major version — flagged, not fixed (breaking API change). |
 | `GainRequest.reflector_boresight` | Earth position the reflector is pointed at; together with `vehicle_position` defines antenna Z-axis | Position3D | n/a | Must not coincide with `vehicle_position` (< 1mm separation raises `InvalidCoordinate`, `coordinates_3d.rs:513-515` and `:600-602`) |
 | `vehicle_attitude` | Optional unit quaternion `[w,x,y,z]`, body→ECEF. Body +Z = boresight, body +X = azimuth-zero reference | dimensionless (unit norm) | norm within 1e-3 of 1.0 | When omitted, azimuth-zero uses the Earth-Z/East cross-product heuristic, which is **discontinuous** near boresight ∥ Earth-Z (switches when `\|z_z\| ≥ 0.99`, i.e. within ≈8.1° of Earth Z, `coordinates_3d.rs:402,427`) — this was finding #5b in the 2026-06-10 review |
-| `q_factor` (feed illumination) | cos^q feed pattern exponent; higher = more focused beam, less spillover | dimensionless | Typical 6–12; example configs use 8–10 | The current `illumination.rs` module doc (`illumination.rs:23`) states combined edge taper (cos^q × space loss) for q=8, f/D=0.5 is "approximately −37.4 dB", consistent with `edge_taper_db` (`illumination.rs:257`). **Note:** the classic "q≈6–8 for 10 dB edge taper" textbook rule of thumb does NOT apply here — this codebase's edge taper is the *combined* (pattern × space-loss) definition. Anyone porting a q-factor from another source must re-derive against `edge_taper_db`, not assume the rule of thumb. |
-| `phase_center_offset` | Distance from physical feed to EM phase center | meters | Typically ±λ/4, frequency-dependent (`geometry.rs:186`) | **OPEN FINDING (still true as of 2026-07-07):** `illumination::phase_center_offset_phase` (`illumination.rs:357`) exists and is unit-tested (`illumination.rs:578+`), but a code search finds **no call site in `integration.rs` or `pattern.rs`** (the live aperture-integration / gain pipeline). The parameter is computed correctly in isolation but appears not consumed by the live gain path. Re-check with `grep -rn phase_center_offset_phase src/model/{integration,pattern}.rs` before assuming this is wired in. |
+| `q_factor` (feed illumination) | cos^q **field** (voltage) pattern exponent; higher = more focused beam, less spillover, deeper edge taper | dimensionless | ~1–3 for a ~−11 dB edge taper at f/D 0.4–0.6; design configs corrected 2026-07-10 (were 8–11) | Because `cos_q_pattern` is the *field* pattern, a "textbook horn" q of 8–12 here gives an absurd edge taper (q=9.5 @ f/D 0.4 → **−71 dB** — a dark aperture rim). The old 8–11 design values under-predicted DSN 34-m peak gain by ~5 dB; corrected via `q_factor_from_taper(−11 dB, f/D)` → q≈1.1–2 (`docs/findings-2026-07-10-ka-phase-center-defocus.md` sibling finding; `tests/reference_validation.rs::feed_taper_q_sweep_dsn_34m_xband`). The `illumination.rs:23` module-doc example (q=8, f/D=0.5 → −37.4 dB) is *consistent with `edge_taper_db`* but is itself an over-tapered case — do not read it as a recommended value. The classic "q≈6–8 for 10 dB edge taper" rule of thumb does NOT apply; always re-derive against `edge_taper_db`, never assume the rule of thumb. |
+| `phase_center_offset` | Axial distance from the physical feed aperture to the EM phase center | meters | Typically ±λ/4, frequency-dependent (`geometry.rs:186`) | **CONSUMED as axial defocus (corrected 2026-07-10):** the *field* `config.feed.phase_center_offset` IS used by the live gain path — `integration.rs:527` folds it into `feed_axial_offset` (`position.z − focal_length + phase_center_offset`), which drives a quadratic (defocus) aperture phase; behavior is intentional and tested (`test_phase_center_offset_produces_defocus_loss`). The loss scales with 1/λ, so a value that is harmless at low frequency (e.g. 0.008 m = 0.06λ edge error at X-band) becomes a multi-dB defocus at high frequency (0.27λ at Ka) — this is the root cause of the Ka-band under-prediction (`docs/findings-2026-07-10-ka-phase-center-defocus.md`). **Semantics DECIDED 2026-07-10 (roadmap P7): model auto-refocus.** `phase_center_offset` is a *raw feed property* the model compensates — the evaluator positions the feed so the phase center lands at the focal point (matching real operated antennas, which refocus per band); deliberate defocus moves to a new explicit field (e.g. `axial_defocus_m`, default 0). **Not yet implemented** — pending roadmap unit P7; until it lands, the field still acts as an uncompensated defocus, so keep it ≈0 in design specs. Separately, the standalone `illumination::phase_center_offset_phase` (`illumination.rs:357`) is a *different*, unused implementation with no live call site — dead code, not the live path. |
 | `surface_rms` | Reflector surface RMS deviation from ideal parabola, used in Ruze's equation | meters | Should be ≪ shortest operating wavelength; example configs 0.4mm–1.5mm | **Scope (confirmed 2026-07-07):** the Ruze form `η = exp(-(4π·σ/λ)²)` (Ruze 1966) models **surface-error (roughness) efficiency only** — the boresight-gain loss from random deviations of the real dish from an ideal paraboloid. It is one multiplicative factor in the live gain path: `overall_efficiency` computes `eta_ruze * eta_mesh` (`pattern.rs:128-141`) using `pattern::ruze_efficiency` (`pattern.rs:112`). It is *not* the steering / off-boresight physics (that lives in the aperture-integration / phase model). The `4π` constant is `2·(2π/λ)`, the factor of 2 coming from the reflection double-pass — a correctly-handled reflected path error. Not independently re-derived against the primary reference; scope and constant confirmed self-consistent with the code. **OPEN FINDING:** a second, identical Ruze implementation exists in `surface.rs` (`ruze_efficiency` `:38`, `ruze_efficiency_from_frequency` `:54`) with no live-path callers — duplicated formula, confirm which is canonical and remove the other. |
 | `mesh_spacing` / `wire_diameter` | Wire-mesh reflector geometry; mesh introduces frequency-dependent reflection loss | meters | spacing ~1-10mm, wire diameter ~0.05-1mm, wire_diameter < spacing (enforced with an error, `geometry.rs:411-419`) | `pattern.rs::overall_efficiency` (`pattern.rs:128,134`) calls `mesh::mesh_reflection_efficiency` (`mesh.rs:389`, inductive-grid model) directly. **OPEN FINDING:** `MeshParameters::transparency_at_wavelength` (`geometry.rs:435`) is a *different*, simpler low-frequency approximation whose only callers are its own unit tests — effectively dead code as of 2026-07-07; confirm removal vs. an intended-but-unwired second path. |
 | `f_over_d` (focal length / diameter) | Reflector geometry ratio, affects illumination/aperture efficiency and beam deviation factor | dimensionless | Typical [0.3, 0.5]; validated range [0.2, 1.0] (`geometry.rs:68,100`) | Out-of-range values do **not** warn or error — the check at `geometry.rs:100-106` is a silent no-op ("unusual but not necessarily invalid"). Confirm this is intentional for exotic designs vs. a missed validation. |
@@ -123,11 +123,14 @@ degraded-accuracy warnings and retain their exact pre-P1 gain. So `spillover_los
 **Signal:** the applied loss is reported as `ComputationMetadata.spillover_loss_db`
 (dB, negative; `null` when not applied — calibrated antenna, or large-offset/non-standard-PO).
 
-**Magnitude reality (finding 2026-07-09):** for the four currently-enabled design-spec
-antennas (q=8–11, f/D=0.4–0.5 — all highly over-tapered) the modeled spillover loss is only
-~**0.001–0.05 dB**, not the ~0.4–1 dB textbook figure (which applies to broad feeds, q≈2–4).
-The correction removes a known systematic bias where it is material, but for these directive
-designs its impact is small; it is not what limits their uncalibrated accuracy.
+**Magnitude reality (finding 2026-07-09, revised 2026-07-10):** this note originally observed
+that the modeled spillover was only ~0.001–0.05 dB — but that was **because** the enabled feeds
+were grossly over-tapered (q=8–11). After the 2026-07-10 feed-taper fix (q≈1.1–3.1 for a ~−11 dB
+edge taper), the feeds are broad and spillover is now **material: ~0.8 dB** (fraction ≈0.17–0.25),
+matching the textbook range. It is applied on the uncalibrated path and cancels out of `loss_db`
+(reference tracks it). Note also that `estimate_spillover` previously truncated a fractional `q`
+to an integer exponent (`powi(q as i32 + 1)`); fixed to `powf(q + 1.0)` on 2026-07-10, which
+moved the 34-m X-band figure from 0.192 → 0.171.
 
 **Unmodeled (by decision):**
 - **Blockage** (feed/strut aperture blockage, ~0.1–0.5 dB) — deferred to feature **F3**;
@@ -138,10 +141,55 @@ designs its impact is small; it is not what limits their uncalibrated accuracy.
 path, but does **not** make uncalibrated predictions calibrated-grade — guessed q-factor and
 assumed surface RMS still dominate the uncertainty there.
 
+## Off-axis pattern / sidelobe fidelity
+
+**The model is a main-beam / peak-gain instrument. Its off-axis (sidelobe) gain is
+systematically *optimistic* (too low) and must NOT be used for interference, adjacent-satellite,
+off-axis-EIRP, or ACI analysis.** (Finding 2026-07-10; `antenna-model/tests/reference_validation.rs`,
+`itu_r_s580_sidelobe_envelope_small_dish` and the `itu_probe_fine_envelope` diagnostic.)
+
+Why: the live pattern is an idealized, unblocked, perfect-surface, strut-free symmetric
+paraboloid. It contains **none of the sidelobe-*raising* mechanisms** that dominate real
+wide-angle sidelobes:
+
+- central/feed **blockage** and quadripod **strut scatter** (unmodeled — see feature F3);
+- aperture-**edge diffraction**;
+- **surface-error scatter** — surface RMS is applied as a *scalar Ruze gain-loss*
+  (`surface_error = 0` in the aperture integrand, `integration.rs`), so there is **no
+  error-sidelobe floor**: the model's sidelobes keep diving where a real antenna's plateau at an
+  error/scatter floor (roughly −3…0 dBi wide-angle);
+- cross-polarization.
+
+**Evidence:** for the 3.7 m ground station at X-band (D/λ ≈ 99), the modeled sidelobe-*peak*
+envelope falls at ~25·log₁₀(θ) — the **same slope** as the ITU-R S.580 mask (29 − 25·log₁₀θ) —
+sitting roughly **8–13 dB below** it across 1°–20° (first sidelobe ≈ −31 dB rel. to peak at
+~1.6°, reaching ≈ −62 dB by 19°). Matching *slope* confirms the aperture-taper diffraction
+physics is right; the offset is the mask's regulatory headroom **plus** the missing real-world
+sidelobe sources above.
+
+**So the S.580 check validates pattern *shape*, not sidelobe *levels*.** It is a good regression
+guard against gross pattern bugs (illumination errors, beam-steering sign flips, broken off-axis
+integration — any of which break the slope or violate the mask), but the model has no mechanism
+to produce realistic (higher) sidelobes. For off-axis fidelity, use the calibration correction
+surface — or the ITU mask itself — as the sidelobe model, not the physics engine's tail.
+
+**Numerical caveat:** physical-optics far-sidelobe computation needs the aperture-phase variation
+(∝ D·sinθ/λ) resolved by the integration grid, which is infeasible for electrically huge dishes;
+the S.580 check therefore runs on the small 3.7 m dish (D/λ ≈ 99), where sidelobes are computable.
+
+**Roadmap (decided 2026-07-10):** an off-axis honesty warning on uncalibrated far-off-boresight
+queries = unit **P8**; a statistical envelope/floor model (Ruze scatter floor, optional ITU-mask
+envelope) = feature **F7**, gated on its register row *and* on reference sidelobe data; physical
+mechanisms (edge diffraction, strut scatter) are out of scope regardless (roadmap §6).
+
 ## Open items surfaced while mining (not fixed here)
 
-- `phase_center_offset_phase` computed/tested but apparently not consumed by the live
-  gain path (`integration.rs`/`pattern.rs`) — see parameter glossary.
+- The `phase_center_offset` *field* IS consumed by the live path as an axial defocus
+  (`integration.rs:527`); the standalone `illumination::phase_center_offset_phase`
+  (`illumination.rs:357`) is a separate, unused implementation (dead code). Corrected
+  2026-07-10 — see the glossary entry and `docs/findings-2026-07-10-ka-phase-center-defocus.md`.
+  Semantics decision **made 2026-07-10: auto-refocus** (raw feed property, model compensates;
+  deliberate defocus via a new explicit field) — implementation pending roadmap unit P7.
 - `MeshParameters::transparency_at_wavelength` is test-only dead code — see glossary.
 - Duplicate Ruze implementation: `surface.rs::ruze_efficiency` / `ruze_efficiency_from_frequency`
   duplicate `pattern.rs::ruze_efficiency` (the one the live gain path uses); the `surface.rs`

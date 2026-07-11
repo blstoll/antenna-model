@@ -1,0 +1,39 @@
+# DSN 34-m Beam-Waveguide (BWG) antenna — published reference performance points.
+#
+# Purpose: sanity-check the UNCALIBRATED physics model (a design-spec paraboloid,
+# `dsn_34m_uncalibrated` in calibration_data/antennas.yaml) against real, measured
+# deep-space-antenna performance, so we can gauge real-life model accuracy across
+# frequency/geometry. Consumed by tests/reference_validation.rs.
+#
+# IMPORTANT CAVEATS — read before trusting a residual (see conversation 2026-07-10):
+#   1. TOPOLOGY MISMATCH. The real DSN 34-m is a dual-shaped Cassegrain beam-waveguide
+#      antenna optimized for ~70% aperture efficiency. Our model is a single prime-focus
+#      paraboloid with a cos^q feed. A systematic efficiency (gain) offset is EXPECTED,
+#      not a bug — quantifying it is the entire point of this exercise.
+#   2. ELEVATION ≠ OFF-AXIS ANGLE. `elevation_deg` here is the antenna's MECHANICAL
+#      pointing elevation, whose gain dependence comes from gravitational surface sag.
+#      It is NOT an off-boresight angle. We compare PEAK (boresight) gain only, so the
+#      elevation column is provenance metadata (the elevation at which peak was measured),
+#      not a model input.
+#   3. PEAK GAIN, FEED ON-AXIS. Measured peak gain is defined with the feed on the optical
+#      axis. The harness therefore evaluates the model with the feed at focus (ignoring the
+#      design's 0.15 m multi-feed lateral packaging offset, which merely squints the beam),
+#      while keeping the design surface RMS so the Ruze surface term still applies.
+#
+# reference_efficiency is the measured TOTAL aperture efficiency (includes spillover,
+# taper, surface/Ruze, etc.). reference_gain_dbi is derived from it as
+#   G = eta * (pi * D / lambda)^2   with D = 34.0 m,
+# so gain and efficiency stay internally consistent.
+#
+# Columns (pipe-delimited; '#' lines and blank lines ignored):
+#   antenna_id | feed_id | frequency_mhz | elevation_deg | reference_gain_dbi | reference_efficiency | tolerance_db | source
+#
+# tolerance_db notes:
+#   X-band 1.5 dB — a real guard: after the q_factor fix (2026-07-10) the model lands -0.73 dB
+#     from measured, so the residual is the honest prime-focus-vs-shaped-Cassegrain topology gap.
+#   Ka-band 5.0 dB — deliberately LOOSE: model sits ~3.5 dB low (eff 0.29 vs 0.66). Diagnosed as
+#     phase-center axial DEFOCUS (phase_center_offset_m = 0.008 m = 0.85λ at Ka), NOT spillover
+#     (spillover is 0.192 at both bands) and NOT an integration artifact. Zeroing the phase center
+#     recovers Ka to ~-0.1 dB. See docs/findings-2026-07-10-ka-phase-center-defocus.md; fix deferred.
+dsn_34m_uncalibrated | x_band  |  8420.0 | 45.0 | 68.0 | 0.70 | 1.5 | DESCANSO Monograph 4 Ch.8 (34-m BWG) / DSN 810-005 Mod.104 — X-band ~70% aperture efficiency near 45 deg elevation
+dsn_34m_uncalibrated | ka_band | 32000.0 | 45.5 | 79.3 | 0.66 | 5.0 | DESCANSO Monograph 4 Ch.8 (34-m BWG) — Ka-band peak aperture efficiency ~66% near 45.5 deg elevation

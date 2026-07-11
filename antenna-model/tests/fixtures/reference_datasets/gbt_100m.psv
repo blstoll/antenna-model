@@ -1,0 +1,17 @@
+# Green Bank Telescope (GBT) 100-m — published aperture efficiency at two widely-separated
+# frequencies. This pair is the harness's SURFACE / RUZE test: efficiency is ~flat at L-band
+# (surface negligible vs wavelength) but rolls off at Q-band (43 GHz), where the ~275 um passive
+# surface RMS drives a large Ruze factor. The model should reproduce that roll-off from the
+# surface_rms alone.
+#
+# Caveats:
+#   - GBT is an UNBLOCKED offset Gregorian; we approximate it as an axisymmetric prime-focus dish
+#     (f/D 0.6). Peak-efficiency comparison is reasonable; off-axis/sidelobe structure is not.
+#   - Real GBT uses an active surface (actuators) that lowers the EFFECTIVE RMS at high frequency;
+#     our static 275 um is the passive figure, so the model may UNDER-predict Q-band efficiency.
+#     Hence the looser Q-band tolerance.
+#
+# Columns: antenna_id | feed_id | frequency_mhz | elevation_deg | reference_gain_dbi | reference_efficiency | tolerance_db | source
+#
+gbt_100m_uncalibrated | l_band | 1400.0  | 45.0 | 61.46 | 0.65  | 1.0 | GBT ~65% aperture efficiency at 21 cm / 1.4 GHz (NRAO GBT description; Boothroyd et al. 2011)
+gbt_100m_uncalibrated | q_band | 43000.0 | 45.0 | 90.67 | 0.575 | 1.5 | GBT 43 GHz aperture efficiency 55-60% at most elevations, 2009 high-frequency benchmark (surface RMS ~275 um); looser: active-surface correction not modeled

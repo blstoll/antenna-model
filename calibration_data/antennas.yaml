@@ -116,14 +116,14 @@ antennas:
         - id: "s_band_feed"
           name: "S-Band Primary Feed"
           position: [0.0, 0.0, 0.0]
-          q_factor: 8.0
+          q_factor: 2.04  # ~-11 dB edge taper at f/D 0.5 (was 8.0; see q_factor_from_taper / illumination.rs)
           phase_center_offset_m: 0.0
           frequency_range: [2000.0, 2300.0]
 
         - id: "x_band_feed"
           name: "X-Band Secondary Feed"
           position: [0.05, 0.0, 0.0]
-          q_factor: 8.5
+          q_factor: 2.04  # ~-11 dB edge taper at f/D 0.5 (was 8.5; see q_factor_from_taper / illumination.rs)
           phase_center_offset_m: 0.0
           frequency_range: [7100.0, 8500.0]
 
@@ -161,21 +161,21 @@ antennas:
         - id: "x_band_downlink"
           name: "X-Band Downlink Feed"
           position: [0.0, 0.0, 0.0]
-          q_factor: 9.0
+          q_factor: 1.14  # ~-11 dB edge taper at f/D 0.4 (was 9.0; see q_factor_from_taper / illumination.rs)
           phase_center_offset_m: 0.01
           frequency_range: [7145.0, 7235.0]
 
         - id: "x_band_uplink"
           name: "X-Band Uplink Feed"
           position: [0.08, 0.0, 0.0]
-          q_factor: 9.0
+          q_factor: 1.14  # ~-11 dB edge taper at f/D 0.4 (was 9.0; see q_factor_from_taper / illumination.rs)
           phase_center_offset_m: 0.01
           frequency_range: [7145.0, 7235.0]
 
         - id: "ka_band_downlink"
           name: "Ka-Band Downlink Feed"
           position: [0.0, 0.08, 0.0]
-          q_factor: 10.0
+          q_factor: 1.14  # ~-11 dB edge taper at f/D 0.4 (was 10.0; see q_factor_from_taper / illumination.rs)
           phase_center_offset_m: 0.005
           frequency_range: [25500.0, 27000.0]
 
@@ -205,21 +205,21 @@ antennas:
         - id: "s_band"
           name: "S-Band Feed"
           position: [0.0, 0.0, 0.0]
-          q_factor: 8.5
+          q_factor: 1.14  # ~-11 dB edge taper at f/D 0.4 (was 8.5; see q_factor_from_taper / illumination.rs)
           phase_center_offset_m: 0.02
           frequency_range: [2200.0, 2300.0]
 
         - id: "x_band"
           name: "X-Band Feed"
           position: [0.15, 0.0, 0.0]
-          q_factor: 9.5
+          q_factor: 1.14  # ~-11 dB edge taper at f/D 0.4 (was 9.5; see q_factor_from_taper / illumination.rs)
           phase_center_offset_m: 0.015
           frequency_range: [8400.0, 8500.0]
 
         - id: "ka_band"
           name: "Ka-Band Feed"
           position: [0.0, 0.15, 0.0]
-          q_factor: 11.0
+          q_factor: 1.14  # ~-11 dB edge taper at f/D 0.4 (was 11.0; see q_factor_from_taper / illumination.rs)
           phase_center_offset_m: 0.008
           frequency_range: [31800.0, 32300.0]
 
@@ -233,6 +233,82 @@ antennas:
 
     description: "Large DSN antenna using design specifications"
     location: "Goldstone, CA"
+
+  # ============================================================================
+  # REFERENCE-VALIDATION ANTENNAS (design specs matched to published real dishes)
+  # ============================================================================
+  # These uncalibrated entries mirror real, publicly-documented antennas so the
+  # physics model can be scored against measured peak gain / aperture efficiency
+  # (see antenna-model/tests/reference_validation.rs and the .psv fixtures).
+  # Feeds are set FOCUSED: q_factor at a ~-11 dB edge taper (via q_factor_from_taper)
+  # and phase_center_offset_m = 0 (see docs/findings-2026-07-10-ka-phase-center-defocus.md).
+
+  - id: "dsn_70m_uncalibrated"
+    name: "DSN 70m - Uncalibrated (reference)"
+    calibration_status: "uncalibrated"
+    enabled: true
+
+    design_specs:
+      diameter_m: 70.0
+      focal_length_m: 30.1
+      f_over_d_ratio: 0.43  # approximate (64->70 m heritage)
+      surface_rms_mm: 0.5   # X-band is illumination-limited, not surface-limited, at this RMS
+
+      feeds:
+        - id: "x_band"
+          name: "X-Band Feed"
+          position: [0.0, 0.0, 0.0]
+          q_factor: 1.39  # ~-11 dB edge taper at f/D 0.43
+          phase_center_offset_m: 0.0  # focused
+          frequency_range: [8400.0, 8500.0]
+
+      mesh: null
+
+    validity_ranges:
+      azimuth_range: [0.0, 360.0]
+      elevation_range: [0.0, 90.0]
+      frequency_range: [8400.0, 8500.0]
+      temperature_k: 290.0
+
+    description: "DSN 70m design specs; ref: TDA PR 42-97 (1989) 74.18 dBi / eta 0.687 at X-band"
+    location: "Goldstone / Canberra / Madrid"
+
+  - id: "gbt_100m_uncalibrated"
+    name: "GBT 100m - Uncalibrated (axisymmetric approx of offset Gregorian)"
+    calibration_status: "uncalibrated"
+    enabled: true
+
+    design_specs:
+      diameter_m: 100.0
+      focal_length_m: 60.0
+      f_over_d_ratio: 0.6    # prime focus 60 m above vertex; offset geometry approximated as axisymmetric
+      surface_rms_mm: 0.275  # holographically-set passive surface (<250-300 um)
+
+      feeds:
+        - id: "l_band"
+          name: "L-Band Feed"
+          position: [0.0, 0.0, 0.0]
+          q_factor: 3.15  # ~-11 dB edge taper at f/D 0.6
+          phase_center_offset_m: 0.0
+          frequency_range: [1000.0, 2000.0]
+
+        - id: "q_band"
+          name: "Q-Band Feed"
+          position: [0.0, 0.0, 0.0]
+          q_factor: 3.15
+          phase_center_offset_m: 0.0
+          frequency_range: [40000.0, 48000.0]
+
+      mesh: null
+
+    validity_ranges:
+      azimuth_range: [0.0, 360.0]
+      elevation_range: [0.0, 90.0]
+      frequency_range: [1000.0, 48000.0]
+      temperature_k: 290.0
+
+    description: "GBT 100m offset Gregorian, axisymmetric approx; ref: eta 0.65 @1.4 GHz, 0.55-0.60 @43 GHz"
+    location: "Green Bank, WV"
 
   # ============================================================================
   # TEST ANTENNAS (For Development)
@@ -253,7 +329,7 @@ antennas:
         - id: "primary"
           name: "Primary Feed"
           position: [0.0, 0.0, 0.0]
-          q_factor: 8.0
+          q_factor: 1.14  # ~-11 dB edge taper at f/D 0.4 (was 8.0; see q_factor_from_taper / illumination.rs)
           phase_center_offset_m: 0.0
           frequency_range: [8000.0, 8500.0]
 

@@ -196,7 +196,10 @@ fn estimate_spillover(config: &AntennaConfiguration) -> f64 {
     // Evaluated from 0 to ψ_edge: [1 - cos^(q+1)(ψ_edge)]
 
     let cos_edge = effective_edge_angle.cos();
-    let captured_fraction = 1.0 - cos_edge.powi((q as i32) + 1);
+    // Use powf, not powi(q as i32): q is fractional in the live uncalibrated path
+    // (e.g. 1.14, 3.15 after the 2026-07-10 feed-taper fix). Truncating q to an integer
+    // exponent mis-estimates the captured/spilled fractions by ~0.1 dB.
+    let captured_fraction = 1.0 - cos_edge.powf(q + 1.0);
     let spillover = 1.0 - captured_fraction;
 
     // Clamp to [0, 1]
@@ -430,6 +433,26 @@ mod tests {
 
         // Offset feed should have higher spillover
         assert!(spillover_offset > spillover_on_axis);
+    }
+
+    /// Regression: `estimate_spillover` must honor a FRACTIONAL q (not truncate it to
+    /// an integer exponent). For f/D=0.5 the rim half-angle is 53.13° (cos=0.6); with an
+    /// on-axis feed at q=1.5 the analytic spillover is cos^(q+1) = 0.6^2.5 ≈ 0.279.
+    /// The old `powi((q as i32)+1)` truncated the exponent to 2 → 0.6^2 = 0.36, which this
+    /// test rejects.
+    #[test]
+    fn test_spillover_honors_fractional_q() {
+        let mut config = test_antenna_on_axis(); // D=1.0, f/D=0.5, feed at focus (no offset)
+        config.feed.q_factor = 1.5;
+
+        let spillover = estimate_spillover(&config);
+        let expected = 0.6_f64.powf(2.5); // ≈ 0.2788
+
+        assert!(
+            (spillover - expected).abs() < 5e-3,
+            "fractional-q spillover should be ~{expected:.4} (0.6^2.5), got {spillover:.4}; \
+             a value near 0.36 means q was truncated to an integer exponent"
+        );
     }
 
     #[test]

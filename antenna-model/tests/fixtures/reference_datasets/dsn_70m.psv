@@ -1,0 +1,8 @@
+# DSN 70-m antenna — published reference peak gain / aperture efficiency.
+# Large-aperture cross-check (D/λ ≈ 1970 at X-band) for the reference-validation harness.
+# Shaped Cassegrain in reality; modeled as a focused prime-focus paraboloid (see antennas.yaml
+# dsn_70m_uncalibrated). Peak gain is defined feed-on-axis, matching the harness.
+#
+# Columns: antenna_id | feed_id | frequency_mhz | elevation_deg | reference_gain_dbi | reference_efficiency | tolerance_db | source
+#
+dsn_70m_uncalibrated | x_band | 8420.0 | 45.0 | 74.18 | 0.687 | 1.0 | DSN 70-m X/S-band gain calibration, TDA Progress Report 42-97 (1989), DSS-14/43/63: 74.18 +/- 0.10 dBi, eta 0.687 +/- 0.015 at 8420 MHz

@@ -51,6 +51,25 @@ What remains in the physics layer is **scope, not bugs**:
   (`edge_cases.rs:250`, consumed via `integration.rs:559-570`) use coefficient 1 with no
   citation.
 
+**Addendum 2026-07-10 — reference-data validation.** A reference-validation harness now
+exists and runs in CI (`antenna-model/tests/reference_validation.rs`: three active tests +
+one `#[ignore]`d diagnostic), scoring the uncalibrated model against real published antennas
+(DSN 34-m BWG, DSN 70-m, GBT 100-m). It has already paid for itself three times over:
+
+- **Feed q-factor fix (landed):** the design-spec q-factors (8–11) were grossly over-tapered
+  for this codebase's *field*-pattern convention, under-predicting DSN 34-m peak gain by
+  ~5 dB; corrected to q≈1.1–3.1 for a ~−11 dB edge taper, pinned by
+  `feed_taper_q_sweep_dsn_34m_xband`.
+- **Ka phase-center defocus (diagnosed → unit P7):** the remaining −3.5 dB Ka residual is
+  entirely `phase_center_offset_m` acting as a 1/λ-scaling axial defocus
+  (`docs/findings-2026-07-10-ka-phase-center-defocus.md`). Register row P7 decided:
+  model auto-refocus.
+- **Off-axis sidelobe scope (documented → P8/F7):** the model is a main-beam instrument;
+  its sidelobes fall at the correct ~25·log₁₀(θ) slope but ~8–13 dB below the ITU-R S.580
+  mask, because all sidelobe-*raising* mechanisms (blockage, strut scatter, edge diffraction,
+  surface-error scatter floor) are unmodeled. Recorded in the contract's "Off-axis pattern /
+  sidelobe fidelity" section; honesty warning = unit P8, envelope model = gated feature F7.
+
 ### API / service layer — functional but operationally soft
 
 Feature-wise this layer is far more complete than CLAUDE.md implies: batch, rectangular
@@ -142,11 +161,11 @@ clean of `unwrap`/`expect`/`panic`). The problems are of a different kind:
 
 | Theme | What it means here |
 |---|---|
-| **T1 — Trustworthy predictions & explicit scope** | Know exactly what the model does and does not claim: fence the unverified aberration heuristic, model spillover on the uncalibrated path (P1 decision), document the remaining unmodeled terms, fail loudly on out-of-range geometry. |
+| **T1 — Trustworthy predictions & explicit scope** | Know exactly what the model does and does not claim: fence the unverified aberration heuristic, model spillover on the uncalibrated path (P1 decision), document the remaining unmodeled terms, fail loudly on out-of-range geometry. 2026-07-10: also fix the phase-center defocus semantics (P7) and warn honestly on off-axis queries the model cannot answer (P8). |
 | **T2 — Operational hardening** | Every knob in config either works or is removed: body-size limit, timeout, worker threads, admission control, readiness lifecycle. |
 | **T3 — Contract fidelity** | docs = code = behavior: document the hidden endpoint, one error vocabulary, JSON error bodies, consistent status codes, a drift guard so openapi.yaml cannot silently rot again. |
 | **T4 — Maintainability & drift prevention** | CI, truthful CLAUDE.md/architecture docs, crate split so the CLI stops compiling the web stack, property tests that make the claimed testing philosophy real. |
-| **T5 — Decision-gated capability growth** | Hot-reload, real ray tracing, physical efficiency terms, noise-temperature modeling — each blocked on an explicit maintainer decision recorded in the register. |
+| **T5 — Decision-gated capability growth** | Hot-reload, real ray tracing, physical efficiency terms, noise-temperature modeling, statistical sidelobe envelope (F7) — each blocked on an explicit maintainer decision recorded in the register. |
 
 ## 4. Phases
 
@@ -167,8 +186,10 @@ Defaults are recommendations; the maintainer decides.
 | ID | Question | Options | Recommended default | Status | Decided by / date |
 |----|----------|---------|---------------------|--------|-------------------|
 | G1-hosting | Where will this repo live? (No remote configured today.) | GitHub / other forge / local-only | GitHub — repo created at github.com/blstoll/antenna-model; CI committed and live (green on `main` 2026-07-09). | **Decided** | Maintainer, 2026-07-08 |
-| P1 | Model spillover / blockage / cross-pol physically? | Implement / document-as-scope / staged | **Staged implement**: spillover promoted into the gain path for antennas *without* a correction surface (double-counting gated, see unit P1); blockage = F3 (data-gated); cross-pol out of scope. Rationale: many antenna systems are expected to lack calibration data, and the unmodeled spillover bias (~0.4–1 dB) alone can consume the <1 dB accuracy budget on the uncalibrated path. **FINDING 2026-07-09 (during P1 execution):** for the four *currently enabled* design-spec antennas (q=8–11, f/D=0.4–0.5 — all highly over-tapered) the code's existing `estimate_spillover` yields only ~0.001–0.05 dB, NOT 0.4–1 dB. The 0.4–1 dB premise is a broad-feed (q≈2–4) figure; it does not hold for these directive designs. Maintainer confirmed 2026-07-09: proceed anyway — the mechanism is correct, cheap, and future-proofs broad-feed antennas; impact on current configs is negligible and documented honestly. | **Decided** | Maintainer, 2026-07-08; finding 2026-07-09 |
+| P1 | Model spillover / blockage / cross-pol physically? | Implement / document-as-scope / staged | **Staged implement**: spillover promoted into the gain path for antennas *without* a correction surface (double-counting gated, see unit P1); blockage = F3 (data-gated); cross-pol out of scope. Rationale: many antenna systems are expected to lack calibration data, and the unmodeled spillover bias (~0.4–1 dB) alone can consume the <1 dB accuracy budget on the uncalibrated path. **FINDING 2026-07-09 (during P1 execution):** for the four *currently enabled* design-spec antennas (q=8–11, f/D=0.4–0.5 — all highly over-tapered) the code's existing `estimate_spillover` yields only ~0.001–0.05 dB, NOT 0.4–1 dB. The 0.4–1 dB premise is a broad-feed (q≈2–4) figure; it does not hold for these directive designs. Maintainer confirmed 2026-07-09: proceed anyway — the mechanism is correct, cheap, and future-proofs broad-feed antennas; impact on current configs is negligible and documented honestly. **REVISED 2026-07-10:** the 07-09 "negligible" finding was itself an artifact of the over-tapered q-factors. After the reference-validation feed-taper fix (q≈1.1–3.1 for a ~−11 dB edge taper), spillover is **material: ~0.8 dB** — the original 0.4–1 dB premise was right after all. A fractional-q truncation in `estimate_spillover` (`powi` → `powf`) was also fixed. See `docs/domain-contract.md` "Magnitude reality". | **Decided** | Maintainer, 2026-07-08; findings 2026-07-09, 2026-07-10 |
 | P2 | Unverified Seidel higher-order coefficients on the live path | Verify vs literature / fence with warning / remove | Fence: annotate + warn when contribution > 0.1 dB; seek citation | Open | — |
+| P7 | `phase_center_offset_m` semantics (root cause of the Ka-band under-prediction — the field acts as a 1/λ-scaling axial defocus, `docs/findings-2026-07-10-ka-phase-center-defocus.md`) | Config realism (redefine as residual-after-focus, set ≈0 by convention) / model auto-refocus (raw feed property, model compensates) | **Auto-refocus.** Correctness over blast radius: config-realism leaves a standing trap where entering a datasheet phase-center value silently costs multi-dB at Ka; auto-refocus matches how real antennas are operated (refocused per band) and is correct per-band by mechanism, not convention. Deliberate defocus moves to a new explicit field. Cheap to change now — no `.bin` artifacts in the wild; bumps `physics_model_version` (P1b). See unit P7. | **Decided** | Maintainer, 2026-07-10 |
+| F7 | Statistical off-axis sidelobe envelope/floor model? (The physics model's sidelobes are systematically ~8–13 dB optimistic — see contract "Off-axis pattern / sidelobe fidelity".) | Implement envelope/floor model / docs + warning only / full physical modeling | Envelope/floor model, **data-gated**: requires reference sidelobe data (the ITU S.580 harness test validates pattern *shape* only — levels need real data). Near-term honesty warning is NOT gated (unit P8, decided with this row's filing). Physical edge-diffraction/strut modeling is out of scope regardless (§6). | Open (P8 warning decided) | Maintainer filed 2026-07-10 |
 | P3 | Ray-trace stub for feed offsets > 0.5·f | Implement (F2) / reject requests / document + flag | Document + flag on all endpoints | Open | — |
 | P5/F4 | Model antenna noise temperature in G/T? | Model / keep user-supplied passthrough | Keep passthrough; document scope | Open | — |
 | S7 | GEO coordinate-ambiguity policy | Warn everywhere / reject ambiguous / remove ambiguity | **Superseded by C8**: `coordinate_system` becomes required, eliminating auto-detection ambiguity entirely (better than warning about it). | **Decided** | Maintainer, 2026-07-08 |
@@ -193,6 +214,10 @@ Unless a decision-register row flips them:
 - Committing binary calibration artifacts to the repository.
 - Migrating to poem-openapi codegen (noted as a possible future item under C7; the drift
   guard is the v1 answer).
+- Physical sidelobe mechanisms — aperture-edge diffraction and quadripod strut scatter.
+  These are domain-expert territory (same class as F2 ray tracing). Feature F7, if its row
+  flips, covers only a *statistical* envelope/floor; the physical mechanisms stay out of
+  scope regardless.
 
 ## 7. Risks
 
@@ -208,3 +233,7 @@ Unless a decision-register row flips them:
   `cargo test --workspace`.
 - **Decision latency**: five of the six feature units are decision-gated; if the register
   sits undecided, Phase 5 stalls by design. That is intentional but worth stating.
+- **Loose Ka reference tolerance until P7 lands**: the DSN 34-m Ka row in the reference
+  harness carries a deliberate 5.0 dB tolerance (masking the known phase-center defocus),
+  so the harness cannot catch Ka-band regressions smaller than that until P7 tightens it
+  to ~1.5 dB.

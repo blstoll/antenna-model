@@ -11,30 +11,23 @@
 
 **Location:** `calibration_data/design_specs/`
 
-These YAML files define physical antenna parameters for uncalibrated antennas:
+A standalone design-specs file is an **input to the `calibrate` tool** (`--design-specs`),
+in the flat `DesignSpecs` schema (`calibrate/src/design_specs_loader.rs`):
 
-- **`small_groundstation.yaml`**
-  - 3.7m mesh reflector
-  - Dual-feed (S-band, X-band)
-  - Commercial ground station specification
-  - Surface RMS: 1.5mm (estimated)
+- **`small_groundstation.yaml`** — 3.7m mesh reflector, dual-feed (S-band, X-band),
+  commercial ground-station spec, surface RMS 1.5mm. Kept valid by
+  `design_specs_loader.rs::tests::example_design_specs_file_loads`.
 
-- **`medium_dsn.yaml`**
-  - 13m solid reflector
-  - Triple-feed (X-band uplink/downlink, Ka-band)
-  - Deep space network specification
-  - Surface RMS: 0.4mm (high precision)
-
-- **`large_dsn.yaml`**
-  - 34m solid reflector
-  - Triple-feed (S-band, X-band, Ka-band)
-  - Large DSN antenna specification
-  - Surface RMS: 0.25mm (ultra-high precision)
+> **Removed 2026-07-10:** the earlier `medium_dsn.yaml` and `large_dsn.yaml` files were deleted.
+> They used a nested `antenna:`/`class:` schema that matches **no** loader (neither `DesignSpecs`
+> nor `AntennaClassRegistry`), were referenced by no code or test, and duplicated the inline
+> `design_specs:` blocks that the *service* actually loads from `calibration_data/antennas.yaml`.
+> The equivalent 13m / 34m antennas live there (`dsn_13m_uncalibrated`, `dsn_34m_uncalibrated`).
 
 **Purpose:**
-- Initial parameter estimates for uncalibrated antennas
-- Tuning bounds for parameter optimization
-- Documentation of design specifications
+- Standalone physical-parameter input for the calibrate tool's boresight/parameter tuning.
+- Note: the optimizer's tuning bounds are derived from `feed.q_factor` in the loader
+  (`get_tuning_bounds`, `feed.q_factor * (0.5, 2.0)`), **not** from any `tuning_bounds` block.
 
 ---
 
@@ -279,10 +272,8 @@ cargo run --release --bin antenna-model
 antenna_model/
 ├── calibration_data/
 │   ├── antennas.yaml                    # ✅ UPDATED - 4 uncalibrated antennas enabled
-│   └── design_specs/                    # ✅ NEW DIRECTORY
-│       ├── small_groundstation.yaml     # ✅ NEW - 3.7m mesh antenna
-│       ├── medium_dsn.yaml              # ✅ NEW - 13m solid antenna
-│       └── large_dsn.yaml               # ✅ NEW - 34m solid antenna
+│   └── design_specs/                    # calibrate --design-specs example(s)
+│       └── small_groundstation.yaml     # 3.7m mesh antenna (DesignSpecs schema)
 │
 ├── docs/
 │   ├── partial-calibration-design.md                  # ✅ NEW - 26 KB design doc

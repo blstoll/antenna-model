@@ -566,4 +566,21 @@ mesh:
         assert!(result.is_err());
         assert!(format!("{:?}", result.unwrap_err()).contains("wire_diameter_mm"));
     }
+
+    /// The shipped example that the docs point `--design-specs` at must actually parse and
+    /// validate against this loader's schema. Guards against the file silently rotting out of
+    /// sync with `DesignSpecs` (the exact failure that left three orphaned files here before).
+    #[test]
+    fn example_design_specs_file_loads() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../calibration_data/design_specs/small_groundstation.yaml");
+        let specs = DesignSpecs::load_from_file(&path)
+            .unwrap_or_else(|e| panic!("example design specs {} must load: {e:?}", path.display()));
+        assert_eq!(specs.antenna_id, "gs_3.7m");
+        assert_eq!(specs.feeds.len(), 2);
+        // load_from_file already calls validate(); assert once more for intent.
+        specs
+            .validate()
+            .expect("example design specs must validate");
+    }
 }
