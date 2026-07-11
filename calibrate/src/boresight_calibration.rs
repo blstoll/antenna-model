@@ -39,7 +39,7 @@ use antenna_model::data::types::{
 };
 use antenna_model::model::{
     compute_g_over_t, AntennaConfigurationBuilder, FeedParametersBuilder, IntegrationParams,
-    MeshParametersBuilder, ReflectorGeometryBuilder,
+    MeshParametersBuilder, ReflectorGeometryBuilder, PHYSICS_MODEL_VERSION,
 };
 
 /// Boresight measurement point (frequency sweep at azimuth=0, elevation=0)
@@ -665,6 +665,7 @@ pub fn build_calibration_artifact(
             num_measurements: measurements.points.len(),
         })
         .measurement_density(MeasurementDensity::BoresightOnly)
+        .physics_model_version(PHYSICS_MODEL_VERSION)
         .notes(notes)
         .build()
         .map_err(|e| anyhow::anyhow!("Failed to build calibration metadata: {}", e))?;

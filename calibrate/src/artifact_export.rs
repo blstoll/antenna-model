@@ -46,6 +46,8 @@ use antenna_model::data::types::{
     ValidityRangesBuilder,
 };
 
+use antenna_model::model::PHYSICS_MODEL_VERSION;
+
 use crate::correction_surface::CorrectionSurface;
 use crate::parser::MeasurementPoint;
 
@@ -353,6 +355,7 @@ pub fn export_full_calibration(
         .measurement_density(MeasurementDensity::Dense {
             points_per_beam: 0.0,
         })
+        .physics_model_version(PHYSICS_MODEL_VERSION)
         .notes(format!(
             "Full calibration with 4D correction surface (shape {:?}), R²={:.6}",
             correction.shape, r_squared

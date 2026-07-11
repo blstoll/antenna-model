@@ -255,6 +255,7 @@ impl CalibrationRepository {
                 antenna_class: None,
                 parameters_source: Some(crate::data::types::ParameterSource::DesignSpecifications),
                 measurement_density: Some(crate::data::types::MeasurementDensity::None),
+                physics_model_version: crate::model::PHYSICS_MODEL_VERSION,
             };
 
             // Build validity ranges (use config override or default from design)

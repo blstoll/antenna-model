@@ -160,6 +160,14 @@ pub struct CalibrationMetadata {
     /// Optional for backward compatibility with existing .bin files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub measurement_density: Option<MeasurementDensity>,
+
+    // ========== Physics-model versioning (roadmap P1b) ==========
+    /// Version of the physics model this calibration was fitted against
+    /// (see `crate::model::PHYSICS_MODEL_VERSION`). 0 = unknown (artifact predates
+    /// the version stamp). NOTE: adding this field changed the bincode layout;
+    /// pre-P1b `.bin` artifacts no longer decode (none exist — sanctioned by P1b).
+    #[serde(default)]
+    pub physics_model_version: u32,
 }
 
 impl CalibrationMetadata {
@@ -999,6 +1007,7 @@ pub struct CalibrationMetadataBuilder {
     antenna_class: Option<String>,
     parameters_source: Option<ParameterSource>,
     measurement_density: Option<MeasurementDensity>,
+    physics_model_version: Option<u32>,
 }
 
 impl CalibrationMetadataBuilder {
@@ -1072,6 +1081,11 @@ impl CalibrationMetadataBuilder {
         self
     }
 
+    pub fn physics_model_version(mut self, version: u32) -> Self {
+        self.physics_model_version = Some(version);
+        self
+    }
+
     pub fn build(self) -> Result<CalibrationMetadata, String> {
         Ok(CalibrationMetadata {
             antenna_name: self.antenna_name.ok_or("antenna_name is required")?,
@@ -1092,6 +1106,7 @@ impl CalibrationMetadataBuilder {
             antenna_class: self.antenna_class,
             parameters_source: self.parameters_source,
             measurement_density: self.measurement_density,
+            physics_model_version: self.physics_model_version.unwrap_or(0),
         })
     }
 }

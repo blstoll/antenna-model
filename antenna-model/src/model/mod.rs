@@ -25,6 +25,23 @@ pub mod pattern;
 pub mod phase;
 pub mod ray_trace;
 
+/// Version of the physics model's gain computation.
+///
+/// Correction surfaces are fitted to `measured − physics` residuals, so any change
+/// that alters `gain_physics` output for identical inputs invalidates surfaces fitted
+/// against the older model. Calibration artifacts record the version they were fitted
+/// against (`CalibrationMetadata::physics_model_version`) and the loader warns on
+/// mismatch (`data/loader.rs`).
+///
+/// # Bump policy
+/// Bump whenever a change alters `gain_physics` output for identical inputs
+/// (new efficiency terms, phase-model changes, defocus semantics, ...).
+///
+/// # History
+/// - 1: baseline at introduction (P1b) — post-P1 model (spillover applied on the
+///   uncalibrated path, fractional-q spillover fix)
+pub const PHYSICS_MODEL_VERSION: u32 = 1;
+
 // Re-export commonly used types
 pub use coordinates::{
     normalize_angle, normalize_angle_symmetric, ApertureCoordinates, EClockConeCoordinates,

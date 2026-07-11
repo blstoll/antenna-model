@@ -1685,6 +1685,48 @@ pub calibration_status: Option<CalibrationStatusInfo>
 - If present: use accuracy estimates and warnings
 - If absent: assume fully calibrated or unknown quality
 
+### 10.5 Physics-Model Versioning
+
+A calibration artifact has **three independent version axes**. They are easy to
+confuse because they all sound like "the version" — they answer different questions:
+
+| Axis | Type | Location | Question it answers |
+|------|------|----------|----------------------|
+| ANTC container version | `u32` (header) | `ANTC_SUPPORTED_VERSION` in `data/loader.rs` | Can this build parse the on-disk byte layout (magic/CRC/bincode framing)? |
+| Format version | `String` (e.g. `"2.0"`) | `CalibrationMetadata::format_version` | Which semantic schema (which fields exist / mean what) was this artifact authored against? |
+| Physics-model version | `u32` | `CalibrationMetadata::physics_model_version` | Which `gain_physics` implementation was this artifact's correction surface fitted against? |
+
+The first two axes are about **decoding and schema**; full reconciliation of them
+(e.g. deriving one from the other, or collapsing them into a single axis) is
+tracked separately as roadmap unit D2. `physics_model_version` is orthogonal to
+both: an artifact can decode fine and use a current-schema `format_version`, yet
+still be fitted against a **stale physics model** — because the correction surface
+is `measured − physics`, any change to `gain_physics` for the same inputs
+(new efficiency terms, phase-model changes, defocus semantics, etc.) makes an
+old correction surface subtly wrong even though the file itself is perfectly
+readable.
+
+**Bump policy:** bump `antenna_model::model::PHYSICS_MODEL_VERSION` whenever a
+change alters `gain_physics` output for identical inputs. It does **not** need to
+bump for changes that don't touch physics output (API-layer changes, new metadata
+fields, correction-surface fitting improvements, etc.).
+
+**Where it's stamped:**
+- `calibrate`'s two artifact writers (`artifact_export.rs` full-grid export,
+  `boresight_calibration.rs` boresight export) stamp the `PHYSICS_MODEL_VERSION`
+  that was compiled into the `calibrate` binary at fit time.
+- The service's uncalibrated (design-spec) path (`data/repository.rs`) stamps the
+  *current* `PHYSICS_MODEL_VERSION`, since design-spec antennas compute live
+  against the running physics model rather than a pre-fitted correction surface.
+
+**Loader behavior:** `data/loader.rs` compares `metadata.physics_model_version`
+against the running service's `PHYSICS_MODEL_VERSION` and emits a `warn!` (never
+an error — matching the `format_version` mismatch handling above) naming both
+values when they differ. `0` means the artifact predates the version stamp
+(pre-P1b) and is always treated as a mismatch worth flagging. A mismatch does not
+block loading; it is a signal that the artifact should be recalibrated against the
+current physics model to avoid a stale correction surface.
+
 ---
 
 ## 11. Appendix: Design Specs Reference

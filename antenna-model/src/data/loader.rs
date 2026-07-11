@@ -5,6 +5,7 @@
 
 use crate::data::types::AntennaCalibration;
 use crate::error::DataError;
+use crate::model::PHYSICS_MODEL_VERSION;
 use bincode::config;
 use std::path::Path;
 use tracing::{debug, info, warn};
@@ -169,7 +170,30 @@ pub fn load_calibration_artifact<P: AsRef<Path>>(path: P) -> Result<AntennaCalib
         );
     }
 
+    // Warn if this artifact was fitted against a different physics-model version.
+    if let Some(msg) = physics_model_version_mismatch(
+        calibration.metadata.physics_model_version,
+        PHYSICS_MODEL_VERSION,
+    ) {
+        warn!("{}", msg);
+    }
+
     Ok(calibration)
+}
+
+/// Warning to emit when an artifact was fitted against a different physics-model
+/// version than this service computes with. Correction surfaces are fitted to
+/// `measured − physics` residuals, so a mismatch can silently degrade accuracy;
+/// this is a warning, not an error (roadmap P1b policy).
+fn physics_model_version_mismatch(artifact: u32, current: u32) -> Option<String> {
+    (artifact != current).then(|| {
+        format!(
+            "Calibration artifact physics_model_version {} does not match the service's \
+             physics model version {}; the correction surface was fitted against a \
+             different physics model and residual corrections may be stale — recalibrate",
+            artifact, current
+        )
+    })
 }
 
 /// Validate a calibration artifact's internal consistency
@@ -528,5 +552,33 @@ mod tests {
             }
             other => panic!("Expected LoadError, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_physics_model_version_mismatch_message() {
+        let msg = physics_model_version_mismatch(999, 1).expect("mismatch must warn");
+        assert!(
+            msg.contains("999") && msg.contains('1'),
+            "must name both versions: {msg}"
+        );
+        assert!(physics_model_version_mismatch(1, 1).is_none());
+        // 0 = unknown / pre-stamp artifact: still a mismatch worth warning about
+        assert!(physics_model_version_mismatch(0, 1).is_some());
+    }
+
+    #[test]
+    fn test_load_artifact_with_mismatched_physics_model_version() {
+        let mut calibration = create_test_calibration();
+        calibration.metadata.physics_model_version = 999;
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        let config = config::standard();
+        let encoded = bincode::encode_to_vec(&calibration, config).unwrap();
+        temp_file.write_all(&encoded).unwrap();
+        temp_file.flush().unwrap();
+
+        // Mismatch must WARN, not error: load succeeds and preserves the stamp.
+        let loaded = load_calibration_artifact(temp_file.path()).unwrap();
+        assert_eq!(loaded.metadata.physics_model_version, 999);
     }
 }
