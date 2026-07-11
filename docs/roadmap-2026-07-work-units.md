@@ -46,7 +46,8 @@ G1 ─┬─ G2 ── G3
     └─ (Phases 1–3 done) ─ D4 ─ D7
 Superseded by C8 (do not implement): S7, C5, C6
 Phase 5: F1..F7 gated on register rows (P3, P5/F4, F5, D9, F7); P1 + C8 DECIDED 2026-07-08;
-P7 DECIDED 2026-07-10 (auto-refocus)
+P7 DECIDED 2026-07-10 (auto-refocus), IMPLEMENTED 2026-07-10 (branch
+feat/p7-phase-center-auto-refocus; P1b dependency implemented in the same branch)
 ```
 
 ---
@@ -202,6 +203,12 @@ P7 DECIDED 2026-07-10 (auto-refocus)
 - **Depends on:** G1, G2. Do before P3/P6 (shares domain-contract edits). Companion: P1b.
 
 ### P1b — Physics-model version stamp in calibration artifacts — Effort: S
+**✅ DONE 2026-07-10** — `1746bc0`. `PHYSICS_MODEL_VERSION` constant added
+(`antenna-model/src/model/mod.rs`), stamped into calibration artifacts as
+`CalibrationMetadata.physics_model_version` by the calibrate writers; the loader compares
+against the service's constant and **warns** (never errors) on mismatch, naming both
+values. Bumped to `2` when P7 landed (auto-refocus changes `gain_physics` output for
+identical inputs, per this unit's own bump policy).
 
 - **Rationale:** correction surfaces are fitted to `measured − physics` residuals; any
   change to the physics model (P1 here, F2/F3 later) invalidates surfaces fitted against
@@ -286,6 +293,21 @@ P7 DECIDED 2026-07-10 (auto-refocus)
 
 ### P7 — Auto-refocus `phase_center_offset`; tighten Ka reference tolerance — Effort: M
 **[DECIDED 2026-07-10 — model auto-refocus]**
+**✅ DONE 2026-07-10** — branch `feat/p7-phase-center-auto-refocus`, commits `ba87160`
+(model: `phase_center_offset` compensated, new explicit `axial_defocus` field carries the
+defocus math), `a31c512` + `6c2e1a8` (plumbing: `axial_defocus_m` threaded YAML →
+data-layer `FeedParameters` → evaluator/h3 model-feed builders, service-level tests
+`test_phase_center_offset_m_is_inert_at_service_level` /
+`test_axial_defocus_m_reduces_gain_at_service_level`), `10c8204` (harness: Ka tolerance
+5.0 → 1.5 dB, X 1.5 → 1.0 dB in `dsn_34m_bwg.psv`; measured post-fix residuals X +0.17 dB,
+Ka +0.01 dB). All four exit criteria met, including the domain-contract update (done in
+this same docs pass). This unit's P1b dependency (`1746bc0`) was implemented earlier in
+the same branch, not on a separate one — see P1b above. **Stretch criterion (exit
+criterion 4, second multi-band reference antenna) intentionally NOT implemented**: judged
+unnecessary because cross-D/λ generalization is already evidenced by `dsn_34m_uncalibrated`
+carrying nonzero datasheet phase-center offsets at both X-band (0.015 m) and Ka-band
+(0.008 m) under the now-tightened tolerances, plus the pre-existing GBT 100-m L/Q-band rows
+(1.4–43 GHz) — see `docs/findings-2026-07-10-ka-phase-center-defocus.md` follow-up step 5.
 
 - **Decision (recorded):** `phase_center_offset_m` is a **raw feed property** that the model
   compensates: the evaluator positions the feed axially so the phase center lands at the

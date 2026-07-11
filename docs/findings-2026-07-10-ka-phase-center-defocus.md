@@ -1,8 +1,11 @@
 # Finding: Ka-band under-prediction is phase-center axial defocus, not spillover
 
 **Date:** 2026-07-10
-**Status:** Decided 2026-07-10 — option 2 (**model auto-refocus**); execution = roadmap
-unit **P7** (`docs/roadmap-2026-07-work-units.md`).
+**Status:** **Implemented (P7) 2026-07-10** — option 2 (**model auto-refocus**); landed on
+branch `feat/p7-phase-center-auto-refocus` (commits `1746bc0`, `ba87160`, `a31c512`,
+`6c2e1a8`, `10c8204`). Harness residuals post-fix: DSN 34-m X +0.17 dB, Ka +0.01 dB (was
+−0.62/−3.40 dB pre-P7). See `docs/roadmap-2026-07-work-units.md` unit **P7** for the
+execution record.
 **Discovered by:** the DSN reference-validation harness (`antenna-model/tests/reference_validation.rs`)
 while grounding the feed-taper fix.
 
@@ -114,12 +117,28 @@ and `compute_gain_db` with `apply_spillover=false` to isolate illumination effic
 
 1. ~~Decide semantics (option 1 vs 2 above); add a decision-register row.~~ **Done 2026-07-10:
    option 2 (auto-refocus); register row P7 Decided in `docs/roadmap-2026-07.md` §5.**
-2. Apply the chosen fix; re-run the harness — expect Ka residual → ~0.1 dB and X → ~0 dB.
-3. Tighten the Ka reference tolerance in
-   `tests/fixtures/reference_datasets/dsn_34m_bwg.psv` (currently a loose 5.0 dB) to ~1.5 dB.
-4. Fix the `(q as i32)` truncation in `estimate_spillover` while in the file.
-5. Add a multi-band reference antenna (e.g. DSN 34-m HEF or 70-m) to confirm the fix generalizes
-   across D/λ.
+2. ~~Apply the chosen fix; re-run the harness — expect Ka residual → ~0.1 dB and X → ~0 dB.~~
+   **Done 2026-07-10 (P7, commit `ba87160` + plumbing `a31c512`/`6c2e1a8`):** harness Ka
+   residual is now **+0.01 dB**; X residual **+0.17 dB** (small nonzero residual reflects the
+   honest prime-focus-vs-shaped-Cassegrain topology gap noted in the .psv fixture, not a
+   remaining defocus bug).
+3. ~~Tighten the Ka reference tolerance in
+   `tests/fixtures/reference_datasets/dsn_34m_bwg.psv` (currently a loose 5.0 dB) to ~1.5 dB.~~
+   **Done 2026-07-10 (commit `10c8204`):** Ka tolerance tightened 5.0 → 1.5 dB; X tolerance
+   also tightened 1.5 → 1.0 dB (residual comfortably supports it).
+4. ~~Fix the `(q as i32)` truncation in `estimate_spillover` while in the file.~~ **Already
+   fixed 2026-07-10**, in the same session that produced this finding (see "What it is NOT"
+   above and `edge_cases.rs::test_spillover_honors_fractional_q`) — predates and is
+   independent of the P7 work above.
+5. Add a multi-band reference antenna (e.g. DSN 34-m HEF or 70-m) to confirm the fix
+   generalizes across D/λ. **Not needed — see roadmap P7 note
+   (`docs/roadmap-2026-07-work-units.md`).** Cross-D/λ generalization is already evidenced
+   without a new antenna: `dsn_34m_uncalibrated` itself carries nonzero datasheet
+   phase-center offsets at both X-band (0.015 m) and Ka-band (0.008 m) under the newly
+   tightened tolerances, and the existing GBT 100-m reference rows span L through Q band
+   (1.4–43 GHz) with their own tolerances. A dedicated second multi-band antenna (e.g. DSN
+   34-m HEF) was judged to add fixture-maintenance cost without materially strengthening
+   that evidence, so the stretch criterion was intentionally not implemented.
 
 ## Related
 
