@@ -300,7 +300,7 @@ data-layer `FeedParameters` → evaluator/h3 model-feed builders, service-level 
 `test_phase_center_offset_m_is_inert_at_service_level` /
 `test_axial_defocus_m_reduces_gain_at_service_level`), `10c8204` (harness: Ka tolerance
 5.0 → 1.5 dB, X 1.5 → 1.0 dB in `dsn_34m_bwg.psv`; measured post-fix residuals X +0.17 dB,
-Ka +0.01 dB). All four exit criteria met, including the domain-contract update (done in
+Ka +0.01 dB). Exit criteria 1–3 met, including the domain-contract update (done in
 this same docs pass). This unit's P1b dependency (`1746bc0`) was implemented earlier in
 the same branch, not on a separate one — see P1b above. **Stretch criterion (exit
 criterion 4, second multi-band reference antenna) intentionally NOT implemented**: judged

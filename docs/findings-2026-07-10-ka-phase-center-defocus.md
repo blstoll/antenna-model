@@ -4,8 +4,9 @@
 **Status:** **Implemented (P7) 2026-07-10** — option 2 (**model auto-refocus**); landed on
 branch `feat/p7-phase-center-auto-refocus` (commits `1746bc0`, `ba87160`, `a31c512`,
 `6c2e1a8`, `10c8204`). Harness residuals post-fix: DSN 34-m X +0.17 dB, Ka +0.01 dB (was
-−0.62/−3.40 dB pre-P7). See `docs/roadmap-2026-07-work-units.md` unit **P7** for the
-execution record.
+−0.62/−3.40 dB pre-P7, measured against the post-q-truncation-fix spillover baseline — the
+−0.73/−3.52 dB figures elsewhere in this doc predate that fix; see the note under the TL;DR
+table). See `docs/roadmap-2026-07-work-units.md` unit **P7** for the execution record.
 **Discovered by:** the DSN reference-validation harness (`antenna-model/tests/reference_validation.rs`)
 while grounding the feed-taper fix.
 
@@ -102,8 +103,10 @@ by mechanism. Execution: roadmap unit P7. Option 1 is kept below for the record.
    offset 0) unless a deliberate defocus is requested. More faithful to feed physics, but a
    behavior change touching `integration.rs` / evaluator, with test implications.
 
-Either way, document the chosen semantics of `phase_center_offset_m` in `domain-contract.md`
-(it is currently ambiguous: "offset from feed aperture" vs "defocus from the focal point").
+At the time of writing, the field's semantics were ambiguous in `domain-contract.md`
+("offset from feed aperture" vs "defocus from the focal point"). **Resolved:** the chosen
+semantics (compensated feed property, auto-refocus, P7) are now documented there — see the
+`phase_center_offset` and `axial_defocus` glossary rows.
 
 ## Reproduction
 
@@ -147,5 +150,6 @@ and `compute_gain_db` with `apply_spillover=false` to isolate illumination effic
 ## Related
 
 - Feed-taper fix (same harness, same session): q_factor corrected to a −11 dB edge-taper target.
-- `docs/domain-contract.md` — needs a `phase_center_offset_m` semantics entry.
+- `docs/domain-contract.md` — now has the `phase_center_offset` semantics entry (compensated,
+  auto-refocus) plus a new `axial_defocus` glossary row; updated in commit `9d97875`.
 - Memory: `dsn-reference-validation`.

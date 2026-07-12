@@ -192,7 +192,7 @@ mechanisms (edge diffraction, strut scatter) are out of scope regardless (roadma
   the change. The standalone `illumination::phase_center_offset_phase` function mentioned
   in earlier drafts of this contract was a separate, unused implementation (dead code) —
   it has since been **removed** (grep-verified 2026-07-10: zero hits for
-  `phase_center_offset_phase` anywhere in the codebase). Recorded here as history, not as
+  `phase_center_offset_phase` in any `.rs` file). Recorded here as history, not as
   an open item.
 - `MeshParameters::transparency_at_wavelength` is test-only dead code — see glossary.
 - Duplicate Ruze implementation: `surface.rs::ruze_efficiency` / `ruze_efficiency_from_frequency`
