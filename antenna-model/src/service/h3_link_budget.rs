@@ -247,6 +247,17 @@ fn compute_cell_gain(
         }
     }
 
+    // Off-axis honesty warning (P8): el_deg is the off-boresight angle
+    // (elevation = 0° at boresight). Computed fresh on every call (cheap),
+    // never cached, so it also surfaces on cache hits. The message is
+    // constant per (antenna, frequency), so the caller's warning-set
+    // aggregation deduplicates it across cells.
+    captured_warnings.extend(crate::service::evaluator::off_axis_unvalidated_warning(
+        calibration,
+        el_deg,
+        request.frequency_mhz,
+    ));
+
     Ok((
         gain_db,
         az_deg,

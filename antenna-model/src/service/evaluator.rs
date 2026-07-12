@@ -340,6 +340,14 @@ pub fn compute_gain_from_request(
         generate_calibration_warnings(&calibration, corrected_az, corrected_el, correction_applied);
     warnings.extend(calibration_warnings);
 
+    // Off-axis honesty warning (P8): corrected_el is the off-boresight angle
+    // (elevation = 0° at boresight in this pipeline's convention).
+    warnings.extend(off_axis_unvalidated_warning(
+        &calibration,
+        corrected_el,
+        request.frequency_mhz,
+    ));
+
     // Build calibration status info
     let calibration_status_info = calibration.calibration_status.as_ref().map(|status| {
         let mut info = CalibrationStatusInfo::from(status);
@@ -464,6 +472,72 @@ fn generate_calibration_warnings(
     }
 
     warnings
+}
+
+/// First-null angle coefficient for tapered circular-aperture illumination:
+/// θ_null ≈ 1.6·λ/D radians (uniform illumination would be 1.22·λ/D; the
+/// taper widens the main lobe). See docs/domain-contract.md, "Off-axis
+/// pattern / sidelobe fidelity".
+const FIRST_NULL_COEFFICIENT: f64 = 1.6;
+
+/// The off-axis honesty warning fires beyond this many first-null angles off
+/// boresight. Inside ~3 first nulls the main beam and first sidelobe are the
+/// region the model is validated for (<1 dB); beyond it, sidelobe *levels*
+/// are systematically optimistic (unmodeled blockage, strut scatter, edge
+/// diffraction, surface-error scatter floor).
+const OFF_AXIS_FIRST_NULL_MULTIPLE: f64 = 3.0;
+
+/// Off-axis honesty warning for uncalibrated antennas (roadmap unit P8).
+///
+/// Returns a warning when a query on an antenna with
+/// `CalibrationStatus::Uncalibrated` falls beyond the validated
+/// main-beam/near-in region (3× the first-null angle ≈ 1.6·λ/D — a
+/// beamwidth-relative threshold, not a fixed angle). Calibrated and
+/// partially-calibrated antennas are excluded: out-of-coverage queries there
+/// already receive the extrapolation warning, and stacking a second warning
+/// was explicitly ruled out (P8 design constraint 1).
+///
+/// The message is intentionally constant per (antenna, frequency) — it must
+/// not embed the query angle, so that heatmap/H3 warning aggregation
+/// deduplicates it to a single entry across grid points.
+///
+/// C8 stage 3 converts this string warning to typed code
+/// `off_axis_unvalidated`.
+pub(crate) fn off_axis_unvalidated_warning(
+    calibration: &crate::data::types::AntennaCalibration,
+    off_boresight_deg: f64,
+    frequency_mhz: f64,
+) -> Option<String> {
+    if !matches!(
+        calibration.calibration_status,
+        Some(CalibrationStatus::Uncalibrated { .. })
+    ) {
+        return None;
+    }
+
+    let diameter_m = calibration.physical_config.reflector.diameter_m;
+    if diameter_m <= 0.0 || frequency_mhz <= 0.0 {
+        return None;
+    }
+
+    let wavelength_m = crate::model::wavelength_from_frequency(frequency_mhz * 1e6);
+    let threshold_deg = (OFF_AXIS_FIRST_NULL_MULTIPLE * FIRST_NULL_COEFFICIENT * wavelength_m
+        / diameter_m)
+        .to_degrees();
+
+    if off_boresight_deg.abs() <= threshold_deg {
+        return None;
+    }
+
+    Some(format!(
+        "Antenna '{}' is uncalibrated and this query is more than {:.2}° off boresight \
+         (3× the first-null angle ≈ 1.6·λ/D at {:.0} MHz) — beyond the validated main-beam \
+         region. Off-axis sidelobe levels from the physics model are systematically \
+         optimistic (pattern shape is validated, levels are not); use calibration data or \
+         a regulatory envelope such as the ITU-R S.580 mask for off-axis/interference \
+         analysis.",
+        calibration.antenna_id, threshold_deg, frequency_mhz
+    ))
 }
 
 #[cfg(test)]
@@ -722,6 +796,97 @@ mod tests {
 
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("Correction surface not applied"));
+    }
+
+    // ------------------------------------------------------------------
+    // Off-axis honesty warning (roadmap unit P8)
+    //
+    // Test fixture geometry: 10 m dish. At 8400 MHz, λ ≈ 0.0357 m, so the
+    // first-null angle ≈ 1.6·λ/D ≈ 0.327° and the warning threshold
+    // (3× first null) ≈ 0.98°.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_off_axis_warning_fires_beyond_threshold_for_uncalibrated() {
+        let calibration = create_test_calibration(CalibrationStatus::Uncalibrated {
+            accuracy_estimate_db: 3.0,
+            loss_accuracy_estimate_db: 2.0,
+        });
+
+        let warning = off_axis_unvalidated_warning(&calibration, 2.0, 8400.0);
+        let msg = warning.expect("2.0° off boresight > ~0.98° threshold must warn");
+        assert!(msg.contains("beyond the validated main-beam region"));
+        assert!(msg.contains("ITU-R S.580"));
+    }
+
+    #[test]
+    fn test_off_axis_warning_silent_inside_main_beam() {
+        let calibration = create_test_calibration(CalibrationStatus::Uncalibrated {
+            accuracy_estimate_db: 3.0,
+            loss_accuracy_estimate_db: 2.0,
+        });
+
+        assert!(off_axis_unvalidated_warning(&calibration, 0.0, 8400.0).is_none());
+        assert!(off_axis_unvalidated_warning(&calibration, 0.5, 8400.0).is_none());
+    }
+
+    #[test]
+    fn test_off_axis_warning_uses_absolute_angle() {
+        let calibration = create_test_calibration(CalibrationStatus::Uncalibrated {
+            accuracy_estimate_db: 3.0,
+            loss_accuracy_estimate_db: 2.0,
+        });
+
+        assert!(off_axis_unvalidated_warning(&calibration, -2.0, 8400.0).is_some());
+    }
+
+    /// Calibrated / partially-calibrated antennas must NOT get the off-axis
+    /// warning: out-of-coverage queries there already receive the extrapolation
+    /// warning, and stacking a second warning was explicitly ruled out (P8
+    /// design constraint 1).
+    #[test]
+    fn test_off_axis_warning_only_for_uncalibrated_status() {
+        let fully = create_test_calibration(CalibrationStatus::FullyCalibrated {
+            accuracy_estimate_db: 1.0,
+        });
+        assert!(off_axis_unvalidated_warning(&fully, 45.0, 8400.0).is_none());
+
+        let coverage = CalibrationCoverage::builder()
+            .azimuth_range(0.0, 90.0)
+            .elevation_range(0.0, 30.0)
+            .frequency_range(8000.0, 9000.0)
+            .num_measurements(100)
+            .has_correction_surface(true)
+            .build()
+            .unwrap();
+        let partial = create_test_calibration(CalibrationStatus::PartiallyCalibrated {
+            accuracy_estimate_db: 1.5,
+            coverage,
+        });
+        assert!(off_axis_unvalidated_warning(&partial, 45.0, 8400.0).is_none());
+
+        // Status None is treated as fully calibrated (backward compatibility).
+        let mut unspecified = create_test_calibration(CalibrationStatus::FullyCalibrated {
+            accuracy_estimate_db: 1.0,
+        });
+        unspecified.calibration_status = None;
+        assert!(off_axis_unvalidated_warning(&unspecified, 45.0, 8400.0).is_none());
+    }
+
+    /// The threshold is beamwidth-relative (λ/D), not a fixed angle: the same
+    /// off-boresight angle warns for an electrically large antenna (narrow
+    /// beam) and stays silent for an electrically small one (wide beam).
+    #[test]
+    fn test_off_axis_threshold_scales_with_wavelength_over_diameter() {
+        let calibration = create_test_calibration(CalibrationStatus::Uncalibrated {
+            accuracy_estimate_db: 3.0,
+            loss_accuracy_estimate_db: 2.0,
+        });
+
+        // 0.6° at 2000 MHz: threshold ≈ 4.1° → silent.
+        assert!(off_axis_unvalidated_warning(&calibration, 0.6, 2000.0).is_none());
+        // 0.6° at 30000 MHz: threshold ≈ 0.27° → warns.
+        assert!(off_axis_unvalidated_warning(&calibration, 0.6, 30000.0).is_some());
     }
 
     /// The correction surface must be evaluated at the calibration's

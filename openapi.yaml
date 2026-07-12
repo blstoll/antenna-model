@@ -625,6 +625,17 @@ components:
           $ref: '#/components/schemas/GeometryInfo'
         warnings:
           type: array
+          description: >
+            Human-readable warnings about result quality. Classes include:
+            uncalibrated / partially-calibrated accuracy estimates,
+            outside-calibrated-region extrapolation, correction surface not
+            applied (out of coverage), degraded-accuracy large feed offsets
+            (ray-trace stub), aperture-integration non-convergence, and the
+            off-axis honesty warning — emitted when a query on an UNCALIBRATED
+            antenna falls beyond ~3x the first-null angle (~1.6*lambda/D,
+            beamwidth-relative): off-axis sidelobe levels from the physics
+            model are systematically optimistic and must not be used for
+            interference / off-axis-EIRP analysis.
           items:
             type: string
         metadata:
@@ -852,7 +863,12 @@ components:
             type: object
         warnings:
           type: array
-          description: Warnings (e.g., extrapolated cells, out-of-range queries)
+          description: >
+            Aggregated, deduplicated warnings across all cells (e.g.,
+            extrapolated cells, out-of-range queries, and the off-axis honesty
+            warning for uncalibrated antennas when cells fall beyond ~3x the
+            first-null angle ~1.6*lambda/D — sidelobe levels there are
+            systematically optimistic).
           items:
             type: string
         metadata:
@@ -987,6 +1003,12 @@ components:
           $ref: '#/components/schemas/GridData'
         warnings:
           type: array
+          description: >
+            Aggregated, deduplicated warnings across all grid points (e.g.,
+            extrapolated points, and the off-axis honesty warning for
+            uncalibrated antennas when grid points fall beyond ~3x the
+            first-null angle ~1.6*lambda/D — sidelobe levels there are
+            systematically optimistic).
           items:
             type: string
         metadata:

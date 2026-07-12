@@ -1,0 +1,120 @@
+# pattern_peaks.psv — sidelobe peak envelope digitized from scanned pattern charts
+# Source: NASA CR-159703, R.E. Collin & L.R. Gabel, "Low sidelobe level low-cost earth station
+#         antennas for the 12 GHz broadcasting satellite service", Sept 1979 (Case Western Reserve Univ.)
+#         https://ntrs.nasa.gov/api/citations/19800004009/downloads/19800004009.pdf
+# Method: pages rendered at 400 dpi (PyMuPDF), chart-only crops read visually; axis calibration from the
+#         -12/-24/-36 dB (or -10/-20/-30 dB) y-ticks and the +/-3-degree x-grid labels; levels referenced
+#         to the main-beam apex (= 0 dB); peaks read against the 1-dB chart fine lines where visible.
+# page = 1-based page number in the PDF file (report-printed page = pdf_page - 7).
+# Angles signed as drawn on the charts (left of boresight = negative). Both halves recorded; asymmetry is real
+# (residual surface error, mixer-stub scatter — see report pp. 59-60, 68).
+# uncertainty_db is the level uncertainty; angle uncertainty is +/-0.3 deg (+/-0.5 deg where noted).
+# Antennas: spun-aluminum prime-focus paraboloids, f/D = 0.38 nominal.
+#   1.22 m: f = 0.457 m, D/lambda ~ 49 at 12.1 GHz.  1.83 m: f = 0.6985 m, D/lambda ~ 73 at 12 GHz.
+# Feeds: "waveguide" = manufacturer button-hook rectangular waveguide feed + 0.216 m flat vertex plate
+#        (as-delivered config); "kumar" = Kumar coaxial-ring hybrid feed, ~20 dB edge taper, vertex plate
+#        replaced by machined paraboloidal section. defocus = fe, feed distance from vertex (m).
+# Half-power beamwidths read from the same charts (step-recorder resolution limits accuracy):
+#   cut 122_wg_h_120:        HPBW ~ 2.2 +/- 0.4 deg (poor focusing; text gain 37.2 dB vs 41 dB spec)
+#   cut 122_kumar_C_h_121:   HPBW ~ 1.5 +/- 0.3 deg (report text states measured 3 dB beamwidth = 1.7 deg; gain 41.4 dB)
+#   cut 122_kumar_D_e_121:   HPBW ~ 1.4 +/- 0.3 deg
+#   cut 183_kumar_best_h_120: HPBW ~ 1.0 +/- 0.3 deg (main lobe 3 deg between nulls per text, p. 87)
+#   others: main lobe distorted or grid too coarse — not read.
+cut_id|figure|page|antenna_diameter_m|frequency_ghz|plane|feed|defocus|surface_condition|peak_angle_deg|level_db_rel_peak|uncertainty_db|notes
+122_wg_h_120|4.2|60|1.22|12.0|H|waveguide|nominal|as_delivered_clamshell_vertex_plate|-12.9|-29.5|1.5|solid trace; dashed feed-rotated-180 trace not digitized
+122_wg_h_120|4.2|60|1.22|12.0|H|waveguide|nominal|as_delivered_clamshell_vertex_plate|-9.5|-25.5|1.5|
+122_wg_h_120|4.2|60|1.22|12.0|H|waveguide|nominal|as_delivered_clamshell_vertex_plate|-7.2|-26.5|1.5|
+122_wg_h_120|4.2|60|1.22|12.0|H|waveguide|nominal|as_delivered_clamshell_vertex_plate|-4.1|-17.5|1.5|shoulder on main lobe, not a detached sidelobe; first true nulls only at +/-6 deg
+122_wg_h_120|4.2|60|1.22|12.0|H|waveguide|nominal|as_delivered_clamshell_vertex_plate|6.9|-26.5|1.5|
+122_wg_h_120|4.2|60|1.22|12.0|H|waveguide|nominal|as_delivered_clamshell_vertex_plate|9.1|-25.5|1.5|
+122_kumar_B_h_121|4.12|69|1.22|12.1|H|kumar|0.4604|seriesB_center_fixed_clamshell_warp|-13.0|-34.0|1.5|sidelobe region heavily filled in between peaks (~-34 to -36 floor)
+122_kumar_B_h_121|4.12|69|1.22|12.1|H|kumar|0.4604|seriesB_center_fixed_clamshell_warp|-10.7|-34.0|1.5|
+122_kumar_B_h_121|4.12|69|1.22|12.1|H|kumar|0.4604|seriesB_center_fixed_clamshell_warp|-8.2|-30.0|1.0|
+122_kumar_B_h_121|4.12|69|1.22|12.1|H|kumar|0.4604|seriesB_center_fixed_clamshell_warp|-6.1|-27.5|1.0|highest sidelobe; text (p.56): series A/B sidelobes as high as -26 dB
+122_kumar_B_h_121|4.12|69|1.22|12.1|H|kumar|0.4604|seriesB_center_fixed_clamshell_warp|-4.6|-32.0|1.5|no clean null between this and main lobe (text p.56-58: missing null on one side)
+122_kumar_B_h_121|4.12|69|1.22|12.1|H|kumar|0.4604|seriesB_center_fixed_clamshell_warp|3.2|-34.0|1.5|narrow spike just past first right null
+122_kumar_B_h_121|4.12|69|1.22|12.1|H|kumar|0.4604|seriesB_center_fixed_clamshell_warp|5.8|-27.5|1.0|broad flat-topped lobe
+122_kumar_B_h_121|4.12|69|1.22|12.1|H|kumar|0.4604|seriesB_center_fixed_clamshell_warp|8.2|-30.5|1.0|
+122_kumar_B_h_121|4.12|69|1.22|12.1|H|kumar|0.4604|seriesB_center_fixed_clamshell_warp|10.2|-31.5|1.5|
+122_kumar_B_h_121|4.12|69|1.22|12.1|H|kumar|0.4604|seriesB_center_fixed_clamshell_warp|14.0|-36.0|1.5|near right edge of chart
+122_kumar_C_h_121_d476|4.16|71|1.22|12.1|H|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|-12.8|-37.0|1.5|d=0.00476 m dielectric-rod setting (not yet optimum)
+122_kumar_C_h_121_d476|4.16|71|1.22|12.1|H|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|-9.5|-32.5|1.0|flat-topped plateau -8.5 to -10.5 deg
+122_kumar_C_h_121_d476|4.16|71|1.22|12.1|H|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|-6.0|-31.5|1.0|double-topped
+122_kumar_C_h_121_d476|4.16|71|1.22|12.1|H|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|4.2|-30.5|1.0|
+122_kumar_C_h_121_d476|4.16|71|1.22|12.1|H|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|5.5|-32.0|1.0|
+122_kumar_C_h_121_d476|4.16|71|1.22|12.1|H|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|8.1|-30.0|1.0|exceeds first sidelobe — flagged in cross-checks (surface error / mixer scatter)
+122_kumar_C_h_121_d476|4.16|71|1.22|12.1|H|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|10.5|-35.0|1.5|
+122_kumar_C_h_121_d476|4.16|71|1.22|12.1|H|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|12.9|-36.0|1.5|
+122_kumar_C_h_121_d476|4.16|71|1.22|12.1|H|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|14.7|-36.0|1.5|near right edge
+122_kumar_C_h_121|4.22|74|1.22|12.1|H|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|-10.8|-37.0|1.0|BEST 1.22 m H-plane cut (text p.58: best gain and sidelobe definition); d=0.003175 m
+122_kumar_C_h_121|4.22|74|1.22|12.1|H|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|-9.0|-38.0|1.0|
+122_kumar_C_h_121|4.22|74|1.22|12.1|H|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|-6.3|-35.5|1.0|shoulder on -5 deg lobe
+122_kumar_C_h_121|4.22|74|1.22|12.1|H|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|-5.1|-30.0|1.0|first distinct left sidelobe
+122_kumar_C_h_121|4.22|74|1.22|12.1|H|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|-3.6|-41.0|1.5|minor spike near first null
+122_kumar_C_h_121|4.22|74|1.22|12.1|H|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|4.0|-30.5|1.0|first right sidelobe
+122_kumar_C_h_121|4.22|74|1.22|12.1|H|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|5.4|-33.0|1.0|
+122_kumar_C_h_121|4.22|74|1.22|12.1|H|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|6.8|-40.0|1.5|
+122_kumar_C_h_121|4.22|74|1.22|12.1|H|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|8.2|-36.5|1.0|
+122_kumar_C_h_121|4.22|74|1.22|12.1|H|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|10.9|-40.5|1.5|
+122_kumar_C_h_121|4.22|74|1.22|12.1|H|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|12.0|-40.0|1.5|multi-lobed cluster at chart edge
+122_kumar_C_h_121_b|4.28|81|1.22|12.1|H|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|-12.8|-40.5|1.5|repeat of 4.22 config on a different day (text p.60 discusses the difference); d=0.003175 m
+122_kumar_C_h_121_b|4.28|81|1.22|12.1|H|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|-10.6|-35.0|0.5|in-figure margin annotation 6.5 dB below CCIR model corroborates
+122_kumar_C_h_121_b|4.28|81|1.22|12.1|H|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|-9.0|-37.5|1.0|
+122_kumar_C_h_121_b|4.28|81|1.22|12.1|H|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|-6.1|-34.0|1.0|shoulder of -5 deg lobe
+122_kumar_C_h_121_b|4.28|81|1.22|12.1|H|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|-4.9|-30.5|0.5|annotation 10.5 dB below CCIR corroborates
+122_kumar_C_h_121_b|4.28|81|1.22|12.1|H|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|4.2|-30.0|0.5|annotation 11 dB below CCIR corroborates; used in phase-reversal-plate experiment (Fig 4.33/4.34)
+122_kumar_C_h_121_b|4.28|81|1.22|12.1|H|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|5.6|-33.5|1.0|
+122_kumar_C_h_121_b|4.28|81|1.22|12.1|H|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|8.1|-32.5|0.5|annotation 7.5 dB below CCIR
+122_kumar_C_h_121_b|4.28|81|1.22|12.1|H|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|10.2|-36.5|0.5|annotation 8 dB below CCIR
+122_kumar_C_h_121_b|4.28|81|1.22|12.1|H|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|12.6|-37.5|1.0|annotation 7 dB below CCIR
+122_kumar_C_h_121_b|4.28|81|1.22|12.1|H|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|14.8|-38.0|0.5|text p.59: "sidelobe at 15 deg is -37.5 dB, 4.5 dB below CCIR model"
+122_kumar_D_e_121|4.37|86|1.22|12.1|E|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|-10.2|-40.0|1.5|Series D = mixer stub turned outward (spurious E-plane lobe eliminated)
+122_kumar_D_e_121|4.37|86|1.22|12.1|E|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|-8.6|-40.0|1.5|
+122_kumar_D_e_121|4.37|86|1.22|12.1|E|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|-7.0|-40.5|1.5|
+122_kumar_D_e_121|4.37|86|1.22|12.1|E|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|-5.1|-30.5|1.0|first left sidelobe
+122_kumar_D_e_121|4.37|86|1.22|12.1|E|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|-3.2|-39.5|1.5|narrow spike
+122_kumar_D_e_121|4.37|86|1.22|12.1|E|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|4.1|-33.0|1.0|first right sidelobe
+122_kumar_D_e_121|4.37|86|1.22|12.1|E|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|5.3|-37.0|1.0|
+122_kumar_D_e_121|4.37|86|1.22|12.1|E|kumar|0.4604|seriesC_reshaped_residual_le_1.6mm|10.3|-40.0|1.5|region 6.5-9.5 deg below recorder floor (<-43 dB) — missing, not zero
+183_wg_h_120|4.48|93|1.83|12.0|H|waveguide|nominal|as_delivered_clamshell_periodic_vertex_plate|-10.2|-33.5|1.5|dense chart grid; merged lobes; angle unc +/-0.5 deg
+183_wg_h_120|4.48|93|1.83|12.0|H|waveguide|nominal|as_delivered_clamshell_periodic_vertex_plate|-6.8|-30.5|1.5|
+183_wg_h_120|4.48|93|1.83|12.0|H|waveguide|nominal|as_delivered_clamshell_periodic_vertex_plate|-5.2|-28.0|1.5|
+183_wg_h_120|4.48|93|1.83|12.0|H|waveguide|nominal|as_delivered_clamshell_periodic_vertex_plate|-3.6|-22.5|0.5|in-figure annotation "-22.5 dB" corroborates
+183_wg_h_120|4.48|93|1.83|12.0|H|waveguide|nominal|as_delivered_clamshell_periodic_vertex_plate|-1.5|-18.5|1.5|shoulder merged with main lobe (poor focusing)
+183_wg_h_120|4.48|93|1.83|12.0|H|waveguide|nominal|as_delivered_clamshell_periodic_vertex_plate|1.4|-27.0|1.5|
+183_wg_h_120|4.48|93|1.83|12.0|H|waveguide|nominal|as_delivered_clamshell_periodic_vertex_plate|2.8|-23.0|1.5|
+183_wg_h_120|4.48|93|1.83|12.0|H|waveguide|nominal|as_delivered_clamshell_periodic_vertex_plate|4.2|-24.0|1.5|broad flat top extending to ~+5 deg
+183_wg_h_120|4.48|93|1.83|12.0|H|waveguide|nominal|as_delivered_clamshell_periodic_vertex_plate|5.9|-30.0|1.5|
+183_wg_h_120|4.48|93|1.83|12.0|H|waveguide|nominal|as_delivered_clamshell_periodic_vertex_plate|9.2|-34.5|1.5|
+183_kumar_pre_e_120|4.52|96|1.83|12.0|E|kumar|0.6953|as_received_clamshell_6.4mm_plus_periodic|-7.1|-33.5|1.5|BEFORE clam-shell removal; text p.87: sidelobe level "very high (around -24 dB)"
+183_kumar_pre_e_120|4.52|96|1.83|12.0|E|kumar|0.6953|as_received_clamshell_6.4mm_plus_periodic|-5.7|-31.0|1.5|
+183_kumar_pre_e_120|4.52|96|1.83|12.0|E|kumar|0.6953|as_received_clamshell_6.4mm_plus_periodic|-4.4|-23.5|1.0|dominant left error lobe
+183_kumar_pre_e_120|4.52|96|1.83|12.0|E|kumar|0.6953|as_received_clamshell_6.4mm_plus_periodic|-1.8|-18.0|1.5|shoulder merged with main lobe
+183_kumar_pre_e_120|4.52|96|1.83|12.0|E|kumar|0.6953|as_received_clamshell_6.4mm_plus_periodic|2.0|-22.0|1.5|first right lobe barely separated from main lobe
+183_kumar_pre_e_120|4.52|96|1.83|12.0|E|kumar|0.6953|as_received_clamshell_6.4mm_plus_periodic|3.5|-23.5|1.0|
+183_kumar_pre_e_120|4.52|96|1.83|12.0|E|kumar|0.6953|as_received_clamshell_6.4mm_plus_periodic|6.0|-30.5|1.5|
+183_kumar_pre_e_120|4.52|96|1.83|12.0|E|kumar|0.6953|as_received_clamshell_6.4mm_plus_periodic|9.6|-37.5|1.5|
+183_kumar_post_h_120|4.53|96|1.83|12.0|H|kumar|0.6985|clamshell_removed_by_reshaping|-9.9|-39.5|1.5|AFTER clam-shell removal
+183_kumar_post_h_120|4.53|96|1.83|12.0|H|kumar|0.6985|clamshell_removed_by_reshaping|-8.6|-33.5|0.5|annotation 4.4 dB below CCIR corroborates
+183_kumar_post_h_120|4.53|96|1.83|12.0|H|kumar|0.6985|clamshell_removed_by_reshaping|-6.5|-40.0|1.5|
+183_kumar_post_h_120|4.53|96|1.83|12.0|H|kumar|0.6985|clamshell_removed_by_reshaping|-3.8|-26.0|0.5|first left sidelobe; annotation 6 dB below CCIR
+183_kumar_post_h_120|4.53|96|1.83|12.0|H|kumar|0.6985|clamshell_removed_by_reshaping|2.9|-28.5|0.5|annotation 6 dB below CCIR
+183_kumar_post_h_120|4.53|96|1.83|12.0|H|kumar|0.6985|clamshell_removed_by_reshaping|4.3|-28.5|1.0|
+183_kumar_post_h_120|4.53|96|1.83|12.0|H|kumar|0.6985|clamshell_removed_by_reshaping|7.8|-33.5|0.5|annotation 4.7 dB below CCIR
+183_kumar_post_h_120|4.53|96|1.83|12.0|H|kumar|0.6985|clamshell_removed_by_reshaping|9.7|-38.5|1.5|
+183_kumar_post_e_120|4.55|97|1.83|12.0|E|kumar|0.6985|clamshell_removed_by_reshaping|-8.7|-34.5|1.0|annotation 4.4 dB below CCIR; text p.87: E-plane >5 dB below CCIR except -9 deg lobe (~4.5 dB)
+183_kumar_post_e_120|4.55|97|1.83|12.0|E|kumar|0.6985|clamshell_removed_by_reshaping|-5.3|-35.5|1.5|double-structured lobe
+183_kumar_post_e_120|4.55|97|1.83|12.0|E|kumar|0.6985|clamshell_removed_by_reshaping|-3.6|-29.0|1.0|first left sidelobe
+183_kumar_post_e_120|4.55|97|1.83|12.0|E|kumar|0.6985|clamshell_removed_by_reshaping|2.7|-30.0|1.0|first right sidelobe
+183_kumar_post_e_120|4.55|97|1.83|12.0|E|kumar|0.6985|clamshell_removed_by_reshaping|4.6|-31.5|1.0|
+183_kumar_post_e_120|4.55|97|1.83|12.0|E|kumar|0.6985|clamshell_removed_by_reshaping|6.8|-35.5|1.5|
+183_kumar_post_e_120|4.55|97|1.83|12.0|E|kumar|0.6985|clamshell_removed_by_reshaping|7.9|-39.5|1.5|
+183_kumar_best_h_120|4.57|98|1.83|12.0|H|kumar|0.6985|best_recontoured|-8.3|-32.5|0.5|BEST 1.83 m surface state; annotation 4.5 dB below CCIR
+183_kumar_best_h_120|4.57|98|1.83|12.0|H|kumar|0.6985|best_recontoured|-6.4|-39.0|1.5|small double lobe
+183_kumar_best_h_120|4.57|98|1.83|12.0|H|kumar|0.6985|best_recontoured|-3.5|-27.0|0.5|text p.87: "one sidelobe at -4 deg which was only -27 dB"; annotation 7.5 dB below CCIR
+183_kumar_best_h_120|4.57|98|1.83|12.0|H|kumar|0.6985|best_recontoured|-2.1|-39.5|1.5|narrow spike
+183_kumar_best_h_120|4.57|98|1.83|12.0|H|kumar|0.6985|best_recontoured|2.2|-32.5|1.0|
+183_kumar_best_h_120|4.57|98|1.83|12.0|H|kumar|0.6985|best_recontoured|3.1|-30.0|1.0|
+183_kumar_best_h_120|4.57|98|1.83|12.0|H|kumar|0.6985|best_recontoured|4.5|-30.0|1.0|
+183_kumar_best_h_120|4.57|98|1.83|12.0|H|kumar|0.6985|best_recontoured|8.1|-32.5|1.0|
+183_kumar_best_h_120|4.57|98|1.83|12.0|H|kumar|0.6985|best_recontoured|9.9|-37.5|1.5|cluster at chart edge

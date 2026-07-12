@@ -89,12 +89,24 @@ The API supports multiple calibration statuses:
 - **Uncalibrated**: ±3-5 dB absolute gain, ±2-3 dB loss (design specs only)
   - Physical feed-spillover efficiency is now folded into the returned gain on this path
     (reported per-response as `metadata.spillover_loss_db`, dB and negative; applied only for
-    small-offset/standard-physical-optics queries). For the enabled directive design-spec
-    antennas this correction is small (~0.001–0.05 dB); the ±3-5 dB accuracy above remains
+    small-offset/standard-physical-optics queries). After the 2026-07-10 feed-taper fix
+    (q≈1.1–3.1) this correction is material (~0.8 dB for the enabled design-spec antennas —
+    see `docs/domain-contract.md`, "Magnitude reality"); the ±3-5 dB accuracy above remains
     limited by design-spec parameter uncertainty (q-factor, surface RMS) and by unmodeled
     blockage/cross-pol — it is not calibrated-grade.
 
 All responses include a `calibration_status` field with accuracy estimates.
+
+**Off-axis (sidelobe) caveat:** the accuracy figures above apply to the main beam and
+first sidelobe only. The physics model's far-off-boresight sidelobe *levels* are
+systematically optimistic (typically 8–13 dB below the ITU-R S.580 mask) because
+sidelobe-raising mechanisms (blockage, strut scatter, edge diffraction, surface-error
+scatter floor) are unmodeled — see `docs/domain-contract.md`, "Off-axis pattern /
+sidelobe fidelity". Queries on **uncalibrated** antennas beyond ~3× the first-null angle
+(≈ 1.6·λ/D, beamwidth-relative) therefore return a warning on all four compute endpoints
+("… beyond the validated main-beam region …"). Do not use uncalibrated off-axis gain for
+interference, adjacent-satellite, or off-axis-EIRP analysis; use calibration data or a
+regulatory envelope (e.g. the ITU-R S.580 mask) instead.
 
 ### Coordinate System Auto-Detection
 

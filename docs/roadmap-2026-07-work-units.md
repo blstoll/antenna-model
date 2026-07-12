@@ -47,7 +47,9 @@ G1 ─┬─ G2 ── G3
 Superseded by C8 (do not implement): S7, C5, C6
 Phase 5: F1..F7 gated on register rows (P3, P5/F4, F5, D9, F7); P1 + C8 DECIDED 2026-07-08;
 P7 DECIDED 2026-07-10 (auto-refocus), IMPLEMENTED 2026-07-10 (branch
-feat/p7-phase-center-auto-refocus; P1b dependency implemented in the same branch)
+feat/p7-phase-center-auto-refocus; P1b dependency implemented in the same branch);
+P8 IMPLEMENTED 2026-07-12 (branch feat/p8-off-axis-honesty-warning; F7 stays gated —
+no reference sidelobe data in-repo)
 ```
 
 ---
@@ -354,6 +356,17 @@ carrying nonzero datasheet phase-center offsets at both X-band (0.015 m) and Ka-
 - **Depends on:** P1b (the version-stamp mechanism this unit bumps).
 
 ### P8 — Off-axis honesty warning — Effort: S
+**✅ DONE 2026-07-12** — branch `feat/p8-off-axis-honesty-warning`, commit `8d0c4f8`.
+`service/evaluator.rs::off_axis_unvalidated_warning` (constants
+`FIRST_NULL_COEFFICIENT = 1.6`, `OFF_AXIS_FIRST_NULL_MULTIPLE = 3.0` → threshold =
+3× first-null angle ≈ 4.8·λ/D rad), called from the gain pipeline (batch/heatmap
+inherit per-item/per-point) and from the H3 per-cell path (`compute_cell_gain`,
+outside the gain cache so it surfaces on cache hits). All four exit criteria met:
+warning tested per endpoint (`tests/integration/off_axis_warning_tests.rs`,
+incl. boresight negative case + heatmap dedup assertion), no existing test
+modified, contract/api-documentation/openapi updated. Message deliberately
+constant per (antenna, frequency) — no per-query angle — so heatmap/H3 warning
+aggregation dedups it; C8 stage 3 owns the typed-code conversion.
 
 - **Rationale:** the model's off-axis (sidelobe) gain is systematically optimistic
   (~8–13 dB below the ITU-R S.580 mask; see the contract's "Off-axis pattern / sidelobe
@@ -894,6 +907,40 @@ envelope output mode for regulatory screening. Reuses P1's uncalibrated-only gat
 (calibrated antennas' correction surfaces absorb real sidelobe behavior within coverage);
 bumps P1b's `physics_model_version`. **Data gate:** the S.580 harness test validates
 pattern *shape* only — floor *levels* need real reference sidelobe data before this can
-claim accuracy; without such data the unit must not start. **Explicitly out of scope**
+claim accuracy; without such data the unit must not start. **DATA GATE MET 2026-07-12:**
+digitized reference datasets now committed at
+`tests/fixtures/reference_datasets/ntia_84_164_sidelobe_statistics.psv` (120 rows:
+statistical sidelobe-peak distributions for 22 C-band earth stations, 2.8–13 m,
+D/λ 35–267, 1°–180°) and `nasa_cr159703_pattern_peaks.psv` (97 sidelobe peaks from
+1.22/1.83 m prime-focus paraboloids at 12 GHz with surface-error provenance). The
+register row and a maintainer decision on the approach are still needed before
+starting. **Explicitly out of scope**
 (roadmap §6): physical edge-diffraction and strut-scatter modeling — domain-expert
 territory, same class as F2. Until this lands, unit P8's warning is the honest answer.
+
+**Candidate reference data identified 2026-07-12** (web search; URLs fetched & verified
+that day; no machine-readable pattern file exists anywhere — all require digitization):
+1. **NTIA Report 84-164** (Harman & Jennings 1984, public domain,
+   https://its.ntia.gov/publications/download/84-164_ocr.pdf): measured sidelobe-peak
+   statistics for 22 commercial earth-station antennas, 2.8–13 m, C-band, D/λ = 35–267
+   (analyzed in D/λ<100 vs >100 subsets — brackets the harness's 3.7 m D/λ≈99 dish);
+   per-angular-bin max/90%/median/10%/min over 1°–180° (Figs 16–21). Cheapest to extract
+   (~10 bins × 5 percentiles × 6 figures) and directly matches the statistical-envelope
+   design. Caveat: population statistics, not a single antenna's pattern.
+2. **NASA CR-159703** (Collin & Gabel 1979,
+   https://ntrs.nasa.gov/api/citations/19800004009/downloads/19800004009.pdf — use the
+   `api/citations` link, the archive link is an HTML landing page): measured E/H-plane
+   cuts of 1.22 m and 1.83 m prime-focus paraboloids (f/D 0.38, same topology as the
+   model), 11.7–12.2 GHz, D/λ ≈ 49/73, ±12°, with a measured surface-error →
+   sidelobe-degradation storyline (ties the floor to `surface_rms`). Scanned strip
+   charts; moderate digitization effort.
+3. (Optional) **ITU-R Report BO.2029** (2002, itu.int, free): ±180° cuts of 30+ small
+   DTH dishes, 10.7–12.75 GHz — but nearly all offset-fed and D/λ ≤ 64; secondary.
+Ruled out (do not re-search): ITU-R pattern library (analytical only), Eutelsat/Intelsat
+approval lists (no pattern data published), ETSI EN 301 428 (masks/methods only),
+ITU-R S.732 (method, no data; the S.465/S.580 campaign data lives in offline CCIR
+reports — NTIA 84-164 is the accessible equivalent), DSN 810-005 (no wide-angle cuts
+found), CommScope/RFS NSMA files (envelopes, not measurements), Ruze 1966 (paywalled;
+mm-wave research dish, low incremental value). FCC IBFS filings have per-model measured
+plots (e.g. GD/Prodelin 3.7/3.8 m) but typically only ±10°, raster, and pre-2015
+attachments are blocked to scripted fetches.

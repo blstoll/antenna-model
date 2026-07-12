@@ -183,6 +183,22 @@ queries = unit **P8**; a statistical envelope/floor model (Ruze scatter floor, o
 envelope) = feature **F7**, gated on its register row *and* on reference sidelobe data; physical
 mechanisms (edge diffraction, strut scatter) are out of scope regardless (roadmap §6).
 
+**P8 implemented (2026-07-12).** Queries on antennas with
+`CalibrationStatus::Uncalibrated` that fall beyond the validated main-beam/near-in
+region now carry an explicit warning on all four compute endpoints (gain, batch,
+heatmap, h3-heatmap). Threshold: **3× the first-null angle**, with the first null
+taken as **θ_null ≈ 1.6·λ/D radians** (tapered circular-aperture illumination;
+uniform would be 1.22·λ/D) — beamwidth-relative, never a fixed angle (a 34-m Ka
+beam is ~0.017° wide; a 3.7-m X-band beam ~0.9°). Implementation:
+`service/evaluator.rs::off_axis_unvalidated_warning` (constants
+`FIRST_NULL_COEFFICIENT = 1.6`, `OFF_AXIS_FIRST_NULL_MULTIPLE = 3.0`), called from
+the gain pipeline (batch/heatmap inherit) and from the H3 per-cell path. Design
+constraints honored: uncalibrated-only (calibrated/partially-calibrated
+out-of-coverage queries already get the extrapolation warning — no stacking), and
+the message is constant per (antenna, frequency) so heatmap/H3 aggregation
+deduplicates it. C8 stage 3 converts the string to typed code
+`off_axis_unvalidated`.
+
 ## Open items surfaced while mining (not fixed here)
 
 - **Resolved 2026-07-10 (roadmap P7, implemented).** `phase_center_offset` is now a
