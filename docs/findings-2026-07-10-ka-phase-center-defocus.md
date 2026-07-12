@@ -58,7 +58,8 @@ regression: `edge_cases.rs::test_spillover_honors_fractional_q`.)
 
 ## Root cause: `phase_center_offset_m` → axial defocus
 
-`antenna-model/src/model/integration.rs:527`:
+`antenna-model/src/model/integration.rs:527` *[pre-P7 code shown; superseded — see status
+header. Post-P7 the term is `axial_defocus`, not `phase_center_offset`]*:
 
 ```rust
 let feed_axial_offset =
@@ -71,9 +72,12 @@ path error is ≈ `offset · (1 − cos ψ_edge)`; at ψ_edge ≈ 64° (f/D 0.4)
 which in **wavelengths** is 0.56·offset/λ — hence the 1/λ growth: 0.008 m is 0.27λ of edge
 error at Ka vs 0.06λ at X.
 
-**This is intentional and tested** — see `test_phase_center_offset_produces_defocus_loss`
-(`integration.rs:990`). So it is *not* a code bug in the phase model. The question is one of
-**config realism / operating assumption**, not correctness of the defocus math.
+**This was intentional and tested** — at the time, by
+`test_phase_center_offset_produces_defocus_loss` (deleted in the P7 change `ba87160`,
+replaced by the two P7 pinning tests `test_phase_center_offset_alone_produces_no_defocus_loss`
+and `test_axial_defocus_produces_defocus_loss`). So it was *not* a code bug in the phase
+model. The question was one of **config realism / operating assumption**, not correctness of
+the defocus math.
 
 ## Why it matters — and the decision to make
 
