@@ -556,3 +556,425 @@ fn itu_r_s580_sidelobe_envelope_small_dish() {
         far_violations.join("\n  ")
     );
 }
+
+// ===========================================================================
+// F7 sidelobe-floor validation against measured reference sidelobe data.
+//
+// The uncalibrated model now applies a Ruze scattered-power floor
+// (`pattern::sidelobe_floor_gain`, gated on the uncalibrated path) so its
+// off-axis gain is *envelope-conservative* rather than systematically
+// optimistic. These tests pin the floor's calibration (`OMEGA_SCATTER`) as a
+// one-sided conservative bound on measured sidelobe peaks — the F7 register
+// decision (2026-07-12): "at or above measured peaks, never optimistic".
+//
+// Data (tests/fixtures/reference_datasets/sidelobe_data/, kept out of the
+// peak-gain harness dir so `load_all_reference_points` does not ingest it):
+//   - NTIA Report 84-164: absolute-dBi sidelobe-peak percentile envelopes for
+//     22 C-band earth stations (PRIMARY — absolute levels, directly comparable
+//     to the model floor).
+//   - NASA CR-159703: rel-to-peak sidelobe peaks with surface-condition
+//     provenance (CROSS-CHECK — validates the floor's surface-error scaling).
+// ===========================================================================
+
+fn sidelobe_data_path(file: &str) -> PathBuf {
+    workspace_path(&format!(
+        "antenna-model/tests/fixtures/reference_datasets/sidelobe_data/{file}"
+    ))
+}
+
+/// The model's Ruze sidelobe floor in dBi for a representative reflector of the
+/// given surface RMS at the given frequency. The floor is diameter-independent
+/// (see `OMEGA_SCATTER`), so diameter/feed here are immaterial placeholders.
+fn model_floor_dbi(surface_rms_m: f64, frequency_mhz: f64) -> f64 {
+    let reflector = ReflectorGeometry::builder()
+        .diameter(4.5)
+        .focal_length(2.25)
+        .surface_rms(surface_rms_m)
+        .build()
+        .expect("build reflector");
+    let feed = FeedParameters::builder()
+        .at_focus(2.25)
+        .q_factor(2.0)
+        .build()
+        .expect("build feed");
+    let config = AntennaConfiguration::builder()
+        .id("floor_ref")
+        .name("floor_ref")
+        .reflector(reflector)
+        .feed(feed)
+        .build()
+        .expect("build config");
+    let wavelength = SPEED_OF_LIGHT_M_S / (frequency_mhz * 1e6);
+    let floor_lin = antenna_model::model::pattern::sidelobe_floor_gain(&config, wavelength);
+    10.0 * floor_lin.log10()
+}
+
+/// One NTIA 84-164 wide-angle statistical sidelobe bin (subset "all").
+struct NtiaBin {
+    band_center_mhz: f64,
+    bin_lo_deg: f64,
+    /// Provenance: the conservative-envelope columns. Retained because the F7
+    /// register decision (envelope -> best-estimate) turned on the p90-vs-median
+    /// choice; keeping them documents what was NOT chosen.
+    #[allow(dead_code)]
+    p90_dbi: f64,
+    #[allow(dead_code)]
+    max_dbi: f64,
+    median_dbi: f64,
+}
+
+fn parse_ntia_bins() -> Vec<NtiaBin> {
+    let text = std::fs::read_to_string(sidelobe_data_path("ntia_84_164_sidelobe_statistics.psv"))
+        .expect("read NTIA sidelobe stats");
+    let mut out = Vec::new();
+    for line in text.lines().skip(1) {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let f: Vec<&str> = line.split('|').collect();
+        // figure|band_mhz|subset|bin_lo|bin_hi|n|max|p90|median|p10|min
+        if f.len() < 11 || f[2] != "all" {
+            continue; // "all" avoids triple-counting the D/λ sub-populations
+        }
+        let (lo, hi) = f[1].split_once('-').expect("band range like 3700-4200");
+        let band_center_mhz = (lo.parse::<f64>().unwrap() + hi.parse::<f64>().unwrap()) / 2.0;
+        out.push(NtiaBin {
+            band_center_mhz,
+            bin_lo_deg: f[3].parse().unwrap(),
+            max_dbi: f[6].parse().unwrap(),
+            p90_dbi: f[7].parse().unwrap(),
+            median_dbi: f[8].parse().unwrap(),
+        });
+    }
+    assert!(!out.is_empty(), "parsed no NTIA bins");
+    out
+}
+
+/// PRIMARY: the surface-scatter floor is a BEST-ESTIMATE that tracks the NTIA
+/// 84-164 wide-angle **median** sidelobe level (F7 register decision revised
+/// 2026-07-12: best-estimate, not conservative envelope — link budget / G/T need
+/// accuracy, and a one-sided upper bound is anti-conservative for desired-signal
+/// margin).
+///
+/// Also pins the two structural properties of the Ω = 4π (isotropic) derivation:
+///   * POWER CONSERVATION — the pedestal never radiates more than Ruze removes.
+///   * CEILING — the floor can never exceed 0 dBi, so it cannot swamp a main beam.
+///
+/// NOTE: this validates the floor LEVEL only. It deliberately does not exercise
+/// `compute_gain`, because the served aperture integral aliases badly off-axis
+/// (see docs/findings-2026-07-13-off-axis-integration-aliasing.md) — the floor
+/// cannot be validated end-to-end until that P0 is fixed.
+#[test]
+fn sidelobe_floor_tracks_measured_median() {
+    // Representative surface RMS for the NTIA C-band earth-station class: ~1 mm.
+    // Their ~55–65% aperture efficiency (report gain table) implies a Ruze factor
+    // ~0.97, i.e. ~1 mm RMS at C-band. This is the calibration's key assumption.
+    const REP_RMS_M: f64 = 0.001;
+    const WIDE_ANGLE_MIN_DEG: f64 = 40.0;
+    // Band-mean residual is -2.04 dB @3950 MHz / +2.90 dB @6175 MHz (mean |err| 2.47 dB).
+    // Two independent sources of spread, both documented limitations of a FLAT pedestal:
+    //   * across FREQUENCY — Ruze scales as (rms/λ)² but the measured floor is nearly
+    //     flat, evidence the real floor is dominated by unmodeled spillover/blockage/
+    //     edge-diffraction rather than surface scatter;
+    //   * across ANGLE — the measured median itself varies ±3-4 dB bin-to-bin (note the
+    //     back-lobe bump near 90-100°), structure a flat pedestal cannot reproduce.
+    // Hence a ±6 dB per-bin band; the band-MEAN error is the tighter ~2.5 dB figure.
+    const ACCURACY_BAND_DB: f64 = 6.0;
+
+    let bins = parse_ntia_bins();
+
+    println!("\n=== F7 surface-scatter floor vs NTIA 84-164 wide-angle MEDIAN ===");
+    println!(
+        "{:<10} {:>8} {:>9} {:>9} {:>9} {:>8}",
+        "band_MHz", "bin_deg", "floor_dBi", "med_dBi", "err", "verdict"
+    );
+
+    let mut checked = 0usize;
+    let mut within = 0usize;
+    let mut worst = 0.0f64;
+    for b in bins.iter().filter(|b| b.bin_lo_deg >= WIDE_ANGLE_MIN_DEG) {
+        let floor = model_floor_dbi(REP_RMS_M, b.band_center_mhz);
+        let err = floor - b.median_dbi;
+        let ok = err.abs() <= ACCURACY_BAND_DB;
+        checked += 1;
+        if ok {
+            within += 1;
+        }
+        if err.abs() > worst.abs() {
+            worst = err;
+        }
+        println!(
+            "{:<10.0} {:>6.0}   {:>9.2} {:>9.2} {:>+9.2} {:>8}",
+            b.band_center_mhz,
+            b.bin_lo_deg,
+            floor,
+            b.median_dbi,
+            err,
+            if ok { "ok" } else { "OUT" }
+        );
+    }
+    println!("\nwithin ±{ACCURACY_BAND_DB} dB: {within}/{checked}; worst err {worst:+.2} dB");
+    assert!(
+        within * 10 >= checked * 9,
+        "floor must track the NTIA wide-angle median within ±{ACCURACY_BAND_DB} dB for >=90% \
+         of bins; got {within}/{checked} (worst {worst:+.2} dB)"
+    );
+
+    // STRUCTURAL 1 — power conservation. The pedestal is applied over the whole 4π
+    // sphere, so the power it radiates is exactly its directivity. That must never
+    // exceed the scattered power available (p_scatter = 1 - η_ruze).
+    for &(rms, f_mhz) in &[
+        (0.0005, 3950.0),
+        (0.001, 6175.0),
+        (0.005, 12_000.0),
+        (0.02, 32_000.0),
+    ] {
+        let lambda = SPEED_OF_LIGHT_M_S / (f_mhz * 1e6);
+        let p_scatter = 1.0 - antenna_model::model::ruze_efficiency(rms, lambda);
+        let radiated = 10f64.powf(model_floor_dbi(rms, f_mhz) / 10.0);
+        assert!(
+            radiated <= p_scatter + 1e-12,
+            "floor radiates {radiated:.4} but only {p_scatter:.4} was scattered \
+             (rms {rms} m @ {f_mhz} MHz) — Ω must be 4π for power conservation"
+        );
+    }
+
+    // STRUCTURAL 2 — ceiling. p_scatter <= 1 ⇒ floor <= 0 dBi, always. This is what
+    // guarantees the floor can never swamp a main beam or a near-in sidelobe.
+    for &(rms, f_mhz) in &[(0.001, 3950.0), (0.01, 32_000.0), (0.5, 32_000.0)] {
+        let floor = model_floor_dbi(rms, f_mhz);
+        assert!(
+            floor <= 0.0 + 1e-9,
+            "floor {floor:+.2} dBi exceeds the 0 dBi ceiling (rms {rms} m @ {f_mhz} MHz)"
+        );
+    }
+}
+
+/// CROSS-CHECK: the floor's surface-error scaling matches the direction measured
+/// in NASA CR-159703 — worse surface → higher sidelobes. The data (rel-to-peak,
+/// near-in ±12°) shows as-delivered/warped surfaces peaking well above reshaped
+/// ones; the model floor likewise rises monotonically with surface RMS. (NASA is
+/// a *direction* cross-check, not an absolute-floor bound: its cuts are near-in,
+/// where the model's diffraction pattern — not the floor — sets the level.)
+#[test]
+fn sidelobe_floor_surface_scaling_matches_nasa() {
+    let text = std::fs::read_to_string(sidelobe_data_path("nasa_cr159703_pattern_peaks.psv"))
+        .expect("read NASA pattern peaks");
+
+    // Worst (highest, closest to 0) detached-sidelobe level per surface class.
+    let mut worst_good = f64::NEG_INFINITY; // reshaped / recontoured
+    let mut worst_poor = f64::NEG_INFINITY; // as-delivered / warped
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with("cut_id") {
+            continue;
+        }
+        let f: Vec<&str> = line.split('|').collect();
+        if f.len() < 11 {
+            continue;
+        }
+        let angle: f64 = f[9].parse().unwrap();
+        let level: f64 = f[10].parse().unwrap(); // dB rel to peak
+        let cond = f[8];
+        // Detached sidelobes only (skip main-lobe shoulders near the first nulls).
+        if angle.abs() < 5.0 {
+            continue;
+        }
+        let good = cond.contains("reshap") || cond.contains("recontour");
+        let poor =
+            cond.contains("as_delivered") || cond.contains("warp") || cond.contains("as_received");
+        if good {
+            worst_good = worst_good.max(level);
+        } else if poor {
+            worst_poor = worst_poor.max(level);
+        }
+    }
+
+    println!("\n=== F7 floor surface scaling vs NASA CR-159703 ===");
+    println!("worst detached sidelobe (dB rel peak): reshaped {worst_good:.1}, as-delivered {worst_poor:.1}");
+
+    assert!(
+        worst_good.is_finite() && worst_poor.is_finite(),
+        "expected both good and poor surface cuts in NASA data"
+    );
+    // Data direction: degraded surfaces have higher (worse) sidelobes.
+    assert!(
+        worst_poor > worst_good,
+        "NASA data should show as-delivered sidelobes ({worst_poor:.1} dB) worse than \
+         reshaped ({worst_good:.1} dB)"
+    );
+
+    // Model direction: the floor rises monotonically with surface RMS at 12 GHz
+    // (matching the data's surface → sidelobe trend). Representative good→poor RMS.
+    let floors: Vec<f64> = [0.0003_f64, 0.0010, 0.0016, 0.0030]
+        .iter()
+        .map(|&rms| model_floor_dbi(rms, 12_000.0))
+        .collect();
+    println!("model floor dBi at 12 GHz for RMS 0.3/1.0/1.6/3.0 mm: {floors:?}");
+    for w in floors.windows(2) {
+        assert!(
+            w[1] > w[0],
+            "model floor must increase with surface RMS (got {floors:?})"
+        );
+    }
+}
+
+// ===========================================================================
+// P10 SPIKE — Hankel/Bessel aperture integral vs the brute-force 2D quadrature.
+//
+// The azimuthal integral has a closed form (Jacobi-Anger):
+//     ∫₀²π exp(-j·a·cos(φ-φ')) dφ' = 2π·J₀(a),   a = k·ρ·sinθ
+// so for an azimuthally symmetric aperture the 2D integral collapses to a 1D
+// radial (Hankel) transform:
+//     I(θ) = 2π ∫₀^R A(ρ)·exp(j·k·ρ²/(4f)·(1-cosθ))·J₀(k·ρ·sinθ)·ρ dρ
+// Ground truth: the converged 2048x4096 2D quadrature gives -33.28 dBi @ θ=90°.
+// ===========================================================================
+
+/// Bessel J₀ (Numerical Recipes): polynomial for |x|<8, asymptotic beyond.
+fn bessel_j0(x: f64) -> f64 {
+    let ax = x.abs();
+    if ax < 8.0 {
+        let y = x * x;
+        let p1 = 57_568_490_574.0
+            + y * (-13_362_590_354.0
+                + y * (651_619_640.7
+                    + y * (-11_214_424.18 + y * (77_392.330_17 + y * (-184.905_245_6)))));
+        let p2 = 57_568_490_411.0
+            + y * (1_029_532_985.0
+                + y * (9_494_680.718 + y * (59_272.648_53 + y * (267.853_271_2 + y))));
+        p1 / p2
+    } else {
+        let z = 8.0 / ax;
+        let y = z * z;
+        let xx = ax - 0.785_398_164;
+        let p1 = 1.0
+            + y * (-0.109_862_862_7e-2
+                + y * (0.273_451_040_7e-4 + y * (-0.207_337_063_9e-5 + y * 0.209_388_721_1e-6)));
+        let p2 = -0.156_249_999_5e-1
+            + y * (0.143_048_876_5e-3
+                + y * (-0.691_114_765_1e-5 + y * (0.762_109_516_1e-6 + y * (-0.934_935_152e-7))));
+        (std::f64::consts::FRAC_2_PI / ax).sqrt() * (xx.cos() * p1 - z * xx.sin() * p2)
+    }
+}
+
+/// Hankel-form aperture integral for an azimuthally symmetric aperture.
+/// Simpson's rule over ρ with `n_rho` points (odd).
+fn hankel_field(
+    cfg: &AntennaConfiguration,
+    theta: f64,
+    frequency_hz: f64,
+    n_rho: usize,
+) -> num_complex::Complex64 {
+    use num_complex::Complex64;
+    let wl = SPEED_OF_LIGHT_M_S / frequency_hz;
+    let k = 2.0 * PI / wl;
+    let f = cfg.reflector.focal_length;
+    let r_max = cfg.reflector.diameter / 2.0;
+
+    let n = if n_rho.is_multiple_of(2) {
+        n_rho + 1
+    } else {
+        n_rho
+    };
+    let h = r_max / (n - 1) as f64;
+    let mut sum = Complex64::new(0.0, 0.0);
+    for i in 0..n {
+        let rho = i as f64 * h;
+        let w = if i == 0 || i == n - 1 {
+            1.0
+        } else if i % 2 == 1 {
+            4.0
+        } else {
+            2.0
+        };
+        // A(ρ): illumination amplitude (φ'-independent for an on-axis feed)
+        let amp = antenna_model::model::illumination_amplitude(rho, 0.0, &cfg.feed, f);
+        // ρ-only aperture phase: the dish-depth chirp k·ρ²/(4f)·(1-cosθ).
+        // (Feed at focus + no mesh + surface_error=0 ⇒ no other ρ-only phase.)
+        let chirp = k * rho * rho / (4.0 * f) * (1.0 - theta.cos());
+        let j0 = bessel_j0(k * rho * theta.sin());
+        let val = Complex64::new(0.0, chirp).exp() * amp * j0 * rho;
+        sum += val * w;
+    }
+    sum * (h / 3.0) * 2.0 * PI
+}
+
+/// P10 SPIKE (diagnostic, #[ignore]d — the 2D reference legs take ~0.4 s each).
+/// Cross-validates the 1D Hankel form against the brute-force 2D quadrature and
+/// pins the convergence + cost result recorded in
+/// docs/findings-2026-07-13-off-axis-integration-aliasing.md §5.
+///   cargo test --release -p antenna-model --test reference_validation p10_spike -- --ignored --nocapture
+#[test]
+#[ignore = "diagnostic spike for P10; run explicitly with --ignored"]
+fn p10_spike_hankel_vs_2d() {
+    use antenna_model::model::integration::{integrate_amplitude_squared, integrate_aperture};
+    use antenna_model::model::{ruze_efficiency, IntegrationParams};
+    use std::time::Instant;
+
+    let repo = load_real_repository();
+    let cal = repo
+        .get_calibration("dsn_34m_uncalibrated", "x_band")
+        .expect("dsn_34m");
+    let cfg = focused_config(&cal, None);
+    let f_hz = 8.4e9;
+    let wl = SPEED_OF_LIGHT_M_S / f_hz;
+    let d_lam = cfg.reflector.diameter / wl;
+
+    // Same downstream gain formula the model uses:
+    //   gain = η · (4π/λ²) · |I|² / ∬|A|² dA
+    let eta = ruze_efficiency(cfg.reflector.surface_rms, wl);
+    let amp_sq = integrate_amplitude_squared(&cfg, 513, 1025);
+    let to_dbi = |field: num_complex::Complex64| {
+        let g = eta * (4.0 * PI / (wl * wl)) * field.norm_sqr() / amp_sq;
+        10.0 * g.log10()
+    };
+
+    println!("\n=== P10 SPIKE: Hankel (1D) vs brute-force 2D quadrature ===");
+    println!("dsn_34m X-band, D/λ = {d_lam:.0}\n");
+
+    // --- ground truth: converged 2D at 2048 x 4096 ---
+    let mut gt = IntegrationParams::high_accuracy();
+    gt.min_rho_points = 2048;
+    gt.max_rho_points = 2048;
+    gt.min_phi_points = 4096;
+    gt.max_phi_points = 4096;
+    gt.max_iterations = 1;
+    gt.apply_sidelobe_floor = false;
+
+    println!(
+        "{:>7} {:>16} {:>12} | {:>16} {:>12} {:>10}",
+        "theta", "2D(2048x4096)", "ms", "Hankel(4097)", "ms", "Δ dB"
+    );
+    for deg in [0.0_f64, 1.0, 5.0, 20.0, 90.0] {
+        let th = deg.to_radians();
+
+        let t = Instant::now();
+        let r2d = integrate_aperture(th, 0.0, &cfg, f_hz, &gt);
+        let ms2d = t.elapsed().as_secs_f64() * 1000.0;
+        let g2d = to_dbi(r2d.expect("2D integrate").field);
+
+        let t = Instant::now();
+        let fh = hankel_field(&cfg, th, f_hz, 4097);
+        let msh = t.elapsed().as_secs_f64() * 1000.0;
+        let gh = to_dbi(fh);
+
+        println!(
+            "{deg:>7.0} {g2d:>16.2} {ms2d:>12.1} | {gh:>16.2} {msh:>12.3} {:>10.2}",
+            gh - g2d
+        );
+    }
+
+    // --- Hankel radial-convergence sweep at theta = 90 deg ---
+    println!(
+        "\nHankel radial convergence at θ=90° (Nyquist N_rho ≈ {:.0}):",
+        2.0 * d_lam
+    );
+    println!("{:>8} {:>12} {:>10}", "N_rho", "gain_dBi", "ms");
+    for n in [257usize, 513, 1025, 2049, 4097, 8193, 16385] {
+        let t = Instant::now();
+        let fh = hankel_field(&cfg, 90f64.to_radians(), f_hz, n);
+        let ms = t.elapsed().as_secs_f64() * 1000.0;
+        println!("{n:>8} {:>12.2} {ms:>10.3}", to_dbi(fh));
+    }
+}

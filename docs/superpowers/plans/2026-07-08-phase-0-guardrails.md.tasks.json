@@ -1,0 +1,32 @@
+{
+  "planPath": "docs/superpowers/plans/2026-07-08-phase-0-guardrails.md",
+  "tasks": [
+    {
+      "id": 1,
+      "subject": "Task 1 (G1): Stand up CI + local gate, fix HEAD clippy lints",
+      "status": "completed",
+      "description": "Add .github/workflows/ci.yml (fmt, clippy+test with libopenblas-dev, non-blocking audit) and scripts/check.sh; fix 3 field_reassign_with_default clippy lints in antenna-model/tests/integration/{error_tests.rs:76-78,128-131,resilience_tests.rs:52-55}; mark G1-hosting register row Decided (GitHub). Verify: bash scripts/check.sh exits 0. No change under antenna-model/src/model/.\n\n```json:metadata\n{\"files\": [\".github/workflows/ci.yml\", \"scripts/check.sh\", \"antenna-model/tests/integration/error_tests.rs\", \"antenna-model/tests/integration/resilience_tests.rs\", \"docs/roadmap-2026-07.md\"], \"verifyCommand\": \"bash scripts/check.sh\", \"acceptanceCriteria\": [\"clippy --workspace --all-targets -D warnings exits 0\", \"scripts/check.sh exits 0\", \"ci.yml has fmt/clippy+test/audit jobs, installs libopenblas-dev\", \"G1-hosting row Decided (GitHub)\", \"no change under src/model/\"], \"modelTier\": \"standard\"}\n```"
+    },
+    {
+      "id": 2,
+      "subject": "Task 2 (G2): Make CLAUDE.md true (docs-only)",
+      "status": "completed",
+      "description": "Docs-only edits to CLAUDE.md: live B-spline correction, Sprints 1-7 complete, remove direct_path.rs/surface.rs/numerical_stability.rs, antennas.toml->antennas.yaml, precomputed-.bin claim (D9), property-tests annotation (D7), module map (add coordinates_3d.rs, correction_interpolator.rs). Verify: git diff --name-only lists only CLAUDE.md. Do NOT touch architecture.md/design doc (D5).\n\n```json:metadata\n{\"files\": [\"CLAUDE.md\"], \"verifyCommand\": \"git diff --name-only && grep -nE 'antennas\\\\.toml|direct_path\\\\.rs|surface\\\\.rs|numerical_stability\\\\.rs' CLAUDE.md\", \"acceptanceCriteria\": [\"no unimplemented-B-spline claim; sprint status 1-7 complete\", \"no deleted-module references\", \"antennas.toml->antennas.yaml\", \"property-tests annotated D7\", \"precomputed-artifact claim corrected D9\", \"module map matches ls; only CLAUDE.md changed\"], \"modelTier\": \"standard\"}\n```"
+    },
+    {
+      "id": 3,
+      "subject": "Task 3 (G3): Fix broken example requests + lock with a drift test",
+      "status": "completed",
+      "blockedBy": [1],
+      "description": "Fix vehicle_attitude in examples/requests/{gain_request,gain_request_geodetic,batch_request}.json to [w,x,y,z] array (w-first per schemas.rs:263; Euler->identity [1,0,0,0]); delete vehicle_attitude from heatmap_request.json (not a HeatmapRequest field); fix same shapes in other examples/ files; create antenna-model/tests/example_requests_deserialize.rs iterating examples/requests/ with explicit filename->type map, panicking on unmapped. Verify: cargo test -p antenna-model --test example_requests_deserialize. NO schemas.rs change.\n\n```json:metadata\n{\"files\": [\"examples/requests/gain_request.json\", \"examples/requests/gain_request_geodetic.json\", \"examples/requests/batch_request.json\", \"examples/requests/heatmap_request.json\", \"examples/api_requests.json\", \"examples/curl-examples.sh\", \"examples/postman_collection.json\", \"examples/python_examples.py\", \"examples/QUICKSTART.md\", \"examples/README.md\", \"antenna-model/tests/example_requests_deserialize.rs\"], \"verifyCommand\": \"cargo test -p antenna-model --test example_requests_deserialize\", \"acceptanceCriteria\": [\"four examples deserialize into their types\", \"vehicle_attitude uses [w,x,y,z]; Euler->identity\", \"heatmap_request.json has no vehicle_attitude\", \"drift test maps filename->type, panics on unmapped\", \"grep '\\\"w\\\":|roll_deg' examples/ clean\", \"schemas.rs unchanged\"], \"modelTier\": \"standard\"}\n```"
+    },
+    {
+      "id": 4,
+      "subject": "Task 4: Wire GitHub remote and activate CI",
+      "status": "completed",
+      "blockedBy": [1, 2, 3],
+      "description": "OUTWARD-FACING: add origin -> github.com/blstoll/antenna-model, confirm branch with maintainer, push (no force), watch first CI run. Verify: gh run list shows a run; clippy+test green.\n\n```json:metadata\n{\"files\": [], \"verifyCommand\": \"gh run list --limit 1\", \"acceptanceCriteria\": [\"origin points at github.com/blstoll/antenna-model\", \"branch pushed, CI run triggered\", \"fmt and clippy+test green on first run\"], \"modelTier\": \"standard\", \"requiresUserSpecification\": true}\n```"
+    }
+  ],
+  "lastUpdated": "2026-07-09T02:00:00Z"
+}

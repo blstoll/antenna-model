@@ -144,21 +144,52 @@ assumed surface RMS still dominate the uncertainty there.
 
 ## Off-axis pattern / sidelobe fidelity
 
-**The model is a main-beam / peak-gain instrument. Its off-axis (sidelobe) gain is
-systematically *optimistic* (too low) and must NOT be used for interference, adjacent-satellite,
-off-axis-EIRP, or ACI analysis.** (Finding 2026-07-10; `antenna-model/tests/reference_validation.rs`,
-`itu_r_s580_sidelobe_envelope_small_dish` and the `itu_probe_fine_envelope` diagnostic.)
+**The model is a main-beam / peak-gain instrument.** Until 2026-07-12 its off-axis (sidelobe)
+gain on the uncalibrated path was systematically *optimistic* (too low). **As of F7
+(2026-07-12), uncalibrated-path off-axis gain instead includes a Ruze scattered-power sidelobe
+floor (`model/pattern.rs::sidelobe_floor_gain`, applied as `max(pattern, floor)` at the
+spillover seam in `compute_gain`, gated on `correction_surface.is_none()`) that lifts deep
+off-axis nulls/sidelobes to a statistically calibrated best estimate — it tracks the measured
+median sidelobe level, not a one-sided conservative bound (register decision revised
+2026-07-12: link budget / G/T consumers need accuracy, and a one-sided upper bound is
+anti-conservative for desired-signal margin).** It must still NOT be used as a precise
+per-antenna prediction for interference, adjacent-satellite, off-axis-EIRP, or ACI analysis —
+see the "Best estimate, not a per-antenna prediction" caveat below. (Original finding
+2026-07-10; `antenna-model/tests/reference_validation.rs`,
+`itu_r_s580_sidelobe_envelope_small_dish` and the `itu_probe_fine_envelope` diagnostic; F7
+floor implemented 2026-07-12, branch `feat/f7-sidelobe-floor`.)
 
-Why: the live pattern is an idealized, unblocked, perfect-surface, strut-free symmetric
-paraboloid. It contains **none of the sidelobe-*raising* mechanisms** that dominate real
-wide-angle sidelobes:
+**⛔ F7 PARKED 2026-07-13 (do not merge `feat/f7-sidelobe-floor`), blocked on unit P10:** the
+floor above is real code on this branch, but it cannot fire on the *served* path today. Every
+served gain uses `IntegrationParams::fast()`, whose aperture integral aliases 20–35 dB too HIGH
+beyond a few degrees off-boresight for electrically large dishes — a floor applied via `max()`
+against an already-too-high pattern never engages (confirmed: 0 of 6 real service geometries).
+See `docs/findings-2026-07-13-off-axis-integration-aliasing.md` for the finding, a ~3200×-faster
+Hankel-transform fix spike, and what F7 must become once P10 lands (a replacement for the
+aliased tail beyond a validity angle, not a `max()` floor over it).
+
+**Calibrated and partially-calibrated antennas, and boresight/main-beam queries on any
+antenna, are unaffected** — the floor is inert at boresight by construction (it only ever
+raises deep nulls/sidelobes) and only applies where `correction_surface.is_none()`;
+calibrated antennas' correction surfaces already absorb real sidelobe behavior within
+coverage.
+
+Why the underlying pattern is still optimistic without the floor: the live aperture-integral
+pattern is an idealized, unblocked, perfect-surface, strut-free symmetric paraboloid. It
+contains **none of the sidelobe-*raising* mechanisms** that dominate real wide-angle
+sidelobes:
 
 - central/feed **blockage** and quadripod **strut scatter** (unmodeled — see feature F3);
 - aperture-**edge diffraction**;
-- **surface-error scatter** — surface RMS is applied as a *scalar Ruze gain-loss*
-  (`surface_error = 0` in the aperture integrand, `integration.rs`), so there is **no
-  error-sidelobe floor**: the model's sidelobes keep diving where a real antenna's plateau at an
-  error/scatter floor (roughly −3…0 dBi wide-angle);
+- **surface-error scatter** — surface RMS is still applied as a *scalar Ruze gain-loss* in the
+  aperture integrand (`surface_error = 0` in `integration.rs`); the physical mechanism (per-point
+  phase scatter) is not modeled. **F7 closes the resulting gap at the population-statistics
+  level**: the power the scalar Ruze efficiency removes from boresight is redistributed
+  isotropically (`OMEGA_SCATTER = 4π`, the only power-conserving choice for a floor applied via
+  `max()` at every angle — see `pattern.rs::OMEGA_SCATTER` doc comment), calibrated against
+  measured wide-angle sidelobe statistics from NTIA Report 84-164 (22 C-band earth stations) and
+  cross-checked against measured pattern peaks in NASA CR-159703 — see "F7 sidelobe floor"
+  below. This bounds a *best estimate*, not any single antenna's exact pattern;
 - cross-polarization.
 
 **Evidence:** for the 3.7 m ground station at X-band (D/λ ≈ 99), the modeled sidelobe-*peak*
@@ -170,18 +201,24 @@ sidelobe sources above.
 
 **So the S.580 check validates pattern *shape*, not sidelobe *levels*.** It is a good regression
 guard against gross pattern bugs (illumination errors, beam-steering sign flips, broken off-axis
-integration — any of which break the slope or violate the mask), but the model has no mechanism
-to produce realistic (higher) sidelobes. For off-axis fidelity, use the calibration correction
-surface — or the ITU mask itself — as the sidelobe model, not the physics engine's tail.
+integration — any of which break the slope or violate the mask). It runs with
+`apply_sidelobe_floor: false` (the `IntegrationParams` default), so it exercises the raw
+aperture-integral tail described above, unaffected by F7's floor. For off-axis fidelity, use
+the calibration correction surface — or the ITU mask itself — as the sidelobe model, not the
+physics engine's tail; the F7 floor (below) raises the *served* uncalibrated-path value to a
+statistically calibrated best estimate but is not a substitute for either (and, per the P10
+note above, does not currently engage on the served path at all).
 
 **Numerical caveat:** physical-optics far-sidelobe computation needs the aperture-phase variation
 (∝ D·sinθ/λ) resolved by the integration grid, which is infeasible for electrically huge dishes;
 the S.580 check therefore runs on the small 3.7 m dish (D/λ ≈ 99), where sidelobes are computable.
 
-**Roadmap (decided 2026-07-10):** an off-axis honesty warning on uncalibrated far-off-boresight
-queries = unit **P8**; a statistical envelope/floor model (Ruze scatter floor, optional ITU-mask
-envelope) = feature **F7**, gated on its register row *and* on reference sidelobe data; physical
-mechanisms (edge diffraction, strut scatter) are out of scope regardless (roadmap §6).
+**Roadmap (decided 2026-07-10, both now implemented — see below):** an off-axis honesty warning
+on uncalibrated far-off-boresight queries = unit **P8**; a statistical envelope/floor model
+(Ruze scatter floor) = feature **F7**, gated on its register row *and* on reference sidelobe
+data (data gate met 2026-07-12 by unit F8, register row decided 2026-07-12); physical
+mechanisms (edge diffraction, strut scatter) remain out of scope regardless (roadmap §6). An
+optional ITU-mask envelope output mode was considered but not built as part of F7.
 
 **P8 implemented (2026-07-12).** Queries on antennas with
 `CalibrationStatus::Uncalibrated` that fall beyond the validated main-beam/near-in
@@ -197,7 +234,54 @@ constraints honored: uncalibrated-only (calibrated/partially-calibrated
 out-of-coverage queries already get the extrapolation warning — no stacking), and
 the message is constant per (antenna, frequency) so heatmap/H3 aggregation
 deduplicates it. C8 stage 3 converts the string to typed code
-`off_axis_unvalidated`.
+`off_axis_unvalidated`. **As of F7 (2026-07-12) the warning's wording was revised** to
+reflect that the served value now includes a best-estimate scattered-power floor rather than
+being silently optimistic — see the F7 subsection below (and the P10 parked-status note above:
+the floor does not currently change what is actually served).
+
+**F7 sidelobe floor implemented (2026-07-12, branch `feat/f7-sidelobe-floor`; parked
+2026-07-13, see the note near the top of this section).** A Ruze scattered-power floor applies
+**on the uncalibrated path only**
+(`apply_sidelobe_floor = correction_surface.is_none()`, threaded through the gain, batch,
+heatmap, and H3 pipelines identically) as `max(pattern, floor)` at the spillover seam in
+`model/pattern.rs::compute_gain`. The floor itself
+(`model/pattern.rs::sidelobe_floor_gain`):
+
+- is derived from `surface_rms` via the same scalar Ruze efficiency (`1 − η_ruze`) already
+  computed for the boresight gain-loss term — the scattered power has to go somewhere, and F7
+  redistributes it **isotropically** over the whole sphere:
+  `floor_linear = 1 − η_ruze` (i.e. `Ω_SCATTER = 4π`, `OMEGA_SCATTER` in `pattern.rs` — the
+  only power-conserving choice for a floor applied via `max()` at every angle; an earlier
+  cut used `Ω_SCATTER = 0.25 sr`, which implied 136–326% of the antenna's total radiated
+  power and was reverted before this branch was parked);
+- is **inert at boresight** and only ever lifts deep off-axis nulls/sidelobes (it is a lower
+  bound via `max`, never reduces gain), and is **bounded by 0 dBi** (`p_scatter ≤ 1`), so it
+  can never swamp a main beam or near-in sidelobe;
+- uses a **single global** `Ω_SCATTER`, not a per-antenna surface correlation length — this is
+  a deliberate simplification (planner default adopted 2026-07-12); a per-antenna width is
+  deferred roadmap unit **F9**;
+- is a **best estimate**, not a conservative envelope (register decision revised
+  2026-07-12), calibrated against **NTIA Report 84-164** measured sidelobe statistics: for a
+  representative ~1 mm-surface C-band earth station the floor tracks the wide-angle **median**
+  sidelobe level to within a band-mean ≈2.5 dB (−2.0 dB at 3950 MHz, +2.9 dB at 6175 MHz;
+  ±6 dB per angular bin) — pinned by
+  `reference_validation::sidelobe_floor_tracks_measured_median`, which also asserts power
+  conservation and the 0 dBi ceiling; the surface-RMS scaling direction is cross-checked
+  against **NASA CR-159703** measured pattern peaks by
+  `reference_validation::sidelobe_floor_surface_scaling_matches_nasa`.
+
+**Best estimate, not a per-antenna prediction:** the floor tracks a *population* median with
+±2.5–6 dB scatter — it is not tuned to any single antenna's actual sidelobe pattern, does not
+model the physical mechanisms that raise real sidelobes (edge diffraction, strut scatter —
+still out of scope, roadmap §6), and does not improve the near-in first-sidelobe or the
+detailed shape of the pattern (those remain governed by the raw aperture integral / calibration
+correction surface as before). For a one-sided conservative bound (regulatory/interference
+screening), use the ITU mask or calibration data instead — the floor is deliberately not that.
+`PHYSICS_MODEL_VERSION` bumped 2 → 3 for this change. No request/response schema field was
+added (only warning-description text in `openapi.yaml` was refreshed) — the floor changes
+served gain values only, gated silently on `calibration_status`, and — per the P10 note above —
+does not currently change anything actually served, because the served pattern it is `max`'d
+against is already aliased higher than the floor at every angle tested.
 
 ## Open items surfaced while mining (not fixed here)
 

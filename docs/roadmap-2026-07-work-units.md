@@ -45,11 +45,12 @@ G1 ─┬─ G2 ── G3
     ├─ D1 ─ D2 ─ D3;  D6                     │
     └─ (Phases 1–3 done) ─ D4 ─ D7
 Superseded by C8 (do not implement): S7, C5, C6
-Phase 5: F1..F7 gated on register rows (P3, P5/F4, F5, D9, F7); P1 + C8 DECIDED 2026-07-08;
+Phase 5: F1..F9 (F7, F8 done) gated on register rows (P3, P5/F4, F5, D9, F9); P1 + C8 DECIDED 2026-07-08;
 P7 DECIDED 2026-07-10 (auto-refocus), IMPLEMENTED 2026-07-10 (branch
 feat/p7-phase-center-auto-refocus; P1b dependency implemented in the same branch);
-P8 IMPLEMENTED 2026-07-12 (branch feat/p8-off-axis-honesty-warning; F7 stays gated —
-no reference sidelobe data in-repo)
+P8 IMPLEMENTED 2026-07-12 (branch feat/p8-off-axis-honesty-warning);
+F7 DECIDED and IMPLEMENTED 2026-07-12 (branch feat/f7-sidelobe-floor; F9 per-antenna
+correlation length deferred)
 ```
 
 ---
@@ -233,6 +234,108 @@ identical inputs, per this unit's own bump policy).
   handle it via the ANTC header version path documented in D2 if needed.
 - **Depends on:** P1 (motivates it); coordinate with D2.
 
+### P10 — Off-axis aperture-integral aliasing (P0 CORRECTNESS) — Effort: L
+**FILED 2026-07-13. Blocks F7. Highest-priority correctness item in the roadmap.**
+
+- **The bug:** the service computes every gain with `IntegrationParams::fast()`
+  (`service/evaluator.rs`, `service/h3_link_budget.rs`). Beyond a few degrees off-boresight the
+  far-field aperture integral is under-sampled (its phase term varies as `2π·(D/λ)·sinθ` across
+  the aperture) and **aliases**, returning gain **20–35 dB too HIGH**. Measured on real served
+  antennas: `dsn_34m_uncalibrated` reports **+34 dBi at 90° off-boresight**, and *more* gain at
+  5° than at 1°. Affects `/gain`, `/gain/batch`, `/heatmap`, `/h3-heatmap` alike. **Pre-existing.**
+- **Why it hid:** a test/production integrator gap. The reference harness validates off-axis
+  shape with `high_accuracy()` on the **small** 3.7 m dish (the one config where the integral
+  still holds), while production serves `fast()` on dishes up to 100 m.
+- **`high_accuracy()` is not the fix:** for D/λ ≈ 953 it still yields +12.8 dBi at θ = 90°.
+  Physical-optics far-sidelobe evaluation is infeasible for electrically huge reflectors at any
+  grid density affordable inside the <100 ms budget. (The domain contract already says this under
+  "Numerical caveat" — nobody had connected it to the served path.)
+- **Evidence + reproduction:** `docs/findings-2026-07-13-off-axis-integration-aliasing.md`.
+- **✅ SPIKE DONE 2026-07-13 — the fix is a CONTAINED REFACTOR, not a rewrite.** The azimuthal
+  integral has a closed form (Jacobi–Anger): `term2` of `phase_path` is exactly the Fourier kernel,
+  and every other phase term is a pure aperture-plane function (`phase_feed_displacement` takes no
+  θ/φ). So for a symmetric aperture the 2D integral collapses to a **1D Hankel transform**
+  `I(θ) = 2π ∫ A(ρ)·exp(j·k·ρ²/(4f)·(1−cosθ))·J₀(k·ρ·sinθ)·ρ dρ`. Measured (dsn_34m, X-band):
+  reproduces the 2D **exactly (Δ = 0.00 dB)** at θ = 0/1/5/20°, and at θ = 90° — where the 2D is
+  aliased even at 8.4 M points — converges to **−33.30 dBi in ~1 ms**, independently reproducing the
+  −33.28 dBi brute-force ground truth that costs **3184 ms**. That is **~3200× faster than the
+  correct answer and ~5× faster than the *wrong* answer we ship today**, and it changes the
+  complexity class from **O((D/λ)²) → O(D/λ)** (GBT Q-band worst case: ~13 min/point → ~2 ms).
+  **The <100 ms budget stops being a constraint.** Evidence + reproduction: findings doc §4a;
+  `reference_validation::p10_spike_hankel_vs_2d` (`--ignored`).
+- **First thing to settle in P10:** the spike covers the **azimuthally symmetric** case only (feed
+  at focus, no coma, no mesh). A laterally displaced feed breaks the symmetry; the generalisation is
+  the standard azimuthal-mode expansion (`e^{jmφ′}` ⇒ `2π(−j)^m J_m(a) e^{jmφ}`) — textbook, but not
+  yet demonstrated. Establish how many modes realistic coma needs.
+- **Method warning:** the spike's first cut used wrong Bessel `J₀` small-argument coefficients and
+  produced a *confidently wrong* 22 dB error at θ = 0 while looking perfect at θ = 90° (asymptotic
+  branch). Cross-check any implementation at angles with independently known answers — a wrong
+  oscillatory integrator is not obviously wrong.
+- **⚠️ RESHAPED BY THE SPIKE — the old plan is stale.** The pre-spike plan was "derive the
+  *numerical* validity limit `θ_valid(D/λ, grid)` and substitute a model beyond it, because the
+  integral cannot be evaluated out there." **That premise is now false.** The Hankel form converges
+  at *every* angle at **O(D/λ)** cost (~1 ms at θ = 90°, ~2 ms for the GBT worst case). There is no
+  longer a numerical wall forcing substitution. Consequently **`θ_valid` becomes a PHYSICAL
+  boundary, not a numerical one** — the angle beyond which the *idealised* PO model (unblocked,
+  strut-free, perfect-surface) stops matching reality, which is a completely different question
+  from where the quadrature breaks. Do not conflate them.
+
+- **Two independent defects — keep them separate.** They were conflated before, which is how F7
+  went wrong:
+  1. **Numerical** (this unit): the integral is aliased ⇒ served numbers are garbage.
+     *Engineerable, contained, measured.*
+  2. **Physical** (F7's redesign): even perfectly converged, idealised PO ≠ reality far off-axis
+     (no blockage / strut scatter / edge diffraction — the original ~8–13 dB-below-ITU finding).
+     Fixing (1) does **not** fix (2); it is what finally lets you *locate* (2) honestly.
+
+## P10 — outstanding decisions
+
+These are genuine calls, not implementation detail. Per roadmap principle 3 ("no silent physics
+changes"), get them decided before/while executing; recommended defaults given.
+
+| # | Decision | Options | Recommended default |
+|---|---|---|---|
+| **D-1** | **Coma / asymmetric apertures.** The Hankel collapse assumes azimuthal symmetry. A laterally displaced feed breaks it. **Settle this FIRST — it decides whether P10 is a day or a week.** | (a) azimuthal-mode expansion (`e^{jmφ′}` ⇒ `2π(−j)^m J_m(a) e^{jmφ}`); (b) keep 2D quadrature for asymmetric cases; (c) restrict/refuse | **(a)** — textbook and general. (b) is a trap: those cases would stay *aliased*, i.e. silently broken, which is the bug we are fixing. Establish an explicit mode-count error budget. |
+| **D-2** | **What to serve far off-axis once the maths is right?** Converged PO is mathematically correct but physically incomplete out there. | (a) serve converged PO (right maths, optimistic physics); (b) substitute the NTIA-calibrated statistical model (salvaged F7); (c) blend PO → statistical across a transition | **(c) or (b)** — but this is the **F7 redesign decision** and is the maintainer's. It is now *properly informed* for the first time. |
+| **D-3** | **Interim honesty on `main` while P10 is built.** `main` serves aliased off-axis gain today behind a soft "not validated" warning. | (a) ship a small immediate fix now (strengthen P8 to *numerically invalid*, and/or refuse off-axis beyond a threshold); (b) wait for P10 | **(a)** — cheap, and the current state actively misleads. User-visible behaviour change ⇒ needs an explicit call. |
+| **D-4** | **Fate of the `fast()` / `high_accuracy()` presets.** If Hankel is *correct* AND ~5× faster than `fast()`, the speed/accuracy trade-off the presets encode largely dissolves. | (a) single correct path, `N_rho` derived adaptively from (D/λ, θ); (b) keep presets | **(a)** — retire the presets, or demote them to a radial safety-factor knob. Removes the test/production integrator gap **at the root** (that gap is *why* this hid for so long). |
+| **D-5** | **Scope: the non-standard computation modes.** `compute_gain_higher_order` and `compute_gain_ray_tracing` use the same 2D quadrature and are therefore **also aliased**. | (a) fix higher-order too; (b) defer both | **(a) for higher-order** (same integrand + Seidel terms, all aperture-plane ⇒ the mode expansion applies). Ray-tracing is already an acknowledged stub (P3) — flag it, don't fix it here. |
+| **D-6** | **Radial sampling policy / safety factor.** Nyquist is `N_rho ≈ 2·(D/λ)·sinθ`. Spike: 2049 pts (≈1.07× Nyquist) → −32.61 dBi (0.7 dB off); 4097 (≈2.15×) → −33.28 (0.02 dB). | pick factor + accuracy target | **≈2× Nyquist** for ~0.02 dB, with a runtime convergence self-check (compare N and 2N; disagreement ⇒ warn or refuse, never silently return). |
+
+## P10 — validation protocol (REQUIRED; do not shortcut)
+
+**A wrong oscillatory integrator is not obviously wrong — it returns a plausible number.**
+Learned the hard way: the spike's first cut used incorrect Bessel `J₀` **small-argument**
+coefficients and was **confidently wrong by 22 dB at θ = 0** while looking *flawless* at θ = 90°.
+It looked fine at 90° precisely because that argument takes the **asymptotic** branch, which was
+correct. Special-function implementations fail **branch-locally**: validating at one angle proves
+nothing about any other.
+
+Therefore every implementation step must be cross-checked at angles whose answers are already
+known independently, spanning the whole range **and both branches**:
+
+| θ | Independent reference |
+|---|---|
+| **0°** | peak gain — pinned by the existing `reference_residuals_within_tolerance` rows (dsn_34m X-band = 68.96 dBi) |
+| **1–5°** | near-in; 2D quadrature is still trustworthy here, and the S.580 shape test validates the envelope |
+| **20°** | mid-range; 2D at high accuracy still usable |
+| **90°** | far; **ground truth −33.28/−33.30 dBi** (dsn_34m X-band), from two independent methods |
+
+...and repeated **across D/λ** (3.7 m → 100 m) and **across bands** (S → Ka/Q), because the
+aliasing onset scales with `(D/λ)·sinθ`. A single-antenna, single-angle green test is exactly the
+gap that let this ship.
+
+- **Exit criteria (revised post-spike):**
+  1. The served path returns **physically plausible** off-axis gain for every enabled antenna — no
+     backlobe above (main-beam − 30 dB), no gain that *rises* with θ.
+  2. Hankel agrees with the converged 2D reference at the **full angle grid above**, for at least
+     the smallest (3.7 m) and largest (100 m) enabled antennas, in **both** Bessel branches.
+  3. A runtime convergence self-check (D-6) — the model never silently returns an unconverged value.
+  4. The test/production integrator gap is **closed at the root** (D-4): the harness and the service
+     evaluate gain through the *same* code path.
+  5. Latency: off-axis gain within the <100 ms p95 budget (the spike says this is now easy).
+- **Blocks:** F7. **Depends on:** nothing.
+
 ### P2 `[DECISION]` — Seidel higher-order aberration coefficients: verify or fence — Effort: M
 
 - **Question:** `higher_order_aberrations` (`antenna-model/src/model/edge_cases.rs:250`)
@@ -368,10 +471,13 @@ modified, contract/api-documentation/openapi updated. Message deliberately
 constant per (antenna, frequency) — no per-query angle — so heatmap/H3 warning
 aggregation dedups it; C8 stage 3 owns the typed-code conversion.
 
-- **Rationale:** the model's off-axis (sidelobe) gain is systematically optimistic
+- **Rationale (as filed):** the model's off-axis (sidelobe) gain was systematically optimistic
   (~8–13 dB below the ITU-R S.580 mask; see the contract's "Off-axis pattern / sidelobe
   fidelity" section) and must not be silently served for interference / off-axis-EIRP use.
-  Until/unless F7 lands, the honest answer is a warning.
+  Until/unless F7 lands, the honest answer is a warning. **F7 has since landed
+  (2026-07-12, branch `feat/f7-sidelobe-floor`)**: the served uncalibrated off-axis value is
+  now envelope-conservative rather than optimistic, and the warning message was revised
+  alongside F7 to say so — see the F7 unit below.
 - **Entrance / read first:** contract section above;
   `service/evaluator.rs:411` (`generate_calibration_warnings` — the implementation site;
   `corrected_el` is already at the call site, `:339`); the existing warning kinds it emits
@@ -894,6 +1000,51 @@ Phase 2.
 
 ### F7 — Statistical sidelobe envelope/floor model — Effort: M/L (gated on register row F7 **and** reference sidelobe data)
 
+**⛔ PARKED 2026-07-13 — DO NOT MERGE `feat/f7-sidelobe-floor`. BLOCKED ON P10.**
+F7 was built on an inverted premise. Its founding claim (modelled sidelobes ~8–13 dB *too low*)
+was measured with `high_accuracy()` on the small 3.7 m dish; the **served** path uses `fast()`,
+where the pattern aliases **20–35 dB too HIGH** (unit **P10**, P0). A floor that only ever
+*raises* gain therefore cannot fire — it engaged in **0 of 6** real service geometries. When F7
+returns it must be a **replacement** model beyond θ_valid, not a `max()` floor over an aliased
+pattern.
+
+*Salvage on the branch:* the corrected derivation — **Ω = 4π (isotropic)** is the only
+power-conserving choice (the floor is applied over the whole sphere), collapsing to
+`floor = 1 − η_ruze`; **bounded by 0 dBi** (cannot swamp a main beam); tracks the NTIA 84-164
+wide-angle **median** to ±6 dB/bin (~2.5 dB band-mean), pinned by
+`reference_validation::sidelobe_floor_tracks_measured_median`, which also asserts power
+conservation and the 0 dBi ceiling. The shipped **Ω = 0.25 sr was wrong** — a cone-derived level
+applied across 4π, implying 136–326% of the antenna's total radiated power. Also reusable: the
+`apply_sidelobe_floor` flag, the uncalibrated gate, the `PHYSICS_MODEL_VERSION` stamp, and the
+digitised NTIA/NASA datasets. Register decision had been revised to **best-estimate (median)**,
+not conservative envelope (maintainer, 2026-07-12) — that call still stands for the redesign.
+
+**✅ DONE 2026-07-12** — branch `feat/f7-sidelobe-floor`, commits `06b8cfe` (Ruze sidelobe
+scatter floor + `apply_sidelobe_floor` flag), `7e043b4` (gate on uncalibrated antennas, all
+endpoints), `08abfaa` (explicit batch endpoint floor coverage; heatmap inheritance noted),
+`a9f0ac0` (calibrate `OMEGA_SCATTER`; conservative-envelope test), `044f1f5` (bump
+`physics_model_version` 2 → 3, P1b). Floor applied as `max(pattern, floor)` at the spillover
+seam in `model/pattern.rs::compute_gain`, gated on `correction_surface.is_none()` (reuses P1's
+double-counting gate) and threaded identically through gain/batch/heatmap/H3. Validated as a
+conservative envelope against NTIA 84-164 (`reference_validation::sidelobe_floor_conservative_envelope`)
+and cross-checked vs NASA CR-159703 surface-error scaling
+(`sidelobe_floor_surface_scaling_matches_nasa`). P8's warning message revised alongside this
+unit to describe the modeled floor (still contains the stable marker substring
+`"beyond the validated main-beam region"`).
+
+**Two planner defaults were adopted as-is (no deviation):**
+1. **No per-antenna surface correlation-length field.** Kept the single global `Ω_SCATTER =
+   0.25 sr` called out as a "candidate floor mechanism" below; per-antenna width is deferred
+   to unit **F9** rather than built here.
+2. **Flat pedestal shape.** The floor is a constant-dBi wide-angle pedestal (no angle-dependent
+   rolloff beyond the `max(pattern, floor)` seam itself), matching the "envelope, not detailed
+   shape" goal — it does not attempt to reproduce near-in first-sidelobe structure.
+
+Out of scope, unchanged from the plan: physical edge-diffraction/strut-scatter modeling, and
+an ITU-mask envelope output mode (considered, not built).
+
+---
+
 Makes off-axis predictions *envelope-conservative* instead of systematically optimistic
 (today: ~8–13 dB below the ITU-R S.580 mask — contract "Off-axis pattern / sidelobe
 fidelity"). Approach: an angle-dependent floor applied at the existing spillover seam in
@@ -912,9 +1063,9 @@ digitized reference datasets now committed at
 `tests/fixtures/reference_datasets/ntia_84_164_sidelobe_statistics.psv` (120 rows:
 statistical sidelobe-peak distributions for 22 C-band earth stations, 2.8–13 m,
 D/λ 35–267, 1°–180°) and `nasa_cr159703_pattern_peaks.psv` (97 sidelobe peaks from
-1.22/1.83 m prime-focus paraboloids at 12 GHz with surface-error provenance). The
-register row and a maintainer decision on the approach are still needed before
-starting. **Explicitly out of scope**
+1.22/1.83 m prime-focus paraboloids at 12 GHz with surface-error provenance). **Register
+row decided and unit implemented 2026-07-12** — see the "✅ DONE" block above.
+**Explicitly out of scope**
 (roadmap §6): physical edge-diffraction and strut-scatter modeling — domain-expert
 territory, same class as F2. Until this lands, unit P8's warning is the honest answer.
 
@@ -944,3 +1095,59 @@ found), CommScope/RFS NSMA files (envelopes, not measurements), Ruze 1966 (paywa
 mm-wave research dish, low incremental value). FCC IBFS filings have per-model measured
 plots (e.g. GD/Prodelin 3.7/3.8 m) but typically only ±10°, raster, and pre-2015
 attachments are blocked to scripted fetches.
+
+### F8 — Reference sidelobe data collection (F7 data gate) — Effort: M
+**✅ DONE 2026-07-12** — commit `1666e8c` (landed alongside the P8 warning). Digitized reference
+sidelobe datasets committed under
+`antenna-model/tests/fixtures/reference_datasets/sidelobe_data/`:
+- `ntia_84_164_sidelobe_statistics.psv` — absolute-dBi percentile envelopes
+  (max/p90/median/p10/min) per angular bin for 22 C-band earth stations (2.8–13 m, D/λ 35–267),
+  1°–180°.
+- `ntia_84_164_antennas.psv` — the backing antenna/gain table.
+- `nasa_cr159703_pattern_peaks.psv` — 97 sidelobe peaks from 1.22/1.83 m prime-focus paraboloids
+  at 12 GHz, with surface-error / defocus provenance.
+
+No machine-readable pattern file existed upstream — all three required manual digitization
+(source, method, and axis calibration recorded in each file header). Files live in a separate
+`sidelobe_data/` subdirectory so the peak-gain harness (`load_all_reference_points`) does not
+auto-ingest them. This **met F7's data gate**; the candidate-source survey (kept and ruled-out)
+is preserved in the F7 unit above. **Blocks:** F7 (data gate — now met).
+
+### F9 `[DECISION]` — Per-antenna sidelobe-floor width (surface correlation length) — Effort: M/L (deferred; gated on register row F9)
+
+Enhancement to F7. F7 ships a **single global** effective scatter solid angle (`Ω_SCATTER`,
+data-calibrated) setting the angular spread/shape of the Ruze scatter floor; the floor's
+per-antenna *magnitude* already scales through each antenna's own `surface_rms` via `(1 − η_ruze)`.
+F9 replaces the global constant with a **per-antenna** surface correlation length so the floor's
+angular width is antenna-specific — enabling a *best-fit* floor shape rather than the conservative
+flat pedestal F7 validates.
+
+- **Decision (recommended default): defer, then implement only if the data demands it.** For F7's
+  chosen goal — a one-sided *conservative envelope*, never optimistic — the global constant is the
+  right altitude: NTIA 84-164 shows the wide-angle floor is roughly antenna-independent in absolute
+  dBi, so a single spread constant bounds the reference set. The per-antenna field mainly buys
+  *best-fit* fidelity, a goal F7 explicitly did **not** adopt.
+- **Trigger to promote from deferred:** F7's Task 3 NASA surface-provenance cross-check cannot bound
+  the data across the surface-condition range with one global `Ω_SCATTER`, **or** a later consumer
+  needs best-fit (not envelope) off-axis levels.
+- **Scope / cost (measured against P7's `axial_defocus_m` plumbing — 11 files, +119 lines):** a new
+  optional reflector field `surface_correlation_length_m` threaded the full config→data→model chain:
+  `calibrate/src/design_specs_loader.rs` (spec field + validation + a tuner-range-or-fixed decision),
+  `config/settings.rs` (field + validation), `data/types.rs` `ReflectorGeometry` (struct + builder +
+  `build()` + validation), `data/repository.rs` (config→data seam), `model/geometry.rs`
+  `ReflectorGeometry` (positional `new()` signature + builder), the mm→m build seams at
+  `evaluator.rs`/`h3_link_budget.rs`, and the calibrate artifact writers (`artifact_export.rs`,
+  `boresight_calibration.rs` — bincode layout change; cheap only because no `.bin` artifacts exist,
+  per P1b). Plus raw-struct-literal fixture churn across `service/*`, `data/types.rs`, `api/routes.rs`.
+  Roughly **doubles F7's model + plumbing footprint**; Effort M/L. Make the field `Option<f64>`
+  defaulting to F7's global `Ω_SCATTER` so absence is inert and no existing YAML/artifact changes.
+- **Additive, no rework penalty:** F7's floor function already carries `theta` in its signature, so
+  the per-antenna width slots in as a shape term without touching the seam or the uncalibrated gate.
+- **Exit criteria (when undeferred):** register row F9 Decided; `surface_correlation_length_m` plumbed
+  end-to-end (optional, global-default fallback); F7's conservative-envelope test still passes **and**
+  a new best-fit test shows per-antenna width tracks the NASA surface-condition/defocus progression
+  tighter than the global constant; `physics_model_version` bumped (P1b); `docs/domain-contract.md` +
+  `docs/api-documentation.md` updated.
+- **Out of scope (inherited from F7 / roadmap §6):** physical edge-diffraction / strut-scatter
+  mechanisms; the ITU-mask envelope output mode (a separate F7 follow-up).
+- **Depends on:** F7 landed.

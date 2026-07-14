@@ -16,6 +16,7 @@
 //! - **Mesh Reflection Efficiency**: Wire mesh reflectors have frequency-dependent reflectivity (inductive-grid model)
 //! - **Illumination Efficiency**: Non-uniform illumination reduces effective aperture
 //! - **Spillover Efficiency**: Feed pattern energy missing the reflector
+//! - **Sidelobe Floor (F7)**: Ruze-scattered power re-radiates as a wide-angle pedestal that lifts deep nulls/sidelobes (opt-in via `IntegrationParams::apply_sidelobe_floor`)
 //!
 //! # References
 //! - Design doc Section 2.1 (Core Physical Optics Model)
@@ -142,6 +143,80 @@ pub fn overall_efficiency(config: &AntennaConfiguration, wavelength: f64) -> f64
 
     // Combined efficiency
     eta_ruze * eta_mesh
+}
+
+/// Solid angle (steradians) over which surface-scattered power is spread by the
+/// sidelobe-floor model (F7).
+///
+/// **Set to 4π (isotropic), which is the only power-conserving choice.** The floor is
+/// applied via `max(pattern, floor)` at *every* angle, i.e. over the whole 4π sphere.
+/// A pedestal of directivity `D` applied over 4π radiates a power fraction `D`. Since
+/// the power available to the pedestal is exactly `p_scatter = 1 − η_ruze`, requiring
+/// `D ≤ p_scatter` forces `Ω = 4π` and the level reduces to
+///
+/// ```text
+/// floor_linear = p_scatter · 4π/Ω = p_scatter        (Ω = 4π)
+/// ```
+///
+/// i.e. the scattered fraction, radiated isotropically, has directivity equal to that
+/// fraction. Any Ω < 4π describes power concentrated into a *cone* and MUST NOT be
+/// applied across the full sphere: the F7 first cut used Ω = 0.25 sr that way and
+/// implied ~50× the scattered power actually available (136–326% of everything the
+/// antenna radiates). Two useful consequences of Ω = 4π:
+///
+/// - **Bounded:** `p_scatter ≤ 1` ⇒ the floor can never exceed **0 dBi**, so it cannot
+///   swamp the main beam or a near-in sidelobe of any real dish. (The `max()` seam in
+///   [`compute_gain`] therefore only ever lifts genuine deep sidelobe/null angles.)
+/// - **Self-calibrating:** no free fudge constant remains.
+///
+/// This is D-independent — the level tracks surface quality, not aperture size — which
+/// matches the NTIA 84-164 observation that the wide-angle floor is nearly
+/// D/λ-independent. A per-antenna angular *shape* (correlation length) is deferred
+/// roadmap unit F9. Changing this changes `gain_physics` on the uncalibrated off-axis
+/// path → bump `PHYSICS_MODEL_VERSION`.
+const OMEGA_SCATTER: f64 = 4.0 * PI;
+
+/// Surface-scatter sidelobe floor (LINEAR gain, relative to isotropic).
+///
+/// A **best-estimate** off-axis floor, not a conservative envelope (F7 register decision
+/// revised 2026-07-12: the primary consumers — link budget and G/T — need accuracy, and a
+/// one-sided upper bound is *anti*-conservative for desired-signal margin).
+///
+/// Level: the Ruze-scattered fraction `p_scatter = 1 − η_ruze`, radiated isotropically
+/// (see [`OMEGA_SCATTER`]), then multiplied by `η_mesh` so the floor shares the SAME
+/// efficiency basis as the pattern it is `max`'d against in [`compute_gain`] (which
+/// carries η_ruze × η_mesh). Applied only via `IntegrationParams::apply_sidelobe_floor`.
+///
+/// # Honest scope — this is EMPIRICAL, not a first-principles derivation
+///
+/// It is validated against, not derived from, measured data: it tracks the NTIA 84-164
+/// wide-angle **median** sidelobe level to within ≈ ±3 dB (−2.0 dB at 4 GHz, +2.9 dB at
+/// 6 GHz). The residual has structure: Ruze scatter scales as `(rms/λ)²` while the
+/// measured floor is nearly frequency-flat — direct evidence that the real wide-angle
+/// floor is dominated by **spillover, blockage and edge diffraction**, which this model
+/// does not have. So `(1 − η_ruze)` acts here as a *surface-quality scaling term* that
+/// carries those unmodeled mechanisms, not as a literal scattered-power budget.
+///
+/// Treat a floored value as "about what a real dish of this surface quality does out
+/// here," ±3 dB — not as a per-antenna sidelobe prediction. For a conservative
+/// *envelope* (interference / regulatory screening), use the ITU mask or calibration
+/// data; the envelope is deliberately NOT the served point estimate.
+pub fn sidelobe_floor_gain(config: &AntennaConfiguration, wavelength: f64) -> f64 {
+    let eta_ruze = ruze_efficiency(config.reflector.surface_rms, wavelength);
+    let p_scatter = 1.0 - eta_ruze;
+
+    // Share the pattern's efficiency basis: the pattern gain has already been reduced by
+    // mesh reflection loss, so the scattered power that reaches the far field is too.
+    let eta_mesh = match config.mesh {
+        Some(ref mesh) => crate::model::mesh::mesh_reflection_efficiency(
+            mesh.spacing,
+            mesh.wire_diameter,
+            wavelength,
+        ),
+        None => 1.0,
+    };
+
+    p_scatter * (4.0 * PI / OMEGA_SCATTER) * eta_mesh
 }
 
 /// Compute theoretical maximum gain for a circular aperture
@@ -296,6 +371,14 @@ pub fn compute_gain(
         (gain * eta, Some(10.0 * eta.log10()))
     } else {
         (gain, None)
+    };
+
+    // Ruze scattered-power sidelobe floor (F7): off by default, lifts deep
+    // nulls/sidelobes to a surface-error scatter pedestal when enabled.
+    let gain = if params.apply_sidelobe_floor {
+        gain.max(sidelobe_floor_gain(config, wavelength))
+    } else {
+        gain
     };
 
     // Apply gain floor for numerical stability
@@ -1058,6 +1141,192 @@ mod tests {
             "spillover must not be applied outside StandardPhysicalOptics, got {:?}",
             result.spillover_loss_db
         );
+    }
+
+    /// Shared config for the F7 sidelobe-floor tests: 1m/f0.5 dish, 1.5mm surface
+    /// RMS, X-band feed. Surface RMS is nonzero so the floor is nonzero.
+    fn sidelobe_floor_test_antenna() -> AntennaConfiguration {
+        let reflector = ReflectorGeometry::builder()
+            .diameter(1.0)
+            .focal_length(0.5)
+            .surface_rms(0.0015) // 1.5mm RMS
+            .build()
+            .unwrap();
+        let feed = FeedParameters::builder()
+            .at_focus(0.5)
+            .q_factor(8.0)
+            .build()
+            .unwrap();
+        AntennaConfiguration::builder()
+            .id("sidelobe_floor_test")
+            .name("Sidelobe Floor Test")
+            .reflector(reflector)
+            .feed(feed)
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn test_sidelobe_floor_zero_at_zero_surface_rms() {
+        let reflector = ReflectorGeometry::builder()
+            .diameter(1.0)
+            .focal_length(0.5)
+            .surface_rms(0.0) // ideal surface
+            .build()
+            .unwrap();
+        let feed = FeedParameters::builder()
+            .at_focus(0.5)
+            .q_factor(8.0)
+            .build()
+            .unwrap();
+        let config = AntennaConfiguration::builder()
+            .id("ideal")
+            .name("Ideal")
+            .reflector(reflector)
+            .feed(feed)
+            .build()
+            .unwrap();
+
+        let wavelength = wavelength_from_frequency(8.4e9);
+        let floor = sidelobe_floor_gain(&config, wavelength);
+        assert_eq!(
+            floor, 0.0,
+            "zero surface RMS must give an exactly-zero floor (no scattered power)"
+        );
+    }
+
+    #[test]
+    fn test_sidelobe_floor_positive_and_monotonic_in_surface_rms() {
+        let wavelength = wavelength_from_frequency(8.4e9);
+
+        let mk = |surface_rms: f64| {
+            let reflector = ReflectorGeometry::builder()
+                .diameter(1.0)
+                .focal_length(0.5)
+                .surface_rms(surface_rms)
+                .build()
+                .unwrap();
+            let feed = FeedParameters::builder()
+                .at_focus(0.5)
+                .q_factor(8.0)
+                .build()
+                .unwrap();
+            AntennaConfiguration::builder()
+                .id("mono")
+                .name("Mono")
+                .reflector(reflector)
+                .feed(feed)
+                .build()
+                .unwrap()
+        };
+
+        let config_small = mk(0.001); // 1mm RMS
+        let config_large = mk(0.003); // 3mm RMS
+
+        let floor_small = sidelobe_floor_gain(&config_small, wavelength);
+        let floor_large = sidelobe_floor_gain(&config_large, wavelength);
+
+        assert!(floor_small > 0.0, "floor must be positive for nonzero RMS");
+        assert!(
+            floor_large > floor_small,
+            "floor must strictly increase with surface_rms: {floor_small} vs {floor_large}"
+        );
+    }
+
+    #[test]
+    fn test_sidelobe_floor_lifts_deep_null_leaves_main_beam_unchanged() {
+        let config = sidelobe_floor_test_antenna();
+        let params_off = IntegrationParams::fast();
+        let params_on = IntegrationParams {
+            apply_sidelobe_floor: true,
+            ..IntegrationParams::fast()
+        };
+
+        // Deep off-axis angle: well past the main beam and first few sidelobes for
+        // this 1m/8.4GHz dish (HPBW ~2.5deg), pattern gain << floor here.
+        let theta_deep_null = 10.0_f64.to_radians();
+
+        let wavelength = wavelength_from_frequency(8.4e9);
+        let floor = sidelobe_floor_gain(&config, wavelength);
+        assert!(floor > 0.0, "floor must be positive for this config");
+
+        let off = compute_gain(theta_deep_null, 0.0, &config, 8.4e9, &params_off).unwrap();
+        let on = compute_gain(theta_deep_null, 0.0, &config, 8.4e9, &params_on).unwrap();
+
+        assert!(
+            off.gain < floor,
+            "pattern at deep-null angle must be below the floor for this test to be meaningful: \
+             pattern={} floor={floor}",
+            off.gain
+        );
+        assert!(
+            (on.gain - off.gain.max(floor)).abs() < 1e-12,
+            "flag-on gain must equal max(pattern, floor): on={} expected={}",
+            on.gain,
+            off.gain.max(floor)
+        );
+        assert!(
+            on.gain > off.gain,
+            "deep null must be lifted by the floor: on={} off={}",
+            on.gain,
+            off.gain
+        );
+
+        // Boresight and main beam: pattern >> floor, so flag on/off must match exactly.
+        for theta_deg in [0.0_f64, 1.0, 2.0] {
+            let theta = theta_deg.to_radians();
+            let off = compute_gain(theta, 0.0, &config, 8.4e9, &params_off).unwrap();
+            let on = compute_gain(theta, 0.0, &config, 8.4e9, &params_on).unwrap();
+            assert_eq!(
+                on.gain, off.gain,
+                "main beam (theta={theta_deg}deg) must be byte-for-byte unchanged by the floor"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sidelobe_floor_flag_off_matches_pre_f7_behavior() {
+        // Flag defaults to false; compute_gain's returned gain must equal the
+        // pre-F7 pipeline exactly (raw standard-PO gain, then apply_gain_floor —
+        // no spillover, since apply_spillover is also false here, and no sidelobe
+        // floor). Reconstructed independently via the private helpers rather than
+        // by re-deriving compute_gain, so this test would actually fail if the
+        // floor seam were wired in unconditionally.
+        let config = sidelobe_floor_test_antenna();
+        let params = IntegrationParams::fast();
+        assert!(
+            !params.apply_sidelobe_floor,
+            "apply_sidelobe_floor must default to false"
+        );
+        assert!(!params.apply_spillover);
+
+        let wavelength = wavelength_from_frequency(8.4e9);
+
+        // Deep-null angle included: this is exactly where a wrongly-unconditional
+        // floor would diverge from the pre-F7 pipeline.
+        for theta_deg in [0.0_f64, 1.0, 5.0, 10.0, 20.0] {
+            let theta = theta_deg.to_radians();
+
+            let mut warnings = Vec::new();
+            let raw_gain = compute_gain_standard(
+                theta,
+                0.0,
+                &config,
+                8.4e9,
+                wavelength,
+                &params,
+                &mut warnings,
+            )
+            .unwrap();
+            let expected = apply_gain_floor(raw_gain);
+
+            let result = compute_gain(theta, 0.0, &config, 8.4e9, &params).unwrap();
+
+            assert_eq!(
+                result.gain, expected,
+                "theta={theta_deg}deg: flag-off gain must equal the pre-F7 pipeline exactly"
+            );
+        }
     }
 
     #[test]

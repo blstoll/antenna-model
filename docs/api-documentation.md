@@ -99,13 +99,21 @@ All responses include a `calibration_status` field with accuracy estimates.
 
 **Off-axis (sidelobe) caveat:** the accuracy figures above apply to the main beam and
 first sidelobe only. The physics model's far-off-boresight sidelobe *levels* are
-systematically optimistic (typically 8–13 dB below the ITU-R S.580 mask) because
-sidelobe-raising mechanisms (blockage, strut scatter, edge diffraction, surface-error
-scatter floor) are unmodeled — see `docs/domain-contract.md`, "Off-axis pattern /
-sidelobe fidelity". Queries on **uncalibrated** antennas beyond ~3× the first-null angle
-(≈ 1.6·λ/D, beamwidth-relative) therefore return a warning on all four compute endpoints
-("… beyond the validated main-beam region …"). Do not use uncalibrated off-axis gain for
-interference, adjacent-satellite, or off-axis-EIRP analysis; use calibration data or a
+missing several sidelobe-raising mechanisms (blockage, strut scatter, edge diffraction —
+see `docs/domain-contract.md`, "Off-axis pattern / sidelobe fidelity"). As of the F7
+sidelobe floor (2026-07-12), uncalibrated-antenna off-axis gain is no longer left
+systematically optimistic: a Ruze scattered-power floor, calibrated as a **best estimate**
+against measured wide-angle sidelobe statistics (NTIA Report 84-164 — it tracks the measured
+median, not a one-sided upper bound), is applied to deep off-axis nulls/sidelobes. This tracks
+a population-statistics median, not any single antenna's exact pattern, and it is still
+**not a substitute for calibrated/measured sidelobe data for regulatory interference
+filings** — the near-in first-sidelobe accuracy and detailed pattern shape are unchanged. (F7
+is currently parked — see `docs/domain-contract.md` — pending a P0 fix to the off-axis
+aperture integral itself, so this floor does not yet change what any endpoint actually
+serves.) Queries on **uncalibrated** antennas beyond ~3× the first-null angle (≈ 1.6·λ/D,
+beamwidth-relative) return a warning on all four compute endpoints ("… beyond the
+validated main-beam region …") describing this caveat. For
+interference, adjacent-satellite, or off-axis-EIRP analysis, use calibration data or a
 regulatory envelope (e.g. the ITU-R S.580 mask) instead.
 
 ### Coordinate System Auto-Detection

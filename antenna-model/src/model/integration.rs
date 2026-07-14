@@ -108,6 +108,13 @@ pub struct IntegrationParams {
     /// surface — the surface otherwise absorbs spillover empirically). The model
     /// itself never inspects calibration; it only reads this bool.
     pub apply_spillover: bool,
+
+    /// Apply the Ruze scattered-power sidelobe floor (F7): `gain = max(pattern, floor)`.
+    ///
+    /// Off by default everywhere in this module — enabling it is a SERVICE-layer
+    /// decision (a later task wires it in for uncalibrated antennas only). See
+    /// `pattern::sidelobe_floor_gain` for the physical model.
+    pub apply_sidelobe_floor: bool,
 }
 
 impl Default for IntegrationParams {
@@ -122,6 +129,7 @@ impl Default for IntegrationParams {
             max_iterations: 5,        // Refinement iteration limit
             use_higher_order_aberrations: false,
             apply_spillover: false,
+            apply_sidelobe_floor: false,
         }
     }
 }
@@ -139,6 +147,7 @@ impl IntegrationParams {
             max_iterations: 3,
             use_higher_order_aberrations: false,
             apply_spillover: false,
+            apply_sidelobe_floor: false,
         }
     }
 
@@ -154,6 +163,7 @@ impl IntegrationParams {
             max_iterations: 8,
             use_higher_order_aberrations: false,
             apply_spillover: false,
+            apply_sidelobe_floor: false,
         }
     }
 

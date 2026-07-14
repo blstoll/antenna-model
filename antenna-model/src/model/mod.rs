@@ -42,7 +42,8 @@ pub mod ray_trace;
 ///   uncalibrated path, fractional-q spillover fix)
 /// - 2: P7 auto-refocus — `phase_center_offset` no longer contributes axial defocus
 ///   (compensated feed property); deliberate defocus via the new `axial_defocus` field
-pub const PHYSICS_MODEL_VERSION: u32 = 2;
+/// - 3: F7 Ruze sidelobe floor on the uncalibrated off-axis path (2026-07)
+pub const PHYSICS_MODEL_VERSION: u32 = 3;
 
 // Re-export commonly used types
 pub use coordinates::{

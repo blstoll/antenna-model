@@ -707,8 +707,10 @@ mod tests {
     ///
     /// `generate_heatmap` delegates every grid point to `compute_gain_from_request`
     /// (see `evaluate_grid_point` above) rather than calling `compute_gain_db`
-    /// directly, so this endpoint already inherits the `apply_spillover` gate wired
-    /// into the evaluator. This test proves that inheritance holds for a real,
+    /// directly, so this endpoint already inherits the `apply_spillover` gate — and,
+    /// identically, the F7 `apply_sidelobe_floor` gate (both keyed on
+    /// `correction_surface.is_none()`) — wired into the evaluator. This test proves
+    /// that inheritance holds for a real,
     /// small-offset (standard physical-optics) uncalibrated query: a single-point
     /// grid's `peak_gain_db` (the only point, so it equals that point's raw gain)
     /// must match the `/gain` gain for the reconstructed identical `GainRequest`.
