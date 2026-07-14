@@ -34,8 +34,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
-      - name: Install OpenBLAS (calibrate uses ndarray-linalg openblas-system)
-        run: sudo apt-get update && sudo apt-get install -y libopenblas-dev gfortran pkg-config
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy

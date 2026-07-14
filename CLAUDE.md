@@ -67,14 +67,6 @@ cargo audit
 cargo doc --open
 ```
 
-### Platform-Specific (macOS with OpenBLAS)
-```bash
-# If calibration tool tests fail on macOS due to BLAS linking
-LDFLAGS="-L/opt/homebrew/opt/openblas/lib" \
-CPPFLAGS="-I/opt/homebrew/opt/openblas/include" \
-cargo test -p calibrate
-```
-
 ## Architecture
 
 ### Workspace Structure
@@ -251,7 +243,7 @@ Active hardening and debt work is tracked in `docs/roadmap-2026-07.md` and
 
 6. **Validity Ranges**: Queries outside calibrated ranges should generate warnings but still return values (extrapolated).
 
-7. **BLAS Linking (macOS calibrate tool)**: The calibration tool uses `ndarray-linalg` with OpenBLAS system library. On macOS, you may need to set `LDFLAGS` and `CPPFLAGS` to link correctly.
+7. **No system BLAS — the build is pure Rust**: `cargo build` / `cargo test` need no environment variables, no Homebrew packages, and no system libraries on any platform. Do not add `LDFLAGS`/`CPPFLAGS`, and do not reintroduce `ndarray-linalg`/OpenBLAS. The correction-surface fit (`correction_surface.rs`) exploits the B-spline's local support to accumulate the normal equations `(BᵀB + λI)` directly from the `order³` non-zero basis values per data point, then solves the SPD system with an in-house Cholesky factorization. This is both dependency-free and substantially cheaper than the dense `BᵀB` product it replaced.
 
 ## References
 

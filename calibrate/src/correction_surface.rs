@@ -34,7 +34,6 @@
 
 use crate::parser::MeasurementPoint;
 use ndarray::{Array1, Array2};
-use ndarray_linalg::Solve;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, info};
@@ -620,6 +619,153 @@ fn validate_knot_vector(knots: &[f64], order: usize) -> Result<()> {
 // Least Squares Fitting
 // ============================================================================
 
+/// Accumulate the normal equations `(B^T B + λI, B^T r)` for the tensor-product basis.
+///
+/// A B-spline basis function is non-zero only over `order` consecutive knot spans, so
+/// each residual point activates at most `order` basis functions per dimension — `order^3`
+/// of the `n_coeff` columns of its design-matrix row. Accumulating `B^T B` from those
+/// active entries costs `O(n_data · order^6)` instead of the `O(n_data · n_coeff^2)` a dense
+/// `B^T B` product would; the design matrix is never materialized.
+fn accumulate_normal_equations(
+    residuals: &[ResidualPoint],
+    knots_freq: &[f64],
+    knots_cone: &[f64],
+    knots_clock: &[f64],
+    order: usize,
+    regularization: f64,
+) -> (Array2<f64>, Array1<f64>) {
+    let n_freq = knots_freq.len() - order;
+    let n_cone = knots_cone.len() - order;
+    let n_clock = knots_clock.len() - order;
+    let n_coeff = n_freq * n_cone * n_clock;
+
+    let mut normal_matrix = Array2::<f64>::zeros((n_coeff, n_coeff));
+    let mut btr = Array1::<f64>::zeros(n_coeff);
+
+    let mut active: Vec<(usize, f64)> = Vec::with_capacity(order * order * order);
+
+    for res in residuals {
+        let basis_freq = evaluate_basis_functions(res.frequency_mhz, knots_freq, order);
+        let basis_cone = evaluate_basis_functions(res.e_cone_deg, knots_cone, order);
+        let basis_clock = evaluate_basis_functions(res.e_clock_deg, knots_clock, order);
+
+        // The non-zero entries of this point's design-matrix row.
+        active.clear();
+        for &(if_, vf) in &basis_freq {
+            for &(ic, vc) in &basis_cone {
+                for &(ik, vk) in &basis_clock {
+                    let idx = if_ + n_freq * (ic + n_cone * ik);
+                    active.push((idx, vf * vc * vk));
+                }
+            }
+        }
+
+        // Rank-1 update restricted to the active columns.
+        for &(ia, va) in &active {
+            btr[ia] += va * res.residual_db;
+            for &(ib, vb) in &active {
+                normal_matrix[[ia, ib]] += va * vb;
+            }
+        }
+    }
+
+    if regularization > 0.0 {
+        for i in 0..n_coeff {
+            normal_matrix[[i, i]] += regularization;
+        }
+    }
+
+    (normal_matrix, btr)
+}
+
+/// Solve `A x = b` for symmetric positive-definite `A` by Cholesky factorization.
+///
+/// `a` is consumed as scratch: it is overwritten with its lower-triangular factor `L`
+/// where `A = L L^T`. Returns `None` if `A` is not positive definite — for the normal
+/// equations here that means the basis is rank-deficient over the supplied data, which
+/// regularization (λ > 0) is what prevents.
+fn cholesky_solve(a: &mut Array2<f64>, b: &Array1<f64>) -> Option<Array1<f64>> {
+    /// Dot product over four independent accumulators.
+    ///
+    /// Floating-point addition is not associative, so a single-accumulator loop forces the
+    /// compiler to keep the adds in order and it cannot vectorize. Splitting the sum into
+    /// four independent chains lets it emit SIMD/FMA, which is worth several times the
+    /// throughput in the O(n^3) factorization below. The regrouping perturbs results only
+    /// at the ulp level.
+    #[inline]
+    fn dot(x: &[f64], y: &[f64]) -> f64 {
+        let n = x.len();
+        let y = &y[..n]; // Prove the lengths match once, so the loop is bounds-check free.
+        let (mut s0, mut s1, mut s2, mut s3) = (0.0, 0.0, 0.0, 0.0);
+
+        let tail = n % 4;
+        let mut k = 0;
+        while k < n - tail {
+            s0 += x[k] * y[k];
+            s1 += x[k + 1] * y[k + 1];
+            s2 += x[k + 2] * y[k + 2];
+            s3 += x[k + 3] * y[k + 3];
+            k += 4;
+        }
+        let mut sum = (s0 + s2) + (s1 + s3);
+        while k < n {
+            sum += x[k] * y[k];
+            k += 1;
+        }
+        sum
+    }
+
+    let n = b.len();
+    debug_assert_eq!(a.dim(), (n, n));
+
+    // Row-major contiguous storage: rows of `a` are then adjacent in memory, which is what
+    // makes the inner dot products above vectorizable.
+    let a = a
+        .as_slice_mut()
+        .expect("normal matrix is contiguous and row-major");
+
+    // Factor A = L L^T in place, writing only the lower triangle.
+    for j in 0..n {
+        let row_j = &a[j * n..j * n + n];
+        let diag = row_j[j] - dot(&row_j[..j], &row_j[..j]);
+
+        // NaN is checked explicitly; `diag <= 0.0` alone would let it through.
+        if diag.is_nan() || diag <= 0.0 {
+            return None;
+        }
+        let ljj = diag.sqrt();
+        a[j * n + j] = ljj;
+
+        for i in (j + 1)..n {
+            // Row j is fully computed and i > j, so the rows are disjoint: split the buffer
+            // to borrow row j immutably while writing row i.
+            let (head, tail) = a.split_at_mut(i * n);
+            let row_j = &head[j * n..j * n + j];
+            let row_i = &mut tail[..n];
+            row_i[j] = (row_i[j] - dot(&row_i[..j], row_j)) / ljj;
+        }
+    }
+
+    // Forward substitution: L y = b.
+    let mut x = b.to_vec();
+    for i in 0..n {
+        let row_i = &a[i * n..i * n + n];
+        x[i] = (x[i] - dot(&row_i[..i], &x[..i])) / row_i[i];
+    }
+
+    // Back substitution: L^T x = y. Walks column i of L, so it is strided rather than
+    // contiguous — but this is O(n^2) and negligible beside the factorization.
+    for i in (0..n).rev() {
+        let mut sum = x[i];
+        for k in (i + 1)..n {
+            sum -= a[k * n + i] * x[k];
+        }
+        x[i] = sum / a[i * n + i];
+    }
+
+    Some(Array1::from_vec(x))
+}
+
 /// Fit B-spline coefficients using least squares
 ///
 /// Solves the system: (B^T B + λI) c = B^T r
@@ -632,59 +778,34 @@ fn fit_bspline_coefficients(
     order: usize,
     regularization: f64,
 ) -> Result<Vec<f64>> {
-    let n_freq = knots_freq.len() - order;
-    let n_cone = knots_cone.len() - order;
-    let n_clock = knots_clock.len() - order;
-    let n_coeff = n_freq * n_cone * n_clock;
-    let n_data = residuals.len();
+    let n_coeff =
+        (knots_freq.len() - order) * (knots_cone.len() - order) * (knots_clock.len() - order);
 
     info!(
-        "Building design matrix: {} data points, {} coefficients",
-        n_data, n_coeff
+        "Accumulating normal equations: {} data points, {} coefficients",
+        residuals.len(),
+        n_coeff
     );
 
-    // Build the design matrix B
-    // B[i, j] = basis function j evaluated at data point i
-    let mut design_matrix = Array2::<f64>::zeros((n_data, n_coeff));
-    let mut residual_vector = Array1::<f64>::zeros(n_data);
+    let (mut normal_matrix, btr) = accumulate_normal_equations(
+        residuals,
+        knots_freq,
+        knots_cone,
+        knots_clock,
+        order,
+        regularization,
+    );
 
-    for (i, res) in residuals.iter().enumerate() {
-        residual_vector[i] = res.residual_db;
-
-        // Evaluate tensor product basis functions
-        let basis_freq = evaluate_basis_functions(res.frequency_mhz, knots_freq, order);
-        let basis_cone = evaluate_basis_functions(res.e_cone_deg, knots_cone, order);
-        let basis_clock = evaluate_basis_functions(res.e_clock_deg, knots_clock, order);
-
-        for &(if_, vf) in &basis_freq {
-            for &(ic, vc) in &basis_cone {
-                for &(ik, vk) in &basis_clock {
-                    let idx = if_ + n_freq * (ic + n_cone * ik);
-                    design_matrix[[i, idx]] = vf * vc * vk;
-                }
-            }
+    let coefficients = cholesky_solve(&mut normal_matrix, &btr).ok_or_else(|| {
+        CorrectionSurfaceError::SingularMatrix {
+            reason: format!(
+                "Normal equations are not positive definite: the {} basis functions are not \
+                 identifiable from {} data points (increase regularization or reduce knot counts)",
+                n_coeff,
+                residuals.len()
+            ),
         }
-    }
-
-    // Solve normal equations: (B^T B + λI) c = B^T r
-    let btb = design_matrix.t().dot(&design_matrix);
-    let btr = design_matrix.t().dot(&residual_vector);
-
-    // Add regularization
-    let mut normal_matrix = btb;
-    if regularization > 0.0 {
-        for i in 0..n_coeff {
-            normal_matrix[[i, i]] += regularization;
-        }
-    }
-
-    // Solve the system
-    let coefficients =
-        normal_matrix
-            .solve_into(btr)
-            .map_err(|e| CorrectionSurfaceError::SingularMatrix {
-                reason: format!("Failed to solve normal equations: {:?}", e),
-            })?;
+    })?;
 
     Ok(coefficients.to_vec())
 }
@@ -1023,5 +1144,207 @@ mod tests {
 
         let invalid_order = vec![0.0, 2.0, 1.0, 3.0];
         assert!(validate_knot_vector(&invalid_order, 2).is_err());
+    }
+}
+
+#[cfg(test)]
+mod least_squares_tests {
+    use super::*;
+
+    /// Deterministic synthetic residuals (no RNG) spanning the knot ranges below.
+    fn fixture_residuals() -> Vec<ResidualPoint> {
+        let mut pts = Vec::new();
+        for i in 0..8 {
+            for j in 0..6 {
+                for k in 0..6 {
+                    let f = 8000.0 + 100.0 * i as f64;
+                    let c = 2.0 * j as f64;
+                    let cl = 30.0 * k as f64;
+                    let r = 0.5 * (f / 1000.0).sin()
+                        + 0.25 * (c / 10.0).cos()
+                        + 0.1 * (cl / 100.0).sin();
+                    pts.push(ResidualPoint {
+                        frequency_mhz: f,
+                        e_cone_deg: c,
+                        e_clock_deg: cl,
+                        residual_db: r,
+                    });
+                }
+            }
+        }
+        pts
+    }
+
+    /// (knots_freq, knots_cone, knots_clock, order) — clamped, as `generate_knot_vector` builds them.
+    fn fixture_knots() -> (Vec<f64>, Vec<f64>, Vec<f64>, usize) {
+        (
+            vec![
+                8000.0, 8000.0, 8000.0, 8200.0, 8400.0, 8700.0, 8700.0, 8700.0,
+            ],
+            vec![0.0, 0.0, 0.0, 4.0, 6.0, 10.0, 10.0, 10.0],
+            vec![0.0, 0.0, 0.0, 60.0, 100.0, 150.0, 150.0, 150.0],
+            3,
+        )
+    }
+
+    /// Textbook dense construction of `(B^T B + λI, B^T r)`, materializing the design
+    /// matrix. This is the definition `accumulate_normal_equations` optimizes away, kept
+    /// here as an independent oracle.
+    fn dense_normal_equations(
+        residuals: &[ResidualPoint],
+        knots_freq: &[f64],
+        knots_cone: &[f64],
+        knots_clock: &[f64],
+        order: usize,
+        regularization: f64,
+    ) -> (Array2<f64>, Array1<f64>) {
+        let n_freq = knots_freq.len() - order;
+        let n_cone = knots_cone.len() - order;
+        let n_clock = knots_clock.len() - order;
+        let n_coeff = n_freq * n_cone * n_clock;
+
+        let mut design = Array2::<f64>::zeros((residuals.len(), n_coeff));
+        let mut rhs = Array1::<f64>::zeros(residuals.len());
+
+        for (i, res) in residuals.iter().enumerate() {
+            rhs[i] = res.residual_db;
+            for &(if_, vf) in &evaluate_basis_functions(res.frequency_mhz, knots_freq, order) {
+                for &(ic, vc) in &evaluate_basis_functions(res.e_cone_deg, knots_cone, order) {
+                    for &(ik, vk) in &evaluate_basis_functions(res.e_clock_deg, knots_clock, order)
+                    {
+                        design[[i, if_ + n_freq * (ic + n_cone * ik)]] = vf * vc * vk;
+                    }
+                }
+            }
+        }
+
+        let mut btb = design.t().dot(&design);
+        let btr = design.t().dot(&rhs);
+        for i in 0..n_coeff {
+            btb[[i, i]] += regularization;
+        }
+        (btb, btr)
+    }
+
+    /// The sparse accumulation must reproduce the dense `B^T B` / `B^T r` exactly.
+    #[test]
+    fn normal_equations_match_dense_reference() {
+        let residuals = fixture_residuals();
+        let (kf, kc, kk, order) = fixture_knots();
+        let lambda = 1e-3;
+
+        let (sparse_a, sparse_b) =
+            accumulate_normal_equations(&residuals, &kf, &kc, &kk, order, lambda);
+        let (dense_a, dense_b) = dense_normal_equations(&residuals, &kf, &kc, &kk, order, lambda);
+
+        assert_eq!(sparse_a.dim(), dense_a.dim());
+        let max_a = (&sparse_a - &dense_a)
+            .iter()
+            .fold(0.0f64, |m, v| m.max(v.abs()));
+        let max_b = (&sparse_b - &dense_b)
+            .iter()
+            .fold(0.0f64, |m, v| m.max(v.abs()));
+        assert!(max_a < 1e-9, "B^T B mismatch vs dense reference: {max_a:e}");
+        assert!(max_b < 1e-9, "B^T r mismatch vs dense reference: {max_b:e}");
+    }
+
+    /// Cholesky must actually solve the system it is handed.
+    #[test]
+    fn cholesky_solves_spd_system() {
+        let mut a = Array2::from_shape_vec(
+            (3, 3),
+            vec![4.0, 12.0, -16.0, 12.0, 37.0, -43.0, -16.0, -43.0, 98.0],
+        )
+        .unwrap();
+        let b = Array1::from_vec(vec![1.0, 2.0, 3.0]);
+        let original = a.clone();
+
+        let x = cholesky_solve(&mut a, &b).expect("matrix is positive definite");
+
+        let residual = original.dot(&x) - &b;
+        let max = residual.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        assert!(max < 1e-10, "A·x != b, residual {max:e}");
+    }
+
+    #[test]
+    fn cholesky_rejects_non_positive_definite() {
+        // Indefinite: eigenvalues ±1.
+        let mut a = Array2::from_shape_vec((2, 2), vec![0.0, 1.0, 1.0, 0.0]).unwrap();
+        let b = Array1::from_vec(vec![1.0, 1.0]);
+        assert!(cholesky_solve(&mut a, &b).is_none());
+    }
+
+    /// The fitted coefficients must satisfy the normal equations they were derived from.
+    #[test]
+    fn fit_satisfies_normal_equations() {
+        let residuals = fixture_residuals();
+        let (kf, kc, kk, order) = fixture_knots();
+        let lambda = 1e-3;
+
+        let coeffs = fit_bspline_coefficients(&residuals, &kf, &kc, &kk, order, lambda).unwrap();
+        let (a, b) = accumulate_normal_equations(&residuals, &kf, &kc, &kk, order, lambda);
+
+        let residual = a.dot(&Array1::from_vec(coeffs)) - &b;
+        let max = residual.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+        assert!(max < 1e-8, "(B^T B + λI)c != B^T r, residual {max:e}");
+    }
+
+    /// Regression guard: values captured from the previous OpenBLAS/LAPACK (`dgesv`)
+    /// implementation, before the switch to sparse normal equations + Cholesky. The fit
+    /// must not drift.
+    #[test]
+    fn fit_matches_openblas_golden() {
+        let residuals = fixture_residuals();
+        let (kf, kc, kk, order) = fixture_knots();
+
+        let c = fit_bspline_coefficients(&residuals, &kf, &kc, &kk, order, 1e-3).unwrap();
+
+        assert_eq!(c.len(), 125);
+        let sum: f64 = c.iter().sum();
+        let sumsq: f64 = c.iter().map(|v| v * v).sum();
+
+        let close = |got: f64, want: f64, what: &str| {
+            let tol = 1e-6 * want.abs().max(1.0);
+            assert!(
+                (got - want).abs() < tol,
+                "{what}: got {got:.12e}, want {want:.12e}"
+            );
+        };
+        close(sum, 8.154347510713e1, "sum");
+        close(sumsq, 5.590390188922e1, "sumsq");
+        close(c[0], 7.434343253931e-1, "c[0]");
+        close(c[1], 7.358607285775e-1, "c[1]");
+        close(c[c.len() / 2], 7.478379397133e-1, "c[mid]");
+        close(c[c.len() - 1], 1.489868817277e-1, "c[last]");
+    }
+
+    /// Behavior change worth pinning: with λ = 0 and a basis the data cannot identify,
+    /// `B^T B` is only positive *semi*-definite. Cholesky refuses it and we surface
+    /// `SingularMatrix`, where LAPACK's general LU solve would have returned a
+    /// numerically meaningless answer. All production call sites use λ > 0.
+    #[test]
+    fn unregularized_rank_deficient_fit_reports_singular_matrix() {
+        let (kf, kc, kk, order) = fixture_knots();
+        // 125 basis functions, 2 data points — hopelessly rank-deficient.
+        let residuals = vec![
+            ResidualPoint {
+                frequency_mhz: 8100.0,
+                e_cone_deg: 1.0,
+                e_clock_deg: 20.0,
+                residual_db: 0.5,
+            },
+            ResidualPoint {
+                frequency_mhz: 8500.0,
+                e_cone_deg: 8.0,
+                e_clock_deg: 120.0,
+                residual_db: -0.25,
+            },
+        ];
+
+        let err = fit_bspline_coefficients(&residuals, &kf, &kc, &kk, order, 0.0).unwrap_err();
+        assert!(
+            matches!(err, CorrectionSurfaceError::SingularMatrix { .. }),
+            "expected SingularMatrix, got {err:?}"
+        );
     }
 }
