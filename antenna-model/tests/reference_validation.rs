@@ -32,8 +32,8 @@ use antenna_model::config::CalibrationConfig;
 use antenna_model::data::repository::CalibrationRepository;
 use antenna_model::data::AntennaCalibration;
 use antenna_model::model::{
-    compute_gain_db, edge_taper_db, AntennaConfiguration, FeedParameters, IntegrationParams,
-    MeshParameters, ReflectorGeometry,
+    compute_gain_db, edge_taper_db, AntennaConfiguration, FeedParameters, FeedPosition,
+    IntegrationParams, MeshParameters, ReflectorGeometry,
 };
 use std::f64::consts::PI;
 use std::path::PathBuf;
@@ -821,17 +821,41 @@ fn sidelobe_floor_surface_scaling_matches_nasa() {
 }
 
 // ===========================================================================
-// P10 SPIKE — Hankel/Bessel aperture integral vs the brute-force 2D quadrature.
+// P10 — OFF-AXIS INTEGRATOR VALIDATION PROTOCOL (Task 4).
 //
-// The azimuthal integral has a closed form (Jacobi-Anger):
-//     ∫₀²π exp(-j·a·cos(φ-φ')) dφ' = 2π·J₀(a),   a = k·ρ·sinθ
-// so for an azimuthally symmetric aperture the 2D integral collapses to a 1D
-// radial (Hankel) transform:
-//     I(θ) = 2π ∫₀^R A(ρ)·exp(j·k·ρ²/(4f)·(1-cosθ))·J₀(k·ρ·sinθ)·ρ dρ
-// Ground truth: the converged 2048x4096 2D quadrature gives -33.28 dBi @ θ=90°.
+// The served aperture integral previously ALIASED off-axis for electrically
+// large dishes: it returned a plausible number that was 20-35 dB TOO HIGH,
+// roughly flat with angle instead of falling (see
+// docs/findings-2026-07-13-off-axis-integration-aliasing.md). P10 replaced the
+// 2D quadrature with a mathematically exact 1D Hankel (J0) / azimuthal-mode
+// (Jm) integrator. This suite is the INDEPENDENT proof that the committed
+// integrator is correct across the required grid.
+//
+// Why the grid must not be collapsed to one case (learned the hard way): a
+// wrong oscillatory integrator fails BRANCH-LOCALLY. The spike's first Bessel
+// cut was 22 dB wrong at theta=0 (small-argument polynomial branch) while
+// flawless at theta=90 (asymptotic branch). So every check spans the WHOLE
+// angle range AND both Bessel branches (|a|<8 polynomial vs |a|>=8 asymptotic,
+// a = k*rho*sin(theta)) AND multiple D/lambda (3.7 m -> 100 m) AND multiple
+// bands (S -> Ka/Q), because aliasing onset scales with (D/lambda)*sin(theta).
+//
+// Method of proof (two independent oracles, both distinct from the production
+// 1D integrator's quadrature):
+//   * hankel_field       — a test-local reimplementation of the symmetric 1D
+//                          Hankel transform (independent code path).
+//   * brute_force_2d_field — a genuine 2D Simpson quadrature (the ground-truth
+//                          method from the findings doc; converges near-in and,
+//                          past Nyquist, at any angle). Used in the #[ignore]d
+//                          legs because the converged 2D is multi-second.
+// Fast legs (default CI): production vs the independent Hankel oracle + the
+// runtime self-check (converged flag). Slow legs (#[ignore]): production vs the
+// converged brute-force 2D and the -33.3 dBi far-off ground truth.
 // ===========================================================================
 
-/// Bessel J₀ (Numerical Recipes): polynomial for |x|<8, asymptotic beyond.
+/// Bessel J0 (Numerical Recipes): polynomial for |x|<8, asymptotic beyond.
+/// A SECOND, independent implementation (the production integrator uses
+/// `model::bessel`); disagreement between the two would surface as an
+/// oracle/production mismatch in the cross-checks below.
 fn bessel_j0(x: f64) -> f64 {
     let ax = x.abs();
     if ax < 8.0 {
@@ -858,19 +882,26 @@ fn bessel_j0(x: f64) -> f64 {
     }
 }
 
-/// Hankel-form aperture integral for an azimuthally symmetric aperture.
-/// Simpson's rule over ρ with `n_rho` points (odd).
+/// Independent oracle: symmetric-aperture Hankel-form aperture integral.
+///
+/// `I(theta) = 2*pi * integral_0^R A(rho) * exp(j*[chirp + mesh]) * J0(k*rho*sin(theta)) * rho drho`
+/// via Simpson over rho with `n_rho` (odd) points. Mesh phase is INCLUDED (the
+/// smallest enabled dish, gs_3.7m, has a wire mesh) so this reproduces the exact
+/// production field for every symmetric enabled config. This is a genuinely
+/// separate code path from `model::integration::hankel_radial_field`.
 fn hankel_field(
     cfg: &AntennaConfiguration,
     theta: f64,
     frequency_hz: f64,
     n_rho: usize,
 ) -> num_complex::Complex64 {
+    use antenna_model::model::phase_mesh;
     use num_complex::Complex64;
     let wl = SPEED_OF_LIGHT_M_S / frequency_hz;
     let k = 2.0 * PI / wl;
     let f = cfg.reflector.focal_length;
     let r_max = cfg.reflector.diameter / 2.0;
+    let mesh_spacing = cfg.mesh.as_ref().map_or(0.0, |m| m.spacing);
 
     let n = if n_rho.is_multiple_of(2) {
         n_rho + 1
@@ -888,93 +919,626 @@ fn hankel_field(
         } else {
             2.0
         };
-        // A(ρ): illumination amplitude (φ'-independent for an on-axis feed)
         let amp = antenna_model::model::illumination_amplitude(rho, 0.0, &cfg.feed, f);
-        // ρ-only aperture phase: the dish-depth chirp k·ρ²/(4f)·(1-cosθ).
-        // (Feed at focus + no mesh + surface_error=0 ⇒ no other ρ-only phase.)
         let chirp = k * rho * rho / (4.0 * f) * (1.0 - theta.cos());
+        let mesh = if mesh_spacing > 0.0 {
+            phase_mesh(mesh_spacing, rho / (2.0 * f), k)
+        } else {
+            0.0
+        };
         let j0 = bessel_j0(k * rho * theta.sin());
-        let val = Complex64::new(0.0, chirp).exp() * amp * j0 * rho;
+        let val = Complex64::new(0.0, chirp + mesh).exp() * amp * j0 * rho;
         sum += val * w;
     }
     sum * (h / 3.0) * 2.0 * PI
 }
 
-/// P10 SPIKE (diagnostic, #[ignore]d — the 2D reference legs take ~0.4 s each).
-/// Cross-validates the 1D Hankel form against the brute-force 2D quadrature and
-/// pins the convergence + cost result recorded in
-/// docs/findings-2026-07-13-off-axis-integration-aliasing.md §5.
-///   cargo test --release -p antenna-model --test reference_validation p10_spike -- --ignored --nocapture
-#[test]
-#[ignore = "diagnostic spike for P10; run explicitly with --ignored"]
-fn p10_spike_hankel_vs_2d() {
-    use antenna_model::model::integration::{integrate_amplitude_squared, integrate_aperture};
-    use antenna_model::model::{ruze_efficiency, IntegrationParams};
-    use std::time::Instant;
+/// Independent oracle: genuine 2D Simpson aperture quadrature (the ground-truth
+/// method). Uses the production phase (`phase_total`) but an independent 2D
+/// quadrature — so it validates the *quadrature collapse* (2D -> 1D Hankel/mode)
+/// that P10 performed. Converges near-in at modest density and, once
+/// `n_rho >= ~2*(D/lambda)*sin(theta)` (Nyquist), at ANY angle. Slow (O(n_rho*n_phi))
+/// hence used only in #[ignore]d legs.
+fn brute_force_2d_field(
+    cfg: &AntennaConfiguration,
+    theta: f64,
+    phi: f64,
+    frequency_hz: f64,
+    n_rho: usize,
+    n_phi: usize,
+) -> num_complex::Complex64 {
+    use antenna_model::model::{illumination_amplitude, phase_total, ApertureCoordinates};
+    use num_complex::Complex64;
+    let wl = SPEED_OF_LIGHT_M_S / frequency_hz;
+    let k = 2.0 * PI / wl;
+    let f = cfg.reflector.focal_length;
+    let r_max = cfg.reflector.diameter / 2.0;
+    let delta = cfg.feed.position.radial_displacement();
+    let alpha = cfg.feed.position.y.atan2(cfg.feed.position.x);
+    let axial = cfg.feed.position.z - f + cfg.feed.axial_defocus;
+    let mesh_spacing = cfg.mesh.as_ref().map_or(0.0, |m| m.spacing);
 
-    let repo = load_real_repository();
-    let cal = repo
-        .get_calibration("dsn_34m_uncalibrated", "x_band")
-        .expect("dsn_34m");
-    let cfg = focused_config(&cal, None);
-    let f_hz = 8.4e9;
-    let wl = SPEED_OF_LIGHT_M_S / f_hz;
-    let d_lam = cfg.reflector.diameter / wl;
-
-    // Same downstream gain formula the model uses:
-    //   gain = η · (4π/λ²) · |I|² / ∬|A|² dA
-    let eta = ruze_efficiency(cfg.reflector.surface_rms, wl);
-    let amp_sq = integrate_amplitude_squared(&cfg, 513, 1025);
-    let to_dbi = |field: num_complex::Complex64| {
-        let g = eta * (4.0 * PI / (wl * wl)) * field.norm_sqr() / amp_sq;
-        10.0 * g.log10()
+    let n_rho = if n_rho.is_multiple_of(2) {
+        n_rho + 1
+    } else {
+        n_rho
     };
+    let n_phi = if n_phi.is_multiple_of(2) {
+        n_phi + 1
+    } else {
+        n_phi
+    };
+    let h_rho = r_max / (n_rho - 1) as f64;
+    let h_phi = 2.0 * PI / (n_phi - 1) as f64;
+    let sw = |i: usize, n: usize| -> f64 {
+        if i == 0 || i == n - 1 {
+            1.0
+        } else if i % 2 == 1 {
+            4.0
+        } else {
+            2.0
+        }
+    };
+    let mut sum = Complex64::new(0.0, 0.0);
+    for j in 0..n_phi {
+        let phip = j as f64 * h_phi;
+        let wphi = sw(j, n_phi);
+        let mut inner = Complex64::new(0.0, 0.0);
+        for i in 0..n_rho {
+            let rho = i as f64 * h_rho;
+            let wrho = sw(i, n_rho);
+            let amp = illumination_amplitude(rho, phip, &cfg.feed, f);
+            let theta_inc = rho / (2.0 * f);
+            let psi = phase_total(
+                ApertureCoordinates::new(rho, phip),
+                theta,
+                phi,
+                f,
+                delta,
+                alpha,
+                axial,
+                0.0, // surface_error handled statistically (Ruze), not per-point
+                theta_inc,
+                mesh_spacing,
+                k,
+            );
+            inner += Complex64::new(0.0, psi).exp() * amp * rho * wrho;
+        }
+        sum += inner * wphi;
+    }
+    sum * h_rho * h_phi / 9.0
+}
 
-    println!("\n=== P10 SPIKE: Hankel (1D) vs brute-force 2D quadrature ===");
-    println!("dsn_34m X-band, D/λ = {d_lam:.0}\n");
+/// Convert a raw aperture field to absolute gain in dBi using the EXACT formula
+/// `compute_gain` uses: `G = overall_efficiency * (4*pi/lambda^2) * |I|^2 / integral|A|^2`.
+/// Lets a raw oracle field be compared to `compute_gain_db` on the same scale.
+fn field_to_dbi(
+    field: num_complex::Complex64,
+    cfg: &AntennaConfiguration,
+    frequency_hz: f64,
+) -> f64 {
+    use antenna_model::model::{integration::integrate_amplitude_squared, overall_efficiency};
+    let wl = SPEED_OF_LIGHT_M_S / frequency_hz;
+    // `compute_gain` builds |A|^2 from params.min_rho_points/min_phi_points; fast()
+    // uses 16/32. The |A|^2 integrand is phase-free and smooth, so this is converged.
+    let amp_sq = integrate_amplitude_squared(cfg, 16, 32);
+    let directivity = 4.0 * PI / (wl * wl) * field.norm_sqr() / amp_sq;
+    10.0 * (directivity * overall_efficiency(cfg, wl)).log10()
+}
 
-    // --- ground truth: converged 2D at 2048 x 4096 ---
-    let mut gt = IntegrationParams::high_accuracy();
-    gt.min_rho_points = 2048;
-    gt.max_rho_points = 2048;
-    gt.min_phi_points = 4096;
-    gt.max_phi_points = 4096;
-    gt.max_iterations = 1;
-    gt.apply_sidelobe_floor = false;
+/// Every enabled antenna x band, feed AT FOCUS (azimuthally symmetric): theta=0 is
+/// the true beam peak, so the plausibility invariants are clean. Spans S/X/Ka/L/Q
+/// and D/lambda from ~27 (gs_3.7m S) to ~14700 (gbt_100m Q).
+fn enabled_symmetric_bands() -> Vec<(&'static str, &'static str, f64)> {
+    vec![
+        ("gs_3.7m_uncalibrated", "s_band_feed", 2.2e9),
+        ("gs_3.7m_uncalibrated", "x_band_feed", 8.0e9),
+        ("dsn_13m_uncalibrated", "x_band_downlink", 7.19e9),
+        ("dsn_13m_uncalibrated", "ka_band_downlink", 26.0e9),
+        ("dsn_34m_uncalibrated", "s_band", 2.25e9),
+        ("dsn_34m_uncalibrated", "x_band", 8.4e9),
+        ("dsn_34m_uncalibrated", "ka_band", 32.0e9),
+        ("dsn_70m_uncalibrated", "x_band", 8.45e9),
+        ("gbt_100m_uncalibrated", "l_band", 1.4e9),
+        ("gbt_100m_uncalibrated", "q_band", 44.0e9),
+    ]
+}
 
-    println!(
-        "{:>7} {:>16} {:>12} | {:>16} {:>12} {:>10}",
-        "theta", "2D(2048x4096)", "ms", "Hankel(4097)", "ms", "Δ dB"
-    );
-    for deg in [0.0_f64, 1.0, 5.0, 20.0, 90.0] {
-        let th = deg.to_radians();
+/// The served laterally-offset (coma) feeds:
+/// `(antenna, feed, freq_hz, (dx, dy), cheap)`. These break azimuthal symmetry
+/// and MUST route through the Jm azimuthal-mode expansion. Offsets are the design
+/// lateral displacements from antennas.yaml, placed at the focal distance
+/// (axially focused — the model's auto-refocus convention) so only the coma
+/// remains.
+///
+/// `cheap` marks the electrically-small feeds (D/λ ≲ 320) whose θ=90° mode
+/// expansion is inexpensive; those run in the DEFAULT tier. The large × high-band
+/// feeds (dsn_13m Ka, dsn_34m X/Ka) need up to ~46k radial points × modes at
+/// θ=90° and run only under `--ignored` (spec criterion 6: keep the default set
+/// fast). Both tiers apply the identical assertions — only the antenna set differs.
+#[allow(clippy::type_complexity)] // a flat test fixture list; a struct would only add noise
+fn enabled_offset_feeds() -> Vec<(&'static str, &'static str, f64, (f64, f64), bool)> {
+    vec![
+        (
+            "gs_3.7m_uncalibrated",
+            "x_band_feed",
+            8.0e9,
+            (0.05, 0.0),
+            true,
+        ),
+        (
+            "dsn_13m_uncalibrated",
+            "x_band_uplink",
+            7.19e9,
+            (0.08, 0.0),
+            true,
+        ),
+        (
+            "dsn_13m_uncalibrated",
+            "ka_band_downlink",
+            26.0e9,
+            (0.0, 0.08),
+            false,
+        ),
+        ("dsn_34m_uncalibrated", "x_band", 8.4e9, (0.15, 0.0), false),
+        (
+            "dsn_34m_uncalibrated",
+            "ka_band",
+            32.0e9,
+            (0.0, 0.15),
+            false,
+        ),
+    ]
+}
 
-        let t = Instant::now();
-        let r2d = integrate_aperture(th, 0.0, &cfg, f_hz, &gt);
-        let ms2d = t.elapsed().as_secs_f64() * 1000.0;
-        let g2d = to_dbi(r2d.expect("2D integrate").field);
+/// Shared coma assertions for one offset feed: the Jm mode path converges (D-6
+/// M-vs-(M+1) self-check) at every angle, the lateral offset depresses the
+/// on-axis gain (squint), the pattern is azimuthally asymmetric (impossible for a
+/// symmetric J0-only aperture), and there is no high backlobe. Used by both the
+/// fast default tier and the `--ignored` expensive tier.
+fn assert_coma_feed_physical(
+    repo: &CalibrationRepository,
+    aid: &str,
+    fid: &str,
+    fhz: f64,
+    dx: f64,
+    dy: f64,
+) {
+    use antenna_model::model::integrate_aperture;
+    let p = integrator_params();
+    let cal = repo.get_calibration(aid, fid).unwrap();
+    let cfg_off = config_for(&cal, Some((dx, dy)));
+    let cfg_sym = config_for(&cal, None);
 
-        let t = Instant::now();
-        let fh = hankel_field(&cfg, th, f_hz, 4097);
-        let msh = t.elapsed().as_secs_f64() * 1000.0;
-        let gh = to_dbi(fh);
-
-        println!(
-            "{deg:>7.0} {g2d:>16.2} {ms2d:>12.1} | {gh:>16.2} {msh:>12.3} {:>10.2}",
-            gh - g2d
+    // Runtime self-check (D-6): the asymmetric path's `converged` IS the
+    // M-vs-(M+1) mode-truncation agreement. It must report converged.
+    for a_deg in [1.0_f64, 5.0, 20.0, 90.0] {
+        let r = integrate_aperture(deg(a_deg), 0.0, &cfg_off, fhz, &p).unwrap();
+        assert!(
+            r.converged,
+            "{aid}/{fid} @ {a_deg}°: mode expansion NOT converged (err={:.3e})",
+            r.error_estimate
         );
     }
 
-    // --- Hankel radial-convergence sweep at theta = 90 deg ---
-    println!(
-        "\nHankel radial convergence at θ=90° (Nyquist N_rho ≈ {:.0}):",
-        2.0 * d_lam
+    // Coma physics 1: the lateral offset squints the beam, depressing the ON-AXIS
+    // (θ=0) gain far below the symmetric peak — proof the mode path carries the
+    // feed-displacement phase (not a symmetric fast path).
+    let g_off = |d: f64, ph: f64| compute_gain_db(deg(d), ph, &cfg_off, fhz, &p).unwrap().gain;
+    let peak_sym = compute_gain_db(0.0, 0.0, &cfg_sym, fhz, &p).unwrap().gain;
+    let on_axis_off = g_off(0.0, 0.0);
+    assert!(
+        on_axis_off < peak_sym - 3.0,
+        "{aid}/{fid}: offset on-axis {on_axis_off:.2} not depressed vs symmetric peak {peak_sym:.2} — coma absent"
     );
-    println!("{:>8} {:>12} {:>10}", "N_rho", "gain_dBi", "ms");
-    for n in [257usize, 513, 1025, 2049, 4097, 8193, 16385] {
-        let t = Instant::now();
-        let fh = hankel_field(&cfg, 90f64.to_radians(), f_hz, n);
-        let ms = t.elapsed().as_secs_f64() * 1000.0;
-        println!("{n:>8} {:>12.2} {ms:>10.3}", to_dbi(fh));
+
+    // Coma physics 2: azimuthal asymmetry — the +offset half-plane (φ aligned with
+    // the offset) differs from the −offset half-plane off-axis. Impossible for a
+    // symmetric (J0-only) aperture.
+    let phi_plus = dy.atan2(dx); // azimuth of the offset direction
+    let phi_minus = phi_plus + PI;
+    let asym_deg = 2.0;
+    let gp = g_off(asym_deg, phi_plus);
+    let gm = g_off(asym_deg, phi_minus);
+    assert!(
+        (gp - gm).abs() > 0.2,
+        "{aid}/{fid}: no coma asymmetry at {asym_deg}° (+dir {gp:.2} vs −dir {gm:.2})"
+    );
+
+    // Plausibility: no high backlobe relative to the (squinted) true peak.
+    let g90 = g_off(90.0, phi_plus);
+    assert!(
+        g90 < peak_sym - 30.0,
+        "{aid}/{fid}: 90° {g90:.2} not 30 dB below the (symmetric) peak {peak_sym:.2}"
+    );
+    println!(
+        "{aid:<22} {fid:<16} off_peak={on_axis_off:>7.2} sym_peak={peak_sym:>7.2} \
+         asym@2°={:>6.2} 90°={g90:>7.2}",
+        gp - gm
+    );
+}
+
+/// Build a physics config with the feed AT FOCUS plus an optional lateral offset
+/// `(dx, dy)` (axially focused: z = focal length). `None` -> azimuthally symmetric.
+fn config_for(cal: &AntennaCalibration, lateral: Option<(f64, f64)>) -> AntennaConfiguration {
+    let f = cal.physical_config.reflector.focal_length_m;
+    let d = cal.physical_config.reflector.diameter_m;
+    let reflector = ReflectorGeometry::builder()
+        .diameter(d)
+        .focal_length(f)
+        .surface_rms(cal.physical_config.reflector.surface_rms_mm / 1000.0)
+        .build()
+        .expect("build reflector");
+    let pos = match lateral {
+        Some((x, y)) => FeedPosition::new(x, y, f),
+        None => FeedPosition::at_focus(f),
+    };
+    let feed = FeedParameters::builder()
+        .position(pos)
+        .q_factor(cal.physical_config.feed.q_factor)
+        .phase_center_offset(cal.physical_config.feed.phase_center_offset_m)
+        .build()
+        .expect("build feed");
+    let mut b = AntennaConfiguration::builder()
+        .id(&cal.antenna_id)
+        .name(&cal.metadata.antenna_name)
+        .reflector(reflector)
+        .feed(feed);
+    if let Some(ref mesh) = cal.physical_config.mesh {
+        let m = MeshParameters::builder()
+            .spacing(mesh.mesh_spacing_mm / 1000.0)
+            .wire_diameter(mesh.wire_diameter_mm / 1000.0)
+            .build()
+            .expect("build mesh");
+        b = b.mesh(m);
     }
+    b.build().expect("build config")
+}
+
+/// The canonical PRODUCTION integrator params for the uncalibrated served path
+/// WITHOUT the F7 sidelobe floor and WITHOUT spillover — i.e. the raw physical
+/// optics pattern the P10 integrator produces. The floor (F7) and spillover are
+/// separate post-integration scalings validated elsewhere; disabling them here
+/// isolates the integrator under test, and reproduces the findings-doc ground
+/// truth (68.96 / 14.53 / -33.3 dBi) exactly. Radial density and mode count are
+/// derived from physics INSIDE `integrate_aperture`, independent of the preset.
+fn integrator_params() -> IntegrationParams {
+    IntegrationParams::fast()
+}
+
+/// The production served uncalibrated params, matching `service/evaluator.rs`:
+/// spillover ON, F7 sidelobe floor OFF (per decision D-2 the served path carries
+/// the raw physical-optics value; the F7 floor's redesign is a separate unit).
+/// Used to confirm the SERVED value stays bounded and never rises with theta —
+/// the converged P10 pattern falls off monotonically in envelope without any
+/// floor pedestal.
+fn served_params() -> IntegrationParams {
+    let mut p = IntegrationParams::fast();
+    p.apply_spillover = true;
+    p.apply_sidelobe_floor = false;
+    p
+}
+
+fn deg(d: f64) -> f64 {
+    d.to_radians()
+}
+
+// ---------------------------------------------------------------------------
+// AC5 — Anchor: dsn_34m X-band pinned to the findings-doc ground truth.
+// (Independently reproduced by brute force in docs/findings-2026-07-13.)
+// Exercises the DEEP asymptotic Bessel branch (a = k*R*sin(theta) up to ~2989).
+// ---------------------------------------------------------------------------
+#[test]
+fn p10_anchor_dsn34m_xband_matches_known_reference_values() {
+    let repo = load_real_repository();
+    let cal = repo
+        .get_calibration("dsn_34m_uncalibrated", "x_band")
+        .expect("dsn_34m_uncalibrated x_band enabled");
+    let cfg = config_for(&cal, None); // symmetric: theta=0 is the peak, as in the findings
+    let f = 8.4e9;
+    let p = integrator_params();
+    let g = |d: f64| compute_gain_db(deg(d), 0.0, &cfg, f, &p).unwrap().gain;
+
+    let (g0, g1, g5, g20, g90) = (g(0.0), g(1.0), g(5.0), g(20.0), g(90.0));
+    println!(
+        "\n[P10 anchor] dsn_34m X-band: 0={g0:.2} 1={g1:.2} 5={g5:.2} 20={g20:.2} 90={g90:.2} dBi"
+    );
+
+    // Ground-truth anchors (findings §2.2 / §4a, brute-force reproduced).
+    assert!((g0 - 68.96).abs() < 0.2, "peak {g0:.2} (expect 68.96)");
+    assert!((g1 - 14.53).abs() < 0.5, "1deg {g1:.2} (expect 14.53)");
+    assert!((g5 - (-9.39)).abs() < 0.6, "5deg {g5:.2} (expect -9.39)");
+    assert!(
+        (g20 - (-23.56)).abs() < 0.8,
+        "20deg {g20:.2} (expect -23.56)"
+    );
+    // The far-off value the aliasing 2D could NOT reach (it gave +1.24 / +34 dBi).
+    assert!(
+        (g90 - (-33.3)).abs() < 1.5,
+        "90deg {g90:.2} (expect ~-33.3, NOT a high backlobe)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// AC2 + AC3 — Every enabled antenna x band is physically plausible off-axis:
+// no high backlobe, and the pattern does not RISE with theta (the aliasing
+// signature). Symmetric configs so theta=0 is the true peak. Repeated across
+// S/X/Ka/L/Q bands. Both the raw integrator pattern AND the production served
+// path (spillover ON, F7 floor OFF per D-2) are checked.
+// ---------------------------------------------------------------------------
+#[test]
+fn p10_served_offaxis_is_physical_all_enabled_antennas() {
+    let repo = load_real_repository();
+    let p_raw = integrator_params();
+    let p_served = served_params();
+
+    println!("\n=== P10 plausibility: every enabled antenna x band (symmetric) ===");
+    println!(
+        "{:<22} {:<16} {:>8} | {:>7} {:>7} {:>7} {:>7} {:>7}",
+        "antenna", "feed", "D/λ", "0°", "1°", "5°", "20°", "90°"
+    );
+
+    for (aid, fid, fhz) in enabled_symmetric_bands() {
+        let cal = repo
+            .get_calibration(aid, fid)
+            .unwrap_or_else(|| panic!("{aid}/{fid} not enabled in the real config"));
+        let cfg = config_for(&cal, None);
+        let d_lambda = cfg.reflector.diameter * fhz / SPEED_OF_LIGHT_M_S;
+
+        let raw = |d: f64| {
+            compute_gain_db(deg(d), 0.0, &cfg, fhz, &p_raw)
+                .unwrap()
+                .gain
+        };
+        let (g0, g1, g5, g20, g90) = (raw(0.0), raw(1.0), raw(5.0), raw(20.0), raw(90.0));
+        println!(
+            "{aid:<22} {fid:<16} {d_lambda:>8.0} | {g0:>7.2} {g1:>7.2} {g5:>7.2} {g20:>7.2} {g90:>7.2}"
+        );
+
+        // (a) No high backlobe: far-off gain is >=30 dB below the peak.
+        assert!(
+            g20 < g0 - 30.0,
+            "{aid}/{fid}: 20° {g20:.2} not 30 dB below peak {g0:.2}"
+        );
+        assert!(
+            g90 < g0 - 30.0,
+            "{aid}/{fid}: 90° {g90:.2} not 30 dB below peak {g0:.2} (backlobe)"
+        );
+        // (b) No near-in RISE (the aliasing signature was g(5)>g(1)). +1 dB ripple slack.
+        assert!(
+            g5 <= g1 + 1.0,
+            "{aid}/{fid}: gain RISES 1°→5° ({g1:.2}→{g5:.2}) — aliasing signature"
+        );
+        // (c) Per-decade envelope falls: the max over the [10°,100°) decade is below the
+        // max over the [1°,10°) decade. Comparing DECADE ENVELOPES (not point-to-point)
+        // tolerates sidelobe ripple and nulls — e.g. dsn_13m ka-band's 5° lands in a deep
+        // null (-34 dBi) between two sidelobes, which a strict point comparison would
+        // mis-read as a rise. The aliased pattern (roughly flat/high) violates this.
+        let near_env = g1.max(g5);
+        let far_env = g20.max(g90);
+        assert!(
+            far_env < near_env,
+            "{aid}/{fid}: far-decade envelope max(20°,90°)={far_env:.2} not below \
+             near-decade envelope max(1°,5°)={near_env:.2} — pattern not falling"
+        );
+
+        // Production served path (spillover ON, F7 floor OFF per D-2): value stays
+        // bounded well below peak and the envelope never rises with theta.
+        let sv = |d: f64| {
+            compute_gain_db(deg(d), 0.0, &cfg, fhz, &p_served)
+                .unwrap()
+                .gain
+        };
+        let (s0, s1, s5, s90) = (sv(0.0), sv(1.0), sv(5.0), sv(90.0));
+        assert!(
+            s90 < s0 - 20.0,
+            "{aid}/{fid}: served 90° {s90:.2} not 20 dB below peak {s0:.2}"
+        );
+        assert!(s5 <= s1 + 1.0, "{aid}/{fid}: served rises 1°→5°");
+        assert!(s90 <= s5 + 1.0, "{aid}/{fid}: served rises 5°→90°");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AC1 (fast leg) — Production integrate_aperture vs the INDEPENDENT Hankel
+// oracle for the SMALLEST (3.7 m) and LARGEST (100 m) enabled antennas, in
+// BOTH Bessel branches, agreeing < 0.1 dB. Field-magnitude ratio cancels all
+// normalization, isolating the integrand/quadrature.
+// ---------------------------------------------------------------------------
+#[test]
+fn p10_production_matches_independent_hankel_oracle_small_and_large() {
+    use antenna_model::model::integrate_aperture;
+    let repo = load_real_repository();
+    let p = integrator_params();
+
+    // Smallest and largest enabled dishes, each in a low and a high band.
+    let cases: &[(&str, &str, f64)] = &[
+        ("gs_3.7m_uncalibrated", "s_band_feed", 2.2e9), // D/λ ≈ 27
+        ("gs_3.7m_uncalibrated", "x_band_feed", 8.0e9), // D/λ ≈ 99 (has a wire mesh)
+        ("gbt_100m_uncalibrated", "l_band", 1.4e9),     // D/λ ≈ 467
+        ("gbt_100m_uncalibrated", "q_band", 44.0e9),    // D/λ ≈ 14684
+    ];
+    let angles = [0.0_f64, 1.0, 5.0, 20.0, 90.0];
+
+    println!("\n=== P10 production integrator vs independent Hankel oracle ===");
+    let mut saw_poly_branch = false;
+    let mut saw_asym_branch = false;
+
+    for &(aid, fid, fhz) in cases {
+        let cal = repo.get_calibration(aid, fid).unwrap();
+        let cfg = config_for(&cal, None);
+        let wl = SPEED_OF_LIGHT_M_S / fhz;
+        let k = 2.0 * PI / wl;
+        let r = cfg.reflector.diameter / 2.0;
+        // Oracle density: comfortably past Nyquist (2*(D/λ)) at the worst angle.
+        let n_rho = ((4.0 * cfg.reflector.diameter / wl).ceil() as usize + 1).clamp(2049, 131_073);
+
+        for &a_deg in &angles {
+            // Track which Bessel branch this (antenna, angle) exercises.
+            let arg_max = k * r * a_deg.to_radians().sin();
+            if arg_max > 0.0 && arg_max < 8.0 {
+                saw_poly_branch = true;
+            }
+            if arg_max >= 8.0 {
+                saw_asym_branch = true;
+            }
+
+            let prod = integrate_aperture(deg(a_deg), 0.0, &cfg, fhz, &p)
+                .unwrap()
+                .field;
+            let oracle = hankel_field(&cfg, deg(a_deg), fhz, n_rho);
+            // Skip the ratio at a deep null where |field| underflows the oracle's
+            // own quadrature error; the absolute plausibility test covers those.
+            if oracle.norm() < 1e-9 * hankel_field(&cfg, 0.0, fhz, n_rho).norm() {
+                continue;
+            }
+            let d_db = 20.0 * (prod.norm() / oracle.norm()).log10();
+            println!("{aid:<22} {fid:<16} θ={a_deg:>5.1}° arg_max={arg_max:>8.1} Δ={d_db:>7.3} dB");
+            assert!(
+                d_db.abs() < 0.1,
+                "{aid}/{fid} θ={a_deg}°: production vs independent Hankel Δ={d_db:.3} dB (arg_max={arg_max:.1})"
+            );
+        }
+    }
+    // Prove the grid actually crossed both Bessel branches (the branch-local trap).
+    assert!(
+        saw_poly_branch,
+        "grid never exercised the small-argument (|a|<8) polynomial branch"
+    );
+    assert!(
+        saw_asym_branch,
+        "grid never exercised the large-argument (|a|>=8) asymptotic branch"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// AC4 — Offset-feed (coma) antennas route through the Jm azimuthal-mode path,
+// converge (the runtime M-vs-(M+1) self-check reports converged), stay
+// physical off-axis, and exhibit genuine coma (boresight depressed by the
+// squint; +φ / −φ asymmetry off-axis).
+// ---------------------------------------------------------------------------
+#[test]
+fn p10_offset_feed_coma_converges_and_is_physical() {
+    // DEFAULT tier: the cheap offset feeds (gs_3.7m X, dsn_13m X-uplink; D/λ ≲ 320)
+    // guard the Jm coma path, the convergence self-check, and coma asymmetry on
+    // every CI run. The electrically-large × high-band feeds run under --ignored
+    // (see p10_offset_feed_coma_wide_angle_large_dish) — the identical assertions,
+    // but their θ=90° mode expansion is too slow for the default set.
+    let repo = load_real_repository();
+    println!("\n=== P10 coma / offset-feed antennas (Jm mode expansion) — fast tier ===");
+    for (aid, fid, fhz, (dx, dy), cheap) in enabled_offset_feeds() {
+        if cheap {
+            assert_coma_feed_physical(&repo, aid, fid, fhz, dx, dy);
+        }
+    }
+}
+
+/// AC4 (expensive tier) — the same coma assertions on the electrically-large,
+/// high-band offset feeds (dsn_13m Ka, dsn_34m X/Ka). #[ignore]d for COST, not
+/// flakiness: dsn_34m Ka-band (32 GHz) at θ=90° needs ~46k radial points × the Jm
+/// mode sum (~7.5M integrand evals for a single point), which dominates the suite
+/// wall-clock in a debug build. Run on demand with `--ignored`.
+#[test]
+#[ignore = "P10 large-dish × high-band coma legs — dsn_34m Ka θ=90° needs ~46k radial pts × modes; run with --ignored"]
+fn p10_offset_feed_coma_wide_angle_large_dish() {
+    let repo = load_real_repository();
+    println!("\n=== P10 coma / offset-feed antennas (Jm mode expansion) — large-dish tier ===");
+    for (aid, fid, fhz, (dx, dy), cheap) in enabled_offset_feeds() {
+        if !cheap {
+            assert_coma_feed_physical(&repo, aid, fid, fhz, dx, dy);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AC1 (slow leg) + AC6 — Genuine converged 2D Simpson quadrature as the
+// independent ground-truth oracle. #[ignore]d: the converged 2D is multi-second.
+//   * SMALL dish (3.7 m): the 2D converges at every near-in angle {0,1,5,20};
+//     production must agree < 0.1 dB.
+//   * dsn_34m X-band @ 90°: the 2D only converges PAST Nyquist (2048×4096 ≈ 8.4M
+//     evals) — where it independently reproduces the −33.3 dBi ground truth and
+//     agrees with the fast production integrator; a coarse 2D (aliased) does NOT.
+//   * LARGE dish (100 m) far-off: the 2D CANNOT converge in feasible time, so it
+//     is NOT a valid reference there (documented; production is validated far-off
+//     by the self-check + Hankel oracle above).
+// ---------------------------------------------------------------------------
+#[test]
+#[ignore = "P10 brute-force 2D ground-truth leg — multi-second; run with --ignored"]
+fn p10_bruteforce_2d_ground_truth() {
+    use antenna_model::model::integrate_aperture;
+    use std::time::Instant;
+    let repo = load_real_repository();
+    let p = integrator_params();
+
+    // --- SMALL dish: 2D trustworthy near-in at every angle ---
+    let cal = repo
+        .get_calibration("gs_3.7m_uncalibrated", "x_band_feed")
+        .unwrap();
+    let cfg = config_for(&cal, None);
+    let f = 8.0e9;
+    println!(
+        "\n=== P10 brute-force 2D vs production — gs_3.7m X-band (2D trustworthy near-in) ==="
+    );
+    println!(
+        "{:>7} {:>14} {:>14} {:>9}",
+        "θ(deg)", "production_dBi", "2D_dBi", "Δ dB"
+    );
+    for a_deg in [0.0_f64, 1.0, 5.0, 20.0] {
+        let prod = integrate_aperture(deg(a_deg), 0.0, &cfg, f, &p)
+            .unwrap()
+            .field;
+        let ref2d = brute_force_2d_field(&cfg, deg(a_deg), 0.0, f, 2049, 2049);
+        let (gp, gr) = (field_to_dbi(prod, &cfg, f), field_to_dbi(ref2d, &cfg, f));
+        println!("{a_deg:>7.1} {gp:>14.3} {gr:>14.3} {:>9.3}", gp - gr);
+        assert!(
+            (gp - gr).abs() < 0.1,
+            "gs_3.7m θ={a_deg}°: production {gp:.3} vs converged 2D {gr:.3} Δ={:.3} dB",
+            gp - gr
+        );
+    }
+
+    // --- dsn_34m X-band @ 90°: the aliasing case. Converged 2D = ground truth. ---
+    let cal = repo
+        .get_calibration("dsn_34m_uncalibrated", "x_band")
+        .unwrap();
+    let cfg = config_for(&cal, None);
+    let f = 8.4e9;
+    // At θ=90° the 2D kernel oscillates ~475 cycles in BOTH ρ and φ', so the φ'
+    // grid is the binding constraint: 2049×4097 still aliases to +1.24 dBi (the P0
+    // value), and only past n_phi≈8193 does the 2D converge to the ground truth.
+    // (Density sweep: 2049×4097=+1.24, 4097×4097=+1.23, 4097×8193=−33.28,
+    //  8193×8193=−33.30 — monotone descent, no plateau below Nyquist, exactly the
+    //  §2.4 finding that brute force is the wrong fix and the Hankel form is right.)
+    println!("\n=== P10 brute-force 2D ground truth — dsn_34m X-band θ=90° ===");
+    let t = Instant::now();
+    let ref2d = brute_force_2d_field(&cfg, deg(90.0), 0.0, f, 4097, 8193);
+    let g2d = field_to_dbi(ref2d, &cfg, f);
+    let ms = t.elapsed().as_secs_f64() * 1000.0;
+    let prod = integrate_aperture(deg(90.0), 0.0, &cfg, f, &p)
+        .unwrap()
+        .field;
+    let gprod = field_to_dbi(prod, &cfg, f);
+    println!("converged 2D (4097×8193, {ms:.0} ms) = {g2d:.2} dBi; production = {gprod:.2} dBi");
+    // The findings ground truth is −33.28/−33.30 dBi (two independent methods).
+    assert!(
+        (g2d - (-33.3)).abs() < 1.0,
+        "converged 2D @90° = {g2d:.2}, expected ~-33.3 (findings ground truth)"
+    );
+    assert!(
+        (gprod - g2d).abs() < 0.5,
+        "production {gprod:.2} disagrees with converged 2D {g2d:.2} at the aliasing angle"
+    );
+
+    // Show that a COARSE 2D (what the old service used) aliases HIGH here — the
+    // exact failure P10 fixed. (Not an assertion on production; a witness.)
+    let coarse = field_to_dbi(
+        brute_force_2d_field(&cfg, deg(90.0), 0.0, f, 257, 513),
+        &cfg,
+        f,
+    );
+    println!("coarse 2D (257×513, sub-Nyquist) = {coarse:.2} dBi  <- aliased HIGH, the P0 bug");
+    assert!(
+        coarse > g2d + 10.0,
+        "expected the sub-Nyquist 2D to alias well above the converged value"
+    );
 }

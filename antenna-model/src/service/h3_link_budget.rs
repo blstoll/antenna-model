@@ -305,16 +305,17 @@ pub fn compute_h3_link_budget(
     let cells: Vec<h3o::CellIndex> = center_cell.grid_disk(request.n_rings);
 
     // 4. Build antenna configuration
-    let mut integration_params = IntegrationParams::fast();
-    // Double-counting gate: physical spillover AND the Ruze sidelobe floor (F7) are folded
-    // in only when NO correction surface exists (the surface otherwise absorbs both).
-    // Whole-antenna gate — never per query. Shared by both `compute_gain_db` call sites
-    // below (boresight reference and per-cell), matching
-    // `service::evaluator::compute_gain_from_request` so the /gain, heatmap, and h3
-    // endpoints agree on an uncalibrated antenna's gain. The floor is inert at the boresight
-    // reference (θ=0, main beam ≫ floor), so it only lifts genuine off-axis cells.
+    let mut integration_params = IntegrationParams::adaptive();
+    // Double-counting gate: physical spillover is folded in only when NO correction surface
+    // exists (the surface otherwise absorbs it). Whole-antenna gate — never per query. Shared
+    // by both `compute_gain_db` call sites below (boresight reference and per-cell), matching
+    // `service::evaluator::compute_gain_from_request` so the /gain, heatmap, and h3 endpoints
+    // agree on an uncalibrated antenna's gain.
     integration_params.apply_spillover = calibration.correction_surface.is_none();
-    integration_params.apply_sidelobe_floor = calibration.correction_surface.is_none();
+    // F7 sidelobe floor is OFF on the served path (D-2): the P10 integrator makes the off-axis
+    // pattern numerically correct, so cells report the RAW physical-optics gain. Floor plumbing
+    // is retained for the separate F7 redesign unit.
+    integration_params.apply_sidelobe_floor = false;
     let frequency_hz = request.frequency_mhz * 1e6;
 
     let (antenna_config, feed_x, feed_y, feed_z) = build_antenna_config(calibration, request)?;
@@ -856,21 +857,20 @@ mod tests {
         );
     }
 
-    /// F7: the Ruze sidelobe floor is gated onto the h3 per-cell path
-    /// (`apply_sidelobe_floor = correction_surface.is_none()` in
-    /// `compute_h3_link_budget`) exactly like spillover. Tested ABSOLUTELY rather
-    /// than by an uncalibrated-vs-calibrated diff, because both gates flip together
-    /// with surface presence (an uncalibrated run also gets spillover, which would
-    /// confound a direct gain comparison — the same reason `test_h3_applies_
-    /// correction_surface` holds spillover constant with 0 dB vs 2 dB surfaces).
+    /// SERVED h3 PATH — F7 floor OFF (D-2). The h3 per-cell path sets
+    /// `apply_sidelobe_floor = false` (see `compute_h3_link_budget`), so now that
+    /// the P10 integrator makes the off-axis pattern numerically correct, an
+    /// uncalibrated antenna's off-axis ring cells report the RAW physical-optics
+    /// gain rather than being lifted to the Ruze pedestal. This pins that the
+    /// floor is NOT applied on the h3 served path: at least one deep off-axis
+    /// cell sits clearly BELOW the (would-be) floor pedestal.
     ///
     /// Geometry mirrors the P8 off-axis h3 test: a low-altitude vehicle so the
     /// n_rings=2 ground cells fan out tens of degrees off boresight, deep in the
     /// sidelobes. The Ruze floor is diameter-independent, so `floor_db` is computed
-    /// from the antenna's `surface_rms` (0.5 mm) and wavelength alone.
+    /// from the antenna's `surface_rms` and wavelength alone.
     #[test]
-    #[ignore = "F7 PARKED: the floor cannot engage on the served path because compute_gain's fast() aperture integral aliases off-axis (20-35 dB too high) — see docs/findings-2026-07-13-off-axis-integration-aliasing.md. Unignore once that P0 is fixed."]
-    fn test_h3_sidelobe_floor_gated_on_uncalibrated_only() {
+    fn test_h3_sidelobe_floor_off_on_served_path() {
         use crate::api::schemas::CoordinateSystem;
         use crate::model::{
             wavelength_from_frequency, AntennaConfiguration, FeedParameters as ModelFeedParams,
@@ -896,12 +896,10 @@ mod tests {
             vehicle_attitude: None,
         };
 
-        // Use a high surface RMS (3 mm) so the Ruze pedestal (which saturates at
-        // 4π/Ω_scatter ≈ +8 dBi as η_ruze → 0) rises into the range of this
-        // geometry's near-in ring-cell gains — realistic h3 ground cells around a
-        // boresight only reach a few tens of degrees off-axis, not the deep
-        // sidelobes a low-RMS floor would require. The floor is diameter-independent,
-        // so a reflector with the same 3 mm RMS reproduces `floor_db` exactly.
+        // High surface RMS (3 mm) so the Ruze pedestal (which saturates at
+        // 4π/Ω_scatter ≈ +8 dBi as η_ruze → 0) is a clearly nonzero pedestal to
+        // compare against. The floor is diameter-independent, so a reflector with
+        // the same 3 mm RMS reproduces `floor_db` exactly.
         const SURFACE_RMS_MM: f64 = 3.0;
         let wavelength = wavelength_from_frequency(8400.0e6);
         let floor_cfg = AntennaConfiguration::new(
@@ -915,8 +913,9 @@ mod tests {
         let floor_db =
             10.0 * crate::model::pattern::sidelobe_floor_gain(&floor_cfg, wavelength).log10();
 
-        // Uncalibrated: no surface → floor ON. No cell may dip below the pedestal,
-        // and at least one off-axis ring cell must sit exactly at it.
+        // Uncalibrated: no correction surface. With the floor OFF, deep off-axis
+        // ring cells are the raw PO pattern — below the pedestal. (With the floor
+        // wrongly ON, no cell could fall below `floor_db`.)
         let mut cal_unc = make_h3_test_calibration();
         cal_unc.physical_config.reflector.surface_rms_mm = SURFACE_RMS_MM;
         assert!(cal_unc.correction_surface.is_none());
@@ -926,7 +925,7 @@ mod tests {
                 .expect("uncalibrated h3 run failed");
         assert!(
             uncal.cells.len() > 1,
-            "need ring cells to exercise the floor"
+            "need ring cells to exercise the off-axis path"
         );
 
         let min_uncal = uncal
@@ -935,37 +934,9 @@ mod tests {
             .map(|c| c.gain_db)
             .fold(f64::INFINITY, f64::min);
         assert!(
-            min_uncal >= floor_db - 1e-6,
-            "no uncalibrated cell may fall below the Ruze floor {floor_db} dB, got min {min_uncal}"
-        );
-        assert!(
-            uncal
-                .cells
-                .iter()
-                .any(|c| (c.gain_db - floor_db).abs() < 1e-6),
-            "at least one deep off-axis cell must be lifted exactly to the floor {floor_db} dB; \
-             cell gains: {:?}",
-            uncal.cells.iter().map(|c| c.gain_db).collect::<Vec<_>>()
-        );
-
-        // Calibrated (0 dB surface): floor OFF → raw off-axis nulls show through,
-        // so at least one cell falls clearly below the floor.
-        let mut cal_cal = make_h3_test_calibration();
-        cal_cal.physical_config.reflector.surface_rms_mm = SURFACE_RMS_MM;
-        cal_cal.correction_surface = Some(constant_surface_db(0.0));
-        cal_cal.calibration_coverage = None;
-        let cache_cal = GainCache::new(false, 1);
-        let cal = compute_h3_link_budget(&request, &cal_cal, &cache_cal, std::time::Instant::now())
-            .expect("calibrated h3 run failed");
-        let min_cal = cal
-            .cells
-            .iter()
-            .map(|c| c.gain_db)
-            .fold(f64::INFINITY, f64::min);
-        assert!(
-            min_cal < floor_db - 1.0,
-            "a calibrated antenna must NOT be floored: its deep off-axis cell {min_cal} dB should \
-             fall below the floor {floor_db} dB"
+            min_uncal < floor_db - 1.0,
+            "F7 floor OFF (D-2): at least one uncalibrated off-axis cell must fall below the \
+             Ruze floor {floor_db} dB (raw PO shows through), got min {min_uncal}"
         );
     }
 

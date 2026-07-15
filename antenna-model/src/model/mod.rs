@@ -13,6 +13,7 @@
 //! - **Edge Cases**: Detection and handling of edge cases (large feed offsets, spillover)
 //! - **Ray Trace**: Ray tracing for large feed offset scenarios
 
+pub mod bessel;
 pub mod coordinates;
 pub mod coordinates_3d;
 pub mod correction_interpolator;
@@ -42,10 +43,19 @@ pub mod ray_trace;
 ///   uncalibrated path, fractional-q spillover fix)
 /// - 2: P7 auto-refocus — `phase_center_offset` no longer contributes axial defocus
 ///   (compensated feed property); deliberate defocus via the new `axial_defocus` field
-/// - 3: F7 Ruze sidelobe floor on the uncalibrated off-axis path (2026-07)
+/// - 3: P10 off-axis integrator (2026-07) — the Hankel / azimuthal-mode aperture
+///   integrator replaced the aliasing fixed-density quadrature, correcting
+///   `gain_physics` at off-axis angles for identical inputs (converged physical
+///   optics, no aliasing). NOTE: the F7 statistical sidelobe floor is a
+///   service-layer param (`IntegrationParams::apply_sidelobe_floor`), OFF on the
+///   served path per decision D-2, and is NOT part of the calibration-fitting
+///   physics — calibrated antennas never had it applied, so it does not gate this
+///   version.
 pub const PHYSICS_MODEL_VERSION: u32 = 3;
 
 // Re-export commonly used types
+pub use bessel::{bessel_j0, bessel_j1, bessel_jn};
+
 pub use coordinates::{
     normalize_angle, normalize_angle_symmetric, ApertureCoordinates, EClockConeCoordinates,
     FarFieldCoordinates,

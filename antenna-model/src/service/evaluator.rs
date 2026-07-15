@@ -207,19 +207,24 @@ pub fn compute_gain_from_request(
         AntennaModelError::Generic(format!("Failed to build antenna configuration: {}", e))
     })?;
 
-    // Use fast integration parameters for <100ms target
-    let mut integration_params = IntegrationParams::fast();
-    // Double-counting gate: physical spillover AND the Ruze sidelobe floor (F7) are folded
-    // in only when NO correction surface exists (the surface otherwise absorbs both
-    // effects empirically). Whole-antenna gate — never per query — so no discontinuity is
-    // introduced between covered and out-of-coverage queries on a calibrated antenna.
-    // Note the model layer further restricts spillover to StandardPhysicalOptics mode, so a
-    // large feed offset may leave that flag on yet apply no spillover; the sidelobe floor,
-    // by contrast, is applied unconditionally in every mode once its flag is on. The
-    // ideal-reference computation below tracks the ACTUAL result's spillover state (not this
-    // raw flag) so that base spillover cancels in loss_db without introducing a one-sided bias.
+    // Canonical served-path integration params. Radial density is derived adaptively
+    // from (D/λ, θ), so this satisfies the <100ms target near boresight while remaining
+    // numerically correct off-axis (P10).
+    let mut integration_params = IntegrationParams::adaptive();
+    // Double-counting gate: physical spillover is folded in only when NO correction surface
+    // exists (the surface otherwise absorbs it empirically). Whole-antenna gate — never per
+    // query — so no discontinuity is introduced between covered and out-of-coverage queries on
+    // a calibrated antenna. Note the model layer further restricts spillover to
+    // StandardPhysicalOptics mode, so a large feed offset may leave that flag on yet apply no
+    // spillover. The ideal-reference computation below tracks the ACTUAL result's spillover
+    // state (not this raw flag) so that base spillover cancels in loss_db without introducing a
+    // one-sided bias.
     integration_params.apply_spillover = calibration.correction_surface.is_none();
-    integration_params.apply_sidelobe_floor = calibration.correction_surface.is_none();
+    // F7 sidelobe floor is OFF on the served path (D-2): now that the P10 integrator makes the
+    // off-axis pattern numerically correct, the served value is the RAW physical-optics gain.
+    // The floor plumbing (`sidelobe_floor_gain`, this flag) is retained for the separate F7
+    // redesign unit; we simply do not enable it here.
+    integration_params.apply_sidelobe_floor = false;
 
     // Convert frequency from MHz to Hz for physics model
     let frequency_hz = request.frequency_mhz * 1e6;
@@ -330,11 +335,12 @@ pub fn compute_gain_from_request(
         // not either, keeping loss_db free of a one-sided spillover bias.
         let mut reference_params = integration_params.clone();
         reference_params.apply_spillover = result.spillover_loss_db.is_some();
-        // `apply_sidelobe_floor` is carried unchanged from the clone: no override is needed
-        // because the floor is inert for the ideal reference on two independent counts — the
-        // ideal reflector has surface_rms = 0.0 (so sidelobe_floor_gain is identically zero),
-        // and the reference is evaluated at boresight (θ=0) where the main beam far exceeds
-        // any floor. Either alone makes it a no-op, so loss_db is unaffected.
+        // `apply_sidelobe_floor` is carried unchanged from the clone (now always `false` on
+        // the served path, D-2), so the reference is a raw physical-optics value — consistent
+        // with the actual path. Even were it on, it would be inert here for two independent
+        // reasons: the ideal reflector has surface_rms = 0.0 (so `sidelobe_floor_gain` is
+        // identically zero), and the reference is evaluated at boresight (θ=0) where the main
+        // beam far exceeds any floor.
         let reference = compute_gain_db(0.0, 0.0, &ideal_config, frequency_hz, &reference_params)?;
 
         // Loss is reference minus actual gain (final gain, including the
@@ -491,11 +497,19 @@ const FIRST_NULL_COEFFICIENT: f64 = 1.6;
 
 /// The off-axis honesty warning fires beyond this many first-null angles off
 /// boresight. Inside ~3 first nulls the main beam and first sidelobe are the
-/// region the model is validated for (<1 dB); beyond it, sidelobe *levels*
-/// are now bounded by a Ruze scattered-power floor (F7) rather than left
-/// systematically optimistic, but still are not calibrated-grade — unmodeled
-/// blockage, strut scatter, and edge diffraction remain out of scope, and the
-/// floor is a statistical envelope, not a per-antenna exact prediction.
+/// region the model is validated for (<1 dB).
+///
+/// Beyond it, the served value is now **numerically correct**: roadmap unit P10
+/// (LANDED 2026-07-15) replaced the aliasing fixed-density quadrature with the
+/// Hankel / azimuthal-mode integrator, which computes the physical-optics pattern
+/// to convergence at all angles (no more 20–35 dB-too-high aliasing, no gain that
+/// rises with angle). The remaining caveat is therefore **physical, not
+/// numerical**: the served value is *idealised* physical optics — it omits
+/// blockage, feed/strut scatter, and aperture-edge diffraction — so far-off-axis
+/// sidelobe *levels* are optimistic and not calibrated-grade (the pattern shape is
+/// validated; the absolute levels are not). Per maintainer decision D-2 the served
+/// path carries the raw PO value with the F7 statistical sidelobe floor OFF (its
+/// redesign is a separate unit). The warning below states this physical caveat.
 const OFF_AXIS_FIRST_NULL_MULTIPLE: f64 = 3.0;
 
 /// Off-axis honesty warning for uncalibrated antennas (roadmap unit P8).
@@ -543,13 +557,15 @@ pub(crate) fn off_axis_unvalidated_warning(
     Some(format!(
         "Antenna '{}' is uncalibrated and this query is more than {:.2}° off boresight \
          (3× the first-null angle ≈ 1.6·λ/D at {:.0} MHz) — beyond the validated main-beam \
-         region. Off-axis sidelobe levels from the physics model now include a Ruze \
-         scattered-power floor calibrated as a best estimate against measured wide-angle \
-         sidelobe statistics (it tracks the measured median, not a one-sided conservative \
-         bound), so the served value is no longer systematically optimistic; it is still not \
-         a precise per-antenna prediction or calibrated-grade. Use calibration data or \
-         a regulatory envelope such as the ITU-R S.580 mask for precise off-axis/interference \
-         analysis.",
+         region. The off-axis gain returned here is numerically converged (the P10 Hankel / \
+         azimuthal-mode integrator computes the physical-optics pattern correctly at all \
+         angles), but it is IDEALISED physical optics: it omits blockage, feed/strut scatter, \
+         and aperture-edge diffraction, so far-off-axis sidelobe LEVELS are optimistic and \
+         NOT calibrated-grade (the pattern shape is validated; the absolute levels are not). \
+         The statistical sidelobe floor is intentionally off on this path, so this is the raw \
+         physical-optics prediction. For sidelobe, interference, off-axis-EIRP, or \
+         adjacent-satellite analysis, use calibration data or a regulatory envelope such as \
+         the ITU-R S.580 mask.",
         calibration.antenna_id, threshold_deg, frequency_mhz
     ))
 }
@@ -831,6 +847,23 @@ mod tests {
         let msg = warning.expect("2.0° off boresight > ~0.98° threshold must warn");
         assert!(msg.contains("beyond the validated main-beam region"));
         assert!(msg.contains("ITU-R S.580"));
+        // Post-P10 honesty (2026-07-15): the P10 integrator landed, so the
+        // off-axis value is now numerically converged/correct. The remaining
+        // caveat is PHYSICAL — idealised PO omits blockage/strut/edge diffraction,
+        // so far-off-axis levels are optimistic and not calibrated-grade.
+        assert!(
+            msg.contains("calibrated-grade"),
+            "message must state levels are not calibrated-grade: {msg}"
+        );
+        assert!(
+            msg.contains("IDEALISED"),
+            "message must describe idealised physical optics: {msg}"
+        );
+        // The stale D-3 interim wording (numerical invalidity / aliasing) must be gone.
+        assert!(
+            !msg.contains("NUMERICALLY INVALID"),
+            "stale interim wording must not return: {msg}"
+        );
     }
 
     #[test]
@@ -1692,8 +1725,12 @@ mod tests {
     }
 
     // ========================================================================
-    // F7 Task 2: sidelobe-floor gate wiring (`apply_sidelobe_floor`, gated
-    // identically to `apply_spillover` on `correction_surface.is_none()`).
+    // Served-path F7 sidelobe floor: OFF (D-2). Now that the P10 integrator
+    // makes the off-axis pattern numerically correct, the served path delivers
+    // the RAW physical-optics gain (`apply_sidelobe_floor = false`). These tests
+    // pin that the floor is NOT applied via the evaluator/batch served paths.
+    // The floor FUNCTION itself is still validated at the model layer
+    // (`model::pattern` tests) and in `tests/reference_validation.rs`.
     // ========================================================================
 
     /// Shared helper building a minimal antenna configuration for
@@ -1718,26 +1755,25 @@ mod tests {
         .unwrap()
     }
 
-    /// For an uncalibrated antenna (no correction surface) with nonzero
-    /// `surface_rms`, a deep off-axis query (`create_deep_offaxis_request` —
-    /// emitter tens of degrees off boresight, feed at focus) must have its gain
-    /// lifted to the Ruze sidelobe floor. The floor is angle- and
-    /// `ComputationMode`-independent (applied
-    /// unconditionally in `compute_gain` once the flag is on — see
-    /// `model::pattern::compute_gain`), so gating `apply_sidelobe_floor`
-    /// alongside `apply_spillover` on `correction_surface.is_none()` must
-    /// reach this deep-null query exactly like it already reaches the
-    /// (separately tested) spillover path.
+    /// SERVED PATH — F7 floor OFF (D-2). For an uncalibrated antenna (no
+    /// correction surface) with nonzero `surface_rms`, a deep off-axis query
+    /// (`create_deep_offaxis_request` — emitter tens of degrees off boresight,
+    /// feed at focus) now returns the RAW physical-optics gain. Since the P10
+    /// integrator makes the off-axis pattern numerically correct, the served
+    /// path no longer lifts it to the Ruze sidelobe floor. This pins that the
+    /// floor is NOT applied: the served value sits clearly BELOW the floor
+    /// pedestal (the raw pattern is negligible at ~96° off boresight). If the
+    /// floor were still applied the gain would be clamped UP to ≈ floor_db.
+    /// (The model-layer `test_sidelobe_floor_lifts_deep_null_...` still
+    /// validates the floor FUNCTION when its flag is set directly.)
     #[test]
-    #[ignore = "F7 PARKED: the floor cannot engage on the served path because compute_gain's fast() aperture integral aliases off-axis (20-35 dB too high) — see docs/findings-2026-07-13-off-axis-integration-aliasing.md. Unignore once that P0 is fixed."]
-    fn test_sidelobe_floor_lifts_deep_offaxis_gain_for_uncalibrated_antenna() {
+    fn served_deep_offaxis_uncalibrated_returns_raw_po_not_floor() {
         let mut repo = CalibrationRepository::new();
         let mut calibration = create_test_calibration(CalibrationStatus::Uncalibrated {
             accuracy_estimate_db: 3.0,
             loss_accuracy_estimate_db: 2.0,
         });
-        // Bump surface RMS so the floor is clearly nonzero (mirrors the F7
-        // Task 1 model-layer tests' 1.5mm X-band fixture).
+        // Nonzero surface RMS so the (would-be) floor is a clearly nonzero pedestal.
         calibration.physical_config.reflector.surface_rms_mm = 1.5;
         assert!(calibration.correction_surface.is_none());
         repo.add_calibration(calibration);
@@ -1745,106 +1781,123 @@ mod tests {
         let request = create_deep_offaxis_request();
         let response = compute_gain_from_request(&request, &repo).unwrap();
 
-        let wavelength = crate::model::wavelength_from_frequency(request.frequency_mhz * 1e6);
-        let expected_floor_linear =
-            crate::model::pattern::sidelobe_floor_gain(&floor_check_config(0.0015), wavelength);
-        let expected_floor_db = 10.0 * expected_floor_linear.log10();
-
-        // Sanity: the floor must be a real, meaningful pedestal for this
-        // config, or the test below proves nothing.
-        assert!(
-            expected_floor_db > -20.0,
-            "expected floor should be a meaningful pedestal, got {expected_floor_db} dB"
-        );
-
-        assert!(
-            (response.gain_db - expected_floor_db).abs() < 1e-6,
-            "deep off-axis gain should equal the sidelobe floor exactly (pattern is \
-             negligible at ~96 deg off boresight): got {}, expected {}",
-            response.gain_db,
-            expected_floor_db
-        );
-    }
-
-    /// An antenna WITH a correction surface must NOT get the sidelobe floor,
-    /// even at the same deep off-axis geometry that lifts the uncalibrated
-    /// sibling to the floor above — the gate is `correction_surface.is_none()`,
-    /// identical to the spillover gate. Mirrors
-    /// `test_spillover_not_applied_for_calibrated_antenna` for the floor.
-    #[test]
-    #[ignore = "F7 PARKED: the floor cannot engage on the served path because compute_gain's fast() aperture integral aliases off-axis (20-35 dB too high) — see docs/findings-2026-07-13-off-axis-integration-aliasing.md. Unignore once that P0 is fixed."]
-    fn test_sidelobe_floor_not_applied_for_calibrated_antenna_deep_offaxis() {
-        let request = create_deep_offaxis_request();
-
-        // A constant 0 dB (no-op) correction surface: it makes the antenna
-        // "calibrated" (gate is `correction_surface.is_some()`) without altering
-        // the raw physics gain, so the comparison isolates the floor gate alone.
-        let zero_db_surface = || crate::data::types::BSplineModel4D {
-            coefficients: vec![0.0; 2 * 2 * 2],
-            shape: [2, 2, 2, 1],
-            knots_azimuth: vec![0.0, 0.0, 0.0, 360.0, 360.0, 360.0],
-            knots_elevation: vec![0.0, 0.0, 0.0, 90.0, 90.0, 90.0],
-            knots_frequency: vec![8000.0, 8000.0, 8000.0, 9000.0, 9000.0, 9000.0],
-            knots_temperature: vec![290.0, 290.0, 290.0, 290.0, 290.0, 290.0],
-            spline_order: 3,
-        };
-
-        // Uncalibrated (no surface): floor ON → gain lifted to the Ruze pedestal.
-        let mut repo_unc = CalibrationRepository::new();
-        let mut cal_unc = create_test_calibration(CalibrationStatus::Uncalibrated {
-            accuracy_estimate_db: 3.0,
-            loss_accuracy_estimate_db: 2.0,
-        });
-        cal_unc.physical_config.reflector.surface_rms_mm = 1.5;
-        assert!(cal_unc.correction_surface.is_none());
-        repo_unc.add_calibration(cal_unc);
-        let gain_uncalibrated = compute_gain_from_request(&request, &repo_unc)
-            .unwrap()
-            .gain_db;
-
-        // Calibrated (0 dB surface): floor OFF → raw off-axis pattern shows through,
-        // which sits below the floor (that is exactly why the floor lifts the
-        // uncalibrated sibling). Same antenna geometry, same query.
-        let mut repo_cal = CalibrationRepository::new();
-        let mut cal = create_test_calibration(CalibrationStatus::FullyCalibrated {
-            accuracy_estimate_db: 1.0,
-        });
-        cal.physical_config.reflector.surface_rms_mm = 1.5;
-        cal.correction_surface = Some(zero_db_surface());
-        assert!(cal.correction_surface.is_some());
-        repo_cal.add_calibration(cal);
-        let gain_calibrated = compute_gain_from_request(&request, &repo_cal)
-            .unwrap()
-            .gain_db;
-
-        // Sanity: the uncalibrated result really is the floor (deep-offaxis lift).
+        // The Ruze floor pedestal for this surface RMS / frequency (the floor is
+        // diameter-independent — see `sidelobe_floor_gain`).
         let wavelength = crate::model::wavelength_from_frequency(request.frequency_mhz * 1e6);
         let floor_db = 10.0
             * crate::model::pattern::sidelobe_floor_gain(&floor_check_config(0.0015), wavelength)
                 .log10();
         assert!(
-            (gain_uncalibrated - floor_db).abs() < 1e-6,
-            "uncalibrated sibling should be floored to {floor_db} dB, got {gain_uncalibrated}"
+            floor_db > -20.0,
+            "floor should be a meaningful pedestal, got {floor_db} dB"
         );
 
-        // The gate: the calibrated antenna is NOT floored, so its gain stays
-        // strictly below the floored uncalibrated result.
+        // Floor OFF ⇒ served value is the raw PO pattern, well below the pedestal.
         assert!(
-            gain_calibrated < gain_uncalibrated - 0.1,
-            "calibrated antenna must NOT get the sidelobe floor: calibrated {gain_calibrated} dB \
-             should be below the floored uncalibrated {gain_uncalibrated} dB"
+            response.gain_db < floor_db - 1.0,
+            "served deep-off-axis gain {} dBi must be BELOW the floor {floor_db} dBi \
+             (F7 floor OFF on the served path, D-2); a value ≈ floor means the floor is \
+             still being applied",
+            response.gain_db
+        );
+    }
+
+    /// Closes the test/production integrator gap that hid the original off-axis
+    /// aliasing bug: the SERVED path (`compute_gain_from_request`) and a DIRECT
+    /// `compute_gain_db` call with the canonical `IntegrationParams::adaptive()`
+    /// params must produce the identical off-axis gain (<1e-9). Uses an
+    /// uncalibrated antenna so the response gain is purely the physics value (no
+    /// correction-surface term), and reconstructs the exact config + angles the
+    /// evaluator fed the integrator (feed offset and corrected az/el are echoed
+    /// back in the response geometry).
+    #[test]
+    fn served_offaxis_matches_direct_compute_gain_db() {
+        use crate::model::{
+            FeedParameters as ModelFeedParams, FeedPosition, MeshParameters as ModelMeshParams,
+            ReflectorGeometry as ModelReflector,
+        };
+
+        let mut repo = CalibrationRepository::new();
+        let calibration = create_test_calibration(CalibrationStatus::Uncalibrated {
+            accuracy_estimate_db: 3.0,
+            loss_accuracy_estimate_db: 2.0,
+        });
+        assert!(calibration.correction_surface.is_none());
+        let phys = calibration.physical_config.clone();
+        repo.add_calibration(calibration);
+
+        let request = create_deep_offaxis_request();
+        let response = compute_gain_from_request(&request, &repo).unwrap();
+
+        // Rebuild the exact model config the evaluator constructed.
+        let focal = phys.reflector.focal_length_m;
+        let reflector = ModelReflector::new(
+            phys.reflector.diameter_m,
+            focal,
+            phys.reflector.surface_rms_mm / 1000.0,
+        )
+        .unwrap();
+        // The evaluator's physical feed position: `feed_offset_meters` echoes
+        // (feed_x, feed_y, feed_z - focal), so feed_z = offset.z + focal reproduces it.
+        let fo = &response.geometry.feed_offset_meters;
+        let feed = ModelFeedParams::builder()
+            .position(FeedPosition::new(fo.x, fo.y, fo.z + focal))
+            .q_factor(phys.feed.q_factor)
+            .phase_center_offset(phys.feed.phase_center_offset_m)
+            .axial_defocus(phys.feed.axial_defocus_m)
+            .build()
+            .unwrap();
+        let mut cfg_builder = AntennaConfiguration::builder()
+            .id("test_antenna")
+            .name("Test Antenna")
+            .reflector(reflector)
+            .feed(feed);
+        if let Some(m) = phys.mesh.as_ref() {
+            let mesh = ModelMeshParams::builder()
+                .spacing(m.mesh_spacing_mm / 1000.0)
+                .wire_diameter(m.wire_diameter_mm / 1000.0)
+                .build()
+                .unwrap();
+            cfg_builder = cfg_builder.mesh(mesh);
+        }
+        let config = cfg_builder.build().unwrap();
+
+        // Corrected az/el (echoed in the response) become phi/theta, exactly as the
+        // evaluator does: theta = corrected_el, phi = corrected_az.
+        let theta_rad = response.geometry.emitter_elevation_deg.to_radians();
+        let phi_rad = response.geometry.emitter_azimuth_deg.to_radians();
+
+        // Canonical served params: adaptive density, spillover ON (uncalibrated),
+        // F7 floor OFF (D-2) — matching `compute_gain_from_request`.
+        let mut params = IntegrationParams::adaptive();
+        params.apply_spillover = true;
+        params.apply_sidelobe_floor = false;
+
+        let direct = compute_gain_db(
+            theta_rad,
+            phi_rad,
+            &config,
+            request.frequency_mhz * 1e6,
+            &params,
+        )
+        .unwrap()
+        .gain;
+
+        assert!(
+            (direct - response.gain_db).abs() < 1e-9,
+            "served path {} dBi and direct compute_gain_db {} dBi must agree (<1e-9): \
+             same integrator, same canonical params",
+            response.gain_db,
+            direct
         );
     }
 
     /// Endpoint coverage: the batch path delegates every item to
-    /// `compute_gain_from_request`, so the sidelobe-floor gate reaches it unchanged
-    /// — a deep-off-axis uncalibrated item is floored exactly like the single-gain
-    /// path. (The rectangular `/heatmap` path delegates to the same function per
-    /// grid point — see `service::heatmap` — so it inherits the gate identically;
-    /// the h3 path has its own gate line, covered in `service::h3_link_budget`.)
+    /// `compute_gain_from_request`, so the served F7-floor-OFF behavior reaches
+    /// it unchanged — a deep-off-axis uncalibrated batch item returns the raw PO
+    /// value (below the floor pedestal), matching the single-gain path.
     #[test]
-    #[ignore = "F7 PARKED: the floor cannot engage on the served path because compute_gain's fast() aperture integral aliases off-axis (20-35 dB too high) — see docs/findings-2026-07-13-off-axis-integration-aliasing.md. Unignore once that P0 is fixed."]
-    fn test_sidelobe_floor_applies_on_batch_endpoint() {
+    fn served_deep_offaxis_batch_is_raw_po_not_floor() {
         use crate::api::schemas::BatchGainRequest;
         use crate::service::batch::evaluate_batch;
 
@@ -1857,6 +1910,10 @@ mod tests {
         assert!(calibration.correction_surface.is_none());
         repo.add_calibration(calibration);
 
+        let single = compute_gain_from_request(&create_deep_offaxis_request(), &repo)
+            .unwrap()
+            .gain_db;
+
         let request = BatchGainRequest {
             evaluations: vec![create_deep_offaxis_request()],
         };
@@ -1867,25 +1924,32 @@ mod tests {
         let floor_db = 10.0
             * crate::model::pattern::sidelobe_floor_gain(&floor_check_config(0.0015), wavelength)
                 .log10();
+        // Batch delegates to the single-gain path → identical value, and floor OFF.
         assert!(
-            (response.results[0].gain_db - floor_db).abs() < 1e-6,
-            "batch deep-off-axis uncalibrated item should be floored to {floor_db} dB, got {}",
+            (response.results[0].gain_db - single).abs() < 1e-12,
+            "batch item {} must equal the single-path gain {single}",
+            response.results[0].gain_db
+        );
+        assert!(
+            response.results[0].gain_db < floor_db - 1.0,
+            "batch deep-off-axis uncalibrated item {} dBi must be below the floor {floor_db} dBi \
+             (F7 floor OFF, D-2)",
             response.results[0].gain_db
         );
     }
 
     /// The boresight-reference computation must be unaffected by
-    /// `apply_sidelobe_floor` even though `reference_params` inherits the flag
-    /// from a clone of `integration_params` (uncalibrated → flag on). Two
-    /// independent reasons make this inert: the reference is always computed
-    /// on an IDEAL antenna (feed at focus, `surface_rms = 0.0` — see the
-    /// `ideal_reflector` construction in `compute_gain_from_request`), so
-    /// `sidelobe_floor_gain` is identically zero for it regardless of the
-    /// flag; and separately, the reference is evaluated at boresight (θ=0)
-    /// where the main beam vastly exceeds any plausible floor anyway. This
-    /// test proves the reference is unperturbed by reconstructing the same
-    /// ideal-boresight computation independently with the floor explicitly
-    /// off and asserting equality.
+    /// `apply_sidelobe_floor`. On the served path the flag is now always off
+    /// (D-2), so `reference_params` inherits `false`; but even if it were on,
+    /// two independent reasons make it inert here: the reference is always
+    /// computed on an IDEAL antenna (feed at focus, `surface_rms = 0.0` — see
+    /// the `ideal_reflector` construction in `compute_gain_from_request`), so
+    /// `sidelobe_floor_gain` is identically zero for it regardless of the flag;
+    /// and separately, the reference is evaluated at boresight (θ=0) where the
+    /// main beam vastly exceeds any plausible floor anyway. This test proves the
+    /// reference is unperturbed by reconstructing the same ideal-boresight
+    /// computation independently with the floor explicitly off and asserting
+    /// equality.
     #[test]
     fn test_sidelobe_floor_does_not_perturb_boresight_reference() {
         use crate::model::{

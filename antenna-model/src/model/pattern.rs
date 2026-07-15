@@ -1028,25 +1028,33 @@ mod tests {
 
     #[test]
     fn test_non_convergence_warning_propagated() {
-        // Force non-convergence by capping to a single iteration with an impossible
-        // tolerance.  compute_gain must include a warning containing "did not converge"
-        // in the returned warnings vec.
-        let config = test_antenna();
-        let params = IntegrationParams {
-            max_iterations: 1,
-            relative_tolerance: 1e-15,
-            ..IntegrationParams::fast()
-        };
-        // Use an off-boresight angle to ensure the standard PO path is exercised.
-        let result = compute_gain(0.3, 0.0, &config, 8.4e9, &params).unwrap();
-        let has_convergence_warning = result
-            .warnings
-            .iter()
-            .any(|w| w.contains("did not converge"));
+        // END-TO-END (P10 Task 3): since the Hankel / mode integrator now carries the
+        // runtime convergence self-check (D-6), a real production geometry CAN return
+        // converged=false, and compute_gain must surface INTEGRATION_NONCONVERGENCE_WARNING.
+        // Drive the full compute_gain path with a dish whose radial Nyquist rate at θ=90°
+        // exceeds 2× the integrator's radial safety cap: the adaptive density clamps below
+        // Nyquist (aliased) while the self-check's 2N leg samples finer, so the two
+        // disagree and the result is flagged — never silently returned. A 750 m symmetric
+        // dish at 40 GHz (D/λ = 1e5) sits well past the cap.
+        let reflector = ReflectorGeometry::new(750.0, 375.0, 0.0).unwrap();
+        let feed = FeedParameters::new(FeedPosition::at_focus(375.0), 2.0, 0.0, 1.0).unwrap();
+        let config =
+            AntennaConfiguration::new("huge".into(), "Huge".into(), reflector, feed, None).unwrap();
+        let params = IntegrationParams::fast();
+
+        let result = compute_gain_db(90f64.to_radians(), 0.0, &config, 40.0e9, &params).unwrap();
+
         assert!(
-            has_convergence_warning,
-            "Expected a convergence warning but got: {:?}",
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("did not converge")),
+            "compute_gain must propagate the non-convergence warning end-to-end; got {:?}",
             result.warnings
+        );
+        assert_eq!(
+            INTEGRATION_NONCONVERGENCE_WARNING,
+            "aperture integration did not converge; gain accuracy may be degraded"
         );
     }
 
@@ -1140,6 +1148,71 @@ mod tests {
             result.spillover_loss_db.is_none(),
             "spillover must not be applied outside StandardPhysicalOptics, got {:?}",
             result.spillover_loss_db
+        );
+    }
+
+    /// P10 (D-5): the higher-order-aberration path routes through the SAME
+    /// adaptive mode integrator as standard PO — `compute_gain_higher_order`
+    /// sets `use_higher_order_aberrations: true` → `integrate_aperture` →
+    /// `azimuthal_mode_field` — so it also benefits from the non-aliasing
+    /// off-axis fix. A moderate feed offset (0.3f–0.5f) forces
+    /// HigherOrderAberrations mode; the wide-angle gain must then be physically
+    /// plausible — a deep backlobe far below the pattern peak, NOT the
+    /// 20–35 dB-too-high plateau the old aliasing 2D quadrature produced.
+    #[test]
+    fn higher_order_mode_wide_angle_is_physical_not_aliased() {
+        // 3 m dish, f/D = 0.5, lateral feed offset 0.6 m → ratio 0.4 ⇒ HigherOrder.
+        let reflector = ReflectorGeometry::builder()
+            .diameter(3.0)
+            .focal_length(1.5)
+            .surface_rms(0.0005)
+            .build()
+            .unwrap();
+        let feed = FeedParameters::builder()
+            .position(FeedPosition::new(0.6, 0.0, 1.5))
+            .q_factor(8.0)
+            .build()
+            .unwrap();
+        let config = AntennaConfiguration::builder()
+            .id("ho")
+            .name("Higher Order")
+            .reflector(reflector)
+            .feed(feed)
+            .build()
+            .unwrap();
+
+        let freq = 8.4e9;
+        let params = IntegrationParams::fast();
+
+        // Confirm the offset routes through the higher-order (mode integrator) path,
+        // not standard PO and not ray tracing.
+        let analysis = analyze_edge_cases(&config, 0.3, 0.0);
+        assert_eq!(
+            analysis.mode,
+            ComputationMode::HigherOrderAberrations,
+            "0.4f offset must route to the higher-order mode integrator, got {:?}",
+            analysis.mode
+        );
+
+        // Scan the pattern; the peak is steered off boresight (~offset/f rad ≈ 23°).
+        let g = |deg: f64| {
+            compute_gain_db(deg.to_radians(), 0.0, &config, freq, &params)
+                .unwrap()
+                .gain
+        };
+        let peak = [0.0_f64, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0]
+            .into_iter()
+            .map(g)
+            .fold(f64::NEG_INFINITY, f64::max);
+
+        let g90 = g(90.0);
+        assert!(g90.is_finite(), "wide-angle gain must be finite, got {g90}");
+        // Not aliased: the wide-angle backlobe is far below the peak. The aliasing
+        // signature was a near-peak plateau/backlobe at wide angles.
+        assert!(
+            g90 < peak - 25.0,
+            "higher-order 90° gain {g90:.2} dBi must be >=25 dB below peak {peak:.2} dBi \
+             (an aliased pattern would sit near the peak)"
         );
     }
 

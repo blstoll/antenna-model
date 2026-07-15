@@ -1,0 +1,54 @@
+{
+  "planPath": "docs/superpowers/plans/2026-07-14-p10-off-axis-integrator.md",
+  "tasks": [
+    {
+      "id": 1,
+      "subject": "P10 Task 0: In-house Bessel Jm module",
+      "status": "completed",
+      "description": "**Goal:** Validated bessel::bessel_jn(m,x) for real x, both branches (|x|<8 polynomial, |x|>=8 asymptotic), no external dependency. Files: create antenna-model/src/model/bessel.rs; modify model/mod.rs. Verify: cargo test -p antenna-model --lib bessel.\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/bessel.rs\", \"antenna-model/src/model/mod.rs\"], \"verifyCommand\": \"cargo test -p antenna-model --lib bessel -- --nocapture\", \"acceptanceCriteria\": [\"bessel_j0/j1/jn implemented\", \"both branches cross-checked against known values\", \"Miller downward recurrence for n>=2\", \"clippy -D warnings clean\"], \"modelTier\": \"standard\"}\n```"
+    },
+    {
+      "id": 2,
+      "subject": "P10 Task 1: Symmetric Hankel radial integrator (m=0)",
+      "status": "completed",
+      "blockedBy": [1],
+      "description": "**Goal:** Replace inner 2D quadrature of integrate_aperture with 1D J0 Hankel transform for symmetric apertures; signature unchanged. Verify: cargo test -p antenna-model --lib integration && pattern.\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/integration.rs\"], \"verifyCommand\": \"cargo test -p antenna-model --lib integration && cargo test -p antenna-model --lib pattern\", \"acceptanceCriteria\": [\"hankel_radial_field implemented\", \"symmetric case routed, signature unchanged\", \"matches 2D <0.05 dB near-in\", \"θ=90° physical ~-33.3 not aliased\", \"existing tests pass\"], \"modelTier\": \"standard\"}\n```"
+    },
+    {
+      "id": 3,
+      "subject": "P10 Task 2: Azimuthal-mode (Jm) expansion for coma/asymmetric apertures",
+      "status": "completed",
+      "blockedBy": [2],
+      "description": "**Goal:** Generalize to laterally-displaced feeds via Jm azimuthal-mode expansion (includes higher-order Seidel, D-5). Verify: cargo test -p antenna-model --lib integration && pattern && edge_cases.\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/integration.rs\"], \"verifyCommand\": \"cargo test -p antenna-model --lib integration && cargo test -p antenna-model --lib pattern && cargo test -p antenna-model --lib edge_cases\", \"acceptanceCriteria\": [\"azimuthal_mode_field with ±m coefficients\", \"asymmetric routed, symmetric untouched\", \"small-dish offset matches 2D <0.1 dB + coma asymmetry\", \"dsn_34m offset physical off-axis\", \"existing coma tests pass\"], \"modelTier\": \"high\"}\n```"
+    },
+    {
+      "id": 4,
+      "subject": "P10 Task 3: Adaptive N_rho + mode-count + convergence self-check (D-6)",
+      "status": "completed",
+      "blockedBy": [3],
+      "description": "**Goal:** N_rho from (D/λ,θ) at ~2× Nyquist + N-vs-2N / M-vs-M+1 self-check that flags non-convergence, never silent. Verify: cargo test -p antenna-model --lib integration.\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/integration.rs\"], \"verifyCommand\": \"cargo test -p antenna-model --lib integration -- --nocapture\", \"acceptanceCriteria\": [\"radial_points_for ~4·(D/λ)·sinθ floored/capped\", \"self-check flags non-convergence, never silent\", \"θ=0 cheap floor\", \"gbt_100m q-band θ=90° converged O(10^4) points\"], \"modelTier\": \"high\"}\n```"
+    },
+    {
+      "id": 5,
+      "subject": "P10 Task 4: Off-axis validation protocol (REQUIRED — user gate)",
+      "status": "completed",
+      "blockedBy": [3, 4],
+      "description": "**USER-ORDERED GATE — NON-SKIPPABLE.** Required validation protocol; do not shortcut. Cross-check production integrator vs converged 2D over angle × D/λ × band grid, both Bessel branches, symmetric + offset-feed antennas. Verify: cargo test -p antenna-model --test reference_validation.\n\n```json:metadata\n{\"files\": [\"antenna-model/tests/reference_validation.rs\"], \"verifyCommand\": \"cargo test -p antenna-model --test reference_validation -- --nocapture\", \"acceptanceCriteria\": [\"2D agreement <0.1 dB near-in on 3.7 m AND 100 m, both branches\", \"θ=90° physical for every enabled antenna\", \"repeated across bands S→Ka/Q\", \"offset-feed coma covered + M-vs-M+1 <0.1 dB\", \"dsn_34m x-band anchors 68.96/14.53/-33.3\", \"brute-force oracle retained #[ignore]d\"], \"userGate\": true, \"tags\": [\"user-gate\"], \"gateScope\": \"all-enabled-antennas\", \"requireEvidenceTokens\": [[\"symmetric\", \"3.7m\", \"small\"], [\"large\", \"100m\", \"dsn_34m\"], [\"coma\", \"offset\", \"asymmetric\"]], \"modelTier\": \"high\"}\n```"
+    },
+    {
+      "id": 6,
+      "subject": "P10 Task 5: Single adaptive service path; retire presets; route higher-order (D-4,D-5)",
+      "status": "completed",
+      "blockedBy": [4],
+      "description": "**Goal:** Service calls one adaptive integrator everywhere; retire fast()/high_accuracy() split; higher-order uses mode integrator; flag (not fix) ray-tracing. Verify: cargo test --workspace && clippy.\n\n```json:metadata\n{\"files\": [\"antenna-model/src/model/integration.rs\", \"antenna-model/src/model/pattern.rs\", \"antenna-model/src/service/evaluator.rs\", \"antenna-model/src/service/h3_link_budget.rs\"], \"verifyCommand\": \"cargo test --workspace && cargo clippy --workspace --all-targets -- -D warnings\", \"acceptanceCriteria\": [\"service uses IntegrationParams::adaptive()\", \"presets removed or demoted\", \"higher-order routes through mode integrator\", \"ray-tracing warning retained\", \"evaluator-vs-harness same-path <1e-9\", \"workspace green + clippy clean\"], \"modelTier\": \"high\"}\n```"
+    },
+    {
+      "id": 7,
+      "subject": "P10 Task 6: Off-axis warning numerical→physical; bump version; docs truth",
+      "status": "completed",
+      "blockedBy": [5, 6],
+      "description": "**Goal:** Rework D-3 warning from numerical-invalidity to physical-incompleteness; bump PHYSICS_MODEL_VERSION; docs truth (P10 done, F7 unblocked pending D-2). Verify: cargo test --workspace.\n\n```json:metadata\n{\"files\": [\"antenna-model/src/service/evaluator.rs\", \"antenna-model/src/model/mod.rs\", \"docs/domain-contract.md\", \"docs/api-documentation.md\", \"docs/roadmap-2026-07.md\", \"docs/roadmap-2026-07-work-units.md\"], \"verifyCommand\": \"cargo test -p antenna-model --lib off_axis && cargo test -p antenna-model --test '*' off_axis && cargo test --workspace\", \"acceptanceCriteria\": [\"warning reworded numerical→physical, dedup-constant\", \"evaluator test asserts new wording\", \"PHYSICS_MODEL_VERSION bumped, mismatch test passes\", \"domain-contract off-axis resolved, F7 unblocked\", \"api-documentation caveat rewritten\", \"roadmap P10→Done, F7→Unblocked\"], \"modelTier\": \"standard\"}\n```"
+    }
+  ],
+  "lastUpdated": "2026-07-14T12:00:00Z"
+}

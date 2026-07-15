@@ -1,10 +1,15 @@
-//! Off-Axis Honesty Warning Tests (roadmap unit P8)
+//! Off-Axis Honesty Warning Tests (roadmap unit P8; message updated to the
+//! post-P10 truth, 2026-07-15)
 //!
-//! The physics model's off-axis (sidelobe) gain is systematically optimistic
-//! (~8–13 dB below the ITU-R S.580 mask — see docs/domain-contract.md,
-//! "Off-axis pattern / sidelobe fidelity"). Queries on UNCALIBRATED antennas
-//! beyond the validated main-beam region (3× the first-null angle ≈ 1.6·λ/D)
-//! must carry an explicit warning on every compute endpoint.
+//! As of P10 (landed 2026-07-15) the served off-axis (sidelobe) gain is
+//! numerically CORRECT: the Hankel / azimuthal-mode integrator replaced the
+//! aliasing fast-integration path (the old P0 defect in
+//! docs/findings-2026-07-13-off-axis-integration-aliasing.md). The remaining
+//! caveat is physical, not numerical — idealised PO omits blockage/strut/edge
+//! diffraction, so far-off-axis LEVELS are optimistic and not calibrated-grade
+//! (F7 floor OFF, D-2). Queries on UNCALIBRATED antennas beyond the validated
+//! main-beam region (3× the first-null angle ≈ 1.6·λ/D) must carry an explicit
+//! warning on every compute endpoint.
 //!
 //! Calibrated / partially-calibrated antennas are excluded: out-of-coverage
 //! queries there already receive the extrapolation warning (no stacking) —

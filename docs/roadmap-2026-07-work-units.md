@@ -235,7 +235,28 @@ identical inputs, per this unit's own bump policy).
 - **Depends on:** P1 (motivates it); coordinate with D2.
 
 ### P10 — Off-axis aperture-integral aliasing (P0 CORRECTNESS) — Effort: L
-**FILED 2026-07-13. Blocks F7. Highest-priority correctness item in the roadmap.**
+**FILED 2026-07-13. ✅ DONE / LANDED 2026-07-15 — F7 now UNBLOCKED.**
+
+> **✅ P10 COMPLETE (2026-07-15) — Tasks 0-6 all shipped:**
+> - **Task 0-1** — the Hankel / azimuthal-mode integrator (Jₘ coma expansion for the
+>   laterally-offset served feeds, D-1) replaced the aliasing 2D quadrature; off-axis gain is
+>   numerically converged at all angles (no more 20–35 dB-too-high aliasing).
+> - **Task 2-3** — adaptive radial density (`N_rho` from D/λ, θ at ~2× Nyquist, D-4/D-6) and
+>   adaptive mode count, each with a runtime convergence self-check (N-vs-2N / M-vs-(M+1)) that
+>   warns/refuses rather than silently returning an unconverged value; higher-order path fixed too
+>   (D-5).
+> - **Task 4** — the P10 validation protocol (reference_validation suite: anchors + plausibility
+>   over every enabled antenna × band).
+> - **Task 5** — a **single service path** serving **raw physical optics with the F7 sidelobe
+>   floor OFF** (D-2 realized: serve raw PO, floor off; the floor is a service-layer param, not
+>   part of the fitting physics).
+> - **Task 6** — the **honest post-P10 warning**: numerically-correct-but-idealised-levels (not
+>   calibrated-grade), keeping "beyond the validated main-beam region" + "ITU-R S.580"; plus this
+>   docs-truth pass. `PHYSICS_MODEL_VERSION` = 3 covers the integrator change.
+>
+> **F7 is UNBLOCKED (redesign pending, D-2):** its floor/substitution beyond θ_valid is the
+> remaining redesign, now properly informed by the correct integrator. The filed-status detail
+> below is preserved as history.
 
 - **The bug:** the service computes every gain with `IntegrationParams::fast()`
   (`service/evaluator.rs`, `service/h3_link_budget.rs`). Beyond a few degrees off-boresight the
@@ -293,6 +314,32 @@ identical inputs, per this unit's own bump policy).
 These are genuine calls, not implementation detail. Per roadmap principle 3 ("no silent physics
 changes"), get them decided before/while executing; recommended defaults given.
 
+> **✅ ALL SIX DECIDED 2026-07-14 (maintainer).** D-1..D-4 confirmed at their recommended
+> defaults via decision review; D-5/D-6 adopted as engineering defaults. Summary:
+> - **D-1 → (a) azimuthal-mode expansion.** Confirmed *required*, not optional: the enabled
+>   `gs_3.7m` / `dsn_13m` / `dsn_34m` antennas run **laterally-offset feeds** in
+>   `antennas.yaml` (`[0.05,0,0]`, `[0.08,0,0]`/`[0,0.08,0]`, `[0.15,0,0]`/`[0,0.15,0]`), so
+>   the symmetric J₀ form does not cover the served configs — a 2D fallback would leave those
+>   exact feeds aliased. Offsets are small (offset/f ≈ 0.004–0.011 ⇒ coma is m≈1-dominated),
+>   so few modes suffice; establish an explicit mode-count error budget (target <0.1 dB).
+> - **D-2 → P10 = correct integrator + honesty warning; the statistical substitution/blend is
+>   a SEPARATE F7-redesign unit** the maintainer decides later. Keeps P10 contained to the
+>   numerical-correctness defect; does not re-couple the two defects that sank F7. **✅ REALIZED
+>   2026-07-15: the served path serves RAW converged PO with the F7 sidelobe floor OFF**
+>   (`apply_sidelobe_floor = false` on the single service path); F7's statistical model is the
+>   separate redesign, now unblocked.
+> - **D-3 → (a) ship the interim honesty fix on `main` now** (strengthen P8 wording to
+>   "numerically invalid" and/or clamp reported off-axis gain), ahead of the multi-session P10.
+>   **SUPERSEDED 2026-07-15:** P10 landed, so the "numerically invalid" wording is no longer true;
+>   the warning now states the post-P10 physical caveat (idealised-PO levels, not calibrated-grade).
+> - **D-4 → (a) single adaptive correct path**, `N_rho` from `(D/λ, θ)` at ~2× Nyquist;
+>   presets demoted to a safety-factor knob. Closes the test/production integrator gap at the
+>   root (P10 exit criterion 4).
+> - **D-5 → (a) fix `compute_gain_higher_order` too** (shares the integrand); flag—don't
+>   fix—`compute_gain_ray_tracing` (already a P3 stub).
+> - **D-6 → ~2× Nyquist** (`N_rho ≈ 4·(D/λ)·sinθ`) + a runtime N-vs-2N convergence self-check
+>   that warns/refuses, never silently returns an unconverged value.
+
 | # | Decision | Options | Recommended default |
 |---|---|---|---|
 | **D-1** | **Coma / asymmetric apertures.** The Hankel collapse assumes azimuthal symmetry. A laterally displaced feed breaks it. **Settle this FIRST — it decides whether P10 is a day or a week.** | (a) azimuthal-mode expansion (`e^{jmφ′}` ⇒ `2π(−j)^m J_m(a) e^{jmφ}`); (b) keep 2D quadrature for asymmetric cases; (c) restrict/refuse | **(a)** — textbook and general. (b) is a trap: those cases would stay *aliased*, i.e. silently broken, which is the bug we are fixing. Establish an explicit mode-count error budget. |
@@ -335,6 +382,33 @@ gap that let this ship.
      evaluate gain through the *same* code path.
   5. Latency: off-axis gain within the <100 ms p95 budget (the spike says this is now easy).
 - **Blocks:** F7. **Depends on:** nothing.
+
+> **✅ P10 DONE 2026-07-15 (branch `feat/p10-off-axis-integrator`, commits `3c2a794`…`e2f401b`).**
+> Exit criteria 1-4 fully met and validated (Task 4 protocol: both Bessel branches, all enabled
+> antennas × bands, dsn_34m X-band 68.96/14.53/−33.29 vs brute-force ground truth). Served path
+> uses the Hankel/Jₘ integrator with the F7 floor OFF (D-2 realized — serve raw PO + honest
+> "idealised levels, not calibrated-grade" warning). Exit criterion 5 (latency) is met near-boresight
+> and for symmetric large dishes, but see **P10-perf** below.
+
+### P10-perf — Azimuthal-mode integrator wide-angle latency (fast-follow) — Effort: M
+
+- **Filed 2026-07-15 by the P10 final review; maintainer chose "ship correctness now, track latency."**
+  The P0 correctness fix (P10) is complete and validated. The **asymmetric** (coma) served path
+  breaches the `<100 ms` p95 target for wide-angle **Ka** on an enabled antenna: `dsn_34m` Ka-band
+  (32 GHz, feed offset 0.15 m) measures 136 ms @2°, 311 ms @5°, ~3.3 s @90° — results are **correct**
+  (`converged=true`), just slow, and wide-angle Ka `/heatmap` is impractical. Root cause: mode count
+  scales with `k·δ = 2π·δ/λ` (~100 rad ⇒ ~194 modes at Ka, not the `δ/f`-based "M≈3–5" estimated at
+  decision time), and `g_m` is built with an O(n_ρ·n_φ·M) direct DFT + O(n_ρ·M²) Bessel loop
+  (`model/integration.rs` ~1114-1138).
+- **Fix (well-understood):** FFT the `g_m` φ'-DFT (O(n_φ·log n_φ)) and compute all `J_m(a)` orders in a
+  single upward/downward recurrence sweep (O(M) not O(M²)). Expected ~1-2 orders of magnitude on the
+  Ka wide-angle case. Guard with the **existing Task 4 validation protocol** (`reference_validation.rs`)
+  so the optimization cannot regress the validated numbers — same result to <0.1 dB.
+- **Also fold in the P10 review minors:** (a) relax the near-null spurious non-convergence warning
+  (absolute-floor on the N-vs-2N check); (b) add a high-order Bessel test near the turning point
+  (`m≈a`, m up to ~200); (c) fix `num_evaluations` to count the ×M mode work.
+- **Depends on:** P10 (done). **Blocks:** nothing (correctness already shipped). Pre-production, so no
+  live SLA is breached today.
 
 ### P2 `[DECISION]` — Seidel higher-order aberration coefficients: verify or fence — Effort: M
 
@@ -1000,7 +1074,12 @@ Phase 2.
 
 ### F7 — Statistical sidelobe envelope/floor model — Effort: M/L (gated on register row F7 **and** reference sidelobe data)
 
-**⛔ PARKED 2026-07-13 — DO NOT MERGE `feat/f7-sidelobe-floor`. BLOCKED ON P10.**
+**✅ UNBLOCKED 2026-07-15 (redesign pending, D-2) — P10 landed and removed the blocker.**
+P10's Hankel / azimuthal-mode integrator fixed the aliasing, so off-axis gain is now numerically
+correct and (per D-2) the served path carries **raw PO with the floor OFF**. F7's remaining scope
+is the redesign — a **replacement** model for the idealised-PO tail beyond a physical θ_valid (not
+a `max()` floor over an aliased pattern) — now properly informed. *History (parked 2026-07-13,
+resolved-by-P10):* **⛔ PARKED 2026-07-13 — DID NOT MERGE `feat/f7-sidelobe-floor`. WAS BLOCKED ON P10.**
 F7 was built on an inverted premise. Its founding claim (modelled sidelobes ~8–13 dB *too low*)
 was measured with `high_accuracy()` on the small 3.7 m dish; the **served** path uses `fast()`,
 where the pattern aliases **20–35 dB too HIGH** (unit **P10**, P0). A floor that only ever
