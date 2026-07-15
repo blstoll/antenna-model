@@ -1037,19 +1037,94 @@ fn enabled_symmetric_bands() -> Vec<(&'static str, &'static str, f64)> {
     ]
 }
 
-/// The served laterally-offset (coma) feeds: `(antenna, feed, freq_hz, (dx, dy))`.
-/// These break azimuthal symmetry and MUST route through the Jm azimuthal-mode
-/// expansion. Offsets are the design lateral displacements from antennas.yaml,
-/// placed at the focal distance (axially focused — the model's auto-refocus
-/// convention) so only the coma remains.
-fn enabled_offset_feeds() -> Vec<(&'static str, &'static str, f64, (f64, f64))> {
+/// The served laterally-offset (coma) feeds:
+/// `(antenna, feed, freq_hz, (dx, dy), cheap)`. These break azimuthal symmetry
+/// and MUST route through the Jm azimuthal-mode expansion. Offsets are the design
+/// lateral displacements from antennas.yaml, placed at the focal distance
+/// (axially focused — the model's auto-refocus convention) so only the coma
+/// remains.
+///
+/// `cheap` marks the electrically-small feeds (D/λ ≲ 320) whose θ=90° mode
+/// expansion is inexpensive; those run in the DEFAULT tier. The large × high-band
+/// feeds (dsn_13m Ka, dsn_34m X/Ka) need up to ~46k radial points × modes at
+/// θ=90° and run only under `--ignored` (spec criterion 6: keep the default set
+/// fast). Both tiers apply the identical assertions — only the antenna set differs.
+#[allow(clippy::type_complexity)] // a flat test fixture list; a struct would only add noise
+fn enabled_offset_feeds() -> Vec<(&'static str, &'static str, f64, (f64, f64), bool)> {
     vec![
-        ("gs_3.7m_uncalibrated", "x_band_feed", 8.0e9, (0.05, 0.0)),
-        ("dsn_13m_uncalibrated", "x_band_uplink", 7.19e9, (0.08, 0.0)),
-        ("dsn_13m_uncalibrated", "ka_band_downlink", 26.0e9, (0.0, 0.08)),
-        ("dsn_34m_uncalibrated", "x_band", 8.4e9, (0.15, 0.0)),
-        ("dsn_34m_uncalibrated", "ka_band", 32.0e9, (0.0, 0.15)),
+        ("gs_3.7m_uncalibrated", "x_band_feed", 8.0e9, (0.05, 0.0), true),
+        ("dsn_13m_uncalibrated", "x_band_uplink", 7.19e9, (0.08, 0.0), true),
+        ("dsn_13m_uncalibrated", "ka_band_downlink", 26.0e9, (0.0, 0.08), false),
+        ("dsn_34m_uncalibrated", "x_band", 8.4e9, (0.15, 0.0), false),
+        ("dsn_34m_uncalibrated", "ka_band", 32.0e9, (0.0, 0.15), false),
     ]
+}
+
+/// Shared coma assertions for one offset feed: the Jm mode path converges (D-6
+/// M-vs-(M+1) self-check) at every angle, the lateral offset depresses the
+/// on-axis gain (squint), the pattern is azimuthally asymmetric (impossible for a
+/// symmetric J0-only aperture), and there is no high backlobe. Used by both the
+/// fast default tier and the `--ignored` expensive tier.
+fn assert_coma_feed_physical(
+    repo: &CalibrationRepository,
+    aid: &str,
+    fid: &str,
+    fhz: f64,
+    dx: f64,
+    dy: f64,
+) {
+    use antenna_model::model::integrate_aperture;
+    let p = integrator_params();
+    let cal = repo.get_calibration(aid, fid).unwrap();
+    let cfg_off = config_for(&cal, Some((dx, dy)));
+    let cfg_sym = config_for(&cal, None);
+
+    // Runtime self-check (D-6): the asymmetric path's `converged` IS the
+    // M-vs-(M+1) mode-truncation agreement. It must report converged.
+    for a_deg in [1.0_f64, 5.0, 20.0, 90.0] {
+        let r = integrate_aperture(deg(a_deg), 0.0, &cfg_off, fhz, &p).unwrap();
+        assert!(
+            r.converged,
+            "{aid}/{fid} @ {a_deg}°: mode expansion NOT converged (err={:.3e})",
+            r.error_estimate
+        );
+    }
+
+    // Coma physics 1: the lateral offset squints the beam, depressing the ON-AXIS
+    // (θ=0) gain far below the symmetric peak — proof the mode path carries the
+    // feed-displacement phase (not a symmetric fast path).
+    let g_off = |d: f64, ph: f64| compute_gain_db(deg(d), ph, &cfg_off, fhz, &p).unwrap().gain;
+    let peak_sym = compute_gain_db(0.0, 0.0, &cfg_sym, fhz, &p).unwrap().gain;
+    let on_axis_off = g_off(0.0, 0.0);
+    assert!(
+        on_axis_off < peak_sym - 3.0,
+        "{aid}/{fid}: offset on-axis {on_axis_off:.2} not depressed vs symmetric peak {peak_sym:.2} — coma absent"
+    );
+
+    // Coma physics 2: azimuthal asymmetry — the +offset half-plane (φ aligned with
+    // the offset) differs from the −offset half-plane off-axis. Impossible for a
+    // symmetric (J0-only) aperture.
+    let phi_plus = dy.atan2(dx); // azimuth of the offset direction
+    let phi_minus = phi_plus + PI;
+    let asym_deg = 2.0;
+    let gp = g_off(asym_deg, phi_plus);
+    let gm = g_off(asym_deg, phi_minus);
+    assert!(
+        (gp - gm).abs() > 0.2,
+        "{aid}/{fid}: no coma asymmetry at {asym_deg}° (+dir {gp:.2} vs −dir {gm:.2})"
+    );
+
+    // Plausibility: no high backlobe relative to the (squinted) true peak.
+    let g90 = g_off(90.0, phi_plus);
+    assert!(
+        g90 < peak_sym - 30.0,
+        "{aid}/{fid}: 90° {g90:.2} not 30 dB below the (symmetric) peak {peak_sym:.2}"
+    );
+    println!(
+        "{aid:<22} {fid:<16} off_peak={on_axis_off:>7.2} sym_peak={peak_sym:>7.2} \
+         asym@2°={:>6.2} 90°={g90:>7.2}",
+        gp - gm
+    );
 }
 
 /// Build a physics config with the feed AT FOCUS plus an optional lateral offset
@@ -1283,62 +1358,34 @@ fn p10_production_matches_independent_hankel_oracle_small_and_large() {
 // ---------------------------------------------------------------------------
 #[test]
 fn p10_offset_feed_coma_converges_and_is_physical() {
-    use antenna_model::model::integrate_aperture;
+    // DEFAULT tier: the cheap offset feeds (gs_3.7m X, dsn_13m X-uplink; D/λ ≲ 320)
+    // guard the Jm coma path, the convergence self-check, and coma asymmetry on
+    // every CI run. The electrically-large × high-band feeds run under --ignored
+    // (see p10_offset_feed_coma_wide_angle_large_dish) — the identical assertions,
+    // but their θ=90° mode expansion is too slow for the default set.
     let repo = load_real_repository();
-    let p = integrator_params();
-
-    println!("\n=== P10 coma / offset-feed antennas (Jm mode expansion) ===");
-    for (aid, fid, fhz, (dx, dy)) in enabled_offset_feeds() {
-        let cal = repo.get_calibration(aid, fid).unwrap();
-        let cfg_off = config_for(&cal, Some((dx, dy)));
-        let cfg_sym = config_for(&cal, None);
-
-        // Runtime self-check (D-6): the asymmetric path's `converged` IS the
-        // M-vs-(M+1) mode-truncation agreement. It must report converged.
-        for a_deg in [1.0_f64, 5.0, 20.0, 90.0] {
-            let r = integrate_aperture(deg(a_deg), 0.0, &cfg_off, fhz, &p).unwrap();
-            assert!(
-                r.converged,
-                "{aid}/{fid} @ {a_deg}°: mode expansion NOT converged (err={:.3e})",
-                r.error_estimate
-            );
+    println!("\n=== P10 coma / offset-feed antennas (Jm mode expansion) — fast tier ===");
+    for (aid, fid, fhz, (dx, dy), cheap) in enabled_offset_feeds() {
+        if cheap {
+            assert_coma_feed_physical(&repo, aid, fid, fhz, dx, dy);
         }
+    }
+}
 
-        // Coma physics 1: the lateral offset squints the beam, depressing the
-        // ON-AXIS (θ=0) gain far below the symmetric peak — proof the mode path
-        // carries the feed-displacement phase (not a symmetric fast path).
-        let g_off = |d: f64, ph: f64| compute_gain_db(deg(d), ph, &cfg_off, fhz, &p).unwrap().gain;
-        let peak_sym = compute_gain_db(0.0, 0.0, &cfg_sym, fhz, &p).unwrap().gain;
-        let on_axis_off = g_off(0.0, 0.0);
-        assert!(
-            on_axis_off < peak_sym - 3.0,
-            "{aid}/{fid}: offset on-axis {on_axis_off:.2} not depressed vs symmetric peak {peak_sym:.2} — coma absent"
-        );
-
-        // Coma physics 2: azimuthal asymmetry — the +offset half-plane (φ aligned
-        // with the offset) differs from the −offset half-plane off-axis. This is
-        // impossible for a symmetric (J0-only) aperture.
-        let phi_plus = dy.atan2(dx); // azimuth of the offset direction
-        let phi_minus = phi_plus + PI;
-        let asym_deg = 2.0;
-        let gp = g_off(asym_deg, phi_plus);
-        let gm = g_off(asym_deg, phi_minus);
-        assert!(
-            (gp - gm).abs() > 0.2,
-            "{aid}/{fid}: no coma asymmetry at {asym_deg}° (+dir {gp:.2} vs −dir {gm:.2})"
-        );
-
-        // Plausibility: no high backlobe relative to the (squinted) true peak.
-        let g90 = g_off(90.0, phi_plus);
-        assert!(
-            g90 < peak_sym - 30.0,
-            "{aid}/{fid}: 90° {g90:.2} not 30 dB below the (symmetric) peak {peak_sym:.2}"
-        );
-        println!(
-            "{aid:<22} {fid:<16} off_peak={on_axis_off:>7.2} sym_peak={peak_sym:>7.2} \
-             asym@2°={:>6.2} 90°={g90:>7.2}",
-            gp - gm
-        );
+/// AC4 (expensive tier) — the same coma assertions on the electrically-large,
+/// high-band offset feeds (dsn_13m Ka, dsn_34m X/Ka). #[ignore]d for COST, not
+/// flakiness: dsn_34m Ka-band (32 GHz) at θ=90° needs ~46k radial points × the Jm
+/// mode sum (~7.5M integrand evals for a single point), which dominates the suite
+/// wall-clock in a debug build. Run on demand with `--ignored`.
+#[test]
+#[ignore = "P10 large-dish × high-band coma legs — dsn_34m Ka θ=90° needs ~46k radial pts × modes; run with --ignored"]
+fn p10_offset_feed_coma_wide_angle_large_dish() {
+    let repo = load_real_repository();
+    println!("\n=== P10 coma / offset-feed antennas (Jm mode expansion) — large-dish tier ===");
+    for (aid, fid, fhz, (dx, dy), cheap) in enabled_offset_feeds() {
+        if !cheap {
+            assert_coma_feed_physical(&repo, aid, fid, fhz, dx, dy);
+        }
     }
 }
 
