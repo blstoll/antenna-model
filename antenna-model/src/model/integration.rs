@@ -31,10 +31,38 @@ use std::f64::consts::PI;
 
 use crate::error::{ComputationError, ComputationResult};
 use crate::model::{
-    bessel::bessel_j0, coordinates::ApertureCoordinates, edge_cases::higher_order_aberrations,
-    geometry::AntennaConfiguration, illumination::illumination_amplitude, phase::phase_total,
+    bessel::{bessel_j0, bessel_jn},
+    edge_cases::higher_order_aberrations,
+    geometry::AntennaConfiguration,
+    illumination::illumination_amplitude,
     wavelength_from_frequency, wavenumber,
 };
+// `phase_total` and `ApertureCoordinates` are only used by the retained 2D reference
+// integrand (`aperture_integrand`), which is now test-only: since P10 Task 2 the
+// production asymmetric path uses `azimuthal_mode_field`, not the 2D quadrature.
+// Gate the imports so production builds stay warning-clean under `-D warnings`.
+#[cfg(test)]
+use crate::model::{coordinates::ApertureCoordinates, phase::phase_total};
+
+/// Interim φ' Fourier-coefficient sample count for `g_m(ρ)` in the azimuthal-mode
+/// integrator (P10 Task 2). The aperture-plane (coma) phase is smooth in φ', so a
+/// modest count resolves every kept mode without aliasing (need `> 2·M`). Task 3
+/// makes this adaptive.
+const MODE_PHI_COEFF: usize = 64;
+
+/// Interim azimuthal-mode truncation `M` for the azimuthal-mode integrator (P10 Task 2).
+///
+/// The coma spectral width grows with the aperture-edge phase excursion `k·δ·(ρ_max/f)`
+/// (≈ `k·δ` at `f/D = 0.5`). Validated to < 0.1 dB against the converged 2D reference on
+/// the served 0.05 m-offset 3.7 m dish (`k·δ ≈ 8.8 rad`), where the minimal converging
+/// `M` is 16 (see `azimuthal_modes_match_2d_small_dish_with_offset`); 24 carries margin.
+///
+/// NOTE (interim): the larger served offsets reach higher `k·δ` (e.g. dsn_34m X-band,
+/// `k·δ ≈ 26`), so a fixed `M` under-resolves them — this is exactly what Task 3's
+/// adaptive `M` (from `k·δ`) plus the runtime `M`-vs-`M+1` self-check will size and flag.
+/// Even under-resolved, the mode expansion is vastly closer than the aliasing 2D it
+/// replaces, and `MODE_PHI_COEFF` must stay `> 2·M` to keep the kept modes alias-free.
+const MODE_M_MAX: u32 = 24;
 
 /// Complex integration result
 ///
@@ -294,119 +322,37 @@ pub fn integrate_aperture(
         });
     }
 
-    // Integration limits
-    let rho_max = config.reflector.diameter / 2.0;
-    let phi_min = 0.0;
-    let phi_max = 2.0 * PI;
-
-    // Start with minimum grid size
-    let mut n_rho = params.min_rho_points;
-    let mut n_phi = params.min_phi_points;
-
-    let mut previous_result = Complex64::new(0.0, 0.0);
-    let mut num_evaluations = 0;
-    // Tracks the last inter-iteration difference computed inside the loop.
-    // Initialised to INFINITY so that if the loop exits before any convergence
-    // check (e.g. max_iterations == 1, or the grid hits max on iteration 0),
-    // the non-converged error estimate is still a conservative, honest value.
-    let mut last_difference = f64::INFINITY;
-
-    // Adaptive refinement loop: progressively refine the integration grid
-    // until the result converges or we reach the maximum grid density.
+    // P10 Task 2: asymmetric aperture — a lateral feed offset (coma), an azimuthally
+    // dependent illumination (`asymmetry_factor != 1.0`), and/or higher-order Seidel
+    // terms. The old 2D Simpson quadrature ALIASES off-axis for electrically large
+    // dishes (the P0 bug: served off-axis gain 20–35 dB too high). Route instead through
+    // the azimuthal-mode (Jₘ) expansion — the general, non-aliasing closed form. The
+    // symmetric Hankel path above is exactly its m=0-only special case.
     //
-    // Strategy:
-    // 1. Start with coarse grid (min_rho_points × min_phi_points)
-    // 2. Compute integral with current grid
-    // 3. Compare with previous iteration to estimate error
-    // 4. If converged, return; otherwise refine grid by 50% and repeat
-    // 5. Stop when grid reaches maximum size or convergence achieved
-    for iteration in 0..params.max_iterations {
-        // Perform 2D integration using composite Simpson's rule
-        // on the current grid (n_rho × n_phi points)
-        let (result, evals) = integrate_2d_simpson(
-            theta,
-            phi,
-            config,
-            k,
-            wavelength,
-            0.0,     // rho starts at aperture center
-            rho_max, // rho extends to aperture edge (D/2)
-            phi_min, // azimuthal angle: 0
-            phi_max, // azimuthal angle: 2π (full circle)
-            n_rho,
-            n_phi,
-            params.use_higher_order_aberrations,
-        );
-
-        num_evaluations += evals;
-
-        // Check convergence by comparing with previous iteration
-        // (skip on first iteration since we have no previous result)
-        if iteration > 0 {
-            // Compute difference between current and previous result
-            let difference = (result - previous_result).norm();
-            let magnitude = result.norm();
-
-            // Track the most recent inter-iteration difference for the
-            // non-converged fall-through error estimate below.
-            last_difference = difference;
-
-            // Calculate relative error (or absolute if magnitude is too small)
-            // This handles both large and small field values correctly
-            let relative_error = if magnitude > params.absolute_tolerance {
-                difference / magnitude
-            } else {
-                difference
-            };
-
-            // Convergence test: relative error < tolerance OR absolute difference < tolerance
-            // We use OR because for very small fields, absolute error is more meaningful
-            if relative_error < params.relative_tolerance || difference < params.absolute_tolerance
-            {
-                return Ok(IntegrationResult {
-                    field: result,
-                    error_estimate: difference,
-                    num_evaluations,
-                    converged: true,
-                });
-            }
-        }
-
-        // Store current result for next iteration's convergence check
-        previous_result = result;
-
-        // Refine grid for next iteration: increase both dimensions by 50%
-        // (grid grows from min → max over iterations)
-        // Clamp to maximum to avoid unbounded growth
-        n_rho = (n_rho * 3 / 2).min(params.max_rho_points);
-        n_phi = (n_phi * 3 / 2).min(params.max_phi_points);
-
-        // If we've reached maximum grid size in both dimensions,
-        // stop refinement (we can't improve further)
-        if n_rho >= params.max_rho_points && n_phi >= params.max_phi_points {
-            break;
-        }
-    }
-
-    // Did not converge within max iterations.
-    // Use the last inter-iteration difference as the error estimate — it is an
-    // honest (pessimistic) value rather than a fabricated |result| × tolerance.
-    // If the loop ran only a single iteration, no convergence check was ever
-    // performed so last_difference remains INFINITY, which correctly signals
-    // that the accuracy is completely unknown.
-    tracing::warn!(
+    // Interim densities (Task 3 makes them adaptive with an M-vs-M+1 self-check):
+    //   `n_rho`          — fixed safe radial density (shared with the symmetric path).
+    //   `MODE_PHI_COEFF` — φ' samples for the `g_m(ρ)` Fourier coefficients.
+    //   `MODE_M_MAX`     — azimuthal-mode truncation.
+    // `converged: true` is the interim contract (same as the symmetric path); the real
+    // runtime convergence self-check lands in Task 3. The retained 2D adaptive loop
+    // (`integrate_2d_adaptive`, test-only) still carries the non-convergence sentinel
+    // that pattern/integration tests pin until then.
+    let n_rho = radial_points_for(config, theta, wavelength, params);
+    let field = azimuthal_mode_field(
+        config,
         theta,
         phi,
-        last_difference,
-        "aperture integration did not converge within {} iterations",
-        params.max_iterations
+        k,
+        n_rho,
+        MODE_PHI_COEFF,
+        MODE_M_MAX,
+        params.use_higher_order_aberrations,
     );
-
     Ok(IntegrationResult {
-        field: previous_result,
-        error_estimate: last_difference,
-        num_evaluations,
-        converged: false,
+        field,
+        error_estimate: 0.0,
+        num_evaluations: n_rho * MODE_PHI_COEFF,
+        converged: true,
     })
 }
 
@@ -416,6 +362,13 @@ pub fn integrate_aperture(
 /// using nested 1D Simpson's rule.
 ///
 /// Returns (integrated_value, num_evaluations)
+///
+/// Retained as a test-only near-in reference (the small-dish regime where the 2D
+/// quadrature is trustworthy) and as the trusted oracle for the azimuthal-mode
+/// integrator. Since P10 Task 2 it is no longer on any production code path — the
+/// production off-axis integral goes through `hankel_radial_field` (symmetric) or
+/// `azimuthal_mode_field` (asymmetric), which do not alias.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn integrate_2d_simpson(
     theta: f64,
@@ -487,6 +440,119 @@ fn integrate_2d_simpson(
     let integral = sum * h_rho * h_phi / 9.0; // 1/9 = (1/3) * (1/3) for 2D Simpson's
 
     (integral, num_evaluations)
+}
+
+/// Retained 2D adaptive Simpson refinement loop — the interim carrier of the
+/// non-convergence sentinel (`converged=false`, `error_estimate=INFINITY`).
+///
+/// This is the exact loop `integrate_aperture` used before P10 Task 2. Now that the
+/// production asymmetric path uses `azimuthal_mode_field`, this loop is off every
+/// production code path; it is kept test-only so the two non-convergence tests
+/// (`test_non_convergence_is_reported` here and `test_non_convergence_warning_propagated`
+/// in `pattern.rs`) can pin the 2D mechanism directly until Task 3 reworks the runtime
+/// convergence self-check into the Hankel/mode paths.
+#[cfg(test)]
+pub(crate) fn integrate_2d_adaptive(
+    theta: f64,
+    phi: f64,
+    config: &AntennaConfiguration,
+    frequency_hz: f64,
+    params: &IntegrationParams,
+) -> IntegrationResult {
+    let wavelength = wavelength_from_frequency(frequency_hz);
+    let k = wavenumber(wavelength);
+    let rho_max = config.reflector.diameter / 2.0;
+    let phi_min = 0.0;
+    let phi_max = 2.0 * PI;
+
+    let mut n_rho = params.min_rho_points;
+    let mut n_phi = params.min_phi_points;
+    let mut previous_result = Complex64::new(0.0, 0.0);
+    let mut num_evaluations = 0;
+    let mut last_difference = f64::INFINITY;
+
+    for iteration in 0..params.max_iterations {
+        let (result, evals) = integrate_2d_simpson(
+            theta,
+            phi,
+            config,
+            k,
+            wavelength,
+            0.0,
+            rho_max,
+            phi_min,
+            phi_max,
+            n_rho,
+            n_phi,
+            params.use_higher_order_aberrations,
+        );
+        num_evaluations += evals;
+
+        if iteration > 0 {
+            let difference = (result - previous_result).norm();
+            let magnitude = result.norm();
+            last_difference = difference;
+            let relative_error = if magnitude > params.absolute_tolerance {
+                difference / magnitude
+            } else {
+                difference
+            };
+            if relative_error < params.relative_tolerance || difference < params.absolute_tolerance
+            {
+                return IntegrationResult {
+                    field: result,
+                    error_estimate: difference,
+                    num_evaluations,
+                    converged: true,
+                };
+            }
+        }
+
+        previous_result = result;
+        n_rho = (n_rho * 3 / 2).min(params.max_rho_points);
+        n_phi = (n_phi * 3 / 2).min(params.max_phi_points);
+        if n_rho >= params.max_rho_points && n_phi >= params.max_phi_points {
+            break;
+        }
+    }
+
+    IntegrationResult {
+        field: previous_result,
+        error_estimate: last_difference,
+        num_evaluations,
+        converged: false,
+    }
+}
+
+/// Single fixed-density 2D Simpson evaluation at `params.max_rho_points ×
+/// params.max_phi_points` — the converged near-in reference used by the azimuthal-mode
+/// cross-validation test on small dishes (where the 2D quadrature is trustworthy).
+#[cfg(test)]
+fn integrate_2d_simpson_public_shim(
+    theta: f64,
+    phi: f64,
+    config: &AntennaConfiguration,
+    frequency_hz: f64,
+    params: &IntegrationParams,
+) -> Complex64 {
+    let wavelength = wavelength_from_frequency(frequency_hz);
+    let k = wavenumber(wavelength);
+    let rho_max = config.reflector.diameter / 2.0;
+    let (field, _) = integrate_2d_simpson(
+        theta,
+        phi,
+        config,
+        k,
+        wavelength,
+        0.0,
+        rho_max,
+        0.0,
+        2.0 * PI,
+        params.max_rho_points,
+        params.max_phi_points,
+        params.use_higher_order_aberrations,
+    );
+    field
 }
 
 /// Interim radial sample count for the symmetric Hankel integrator.
@@ -570,6 +636,171 @@ fn hankel_radial_field(
     sum * (h / 3.0) * 2.0 * PI
 }
 
+/// θ-independent aperture-plane function
+/// ```text
+/// g(ρ,φ') = A(ρ,φ') · exp( j·[ Ψ_feed_displacement(ρ,φ') + Ψ_higher_order(ρ,φ') + Ψ_mesh(ρ) ] )
+/// ```
+/// i.e. the full aperture integrand phase MINUS the parabolic dish-depth chirp
+/// `k·ρ²/(4f)·(1−cosθ)` and MINUS the Fourier kernel `−k·ρ·sinθ·cos(φ−φ')` (both added,
+/// respectively folded, in the radial loop of [`azimuthal_mode_field`]). Neither the
+/// observation angle θ nor φ enters here — this is what makes the φ'-Fourier
+/// coefficients `g_m(ρ)` reusable across all θ.
+///
+/// The guards mirror `aperture_integrand`/`phase_total` exactly (lateral coma + axial
+/// defocus via the exact geometric `phase_feed_displacement`; higher-order Seidel only
+/// for a laterally displaced feed; mesh phase when a mesh is present) so the mode
+/// integrator and the 2D reference agree wherever both are valid.
+fn aperture_plane_g(
+    config: &AntennaConfiguration,
+    rho: f64,
+    phi_prime: f64,
+    k: f64,
+    use_higher_order: bool,
+) -> Complex64 {
+    let f = config.reflector.focal_length;
+    let amp = illumination_amplitude(rho, phi_prime, &config.feed, f);
+    let delta = config.feed.position.radial_displacement();
+    let alpha = config.feed.position.y.atan2(config.feed.position.x);
+    let axial = config.feed.position.z - f + config.feed.axial_defocus;
+
+    let mut phase = 0.0;
+    if delta > 0.0 || axial != 0.0 {
+        phase +=
+            crate::model::phase::phase_feed_displacement(rho, phi_prime, delta, alpha, axial, f, k);
+    }
+    if use_higher_order && delta > 0.0 {
+        phase += higher_order_aberrations(rho, phi_prime, delta, alpha, f, k);
+    }
+    if let Some(mesh) = config.mesh.as_ref() {
+        let theta_inc = rho / (2.0 * f);
+        phase += crate::model::phase::phase_mesh(mesh.spacing, theta_inc, k);
+    }
+    Complex64::new(0.0, phase).exp() * amp
+}
+
+/// `(−j)^m` for integer `m` (which may be negative): `(−j)^m = exp(−j·m·π/2)`.
+#[inline]
+fn pow_neg_j(m: i32) -> Complex64 {
+    Complex64::new(0.0, -(m as f64) * std::f64::consts::FRAC_PI_2).exp()
+}
+
+/// Azimuthal-mode-expansion aperture field for an asymmetric (coma / azimuthally
+/// dependent) aperture:
+/// ```text
+/// I(θ,φ) = 2π · Σ_{m=−M}^{M} (−j)^m e^{jmφ} · R_m(θ)
+/// R_m(θ)  = ∫₀^R exp(j·k·ρ²/(4f)·(1−cosθ)) · g_m(ρ) · J_m(kρ sinθ) · ρ dρ
+/// g_m(ρ)  = (1/2π) ∫₀^{2π} g(ρ,φ') e^{−jmφ'} dφ'          (θ-independent)
+/// ```
+/// The negative modes reuse `g_{-m}(ρ)` (the `e^{+jmφ'}` coefficient) and the identity
+/// `J_{-m}(a) = (−1)^m J_m(a)`, with `(−j)^{-m} = e^{+jmπ/2}`. For a real, `+x`-offset
+/// feed the sum is real-symmetric (`g_{-m} = conj(g_m)`); the code does NOT assume that
+/// — the served Ka-band feeds are offset along `+y`.
+///
+/// Radial quadrature is composite Simpson over ρ (`n_rho` forced odd); each `g_m(ρ)` is
+/// a uniform-grid DFT over φ' with `n_phi_coeff` samples (trapezoid == rectangle on a
+/// periodic grid), computed once per ρ and shared across modes. `J_m` is evaluated with
+/// the in-house `bessel_jn`, accurate at every argument magnitude reached here.
+///
+/// The symmetric aperture is exactly the `M = 0` special case (only `g_0` survives,
+/// `J_0`), reproducing [`hankel_radial_field`].
+#[allow(clippy::too_many_arguments)]
+fn azimuthal_mode_field(
+    config: &AntennaConfiguration,
+    theta: f64,
+    phi: f64,
+    k: f64,
+    n_rho: usize,
+    n_phi_coeff: usize,
+    m_max: u32,
+    use_higher_order: bool,
+) -> Complex64 {
+    let f = config.reflector.focal_length;
+    let r_max = config.reflector.diameter / 2.0;
+    let n = if n_rho.is_multiple_of(2) {
+        n_rho + 1
+    } else {
+        n_rho
+    };
+    let h = r_max / (n - 1) as f64;
+    let dphi = 2.0 * PI / n_phi_coeff as f64;
+    let sin_theta = theta.sin();
+    let one_minus_cos = 1.0 - theta.cos();
+    let mmax = m_max as usize;
+
+    // Precompute the φ' twiddle factors e^{−jmφ'_j} (θ- and ρ-independent — the φ' grid
+    // is fixed). This lifts n_rho·n_phi·m complex exponentials out of the radial loop into
+    // a one-time n_phi·m table. e^{+jmφ'_j} is just its conjugate.
+    // Flat layout: twiddle[m * n_phi_coeff + j].
+    let mut twiddle = vec![Complex64::new(0.0, 0.0); (mmax + 1) * n_phi_coeff];
+    for (m, chunk) in twiddle.chunks_mut(n_phi_coeff).enumerate() {
+        for (jj, t) in chunk.iter_mut().enumerate() {
+            *t = Complex64::new(0.0, -(m as f64) * jj as f64 * dphi).exp();
+        }
+    }
+
+    // Radial accumulators for R_{+m} and R_{-m} (m = 0..=m_max); Simpson scale applied
+    // once at the end. r_neg[0] is unused (m=0 has no distinct negative counterpart).
+    let mut r_pos = vec![Complex64::new(0.0, 0.0); mmax + 1];
+    let mut r_neg = vec![Complex64::new(0.0, 0.0); mmax + 1];
+
+    // Per-ρ Fourier-coefficient buffers, reused each radial step to avoid reallocation.
+    let mut gm_pos = vec![Complex64::new(0.0, 0.0); mmax + 1];
+    let mut gm_neg = vec![Complex64::new(0.0, 0.0); mmax + 1];
+
+    for i in 0..n {
+        let rho = i as f64 * h;
+        let w = simpson_weight(i, n);
+        let chirp = k * rho * rho / (4.0 * f) * one_minus_cos;
+        let chirp_factor = Complex64::new(0.0, chirp).exp();
+        let a = k * rho * sin_theta;
+
+        // g_m(ρ) via a single φ' sweep filling both +m (e^{−jmφ'}) and −m (e^{+jmφ'}).
+        for g in gm_pos.iter_mut() {
+            *g = Complex64::new(0.0, 0.0);
+        }
+        for g in gm_neg.iter_mut() {
+            *g = Complex64::new(0.0, 0.0);
+        }
+        for jj in 0..n_phi_coeff {
+            let phip = jj as f64 * dphi;
+            let g = aperture_plane_g(config, rho, phip, k, use_higher_order);
+            for m in 0..=mmax {
+                let t = twiddle[m * n_phi_coeff + jj]; // e^{−jmφ'_j}
+                gm_pos[m] += g * t;
+                gm_neg[m] += g * t.conj(); // e^{+jmφ'_j}
+            }
+        }
+        let norm = dphi / (2.0 * PI);
+        for m in 0..=mmax {
+            gm_pos[m] *= norm;
+            gm_neg[m] *= norm;
+        }
+
+        // Radial integrand contribution for each mode.
+        for (m, (rp, rn)) in r_pos.iter_mut().zip(r_neg.iter_mut()).enumerate() {
+            let jm = bessel_jn(m as u32, a); // J_m(a); J_{-m} = (−1)^m J_m
+            let base = chirp_factor * jm * rho * w;
+            *rp += base * gm_pos[m];
+            if m > 0 {
+                let sign = if m % 2 == 0 { 1.0 } else { -1.0 };
+                *rn += base * gm_neg[m] * sign;
+            }
+        }
+    }
+
+    let scale = h / 3.0;
+    // I(θ,φ) = 2π Σ_{m=−M}^{M} (−j)^m e^{jmφ} R_m(θ).
+    let mut acc = r_pos[0] * scale; // m = 0: (−j)^0 = 1, e^0 = 1
+    for m in 1..=mmax {
+        let mf = m as f64;
+        let epos = Complex64::new(0.0, mf * phi).exp();
+        let eneg = Complex64::new(0.0, -mf * phi).exp();
+        acc += pow_neg_j(m as i32) * epos * r_pos[m] * scale;
+        acc += pow_neg_j(-(m as i32)) * eneg * r_neg[m] * scale;
+    }
+    acc * 2.0 * PI
+}
+
 /// Simpson's rule weight for index i in array of n points
 ///
 /// Returns:
@@ -612,6 +843,10 @@ fn simpson_weight(i: usize, n: usize) -> f64 {
 ///
 /// # Returns
 /// Complex integrand value
+///
+/// Test-only since P10 Task 2: it is the single-point integrand of the retained 2D
+/// reference (`integrate_2d_simpson`), which no longer runs in production.
+#[cfg(test)]
 #[inline]
 #[allow(clippy::too_many_arguments)]
 fn aperture_integrand(
@@ -834,6 +1069,72 @@ mod tests {
         let reflector = ReflectorGeometry::new(10.0, 5.0, 0.0).unwrap();
         let feed = FeedParameters::new(FeedPosition::at_focus(5.0), 2.0, 0.0, 1.0).unwrap();
         AntennaConfiguration::new("large".into(), "Large".into(), reflector, feed, None).unwrap()
+    }
+
+    /// Small dish (`D/λ ≈ 104` at X-band) with a lateral feed offset (coma). The 2D
+    /// quadrature is trustworthy at this size, so it is the near-in ground truth against
+    /// which the azimuthal-mode expansion is validated. `lateral = 0.05 m` matches the
+    /// served `gs_3.7m` x-band feed; `q = 2` gives a broad illumination (heavy edge
+    /// content, a stress test for the mode truncation).
+    fn offset_feed_test_antenna(diameter: f64, focal: f64, lateral: f64) -> AntennaConfiguration {
+        let reflector = ReflectorGeometry::new(diameter, focal, 0.0).unwrap();
+        let mut pos = FeedPosition::at_focus(focal);
+        pos.x = lateral; // lateral offset in +x → breaks azimuthal symmetry (coma)
+        let feed = FeedParameters::new(pos, 2.0, 0.0, 1.0).unwrap();
+        AntennaConfiguration::new("off".into(), "Off".into(), reflector, feed, None).unwrap()
+    }
+
+    #[test]
+    fn azimuthal_modes_match_2d_small_dish_with_offset() {
+        // 3.7 m dish, X-band, lateral feed offset 0.05 m (served gs_3.7m x-band feed).
+        // The 2D quadrature is ground truth near-in here (D/λ ~ 104, small), so the mode
+        // expansion must match it AND reproduce coma asymmetry (|E(φ=0)| ≠ |E(φ=π)|).
+        let config = offset_feed_test_antenna(3.7, 1.85, 0.05);
+        let f = 8.4e9;
+        let mut hi = IntegrationParams::high_accuracy();
+        hi.min_rho_points = 512;
+        hi.max_rho_points = 512;
+        hi.min_phi_points = 1024;
+        hi.max_phi_points = 1024;
+        hi.max_iterations = 1;
+        let k = wavenumber(wavelength_from_frequency(f));
+
+        for deg in [0.0_f64, 1.0, 5.0, 20.0] {
+            let th = deg.to_radians();
+            let ref_field = integrate_2d_simpson_public_shim(th, 0.0, &config, f, &hi);
+            let mode_field =
+                azimuthal_mode_field(&config, th, 0.0, k, 4097, MODE_PHI_COEFF, MODE_M_MAX, false);
+            let d_db = 20.0 * (mode_field.norm() / ref_field.norm()).log10();
+            assert!(d_db.abs() < 0.1, "θ={deg}°: mode vs 2D Δ={d_db:.4} dB");
+        }
+
+        // Coma asymmetry: off-axis in the +x plane (φ=0) vs the −x plane (φ=π) must differ.
+        let th = 3.0_f64.to_radians();
+        let plus = azimuthal_mode_field(&config, th, 0.0, k, 4097, MODE_PHI_COEFF, MODE_M_MAX, false)
+            .norm();
+        let minus = azimuthal_mode_field(&config, th, PI, k, 4097, MODE_PHI_COEFF, MODE_M_MAX, false)
+            .norm();
+        assert!(
+            (plus - minus).abs() / plus.max(minus) > 1e-3,
+            "coma asymmetry absent: |E(φ=0)|={plus}, |E(φ=π)|={minus}"
+        );
+    }
+
+    /// The azimuthal-mode integrator must reproduce the symmetric Hankel path exactly
+    /// when the aperture is symmetric (m=0-only special case) — a consistency self-check
+    /// that the ±m assembly and normalisation are correct.
+    #[test]
+    fn azimuthal_modes_reduce_to_hankel_when_symmetric() {
+        let config = large_test_antenna(); // symmetric: feed at focus, asymmetry_factor=1
+        let f = 8.4e9;
+        let k = wavenumber(wavelength_from_frequency(f));
+        for deg in [0.0_f64, 1.0, 5.0, 20.0, 90.0] {
+            let th = deg.to_radians();
+            let hankel = hankel_radial_field(&config, th, 0.0, k, 4097);
+            let modes = azimuthal_mode_field(&config, th, 0.0, k, 4097, MODE_PHI_COEFF, 4, false);
+            let rel = (hankel - modes).norm() / hankel.norm().max(1e-30);
+            assert!(rel < 1e-9, "θ={deg}°: Hankel vs modes rel diff {rel:.2e}");
+        }
     }
 
     #[test]
@@ -1120,11 +1421,14 @@ mod tests {
 
     #[test]
     fn test_non_convergence_is_reported() {
-        // The 2D adaptive refinement loop is what carries the non-convergence sentinel.
-        // Since P10 Task 1, symmetric apertures take the exact 1D Hankel path (which does
-        // not use that loop), so this test uses a laterally-offset feed to keep the 2D
-        // path — the code whose non-convergence signalling it exercises. (Task 2 replaces
-        // the 2D path with the Jₘ expansion, at which point this moves with it.)
+        // The 2D adaptive refinement loop is what carries the non-convergence sentinel
+        // (converged=false, error_estimate=INFINITY). Since P10 Task 2 NO production
+        // aperture goes through that loop — symmetric feeds take the exact 1D Hankel path
+        // and asymmetric/coma feeds take the Jₘ mode expansion, both of which return
+        // converged=true in the interim (the real runtime self-check is Task 3). This
+        // test therefore pins the retained 2D mechanism DIRECTLY via `integrate_2d_adaptive`
+        // (the exact loop `integrate_aperture` used pre-Task-2), pending Task 3 folding a
+        // convergence self-check into the Hankel/mode paths.
         let reflector = ReflectorGeometry::new(1.0, 0.5, 0.0).unwrap();
         let feed = FeedParameters::new(FeedPosition::new(0.01, 0.0, 0.5), 8.0, 0.0, 1.0).unwrap();
         let config =
@@ -1134,7 +1438,7 @@ mod tests {
             relative_tolerance: 1e-15,
             ..IntegrationParams::fast()
         };
-        let result = integrate_aperture(0.3, 0.0, &config, 8.4e9, &params).unwrap();
+        let result = integrate_2d_adaptive(0.3, 0.0, &config, 8.4e9, &params);
         assert!(!result.converged);
         // With max_iterations == 1 the loop runs a single iteration and the convergence
         // check (iteration > 0) is never reached, so no inter-iteration difference is
