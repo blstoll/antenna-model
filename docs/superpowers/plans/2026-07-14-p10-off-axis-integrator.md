@@ -8,6 +8,14 @@
 
 **Tech Stack:** Rust, `num_complex::Complex64`, existing `model/phase.rs` + `model/illumination.rs`, Simpson's rule. No new dependencies (in-house Bessel functions, matching the repo's no-BLAS pure-Rust rule).
 
+> **STATUS 2026-07-15 — all 7 tasks COMPLETE and merged onto `feat/p10-off-axis-integrator` (commits `3c2a794`…`e2f401b`). Final whole-branch review: integrator math verified CORRECT end-to-end; P0 aliasing bug fixed and validated (Task 4 protocol, both Bessel branches, all enabled antennas × bands). Follow-ups filed below.**
+>
+> **Post-implementation review findings (final review, 2026-07-15):**
+> - **[IMPORTANT — latency follow-up] Wide-angle Ka on the asymmetric path breaches the <100 ms p95 target for an enabled antenna.** `dsn_34m` Ka-band (32 GHz, feed offset 0.15 m) needs ~194 azimuthal modes because mode count scales with `k·δ = 2π·δ/λ` (~100 rad at Ka), NOT with `δ/f` (the D-1 "M≈3–5" estimate held for `δ/f` but missed the `k·δ` scaling). Measured: 136 ms @2°, 311 ms @5°, ~3.3 s @90° — correct results (`converged=true`), just slow; wide-angle Ka heatmaps are impractical. Root cause: `g_m` is an O(n_ρ·n_φ·M) direct DFT + O(n_ρ·M²) Bessel loop (`integration.rs` ~1114-1138). Fix (well-understood, deferred to a separate optimization unit so the validated integrator isn't destabilized): FFT the `g_m` DFT (O(n_φ log n_φ)) + compute all `J_m(a)` orders in one recurrence sweep (O(M) not O(M²)). Near-boresight (common tracking case) and symmetric large dishes (GBT Q-band, 11 ms) are within budget. Pre-production (no consumers yet), so acceptable to track as fast-follow.
+> - **[Minor] Near-null spurious non-convergence warning:** at a deep pattern null the N-vs-2N relative diff can exceed 2% from cancellation, emitting `INTEGRATION_NONCONVERGENCE_WARNING` though the value is fine. Consider an absolute-floor relaxation.
+> - **[Minor] High-order Bessel near the turning point (`m≈a`, m up to ~194) not independently pinned** — test-coverage gap, not a known defect (two-branch NR scheme + runtime self-check backstop it).
+> - **[Minor] `num_evaluations` undercounts the asymmetric path** (reports `n_rho*n_phi`, omits ×M) — cosmetic metric only.
+
 **User decisions (already made):**
 - D-1: "Azimuthal-mode expansion" — required, not optional. The served `gs_3.7m` / `dsn_13m` / `dsn_34m` antennas run laterally-offset feeds, so a symmetric-only integrator leaves the production configs aliased.
 - D-2: P10 = correct integrator + honesty warning only. The statistical-model substitution/blend is a SEPARATE F7-redesign unit the maintainer decides later.

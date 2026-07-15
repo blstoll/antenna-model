@@ -383,6 +383,33 @@ gap that let this ship.
   5. Latency: off-axis gain within the <100 ms p95 budget (the spike says this is now easy).
 - **Blocks:** F7. **Depends on:** nothing.
 
+> **✅ P10 DONE 2026-07-15 (branch `feat/p10-off-axis-integrator`, commits `3c2a794`…`e2f401b`).**
+> Exit criteria 1-4 fully met and validated (Task 4 protocol: both Bessel branches, all enabled
+> antennas × bands, dsn_34m X-band 68.96/14.53/−33.29 vs brute-force ground truth). Served path
+> uses the Hankel/Jₘ integrator with the F7 floor OFF (D-2 realized — serve raw PO + honest
+> "idealised levels, not calibrated-grade" warning). Exit criterion 5 (latency) is met near-boresight
+> and for symmetric large dishes, but see **P10-perf** below.
+
+### P10-perf — Azimuthal-mode integrator wide-angle latency (fast-follow) — Effort: M
+
+- **Filed 2026-07-15 by the P10 final review; maintainer chose "ship correctness now, track latency."**
+  The P0 correctness fix (P10) is complete and validated. The **asymmetric** (coma) served path
+  breaches the `<100 ms` p95 target for wide-angle **Ka** on an enabled antenna: `dsn_34m` Ka-band
+  (32 GHz, feed offset 0.15 m) measures 136 ms @2°, 311 ms @5°, ~3.3 s @90° — results are **correct**
+  (`converged=true`), just slow, and wide-angle Ka `/heatmap` is impractical. Root cause: mode count
+  scales with `k·δ = 2π·δ/λ` (~100 rad ⇒ ~194 modes at Ka, not the `δ/f`-based "M≈3–5" estimated at
+  decision time), and `g_m` is built with an O(n_ρ·n_φ·M) direct DFT + O(n_ρ·M²) Bessel loop
+  (`model/integration.rs` ~1114-1138).
+- **Fix (well-understood):** FFT the `g_m` φ'-DFT (O(n_φ·log n_φ)) and compute all `J_m(a)` orders in a
+  single upward/downward recurrence sweep (O(M) not O(M²)). Expected ~1-2 orders of magnitude on the
+  Ka wide-angle case. Guard with the **existing Task 4 validation protocol** (`reference_validation.rs`)
+  so the optimization cannot regress the validated numbers — same result to <0.1 dB.
+- **Also fold in the P10 review minors:** (a) relax the near-null spurious non-convergence warning
+  (absolute-floor on the N-vs-2N check); (b) add a high-order Bessel test near the turning point
+  (`m≈a`, m up to ~200); (c) fix `num_evaluations` to count the ×M mode work.
+- **Depends on:** P10 (done). **Blocks:** nothing (correctness already shipped). Pre-production, so no
+  live SLA is breached today.
+
 ### P2 `[DECISION]` — Seidel higher-order aberration coefficients: verify or fence — Effort: M
 
 - **Question:** `higher_order_aberrations` (`antenna-model/src/model/edge_cases.rs:250`)
