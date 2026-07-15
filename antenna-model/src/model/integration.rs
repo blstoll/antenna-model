@@ -226,6 +226,16 @@ impl IntegrationParams {
     ///     `#[cfg(test)]`-only fixed-density 2D Simpson path.
     ///
     /// They no longer gate the served pattern's correctness.
+    ///
+    /// INERT on the served path: `min_phi_points`, `max_phi_points`, and `max_iterations`
+    /// are NOT read by either production integrator. The served φ' sample count comes from
+    /// `mode_count_for` (not `min/max_phi_points`), the radial density from
+    /// `radial_points_for`, and there is no adaptive refinement loop (the runtime
+    /// convergence check is a single N-vs-2N / M-vs-(M+1) comparison, not an iteration
+    /// count). These three fields survive only for the `#[cfg(test)]`-only 2D reference
+    /// (`integrate_2d_adaptive` / `integrate_2d_simpson_public_shim`) and for struct
+    /// compatibility with the other presets — tuning them here does nothing to a served
+    /// evaluation.
     pub fn adaptive() -> Self {
         Self {
             min_rho_points: 16,
@@ -407,7 +417,8 @@ pub fn integrate_aperture(
         let n2 = radial_check_points(n1);
         let f1 = hankel_radial_field(config, theta, phi, k, n1);
         let f2 = hankel_radial_field(config, theta, phi, k, n2);
-        let (field, error_estimate, converged) = self_check(f1, f2, params);
+        let (field, error_estimate, converged) =
+            self_check(f1, f2, params, HANKEL_SELF_CHECK_RTOL);
         return Ok(IntegrationResult {
             field,
             error_estimate,
@@ -446,7 +457,8 @@ pub fn integrate_aperture(
     );
     // I(M) = I(M+1) − (top-mode contribution); the self-check compares I(M) vs I(M+1).
     let f_m = field - top_contrib;
-    let (field, error_estimate, converged) = self_check(f_m, field, params);
+    let (field, error_estimate, converged) =
+        self_check(f_m, field, params, MODE_SELF_CHECK_RTOL);
     Ok(IntegrationResult {
         field,
         error_estimate,
@@ -487,21 +499,52 @@ fn radial_check_points(n1: usize) -> usize {
 /// tighten below the physically-meaningful floor.
 const HANKEL_SELF_CHECK_RTOL: f64 = 2.0e-2;
 
+/// Relative-tolerance FLOOR for the azimuthal-mode TRUNCATION self-check (D-6), used ONLY
+/// on the Jₘ mode path — deliberately tighter than [`HANKEL_SELF_CHECK_RTOL`].
+///
+/// The 2 % radial floor is justified by Richardson extrapolation: for a *converged* O(h⁴)
+/// Simpson integral the returned `2N` estimate's own error is ≈ `diff/15`, so a 2 %
+/// `N`-vs-`2N` field difference bounds the returned error to < 0.013 dB. That `diff/15`
+/// benefit does NOT exist for a mode-TRUNCATION tail. There the self-check `diff` is just
+/// the single `M+1` mode's contribution `|I(M+1) − I(M)|`, whereas the returned field's
+/// actual error is the ENTIRE unmeasured tail `|Σ_{m≥M+2}|`. For a slowly-decaying
+/// azimuthal spectrum that tail can be comparable to `diff`, so a 2 % `M+1` diff could hide
+/// up to ≈ 0.17 dB of truncation error — above the documented < 0.1 dB budget.
+///
+/// Tail model (conservative): assume the modes beyond `M+1` form a geometric tail with
+/// ratio ≤ 0.5, so `Σ_{m≥M+2} ≤ term(M+1) = diff` — i.e. the returned error is at most one
+/// more `diff`. Gating `diff ≤ 0.5 %` then keeps the returned amplitude error ≤ 0.5 %
+/// ≈ 0.043 dB, comfortably inside the < 0.1 dB budget (and still under budget even for a
+/// somewhat slower tail: ratio ≈ 0.7 gives a tail ≈ 2.3·diff ≈ 1.16 % ≈ 0.1 dB, the edge).
+/// The `+6` mode margin in [`mode_count_for`] pushes the `M+1` probe well into the
+/// negligible tail for every real (physically-offset / asymmetric-illumination) case, so
+/// they stay `converged=true` despite the tighter gate. Effective tolerance is
+/// `max(params.relative_tolerance, this)` — same loosen-not-tighten floor semantics.
+const MODE_SELF_CHECK_RTOL: f64 = 5.0e-3;
+
 /// Runtime convergence verdict (D-6): compare a coarse and a fine field estimate and
 /// decide whether the integrator converged. Returns `(field, error_estimate, converged)`
 /// where `field` is ALWAYS the finer estimate (`fine`) and `error_estimate` is the
 /// finite, non-negative coarse/fine magnitude difference. `converged` is true iff that
-/// difference is within the effective relative tolerance (see [`HANKEL_SELF_CHECK_RTOL`])
-/// times `|fine|`, or below `absolute_tolerance`.
+/// difference is within the effective relative tolerance times `|fine|`, or below
+/// `absolute_tolerance`.
+///
+/// `rtol_floor` is the physically-justified relative-tolerance floor for THIS check: the
+/// radial N-vs-2N path passes [`HANKEL_SELF_CHECK_RTOL`] (Richardson `diff/15` benefit),
+/// while the mode M-vs-(M+1) truncation path passes the tighter [`MODE_SELF_CHECK_RTOL`]
+/// (no Richardson benefit for a truncation tail — see that constant's docstring). The
+/// effective tolerance is `max(params.relative_tolerance, rtol_floor)`, so a caller may
+/// loosen but never tighten below the floor.
 #[inline]
 fn self_check(
     coarse: Complex64,
     fine: Complex64,
     params: &IntegrationParams,
+    rtol_floor: f64,
 ) -> (Complex64, f64, bool) {
     let diff = (fine - coarse).norm();
     let magnitude = fine.norm();
-    let rtol = params.relative_tolerance.max(HANKEL_SELF_CHECK_RTOL);
+    let rtol = params.relative_tolerance.max(rtol_floor);
     let converged =
         diff <= rtol * magnitude.max(params.absolute_tolerance) || diff < params.absolute_tolerance;
     (fine, diff, converged)
@@ -786,12 +829,18 @@ fn radial_points_for(
 /// Two distinct quantities are derived here:
 ///
 /// - **`n_phi`** (φ' DFT sample count) must resolve the azimuthal spectrum of the INPUT
-///   aperture-plane phase `g(ρ,φ')`, whose maximum significant mode `B` is bounded both
-///   by the coma spread `spread = k·δ·(R/f)` and, physically, by `k·R` (the aperture's
-///   k-space radius — a purely-azimuthal phase gradient cannot exceed `k`). We take
-///   `n_phi ≈ 2·B` (rounded up to a power of two), floored/capped at [`MODE_PHI_MIN`] /
-///   [`MODE_PHI_MAX`]. Under-sizing `n_phi` aliases high input modes into `g_0` and is the
-///   exact defect that made a heavily-steered feed read far too high off-axis.
+///   aperture-plane function `g(ρ,φ')`, whose maximum significant mode `B` is the wider of
+///   two drivers (physically capped at `k·R`, the aperture's k-space radius — a
+///   purely-azimuthal phase gradient cannot exceed `k`): the coma spread
+///   `spread = k·δ·(R/f)` from a lateral feed offset, OR an illumination floor of `6` when
+///   `asymmetry_factor != 1.0` (an elliptical feed modulates the effective q-factor by
+///   `cos(2φ')`, so `g` carries m=±2 plus weaker ±4, ±6 harmonics even for a CENTERED feed,
+///   δ=0). We take `n_phi ≈ 2·B` (rounded up to a power of two), floored/capped at
+///   [`MODE_PHI_MIN`] / [`MODE_PHI_MAX`]. Under-sizing `n_phi` aliases high input modes into
+///   `g_0` and is the exact defect that made a heavily-steered feed read far too high
+///   off-axis. Only the pure-symmetric, pure-axial-defocus case (`asymmetry_factor==1.0`
+///   AND no lateral coma) has no azimuthal content and takes the cheap `(1, MODE_PHI_MIN)`
+///   fast path.
 ///
 /// - **`m_max`** (modes actually summed) need only include modes that survive the
 ///   `Jₘ(kρ·sinθ)` kernel: `Jₘ(x) ≈ 0` for `m ≳ x`, so at observation angle θ only
@@ -809,13 +858,35 @@ fn mode_count_for(config: &AntennaConfiguration, wavelength: f64, theta: f64) ->
     let r_over_f = r / config.reflector.focal_length;
     let k_r = k * r; // physical azimuthal-bandwidth ceiling
     let spread = k * delta * r_over_f;
-    if !spread.is_finite() || spread <= 0.0 {
-        // No lateral coma (pure axial defocus / asymmetric illumination): a couple of
-        // modes plus the floor suffice.
+
+    // Coma-driven azimuthal bandwidth of g(ρ,φ') from a lateral feed offset, physically
+    // capped at k·R. Zero for a centered feed (δ=0) or a non-finite spread.
+    let coma_bandwidth = if spread.is_finite() && spread > 0.0 {
+        spread.min(k_r)
+    } else {
+        0.0
+    };
+
+    // Illumination-driven azimuthal bandwidth. When `asymmetry_factor != 1.0`,
+    // `illumination_amplitude` modulates the effective q-factor by `cos(2φ')`, so the
+    // aperture function g(ρ,φ') carries a genuine m=±2 fundamental PLUS weaker m=±4, ±6
+    // harmonics from the nonlinear `cos_q_pattern(ψ, q(φ'))` dependence — even for a
+    // CENTERED feed (δ=0, coma_bandwidth=0). A bandwidth floor of 6 ensures those
+    // harmonics are resolved; without it `m_max=1` under-resolves the m=2 content AND the
+    // M-vs-(M+1) self-check would see the large m=2 jump and spuriously flag non-convergence.
+    let asym_bandwidth = if config.feed.asymmetry_factor != 1.0 {
+        6.0
+    } else {
+        0.0
+    };
+
+    // Combine the two drivers (take the wider). Pure-symmetric, pure-axial-defocus feeds
+    // (asymmetry_factor==1.0 AND no lateral coma) genuinely have no azimuthal content, so
+    // they keep the cheap (1, MODE_PHI_MIN) fast path.
+    let bandwidth = coma_bandwidth.max(asym_bandwidth);
+    if bandwidth <= 0.0 {
         return (1, MODE_PHI_MIN);
     }
-    // Input azimuthal bandwidth of g(ρ,φ'), physically capped at k·R.
-    let bandwidth = spread.min(k_r);
 
     // In the ray-tracing regime (δ/f ≫ 1, D-5 stub) cap n_phi low for performance; every
     // physical offset feed (δ/f ≪ 1) keeps the full MODE_PHI_MAX so its coma spectrum
@@ -1664,6 +1735,53 @@ mod tests {
         assert!(
             (g_e - g_h).abs() > 1e-6 * g_e.max(g_h),
             "asymmetric centered feed must retain φ dependence (2D path): E-plane={g_e}, H-plane={g_h}"
+        );
+    }
+
+    #[test]
+    fn asymmetric_illumination_centered_feed_converges_and_matches_2d() {
+        // Review FIX 1: a CENTERED feed (δ=0) with a non-unity asymmetry_factor has NO
+        // lateral coma (spread=0), but `illumination_amplitude` modulates the effective
+        // q-factor by cos(2φ'), so the aperture function g(ρ,φ') carries genuine m=±2
+        // (plus weaker ±4, ±6) azimuthal content. `mode_count_for` must NOT early-return
+        // (1, MODE_PHI_MIN): with m_max=1 the mode sum under-resolves that content AND the
+        // M-vs-(M+1) self-check sees the large m=2 jump → spurious converged=false.
+        let reflector = ReflectorGeometry::new(1.0, 0.5, 0.0).unwrap(); // small dish → fast
+        let feed = FeedParameters::new(FeedPosition::at_focus(0.5), 8.0, 0.0, 1.5).unwrap();
+        let config =
+            AntennaConfiguration::new("asym".into(), "Asym".into(), reflector, feed, None).unwrap();
+        let f_hz = 8.4e9;
+        let wl = wavelength_from_frequency(f_hz);
+        let params = IntegrationParams::default();
+
+        let theta = 5.0_f64.to_radians();
+        let r_off = integrate_aperture(theta, 0.0, &config, f_hz, &params).unwrap();
+        let r_on = integrate_aperture(0.0, 0.0, &config, f_hz, &params).unwrap();
+
+        // Not spuriously flagged, and physically plausible (finite, positive, below boresight).
+        assert!(
+            r_off.converged,
+            "asymmetric-illumination centered feed must converge (err={:.3e})",
+            r_off.error_estimate
+        );
+        let (off, on) = (r_off.field.norm(), r_on.field.norm());
+        assert!(off.is_finite() && off > 0.0, "off-axis field must be finite/positive");
+        assert!(off < on, "off-axis must be below boresight: off={off} on={on}");
+
+        // The mode-path result must match the trusted 2D quadrature reference to <0.1 dB —
+        // proof the m=±2, ±4, ±6 content is actually RESOLVED, not merely un-warned.
+        let k = wavenumber(wl);
+        let mut hi = IntegrationParams::high_accuracy();
+        hi.max_rho_points = 513;
+        hi.max_phi_points = 1025;
+        let ref_field = integrate_2d_simpson_public_shim(theta, 0.0, &config, f_hz, &hi);
+        let (m_max, n_phi) = mode_count_for(&config, wl, theta);
+        assert!(m_max >= 6, "asym illumination must resolve at least ~m=6, got M={m_max}");
+        let mode_field = azimuthal_mode_field(&config, theta, 0.0, k, 4097, n_phi, m_max, false);
+        let d_db = 20.0 * (mode_field.norm() / ref_field.norm()).log10();
+        assert!(
+            d_db.abs() < 0.1,
+            "mode vs 2D Δ={d_db:.4} dB (M={m_max}, n_phi={n_phi})"
         );
     }
 
