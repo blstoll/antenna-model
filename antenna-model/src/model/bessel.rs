@@ -75,8 +75,21 @@ pub fn bessel_j1(x: f64) -> f64 {
 
 /// Bessel function of the first kind, integer order `n >= 0`, real argument.
 ///
-/// n=0,1 delegate to the rational approximations; n>=2 use Miller's downward
-/// recurrence with renormalization (the numerically stable direction for Jₙ).
+/// n=0,1 delegate to the rational approximations. For n>=2 this follows the
+/// standard two-branch Numerical Recipes `bessj` design, choosing the recurrence
+/// direction that is numerically stable for the given argument:
+///
+/// - **|x| > n: UPWARD recurrence** — stable in this regime and O(n) rather than
+///   O(x). Seeds `J0(|x|)`, `J1(|x|)` and steps up to order n.
+/// - **|x| <= n: DOWNWARD Miller recurrence** with renormalization — the stable
+///   direction when the order dominates. Here `|x| <= n` keeps the argument small,
+///   so the recurrence seed reaches the decaying tail and no overflow can occur.
+///
+/// A fixed-offset downward-only scheme is wrong at large x: the turning-point
+/// transition width grows like x^(1/3), so a constant seed offset fails to reach
+/// the decaying tail and seed contamination survives (errors of tens of percent by
+/// x~1e5). It also cost O(x) per call and could overflow `ax as usize`. The
+/// two-branch form fixes accuracy, cost, and the overflow together.
 pub fn bessel_jn(n: u32, x: f64) -> f64 {
     match n {
         0 => return bessel_j0(x),
@@ -89,47 +102,63 @@ pub fn bessel_jn(n: u32, x: f64) -> f64 {
     let ax = x.abs();
     let n = n as usize;
 
-    // Recurrence: J_{m-1}(x) = (2m/x) J_m(x) - J_{m+1}(x).
-    // Start above the requested order to seed the stable downward pass.
-    let acc = 40; // extra iterations above max(n, x) for accuracy
-    let big = 1.0e10_f64;
-    let bigi = 1.0e-10_f64;
-
-    let mut ans = 0.0;
-    // Even starting index comfortably above BOTH the requested order and the
-    // argument magnitude (the turning point of J_m(x) sits near m ≈ x). The extra
-    // `acc` iterations push the seed orders into the exponentially-decaying tail,
-    // where J_{m_start}/J_n is negligible and the downward pass is accurate.
-    let base = n.max(ax as usize) + acc;
-    let m_start = 2 * (base / 2 + 1); // force even
-    let mut bjp = 0.0_f64; // J_{m+1}
-    let mut bj = 1.0_f64; // J_m (arbitrary seed; renormalized at the end)
-    let mut sum = 0.0_f64;
-    let mut jsum = false; // toggles each step; true selects the even-order terms
-    let tox = 2.0 / ax;
-    for m in (1..=m_start).rev() {
-        let bjm = m as f64 * tox * bj - bjp; // J_{m-1}
-        bjp = bj;
-        bj = bjm;
-        if bj.abs() > big {
-            // Renormalize to avoid overflow.
-            bj *= bigi;
-            bjp *= bigi;
-            ans *= bigi;
-            sum *= bigi;
-        }
-        if jsum {
-            sum += bj; // accumulates the even-order Bessel values
-        }
-        jsum = !jsum;
-        if m == n {
-            ans = bjp; // capture J_n as we pass it
-        }
+    // Non-finite argument: propagate NaN rather than panic (ax as usize would
+    // otherwise be reached in the downward branch). Never occurs for finite x.
+    if !ax.is_finite() {
+        return f64::NAN;
     }
-    // Normalization: 1 = J0 + 2*(J2 + J4 + ...); `sum` here is J0 + 2ΣJ_even after
-    // undoing the double count of J0 (the last-added term, bj).
-    sum = 2.0 * sum - bj;
-    ans /= sum;
+
+    let tox = 2.0 / ax;
+    let ans = if ax > n as f64 {
+        // UPWARD recurrence: J_{j+1}(x) = (2j/x) J_j(x) - J_{j-1}(x). Stable for x>n.
+        let mut bjm = bessel_j0(ax); // J_{j-1}, starting j=1 -> J_0
+        let mut bj = bessel_j1(ax); // J_j,   starting j=1 -> J_1
+        for j in 1..n {
+            let bjp = j as f64 * tox * bj - bjm; // J_{j+1}
+            bjm = bj;
+            bj = bjp;
+        }
+        bj
+    } else {
+        // DOWNWARD Miller recurrence: J_{m-1}(x) = (2m/x) J_m(x) - J_{m+1}(x).
+        // Only runs for |x| <= n, so the argument is small and `ax as usize` is
+        // bounded by n (no overflow). The seed starts an even number of orders
+        // above n so the arbitrary seed decays into negligibility before order n.
+        let acc = 40; // extra iterations above n for accuracy
+        let big = 1.0e10_f64;
+        let bigi = 1.0e-10_f64;
+
+        let m_start = 2 * ((n + acc) / 2 + 1); // force even
+        let mut jn = 0.0_f64; // captured J_n (in the unnormalized seed scale)
+        let mut bjp = 0.0_f64; // J_{m+1}
+        let mut bj = 1.0_f64; // J_m (arbitrary seed; renormalized at the end)
+        let mut sum = 0.0_f64;
+        let mut jsum = false; // toggles each step; true selects the even-order terms
+        for m in (1..=m_start).rev() {
+            let bjm = m as f64 * tox * bj - bjp; // J_{m-1}
+            bjp = bj;
+            bj = bjm;
+            if bj.abs() > big {
+                // Renormalize to avoid overflow.
+                bj *= bigi;
+                bjp *= bigi;
+                jn *= bigi;
+                sum *= bigi;
+            }
+            if jsum {
+                sum += bj; // accumulates the even-order Bessel values
+            }
+            jsum = !jsum;
+            if m == n {
+                jn = bjp; // capture J_n as we pass it
+            }
+        }
+        // Normalization: 1 = J0 + 2*(J2 + J4 + ...); `sum` here is J0 + 2ΣJ_even
+        // after undoing the double count of J0 (the last-added term, bj).
+        sum = 2.0 * sum - bj;
+        jn / sum
+    };
+
     // Jₙ(−x) = (−1)ⁿ Jₙ(x): correct the sign for negative x, odd n.
     if x < 0.0 && n % 2 == 1 {
         -ans
@@ -189,7 +218,8 @@ mod tests {
 
     #[test]
     fn jn_negative_x_symmetry() {
-        // Jn(-x) = (-1)^n Jn(x): exercises the n>=2 downward-recurrence sign path.
+        // Jn(-x) = (-1)^n Jn(x): exercises the n>=2 sign path across both branches
+        // (x=2.5<=4 downward; x=7,12>4 upward for n=4).
         for &x in &[2.5, 7.0, 12.0] {
             assert!(
                 (bessel_jn(4, -x) - bessel_jn(4, x)).abs() < 1e-12,
@@ -208,6 +238,62 @@ mod tests {
         assert!((bessel_jn(2, 5.0) - 0.046_565_116_3).abs() < TOL);
         assert!((bessel_jn(3, 10.0) - 0.058_379_379_3).abs() < TOL);
         assert!((bessel_jn(5, 10.0) - (-0.234_061_528_2)).abs() < TOL);
+    }
+
+    #[test]
+    fn jn_large_x_recurrence_identity() {
+        // Primary large-x guard: the exact three-term recurrence
+        //   (2n/x) Jn(x) = J_{n-1}(x) + J_{n+1}(x)
+        // holds identically for every real x. It is independent of any table and
+        // directly exercises the UPWARD-recurrence branch (x > n), which the old
+        // downward-only scheme got badly wrong (errors of tens of percent by x~1e5).
+        for &x in &[1.0e4_f64, 5.0e4, 1.0e5] {
+            let n = 5u32;
+            let lhs = (2.0 * n as f64 / x) * bessel_jn(n, x);
+            let rhs = bessel_jn(n - 1, x) + bessel_jn(n + 1, x);
+            let scale = rhs.abs().max(1e-12);
+            assert!(
+                (lhs - rhs).abs() < scale * 1e-9,
+                "recurrence identity broken at x={x}: lhs={lhs}, rhs={rhs}"
+            );
+        }
+    }
+
+    #[test]
+    fn jn_large_x_absolute_values() {
+        // Absolute-value guard at large x. References computed independently via the
+        // Hankel large-argument asymptotic expansion (validated against A&S table
+        // values J0(10)/J2(10)/J5(10) to ~1e-8). NOTE: the coordinator's quoted
+        // J2(1000)=4.6596e-4 was a wrong hand-estimate; the true value is
+        // -2.477_722_95e-2 (near the envelope max sqrt(2/(pi·1000))≈2.52e-2).
+        let cases = [
+            (2u32, 1000.0_f64, -2.477_722_952_861e-2),
+            (5, 1.0e4, 3.638_932_738_307e-3),
+            (5, 1.0e5, 1.846_551_245_453e-3),
+        ];
+        for &(n, x, reference) in &cases {
+            let v = bessel_jn(n, x);
+            let rel = (v - reference).abs() / reference.abs();
+            eprintln!("J{n}({x}) = {v:.12e}  ref = {reference:.12e}  rel_err = {rel:.2e}");
+            assert!(
+                rel < 1e-6,
+                "J{n}({x}) = {v}, expected ≈ {reference} (rel_err {rel})"
+            );
+        }
+    }
+
+    #[test]
+    fn jn_nonfinite_argument_is_nan_not_panic() {
+        // "Panic-free for any finite f64" plus graceful handling of ±inf/NaN:
+        // must not panic (the old `ax as usize` overflowed for |x| >~ 1.8e19).
+        assert!(bessel_jn(3, f64::INFINITY).is_nan());
+        assert!(bessel_jn(3, f64::NEG_INFINITY).is_nan());
+        assert!(bessel_jn(3, f64::NAN).is_nan());
+        // A very large finite argument beyond usize range must not panic and must
+        // stay within the physical envelope sqrt(2/(pi x)).
+        let big = 1.0e20_f64;
+        let v = bessel_jn(3, big);
+        assert!(v.is_finite() && v.abs() < 1.0, "got {v}");
     }
 
     #[test]
