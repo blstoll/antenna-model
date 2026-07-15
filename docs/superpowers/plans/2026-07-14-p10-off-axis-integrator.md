@@ -169,6 +169,8 @@ mod tests {
 
 - [ ] **Step 3: Implement using the Numerical Recipes rational approximations + Miller downward recurrence.**
 
+> **⚠️ Correction (applied during execution 2026-07-14, commit `3c2a794`):** the draft `bessel_jn` below has three bugs — fixed in the landed `antenna-model/src/model/bessel.rs`, which is the source of truth. (1) The normalization `if m % 2 == 0 { sum += bj }` accumulates the WRONG parity (after `bj = J_{m-1}`), breaking `1 = J0 + 2ΣJ_even`; use the canonical NR `jsum` even/odd toggle. (2) `acc * ax.sqrt() as usize` parses as `acc * (ax.sqrt() as usize)`, truncating to 0 for `|x|<1` and starving the downward pass; use an even start index above `max(n, x) + 40`. (3) The `jn_high_order_small_x` bound is analytically wrong: `J10(0.1) = (0.05)^10/10! ≈ 2.69e-20`, not `< 1e-20`; the landed test pins the analytic value at 1e-6 relative. (4) Code-quality review then found the downward-ONLY recurrence is inaccurate at large x (28% error at x=1e5) and could overflow `ax as usize`; the landed code restores NR's standard two-branch `bessj` (UPWARD recurrence for |x|>n seeded by J0/J1, DOWNWARD Miller for |x|<=n), plus a non-finite guard and a table-independent `(2n/x)Jn = J_{n-1}+J_{n+1}` recurrence-identity test at x∈{1e4,5e4,1e5}. Landed across commits `3c2a794` (initial), `2b77ff2` (neg-x test), `54d4cf5` (two-branch fix). Read the committed file, not this draft, if resuming.
+
 ```rust
 //! In-house cylindrical Bessel functions Jₘ(x) for real argument.
 //!

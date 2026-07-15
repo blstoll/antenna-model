@@ -1178,13 +1178,16 @@ fn integrator_params() -> IntegrationParams {
     IntegrationParams::fast()
 }
 
-/// The full served uncalibrated params (spillover + F7 floor ON), matching
-/// `service/evaluator.rs`. Used only to confirm the SERVED value stays bounded
-/// and never rises with theta (the floor pedestal sits below the beam).
+/// The production served uncalibrated params, matching `service/evaluator.rs`:
+/// spillover ON, F7 sidelobe floor OFF (per decision D-2 the served path carries
+/// the raw physical-optics value; the F7 floor's redesign is a separate unit).
+/// Used to confirm the SERVED value stays bounded and never rises with theta —
+/// the converged P10 pattern falls off monotonically in envelope without any
+/// floor pedestal.
 fn served_params() -> IntegrationParams {
     let mut p = IntegrationParams::fast();
     p.apply_spillover = true;
-    p.apply_sidelobe_floor = true;
+    p.apply_sidelobe_floor = false;
     p
 }
 
@@ -1226,8 +1229,8 @@ fn p10_anchor_dsn34m_xband_matches_known_reference_values() {
 // AC2 + AC3 — Every enabled antenna x band is physically plausible off-axis:
 // no high backlobe, and the pattern does not RISE with theta (the aliasing
 // signature). Symmetric configs so theta=0 is the true peak. Repeated across
-// S/X/Ka/L/Q bands. Both the raw integrator pattern AND the served (floored)
-// path are checked.
+// S/X/Ka/L/Q bands. Both the raw integrator pattern AND the production served
+// path (spillover ON, F7 floor OFF per D-2) are checked.
 // ---------------------------------------------------------------------------
 #[test]
 fn p10_served_offaxis_is_physical_all_enabled_antennas() {
@@ -1272,8 +1275,8 @@ fn p10_served_offaxis_is_physical_all_enabled_antennas() {
              near-decade envelope max(1°,5°)={near_env:.2} — pattern not falling"
         );
 
-        // Served path (F7 floor + spillover ON): value stays bounded well below peak
-        // and the floor pedestal never rises with theta.
+        // Production served path (spillover ON, F7 floor OFF per D-2): value stays
+        // bounded well below peak and the envelope never rises with theta.
         let sv = |d: f64| compute_gain_db(deg(d), 0.0, &cfg, fhz, &p_served).unwrap().gain;
         let (s0, s1, s5, s90) = (sv(0.0), sv(1.0), sv(5.0), sv(90.0));
         assert!(s90 < s0 - 20.0, "{aid}/{fid}: served 90° {s90:.2} not 20 dB below peak {s0:.2}");

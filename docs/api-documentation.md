@@ -97,26 +97,29 @@ The API supports multiple calibration statuses:
 
 All responses include a `calibration_status` field with accuracy estimates.
 
-**Off-axis (sidelobe) caveat — off-axis gain is currently NUMERICALLY INVALID:** the
-accuracy figures above apply to the **main beam and first sidelobe only**. Beyond the main
-beam, the served off-axis gain is **not usable**. The far-field aperture integral is
-evaluated on a fixed-density grid, but its phase varies as `2π·(D/λ)·sinθ` across the
-aperture; past the main beam that is grossly under-sampled and **aliases**, so the reported
-off-axis gain can be **20–35 dB too high** and may even *rise* with angle (a 34 m dish
-reports +34 dBi at 90° off-boresight). This is a known P0 defect
-(`docs/findings-2026-07-13-off-axis-integration-aliasing.md`); a corrected off-axis
-integrator (Hankel / azimuthal-mode expansion — roadmap unit P10) is in progress. Until it
-lands, **do not use any off-axis value** — for sidelobe, interference, adjacent-satellite,
-off-axis-EIRP analysis, *or* desired-signal margin computed off-boresight — from any
-endpoint. Use calibration data or a regulatory envelope (e.g. the ITU-R S.580 mask) instead.
+**Off-axis (sidelobe) caveat — off-axis gain is now numerically correct, but idealised:**
+the accuracy figures above apply to the **main beam and first sidelobe only**. Off-axis gain
+is now **numerically converged**: roadmap unit **P10 landed 2026-07-15**, replacing the
+aliasing fixed-density quadrature with a Hankel / azimuthal-mode integrator that computes the
+physical-optics pattern correctly at all angles (the old code aliased the rapidly-varying
+`2π·(D/λ)·sinθ` phase, reporting off-axis gain 20–35 dB too high — e.g. a 34 m dish at +34 dBi
+at 90° off-boresight — and gain that *rose* with angle; that P0 defect is fixed). The served
+off-axis value is the **raw physical optics** prediction: per maintainer decision D-2 the F7
+statistical sidelobe floor is intentionally **OFF** on this path.
+
+The remaining caveat is **physical, not numerical**: idealised physical optics omits
+blockage, feed/strut scatter, and aperture-edge diffraction, so far-off-axis sidelobe
+*levels* are **optimistic and not calibrated-grade** — the pattern shape is validated, the
+absolute levels are not. For sidelobe, interference, adjacent-satellite, or off-axis-EIRP
+analysis, use calibration data or a regulatory envelope (e.g. the ITU-R S.580 mask) instead
+of the raw off-axis levels.
 
 Queries on **uncalibrated** antennas beyond ~3× the first-null angle (≈ 1.6·λ/D,
 beamwidth-relative) return a warning on all four compute endpoints ("… beyond the validated
-main-beam region … NUMERICALLY INVALID …") stating this. Note the deeper physical caveat
-that remains even once P10 lands: idealised physical optics omits blockage, strut scatter,
-and edge diffraction, so far-off-axis *levels* will still not be calibrated-grade (the F7
-sidelobe-floor redesign, parked behind P10, addresses that separately — see
-`docs/domain-contract.md`, "Off-axis pattern / sidelobe fidelity").
+main-beam region … not calibrated-grade …") stating this physical caveat. The F7
+sidelobe-floor redesign (unblocked by P10, redesign pending) would address the absolute
+off-axis levels separately — see `docs/domain-contract.md`, "Off-axis pattern / sidelobe
+fidelity".
 
 ### Coordinate System Auto-Detection
 

@@ -1,11 +1,13 @@
-//! Off-Axis Honesty Warning Tests (roadmap unit P8; message strengthened by
-//! P10 decision D-3, 2026-07-14)
+//! Off-Axis Honesty Warning Tests (roadmap unit P8; message updated to the
+//! post-P10 truth, 2026-07-15)
 //!
-//! The served off-axis (sidelobe) gain is currently NUMERICALLY INVALID: the
-//! aperture integral aliases past the main beam on the served fast-integration
-//! path, so reported off-axis gain can be 20–35 dB too high (the P0 defect in
-//! docs/findings-2026-07-13-off-axis-integration-aliasing.md; corrected by
-//! roadmap unit P10). Queries on UNCALIBRATED antennas beyond the validated
+//! As of P10 (landed 2026-07-15) the served off-axis (sidelobe) gain is
+//! numerically CORRECT: the Hankel / azimuthal-mode integrator replaced the
+//! aliasing fast-integration path (the old P0 defect in
+//! docs/findings-2026-07-13-off-axis-integration-aliasing.md). The remaining
+//! caveat is physical, not numerical — idealised PO omits blockage/strut/edge
+//! diffraction, so far-off-axis LEVELS are optimistic and not calibrated-grade
+//! (F7 floor OFF, D-2). Queries on UNCALIBRATED antennas beyond the validated
 //! main-beam region (3× the first-null angle ≈ 1.6·λ/D) must carry an explicit
 //! warning on every compute endpoint.
 //!

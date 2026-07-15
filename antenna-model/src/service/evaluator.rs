@@ -499,19 +499,17 @@ const FIRST_NULL_COEFFICIENT: f64 = 1.6;
 /// boresight. Inside ~3 first nulls the main beam and first sidelobe are the
 /// region the model is validated for (<1 dB).
 ///
-/// Beyond it, the served value is currently **numerically invalid** — not merely
-/// "optimistic." The far-field aperture integral is evaluated with a fixed-density
-/// grid (`IntegrationParams::fast()`), but the integrand's phase varies as
-/// `2π·(D/λ)·sinθ` across the aperture; past the main beam this is grossly
-/// under-sampled and **aliases**, so the reported off-axis gain can be 20–35 dB
-/// TOO HIGH (a 34 m dish reports +34 dBi at 90° off-boresight, and more gain at 5°
-/// than at 1°). This is the P0 defect in
-/// `docs/findings-2026-07-13-off-axis-integration-aliasing.md`; the corrected
-/// (Hankel / azimuthal-mode) integrator is roadmap unit P10. Until it lands, this
-/// warning must state numerical invalidity, not surface-quality caveats. The prior
-/// message's claim that an F7 Ruze floor made the value "no longer systematically
-/// optimistic" was inverted: a floor only ever *raises* gain and cannot correct an
-/// aliased-high pattern (it fired in 0 of 6 real service geometries).
+/// Beyond it, the served value is now **numerically correct**: roadmap unit P10
+/// (LANDED 2026-07-15) replaced the aliasing fixed-density quadrature with the
+/// Hankel / azimuthal-mode integrator, which computes the physical-optics pattern
+/// to convergence at all angles (no more 20–35 dB-too-high aliasing, no gain that
+/// rises with angle). The remaining caveat is therefore **physical, not
+/// numerical**: the served value is *idealised* physical optics — it omits
+/// blockage, feed/strut scatter, and aperture-edge diffraction — so far-off-axis
+/// sidelobe *levels* are optimistic and not calibrated-grade (the pattern shape is
+/// validated; the absolute levels are not). Per maintainer decision D-2 the served
+/// path carries the raw PO value with the F7 statistical sidelobe floor OFF (its
+/// redesign is a separate unit). The warning below states this physical caveat.
 const OFF_AXIS_FIRST_NULL_MULTIPLE: f64 = 3.0;
 
 /// Off-axis honesty warning for uncalibrated antennas (roadmap unit P8).
@@ -559,13 +557,15 @@ pub(crate) fn off_axis_unvalidated_warning(
     Some(format!(
         "Antenna '{}' is uncalibrated and this query is more than {:.2}° off boresight \
          (3× the first-null angle ≈ 1.6·λ/D at {:.0} MHz) — beyond the validated main-beam \
-         region. The off-axis gain returned here is currently NUMERICALLY INVALID: the \
-         aperture integral under-samples (aliases) the rapidly-varying far-field phase past \
-         the main beam, so the reported value can be 20–35 dB TOO HIGH and may even rise with \
-         angle. Do NOT use it for sidelobe, interference, off-axis-EIRP, or adjacent-satellite \
-         analysis — nor for desired-signal margin computed off-boresight. Use calibration data \
-         or a regulatory envelope such as the ITU-R S.580 mask for off-axis analysis. \
-         (A corrected off-axis integrator is in progress.)",
+         region. The off-axis gain returned here is numerically converged (the P10 Hankel / \
+         azimuthal-mode integrator computes the physical-optics pattern correctly at all \
+         angles), but it is IDEALISED physical optics: it omits blockage, feed/strut scatter, \
+         and aperture-edge diffraction, so far-off-axis sidelobe LEVELS are optimistic and \
+         NOT calibrated-grade (the pattern shape is validated; the absolute levels are not). \
+         The statistical sidelobe floor is intentionally off on this path, so this is the raw \
+         physical-optics prediction. For sidelobe, interference, off-axis-EIRP, or \
+         adjacent-satellite analysis, use calibration data or a regulatory envelope such as \
+         the ITU-R S.580 mask.",
         calibration.antenna_id, threshold_deg, frequency_mhz
     ))
 }
@@ -847,21 +847,22 @@ mod tests {
         let msg = warning.expect("2.0° off boresight > ~0.98° threshold must warn");
         assert!(msg.contains("beyond the validated main-beam region"));
         assert!(msg.contains("ITU-R S.580"));
-        // D-3 interim honesty (2026-07-14): the message must state the served
-        // off-axis value is numerically invalid (aliasing, P10), NOT reassure
-        // that an F7 floor made it "no longer optimistic" (that claim was
-        // inverted — the floor can only raise an already-too-high pattern).
+        // Post-P10 honesty (2026-07-15): the P10 integrator landed, so the
+        // off-axis value is now numerically converged/correct. The remaining
+        // caveat is PHYSICAL — idealised PO omits blockage/strut/edge diffraction,
+        // so far-off-axis levels are optimistic and not calibrated-grade.
         assert!(
-            msg.contains("NUMERICALLY INVALID"),
-            "message must state numerical invalidity: {msg}"
+            msg.contains("calibrated-grade"),
+            "message must state levels are not calibrated-grade: {msg}"
         );
         assert!(
-            msg.contains("TOO HIGH"),
-            "message must state the value can be too high: {msg}"
+            msg.contains("IDEALISED"),
+            "message must describe idealised physical optics: {msg}"
         );
+        // The stale D-3 interim wording (numerical invalidity / aliasing) must be gone.
         assert!(
-            !msg.contains("no longer systematically optimistic"),
-            "stale reassuring wording must not return: {msg}"
+            !msg.contains("NUMERICALLY INVALID"),
+            "stale interim wording must not return: {msg}"
         );
     }
 

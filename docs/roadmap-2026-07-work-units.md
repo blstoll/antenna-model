@@ -235,7 +235,28 @@ identical inputs, per this unit's own bump policy).
 - **Depends on:** P1 (motivates it); coordinate with D2.
 
 ### P10 — Off-axis aperture-integral aliasing (P0 CORRECTNESS) — Effort: L
-**FILED 2026-07-13. Blocks F7. Highest-priority correctness item in the roadmap.**
+**FILED 2026-07-13. ✅ DONE / LANDED 2026-07-15 — F7 now UNBLOCKED.**
+
+> **✅ P10 COMPLETE (2026-07-15) — Tasks 0-6 all shipped:**
+> - **Task 0-1** — the Hankel / azimuthal-mode integrator (Jₘ coma expansion for the
+>   laterally-offset served feeds, D-1) replaced the aliasing 2D quadrature; off-axis gain is
+>   numerically converged at all angles (no more 20–35 dB-too-high aliasing).
+> - **Task 2-3** — adaptive radial density (`N_rho` from D/λ, θ at ~2× Nyquist, D-4/D-6) and
+>   adaptive mode count, each with a runtime convergence self-check (N-vs-2N / M-vs-(M+1)) that
+>   warns/refuses rather than silently returning an unconverged value; higher-order path fixed too
+>   (D-5).
+> - **Task 4** — the P10 validation protocol (reference_validation suite: anchors + plausibility
+>   over every enabled antenna × band).
+> - **Task 5** — a **single service path** serving **raw physical optics with the F7 sidelobe
+>   floor OFF** (D-2 realized: serve raw PO, floor off; the floor is a service-layer param, not
+>   part of the fitting physics).
+> - **Task 6** — the **honest post-P10 warning**: numerically-correct-but-idealised-levels (not
+>   calibrated-grade), keeping "beyond the validated main-beam region" + "ITU-R S.580"; plus this
+>   docs-truth pass. `PHYSICS_MODEL_VERSION` = 3 covers the integrator change.
+>
+> **F7 is UNBLOCKED (redesign pending, D-2):** its floor/substitution beyond θ_valid is the
+> remaining redesign, now properly informed by the correct integrator. The filed-status detail
+> below is preserved as history.
 
 - **The bug:** the service computes every gain with `IntegrationParams::fast()`
   (`service/evaluator.rs`, `service/h3_link_budget.rs`). Beyond a few degrees off-boresight the
@@ -303,9 +324,14 @@ changes"), get them decided before/while executing; recommended defaults given.
 >   so few modes suffice; establish an explicit mode-count error budget (target <0.1 dB).
 > - **D-2 → P10 = correct integrator + honesty warning; the statistical substitution/blend is
 >   a SEPARATE F7-redesign unit** the maintainer decides later. Keeps P10 contained to the
->   numerical-correctness defect; does not re-couple the two defects that sank F7.
+>   numerical-correctness defect; does not re-couple the two defects that sank F7. **✅ REALIZED
+>   2026-07-15: the served path serves RAW converged PO with the F7 sidelobe floor OFF**
+>   (`apply_sidelobe_floor = false` on the single service path); F7's statistical model is the
+>   separate redesign, now unblocked.
 > - **D-3 → (a) ship the interim honesty fix on `main` now** (strengthen P8 wording to
 >   "numerically invalid" and/or clamp reported off-axis gain), ahead of the multi-session P10.
+>   **SUPERSEDED 2026-07-15:** P10 landed, so the "numerically invalid" wording is no longer true;
+>   the warning now states the post-P10 physical caveat (idealised-PO levels, not calibrated-grade).
 > - **D-4 → (a) single adaptive correct path**, `N_rho` from `(D/λ, θ)` at ~2× Nyquist;
 >   presets demoted to a safety-factor knob. Closes the test/production integrator gap at the
 >   root (P10 exit criterion 4).
@@ -1021,7 +1047,12 @@ Phase 2.
 
 ### F7 — Statistical sidelobe envelope/floor model — Effort: M/L (gated on register row F7 **and** reference sidelobe data)
 
-**⛔ PARKED 2026-07-13 — DO NOT MERGE `feat/f7-sidelobe-floor`. BLOCKED ON P10.**
+**✅ UNBLOCKED 2026-07-15 (redesign pending, D-2) — P10 landed and removed the blocker.**
+P10's Hankel / azimuthal-mode integrator fixed the aliasing, so off-axis gain is now numerically
+correct and (per D-2) the served path carries **raw PO with the floor OFF**. F7's remaining scope
+is the redesign — a **replacement** model for the idealised-PO tail beyond a physical θ_valid (not
+a `max()` floor over an aliased pattern) — now properly informed. *History (parked 2026-07-13,
+resolved-by-P10):* **⛔ PARKED 2026-07-13 — DID NOT MERGE `feat/f7-sidelobe-floor`. WAS BLOCKED ON P10.**
 F7 was built on an inverted premise. Its founding claim (modelled sidelobes ~8–13 dB *too low*)
 was measured with `high_accuracy()` on the small 3.7 m dish; the **served** path uses `fast()`,
 where the pattern aliases **20–35 dB too HIGH** (unit **P10**, P0). A floor that only ever
