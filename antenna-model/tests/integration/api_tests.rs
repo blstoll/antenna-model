@@ -123,15 +123,19 @@ async fn test_single_gain_computation_geodetic() {
     let loss = response.loss_db.unwrap();
     // loss_db = reference(ideal boresight) − actual. The request steers the feed far
     // off boresight AND uses a different pointing frequency (8450 vs 8400 MHz, adding
-    // beam squint), so the actual gain is tens of dB below the ideal reference, giving
-    // loss ≈ 48 dB (measured with the near-boresight direct-path interference mode
-    // removed — that mode previously injected a spurious constructive-interference
-    // boost at this angle via a hardcoded, un-normalized direct field, which
-    // suppressed the reported loss to ~22 dB). This geometry's large offset ratio
-    // now routes through ray tracing, exposing the genuine deep-loss value.
-    // Loss can also be slightly negative near coma lobes. Range: -10 dB to +55 dB.
+    // beam squint), so the actual gain is tens of dB below the ideal reference. This
+    // geometry's large offset ratio routes through ray tracing, exposing a deep-loss value
+    // of ≈ 56 dB.
+    //
+    // P10 (off-axis integrator): the stale upper bound was 55 dB, which the correct
+    // converged loss (≈ 56.0 dB) exceeds — the pre-P10 aliasing 2D quadrature reported a
+    // spuriously HIGH off-axis field (lower loss), and removing it makes the off-axis
+    // aperture field correct (lower gain → higher loss). The upper bound is raised to 62 dB
+    // to admit the corrected physics. This loss is a stable ratio (reference − actual share
+    // the same ray-tracing anchor, so the anchor's level cancels). It can also be slightly
+    // negative near coma lobes, hence the −10 dB lower bound.
     assert!(
-        (-10.0..55.0).contains(&loss),
+        (-10.0..62.0).contains(&loss),
         "Loss {} is outside expected range",
         loss
     );

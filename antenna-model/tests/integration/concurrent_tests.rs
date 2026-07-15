@@ -302,11 +302,20 @@ async fn test_concurrent_different_antennas() {
 
     // All results should be valid. The shared request steers the feed far off
     // boresight (feed near the vehicle, boresight at the satellite), so gains are
-    // well below each antenna's boresight maximum. With the aperture-directivity
-    // formula (no hardcoded 0.55 efficiency) the smallest of these is ≈ 8.7 dBi.
+    // well below each antenna's boresight maximum.
+    //
+    // P10 (off-axis integrator): the feed-steering offset here is many focal lengths
+    // (δ/f ≫ 1), so these route through the ray-tracing stub (D-5) whose boresight anchor
+    // is the physical-optics aperture integral. The old `> 5.0` bound was calibrated to the
+    // pre-P10 aliased ≈ 8.7 dBi; the corrected physics gives ≈ 2.3 dBi for test_large (the
+    // value the P10 spec anchors to) and ≈ 11–16 dBi for the smaller test_uncalibrated /
+    // test_simple dishes. In this strongly-steered regime the mode integrator is
+    // performance-capped (the exact coma integral is neither affordable in the latency
+    // budget nor PO-trustworthy — D-5), so this asserts a broad physical-plausibility range
+    // rather than a converged level; the lower bound admits coma-lobe negatives.
     for (antenna_id, gain) in &results {
         assert!(
-            *gain > 5.0 && *gain < 60.0,
+            (-10.0..60.0).contains(gain),
             "Antenna {} got invalid gain {}",
             antenna_id,
             gain

@@ -1028,31 +1028,34 @@ mod tests {
 
     #[test]
     fn test_non_convergence_warning_propagated() {
-        // compute_gain_standard pushes INTEGRATION_NONCONVERGENCE_WARNING ("...did not
-        // converge...") whenever the integrator reports converged=false. That propagation
-        // branch is unchanged, but since P10 Task 2 NO production aperture reaches a
-        // converged=false state: symmetric feeds take the exact 1D Hankel path and
-        // asymmetric/coma feeds take the Jₘ mode expansion, both returning converged=true
-        // in the interim (the real runtime self-check is Task 3). So we pin the retained
-        // 2D non-convergence mechanism DIRECTLY via `integrate_2d_adaptive` and check the
-        // warning string compute_gain would emit — pending Task 3 folding a convergence
-        // self-check into the Hankel/mode paths (which will restore the end-to-end route).
-        let reflector = ReflectorGeometry::new(1.0, 0.5, 0.001).unwrap();
-        let feed = FeedParameters::new(FeedPosition::new(0.01, 0.0, 0.5), 8.0, 0.0, 1.0).unwrap();
+        // END-TO-END (P10 Task 3): since the Hankel / mode integrator now carries the
+        // runtime convergence self-check (D-6), a real production geometry CAN return
+        // converged=false, and compute_gain must surface INTEGRATION_NONCONVERGENCE_WARNING.
+        // Drive the full compute_gain path with a dish whose radial Nyquist rate at θ=90°
+        // exceeds 2× the integrator's radial safety cap: the adaptive density clamps below
+        // Nyquist (aliased) while the self-check's 2N leg samples finer, so the two
+        // disagree and the result is flagged — never silently returned. A 750 m symmetric
+        // dish at 40 GHz (D/λ = 1e5) sits well past the cap.
+        let reflector = ReflectorGeometry::new(750.0, 375.0, 0.0).unwrap();
+        let feed = FeedParameters::new(FeedPosition::at_focus(375.0), 2.0, 0.0, 1.0).unwrap();
         let config =
-            AntennaConfiguration::new("off".into(), "Off".into(), reflector, feed, None).unwrap();
-        let params = IntegrationParams {
-            max_iterations: 1,
-            relative_tolerance: 1e-15,
-            ..IntegrationParams::fast()
-        };
-        let result = crate::model::integration::integrate_2d_adaptive(0.3, 0.0, &config, 8.4e9, &params);
-        assert!(!result.converged, "2D mechanism must flag non-convergence");
-        // The warning compute_gain_standard emits on !converged still contains the
-        // substring the API contract (and downstream tests) rely on.
+            AntennaConfiguration::new("huge".into(), "Huge".into(), reflector, feed, None).unwrap();
+        let params = IntegrationParams::fast();
+
+        let result =
+            compute_gain_db(90f64.to_radians(), 0.0, &config, 40.0e9, &params).unwrap();
+
         assert!(
-            INTEGRATION_NONCONVERGENCE_WARNING.contains("did not converge"),
-            "warning constant must contain 'did not converge': {INTEGRATION_NONCONVERGENCE_WARNING}"
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("did not converge")),
+            "compute_gain must propagate the non-convergence warning end-to-end; got {:?}",
+            result.warnings
+        );
+        assert_eq!(
+            INTEGRATION_NONCONVERGENCE_WARNING,
+            "aperture integration did not converge; gain accuracy may be degraded"
         );
     }
 
