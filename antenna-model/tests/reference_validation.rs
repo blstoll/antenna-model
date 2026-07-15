@@ -820,7 +820,6 @@ fn sidelobe_floor_surface_scaling_matches_nasa() {
     }
 }
 
-
 // ===========================================================================
 // P10 — OFF-AXIS INTEGRATOR VALIDATION PROTOCOL (Task 4).
 //
@@ -959,8 +958,16 @@ fn brute_force_2d_field(
     let axial = cfg.feed.position.z - f + cfg.feed.axial_defocus;
     let mesh_spacing = cfg.mesh.as_ref().map_or(0.0, |m| m.spacing);
 
-    let n_rho = if n_rho.is_multiple_of(2) { n_rho + 1 } else { n_rho };
-    let n_phi = if n_phi.is_multiple_of(2) { n_phi + 1 } else { n_phi };
+    let n_rho = if n_rho.is_multiple_of(2) {
+        n_rho + 1
+    } else {
+        n_rho
+    };
+    let n_phi = if n_phi.is_multiple_of(2) {
+        n_phi + 1
+    } else {
+        n_phi
+    };
     let h_rho = r_max / (n_rho - 1) as f64;
     let h_phi = 2.0 * PI / (n_phi - 1) as f64;
     let sw = |i: usize, n: usize| -> f64 {
@@ -1052,11 +1059,35 @@ fn enabled_symmetric_bands() -> Vec<(&'static str, &'static str, f64)> {
 #[allow(clippy::type_complexity)] // a flat test fixture list; a struct would only add noise
 fn enabled_offset_feeds() -> Vec<(&'static str, &'static str, f64, (f64, f64), bool)> {
     vec![
-        ("gs_3.7m_uncalibrated", "x_band_feed", 8.0e9, (0.05, 0.0), true),
-        ("dsn_13m_uncalibrated", "x_band_uplink", 7.19e9, (0.08, 0.0), true),
-        ("dsn_13m_uncalibrated", "ka_band_downlink", 26.0e9, (0.0, 0.08), false),
+        (
+            "gs_3.7m_uncalibrated",
+            "x_band_feed",
+            8.0e9,
+            (0.05, 0.0),
+            true,
+        ),
+        (
+            "dsn_13m_uncalibrated",
+            "x_band_uplink",
+            7.19e9,
+            (0.08, 0.0),
+            true,
+        ),
+        (
+            "dsn_13m_uncalibrated",
+            "ka_band_downlink",
+            26.0e9,
+            (0.0, 0.08),
+            false,
+        ),
         ("dsn_34m_uncalibrated", "x_band", 8.4e9, (0.15, 0.0), false),
-        ("dsn_34m_uncalibrated", "ka_band", 32.0e9, (0.0, 0.15), false),
+        (
+            "dsn_34m_uncalibrated",
+            "ka_band",
+            32.0e9,
+            (0.0, 0.15),
+            false,
+        ),
     ]
 }
 
@@ -1129,10 +1160,7 @@ fn assert_coma_feed_physical(
 
 /// Build a physics config with the feed AT FOCUS plus an optional lateral offset
 /// `(dx, dy)` (axially focused: z = focal length). `None` -> azimuthally symmetric.
-fn config_for(
-    cal: &AntennaCalibration,
-    lateral: Option<(f64, f64)>,
-) -> AntennaConfiguration {
+fn config_for(cal: &AntennaCalibration, lateral: Option<(f64, f64)>) -> AntennaConfiguration {
     let f = cal.physical_config.reflector.focal_length_m;
     let d = cal.physical_config.reflector.diameter_m;
     let reflector = ReflectorGeometry::builder()
@@ -1220,9 +1248,15 @@ fn p10_anchor_dsn34m_xband_matches_known_reference_values() {
     assert!((g0 - 68.96).abs() < 0.2, "peak {g0:.2} (expect 68.96)");
     assert!((g1 - 14.53).abs() < 0.5, "1deg {g1:.2} (expect 14.53)");
     assert!((g5 - (-9.39)).abs() < 0.6, "5deg {g5:.2} (expect -9.39)");
-    assert!((g20 - (-23.56)).abs() < 0.8, "20deg {g20:.2} (expect -23.56)");
+    assert!(
+        (g20 - (-23.56)).abs() < 0.8,
+        "20deg {g20:.2} (expect -23.56)"
+    );
     // The far-off value the aliasing 2D could NOT reach (it gave +1.24 / +34 dBi).
-    assert!((g90 - (-33.3)).abs() < 1.5, "90deg {g90:.2} (expect ~-33.3, NOT a high backlobe)");
+    assert!(
+        (g90 - (-33.3)).abs() < 1.5,
+        "90deg {g90:.2} (expect ~-33.3, NOT a high backlobe)"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1245,23 +1279,36 @@ fn p10_served_offaxis_is_physical_all_enabled_antennas() {
     );
 
     for (aid, fid, fhz) in enabled_symmetric_bands() {
-        let cal = repo.get_calibration(aid, fid).unwrap_or_else(|| {
-            panic!("{aid}/{fid} not enabled in the real config")
-        });
+        let cal = repo
+            .get_calibration(aid, fid)
+            .unwrap_or_else(|| panic!("{aid}/{fid} not enabled in the real config"));
         let cfg = config_for(&cal, None);
         let d_lambda = cfg.reflector.diameter * fhz / SPEED_OF_LIGHT_M_S;
 
-        let raw = |d: f64| compute_gain_db(deg(d), 0.0, &cfg, fhz, &p_raw).unwrap().gain;
+        let raw = |d: f64| {
+            compute_gain_db(deg(d), 0.0, &cfg, fhz, &p_raw)
+                .unwrap()
+                .gain
+        };
         let (g0, g1, g5, g20, g90) = (raw(0.0), raw(1.0), raw(5.0), raw(20.0), raw(90.0));
         println!(
             "{aid:<22} {fid:<16} {d_lambda:>8.0} | {g0:>7.2} {g1:>7.2} {g5:>7.2} {g20:>7.2} {g90:>7.2}"
         );
 
         // (a) No high backlobe: far-off gain is >=30 dB below the peak.
-        assert!(g20 < g0 - 30.0, "{aid}/{fid}: 20° {g20:.2} not 30 dB below peak {g0:.2}");
-        assert!(g90 < g0 - 30.0, "{aid}/{fid}: 90° {g90:.2} not 30 dB below peak {g0:.2} (backlobe)");
+        assert!(
+            g20 < g0 - 30.0,
+            "{aid}/{fid}: 20° {g20:.2} not 30 dB below peak {g0:.2}"
+        );
+        assert!(
+            g90 < g0 - 30.0,
+            "{aid}/{fid}: 90° {g90:.2} not 30 dB below peak {g0:.2} (backlobe)"
+        );
         // (b) No near-in RISE (the aliasing signature was g(5)>g(1)). +1 dB ripple slack.
-        assert!(g5 <= g1 + 1.0, "{aid}/{fid}: gain RISES 1°→5° ({g1:.2}→{g5:.2}) — aliasing signature");
+        assert!(
+            g5 <= g1 + 1.0,
+            "{aid}/{fid}: gain RISES 1°→5° ({g1:.2}→{g5:.2}) — aliasing signature"
+        );
         // (c) Per-decade envelope falls: the max over the [10°,100°) decade is below the
         // max over the [1°,10°) decade. Comparing DECADE ENVELOPES (not point-to-point)
         // tolerates sidelobe ripple and nulls — e.g. dsn_13m ka-band's 5° lands in a deep
@@ -1277,9 +1324,16 @@ fn p10_served_offaxis_is_physical_all_enabled_antennas() {
 
         // Production served path (spillover ON, F7 floor OFF per D-2): value stays
         // bounded well below peak and the envelope never rises with theta.
-        let sv = |d: f64| compute_gain_db(deg(d), 0.0, &cfg, fhz, &p_served).unwrap().gain;
+        let sv = |d: f64| {
+            compute_gain_db(deg(d), 0.0, &cfg, fhz, &p_served)
+                .unwrap()
+                .gain
+        };
         let (s0, s1, s5, s90) = (sv(0.0), sv(1.0), sv(5.0), sv(90.0));
-        assert!(s90 < s0 - 20.0, "{aid}/{fid}: served 90° {s90:.2} not 20 dB below peak {s0:.2}");
+        assert!(
+            s90 < s0 - 20.0,
+            "{aid}/{fid}: served 90° {s90:.2} not 20 dB below peak {s0:.2}"
+        );
         assert!(s5 <= s1 + 1.0, "{aid}/{fid}: served rises 1°→5°");
         assert!(s90 <= s5 + 1.0, "{aid}/{fid}: served rises 5°→90°");
     }
@@ -1339,9 +1393,7 @@ fn p10_production_matches_independent_hankel_oracle_small_and_large() {
                 continue;
             }
             let d_db = 20.0 * (prod.norm() / oracle.norm()).log10();
-            println!(
-                "{aid:<22} {fid:<16} θ={a_deg:>5.1}° arg_max={arg_max:>8.1} Δ={d_db:>7.3} dB"
-            );
+            println!("{aid:<22} {fid:<16} θ={a_deg:>5.1}° arg_max={arg_max:>8.1} Δ={d_db:>7.3} dB");
             assert!(
                 d_db.abs() < 0.1,
                 "{aid}/{fid} θ={a_deg}°: production vs independent Hankel Δ={d_db:.3} dB (arg_max={arg_max:.1})"
@@ -1349,8 +1401,14 @@ fn p10_production_matches_independent_hankel_oracle_small_and_large() {
         }
     }
     // Prove the grid actually crossed both Bessel branches (the branch-local trap).
-    assert!(saw_poly_branch, "grid never exercised the small-argument (|a|<8) polynomial branch");
-    assert!(saw_asym_branch, "grid never exercised the large-argument (|a|>=8) asymptotic branch");
+    assert!(
+        saw_poly_branch,
+        "grid never exercised the small-argument (|a|<8) polynomial branch"
+    );
+    assert!(
+        saw_asym_branch,
+        "grid never exercised the large-argument (|a|>=8) asymptotic branch"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1413,13 +1471,22 @@ fn p10_bruteforce_2d_ground_truth() {
     let p = integrator_params();
 
     // --- SMALL dish: 2D trustworthy near-in at every angle ---
-    let cal = repo.get_calibration("gs_3.7m_uncalibrated", "x_band_feed").unwrap();
+    let cal = repo
+        .get_calibration("gs_3.7m_uncalibrated", "x_band_feed")
+        .unwrap();
     let cfg = config_for(&cal, None);
     let f = 8.0e9;
-    println!("\n=== P10 brute-force 2D vs production — gs_3.7m X-band (2D trustworthy near-in) ===");
-    println!("{:>7} {:>14} {:>14} {:>9}", "θ(deg)", "production_dBi", "2D_dBi", "Δ dB");
+    println!(
+        "\n=== P10 brute-force 2D vs production — gs_3.7m X-band (2D trustworthy near-in) ==="
+    );
+    println!(
+        "{:>7} {:>14} {:>14} {:>9}",
+        "θ(deg)", "production_dBi", "2D_dBi", "Δ dB"
+    );
     for a_deg in [0.0_f64, 1.0, 5.0, 20.0] {
-        let prod = integrate_aperture(deg(a_deg), 0.0, &cfg, f, &p).unwrap().field;
+        let prod = integrate_aperture(deg(a_deg), 0.0, &cfg, f, &p)
+            .unwrap()
+            .field;
         let ref2d = brute_force_2d_field(&cfg, deg(a_deg), 0.0, f, 2049, 2049);
         let (gp, gr) = (field_to_dbi(prod, &cfg, f), field_to_dbi(ref2d, &cfg, f));
         println!("{a_deg:>7.1} {gp:>14.3} {gr:>14.3} {:>9.3}", gp - gr);
@@ -1431,7 +1498,9 @@ fn p10_bruteforce_2d_ground_truth() {
     }
 
     // --- dsn_34m X-band @ 90°: the aliasing case. Converged 2D = ground truth. ---
-    let cal = repo.get_calibration("dsn_34m_uncalibrated", "x_band").unwrap();
+    let cal = repo
+        .get_calibration("dsn_34m_uncalibrated", "x_band")
+        .unwrap();
     let cfg = config_for(&cal, None);
     let f = 8.4e9;
     // At θ=90° the 2D kernel oscillates ~475 cycles in BOTH ρ and φ', so the φ'
@@ -1445,7 +1514,9 @@ fn p10_bruteforce_2d_ground_truth() {
     let ref2d = brute_force_2d_field(&cfg, deg(90.0), 0.0, f, 4097, 8193);
     let g2d = field_to_dbi(ref2d, &cfg, f);
     let ms = t.elapsed().as_secs_f64() * 1000.0;
-    let prod = integrate_aperture(deg(90.0), 0.0, &cfg, f, &p).unwrap().field;
+    let prod = integrate_aperture(deg(90.0), 0.0, &cfg, f, &p)
+        .unwrap()
+        .field;
     let gprod = field_to_dbi(prod, &cfg, f);
     println!("converged 2D (4097×8193, {ms:.0} ms) = {g2d:.2} dBi; production = {gprod:.2} dBi");
     // The findings ground truth is −33.28/−33.30 dBi (two independent methods).
@@ -1460,7 +1531,11 @@ fn p10_bruteforce_2d_ground_truth() {
 
     // Show that a COARSE 2D (what the old service used) aliases HIGH here — the
     // exact failure P10 fixed. (Not an assertion on production; a witness.)
-    let coarse = field_to_dbi(brute_force_2d_field(&cfg, deg(90.0), 0.0, f, 257, 513), &cfg, f);
+    let coarse = field_to_dbi(
+        brute_force_2d_field(&cfg, deg(90.0), 0.0, f, 257, 513),
+        &cfg,
+        f,
+    );
     println!("coarse 2D (257×513, sub-Nyquist) = {coarse:.2} dBi  <- aliased HIGH, the P0 bug");
     assert!(
         coarse > g2d + 10.0,

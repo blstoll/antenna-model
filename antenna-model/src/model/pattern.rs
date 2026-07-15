@@ -1042,8 +1042,7 @@ mod tests {
             AntennaConfiguration::new("huge".into(), "Huge".into(), reflector, feed, None).unwrap();
         let params = IntegrationParams::fast();
 
-        let result =
-            compute_gain_db(90f64.to_radians(), 0.0, &config, 40.0e9, &params).unwrap();
+        let result = compute_gain_db(90f64.to_radians(), 0.0, &config, 40.0e9, &params).unwrap();
 
         assert!(
             result
@@ -1196,8 +1195,11 @@ mod tests {
         );
 
         // Scan the pattern; the peak is steered off boresight (~offset/f rad ≈ 23°).
-        let g =
-            |deg: f64| compute_gain_db(deg.to_radians(), 0.0, &config, freq, &params).unwrap().gain;
+        let g = |deg: f64| {
+            compute_gain_db(deg.to_radians(), 0.0, &config, freq, &params)
+                .unwrap()
+                .gain
+        };
         let peak = [0.0_f64, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0]
             .into_iter()
             .map(g)

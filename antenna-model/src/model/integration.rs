@@ -417,8 +417,7 @@ pub fn integrate_aperture(
         let n2 = radial_check_points(n1);
         let f1 = hankel_radial_field(config, theta, phi, k, n1);
         let f2 = hankel_radial_field(config, theta, phi, k, n2);
-        let (field, error_estimate, converged) =
-            self_check(f1, f2, params, HANKEL_SELF_CHECK_RTOL);
+        let (field, error_estimate, converged) = self_check(f1, f2, params, HANKEL_SELF_CHECK_RTOL);
         return Ok(IntegrationResult {
             field,
             error_estimate,
@@ -457,8 +456,7 @@ pub fn integrate_aperture(
     );
     // I(M) = I(M+1) − (top-mode contribution); the self-check compares I(M) vs I(M+1).
     let f_m = field - top_contrib;
-    let (field, error_estimate, converged) =
-        self_check(f_m, field, params, MODE_SELF_CHECK_RTOL);
+    let (field, error_estimate, converged) = self_check(f_m, field, params, MODE_SELF_CHECK_RTOL);
     Ok(IntegrationResult {
         field,
         error_estimate,
@@ -473,7 +471,9 @@ pub fn integrate_aperture(
 /// Nyquist, this finer leg exposes the disagreement so it is flagged, not hidden.
 #[inline]
 fn radial_check_points(n1: usize) -> usize {
-    let n2 = (2 * n1).saturating_sub(1).min(2 * RADIAL_POINTS_SAFETY_MAX + 1);
+    let n2 = (2 * n1)
+        .saturating_sub(1)
+        .min(2 * RADIAL_POINTS_SAFETY_MAX + 1);
     if n2.is_multiple_of(2) {
         n2 + 1
     } else {
@@ -945,7 +945,11 @@ fn hankel_radial_field(
     // excluded here by the caller (symmetric path only).
     let axial = config.feed.position.z - f + config.feed.axial_defocus;
 
-    let n = if n_rho.is_multiple_of(2) { n_rho + 1 } else { n_rho };
+    let n = if n_rho.is_multiple_of(2) {
+        n_rho + 1
+    } else {
+        n_rho
+    };
     let h = r_max / (n - 1) as f64;
     let sin_theta = theta.sin();
     let one_minus_cos = 1.0 - theta.cos();
@@ -1219,8 +1223,8 @@ fn azimuthal_mode_field_inner(
         let mf = m as f64;
         let epos = Complex64::new(0.0, mf * phi).exp();
         let eneg = Complex64::new(0.0, -mf * phi).exp();
-        let contrib =
-            pow_neg_j(m as i32) * epos * r_pos[m] * scale + pow_neg_j(-(m as i32)) * eneg * r_neg[m] * scale;
+        let contrib = pow_neg_j(m as i32) * epos * r_pos[m] * scale
+            + pow_neg_j(-(m as i32)) * eneg * r_neg[m] * scale;
         acc += contrib;
         if m == mmax {
             top = contrib;
@@ -1530,18 +1534,15 @@ mod tests {
         for deg in [0.0_f64, 1.0, 5.0, 20.0] {
             let th = deg.to_radians();
             let ref_field = integrate_2d_simpson_public_shim(th, 0.0, &config, f, &hi);
-            let mode_field =
-                azimuthal_mode_field(&config, th, 0.0, k, 4097, 128, 48, false);
+            let mode_field = azimuthal_mode_field(&config, th, 0.0, k, 4097, 128, 48, false);
             let d_db = 20.0 * (mode_field.norm() / ref_field.norm()).log10();
             assert!(d_db.abs() < 0.1, "θ={deg}°: mode vs 2D Δ={d_db:.4} dB");
         }
 
         // Coma asymmetry: off-axis in the +x plane (φ=0) vs the −x plane (φ=π) must differ.
         let th = 3.0_f64.to_radians();
-        let plus = azimuthal_mode_field(&config, th, 0.0, k, 4097, 128, 48, false)
-            .norm();
-        let minus = azimuthal_mode_field(&config, th, PI, k, 4097, 128, 48, false)
-            .norm();
+        let plus = azimuthal_mode_field(&config, th, 0.0, k, 4097, 128, 48, false).norm();
+        let minus = azimuthal_mode_field(&config, th, PI, k, 4097, 128, 48, false).norm();
         assert!(
             (plus - minus).abs() / plus.max(minus) > 1e-3,
             "coma asymmetry absent: |E(φ=0)|={plus}, |E(φ=π)|={minus}"
@@ -1615,7 +1616,11 @@ mod tests {
             r.error_estimate,
             r.num_evaluations
         );
-        assert!(r.converged, "gbt q-band θ=90° must converge (err={:.3e})", r.error_estimate);
+        assert!(
+            r.converged,
+            "gbt q-band θ=90° must converge (err={:.3e})",
+            r.error_estimate
+        );
     }
 
     #[test]
@@ -1630,7 +1635,10 @@ mod tests {
         // θ=90° → count ∝ D/λ, so the 10× larger dish needs ~10× the points.
         let ns = radial_points_for(&small, PI / 2.0, wl, &p);
         let nl = radial_points_for(&large, PI / 2.0, wl, &p);
-        assert!(nl > ns * 5, "θ=90° density must scale with D/λ: large={nl} small={ns}");
+        assert!(
+            nl > ns * 5,
+            "θ=90° density must scale with D/λ: large={nl} small={ns}"
+        );
         assert!(ns % 2 == 1 && nl % 2 == 1, "counts must be odd for Simpson");
     }
 
@@ -1671,10 +1679,19 @@ mod tests {
                 r.converged,
                 r.error_estimate
             );
-            assert!(r.converged, "dsn_34m θ={deg}° mode count must converge (M vs M+1)");
+            assert!(
+                r.converged,
+                "dsn_34m θ={deg}° mode count must converge (M vs M+1)"
+            );
             // Physical: every off-axis angle far below boresight and not rising with θ.
-            assert!(power < g0 * 1e-2, "dsn_34m θ={deg}° not far below boresight");
-            assert!(power <= prev * 1.5, "dsn_34m θ={deg}° pattern rose with θ (aliasing signature)");
+            assert!(
+                power < g0 * 1e-2,
+                "dsn_34m θ={deg}° not far below boresight"
+            );
+            assert!(
+                power <= prev * 1.5,
+                "dsn_34m θ={deg}° pattern rose with θ (aliasing signature)"
+            );
             prev = power;
         }
     }
@@ -1765,8 +1782,14 @@ mod tests {
             r_off.error_estimate
         );
         let (off, on) = (r_off.field.norm(), r_on.field.norm());
-        assert!(off.is_finite() && off > 0.0, "off-axis field must be finite/positive");
-        assert!(off < on, "off-axis must be below boresight: off={off} on={on}");
+        assert!(
+            off.is_finite() && off > 0.0,
+            "off-axis field must be finite/positive"
+        );
+        assert!(
+            off < on,
+            "off-axis must be below boresight: off={off} on={on}"
+        );
 
         // The mode-path result must match the trusted 2D quadrature reference to <0.1 dB —
         // proof the m=±2, ±4, ±6 content is actually RESOLVED, not merely un-warned.
@@ -1776,7 +1799,10 @@ mod tests {
         hi.max_phi_points = 1025;
         let ref_field = integrate_2d_simpson_public_shim(theta, 0.0, &config, f_hz, &hi);
         let (m_max, n_phi) = mode_count_for(&config, wl, theta);
-        assert!(m_max >= 6, "asym illumination must resolve at least ~m=6, got M={m_max}");
+        assert!(
+            m_max >= 6,
+            "asym illumination must resolve at least ~m=6, got M={m_max}"
+        );
         let mode_field = azimuthal_mode_field(&config, theta, 0.0, k, 4097, n_phi, m_max, false);
         let d_db = 20.0 * (mode_field.norm() / ref_field.norm()).log10();
         assert!(
