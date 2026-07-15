@@ -13,6 +13,7 @@
 //! - **Edge Cases**: Detection and handling of edge cases (large feed offsets, spillover)
 //! - **Ray Trace**: Ray tracing for large feed offset scenarios
 
+pub mod bessel;
 pub mod coordinates;
 pub mod coordinates_3d;
 pub mod correction_interpolator;
@@ -46,6 +47,8 @@ pub mod ray_trace;
 pub const PHYSICS_MODEL_VERSION: u32 = 3;
 
 // Re-export commonly used types
+pub use bessel::{bessel_j0, bessel_j1, bessel_jn};
+
 pub use coordinates::{
     normalize_angle, normalize_angle_symmetric, ApertureCoordinates, EClockConeCoordinates,
     FarFieldCoordinates,
