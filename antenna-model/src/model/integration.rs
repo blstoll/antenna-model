@@ -212,7 +212,42 @@ impl Default for IntegrationParams {
 }
 
 impl IntegrationParams {
-    /// Create fast integration parameters (lower accuracy, faster)
+    /// Canonical parameters for the SERVED (production) path.
+    ///
+    /// This is the single constructor the service layer should use (see
+    /// `service::evaluator` and `service::h3_link_budget`). Since the P10
+    /// off-axis integrator landed, the number of radial samples is derived
+    /// ADAPTIVELY from `(D/λ, θ)` by `radial_points_for` — roughly
+    /// `N_ρ ≈ 4·(D/λ)·sinθ` — so the physical correctness of the off-axis
+    /// pattern no longer depends on this preset's magnitude. In this new
+    /// regime the `min_rho_points`/`max_rho_points` fields are just:
+    ///   * `min_rho_points` — a DENSITY FLOOR (cheap near-boresight cases), and
+    ///   * `max_rho_points` — a safety knob / fallback size for the
+    ///     `#[cfg(test)]`-only fixed-density 2D Simpson path.
+    ///
+    /// They no longer gate the served pattern's correctness.
+    pub fn adaptive() -> Self {
+        Self {
+            min_rho_points: 16,
+            max_rho_points: 64,
+            min_phi_points: 32,
+            max_phi_points: 128,
+            relative_tolerance: 1e-3,
+            absolute_tolerance: 1e-7,
+            max_iterations: 3,
+            use_higher_order_aberrations: false,
+            apply_spillover: false,
+            apply_sidelobe_floor: false,
+        }
+    }
+
+    /// Create fast integration parameters (lower accuracy, faster).
+    ///
+    /// NOTE: since the P10 adaptive off-axis integrator landed, this preset no
+    /// longer gates production correctness — the served radial density is
+    /// derived adaptively from `(D/λ, θ)` regardless of these values (see
+    /// [`IntegrationParams::adaptive`]). Retained for the many tests that
+    /// construct it directly; prefer `adaptive()` for the served path.
     pub fn fast() -> Self {
         Self {
             min_rho_points: 16,
@@ -228,7 +263,12 @@ impl IntegrationParams {
         }
     }
 
-    /// Create high-accuracy integration parameters (slower, more accurate)
+    /// Create high-accuracy integration parameters (slower, more accurate).
+    ///
+    /// As with [`IntegrationParams::fast`], since the P10 adaptive integrator
+    /// landed this preset no longer gates production correctness (the served
+    /// radial density is adaptive — see [`IntegrationParams::adaptive`]). Kept
+    /// for tests that need a high-density floor.
     pub fn high_accuracy() -> Self {
         Self {
             min_rho_points: 64,

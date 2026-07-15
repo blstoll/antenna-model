@@ -1152,6 +1152,68 @@ mod tests {
         );
     }
 
+    /// P10 (D-5): the higher-order-aberration path routes through the SAME
+    /// adaptive mode integrator as standard PO — `compute_gain_higher_order`
+    /// sets `use_higher_order_aberrations: true` → `integrate_aperture` →
+    /// `azimuthal_mode_field` — so it also benefits from the non-aliasing
+    /// off-axis fix. A moderate feed offset (0.3f–0.5f) forces
+    /// HigherOrderAberrations mode; the wide-angle gain must then be physically
+    /// plausible — a deep backlobe far below the pattern peak, NOT the
+    /// 20–35 dB-too-high plateau the old aliasing 2D quadrature produced.
+    #[test]
+    fn higher_order_mode_wide_angle_is_physical_not_aliased() {
+        // 3 m dish, f/D = 0.5, lateral feed offset 0.6 m → ratio 0.4 ⇒ HigherOrder.
+        let reflector = ReflectorGeometry::builder()
+            .diameter(3.0)
+            .focal_length(1.5)
+            .surface_rms(0.0005)
+            .build()
+            .unwrap();
+        let feed = FeedParameters::builder()
+            .position(FeedPosition::new(0.6, 0.0, 1.5))
+            .q_factor(8.0)
+            .build()
+            .unwrap();
+        let config = AntennaConfiguration::builder()
+            .id("ho")
+            .name("Higher Order")
+            .reflector(reflector)
+            .feed(feed)
+            .build()
+            .unwrap();
+
+        let freq = 8.4e9;
+        let params = IntegrationParams::fast();
+
+        // Confirm the offset routes through the higher-order (mode integrator) path,
+        // not standard PO and not ray tracing.
+        let analysis = analyze_edge_cases(&config, 0.3, 0.0);
+        assert_eq!(
+            analysis.mode,
+            ComputationMode::HigherOrderAberrations,
+            "0.4f offset must route to the higher-order mode integrator, got {:?}",
+            analysis.mode
+        );
+
+        // Scan the pattern; the peak is steered off boresight (~offset/f rad ≈ 23°).
+        let g =
+            |deg: f64| compute_gain_db(deg.to_radians(), 0.0, &config, freq, &params).unwrap().gain;
+        let peak = [0.0_f64, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0]
+            .into_iter()
+            .map(g)
+            .fold(f64::NEG_INFINITY, f64::max);
+
+        let g90 = g(90.0);
+        assert!(g90.is_finite(), "wide-angle gain must be finite, got {g90}");
+        // Not aliased: the wide-angle backlobe is far below the peak. The aliasing
+        // signature was a near-peak plateau/backlobe at wide angles.
+        assert!(
+            g90 < peak - 25.0,
+            "higher-order 90° gain {g90:.2} dBi must be >=25 dB below peak {peak:.2} dBi \
+             (an aliased pattern would sit near the peak)"
+        );
+    }
+
     /// Shared config for the F7 sidelobe-floor tests: 1m/f0.5 dish, 1.5mm surface
     /// RMS, X-band feed. Surface RMS is nonzero so the floor is nonzero.
     fn sidelobe_floor_test_antenna() -> AntennaConfiguration {
