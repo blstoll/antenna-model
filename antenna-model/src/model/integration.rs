@@ -64,6 +64,11 @@ const MODE_PHI_COEFF: usize = 64;
 /// replaces, and `MODE_PHI_COEFF` must stay `> 2·M` to keep the kept modes alias-free.
 const MODE_M_MAX: u32 = 24;
 
+// The azimuthal DFT that builds g_m(ρ) needs > 2·M samples in φ' or the top
+// modes alias (Nyquist). Enforced at compile time so a future MODE_M_MAX bump
+// cannot silently break it.
+const _: () = assert!(MODE_PHI_COEFF > 2 * MODE_M_MAX as usize);
+
 /// Complex integration result
 ///
 /// The aperture integration produces a complex-valued field in the far zone.
@@ -750,6 +755,10 @@ fn azimuthal_mode_field(
     for i in 0..n {
         let rho = i as f64 * h;
         let w = simpson_weight(i, n);
+        // Dish-depth chirp (ρ-only, θ-dependent — the parabola's equiphase term).
+        // NOTE: must stay in sync with phase_path's term1 in phase.rs — it is
+        // duplicated from there because phase_path returns term1−term2 fused and
+        // only term1 (this ρ²/(4f)·(1−cosθ) chirp) is wanted here.
         let chirp = k * rho * rho / (4.0 * f) * one_minus_cos;
         let chirp_factor = Complex64::new(0.0, chirp).exp();
         let a = k * rho * sin_theta;
