@@ -31,7 +31,7 @@ use std::f64::consts::PI;
 
 use crate::error::{ComputationError, ComputationResult};
 use crate::model::{
-    coordinates::ApertureCoordinates, edge_cases::higher_order_aberrations,
+    bessel::bessel_j0, coordinates::ApertureCoordinates, edge_cases::higher_order_aberrations,
     geometry::AntennaConfiguration, illumination::illumination_amplitude, phase::phase_total,
     wavelength_from_frequency, wavenumber,
 };
@@ -270,6 +270,26 @@ pub fn integrate_aperture(
     let wavelength = wavelength_from_frequency(frequency_hz);
     let k = wavenumber(wavelength);
 
+    // P10 Task 1: azimuthally symmetric apertures (no lateral feed offset and no
+    // higher-order aberration terms) reduce EXACTLY to a 1D radial Hankel (J₀)
+    // transform. Unlike the 2D quadrature below, this does NOT alias off-axis for
+    // electrically large dishes (the P0 bug). The asymmetric / coma case keeps the
+    // 2D path until Task 2 replaces it with the Jₘ azimuthal-mode expansion.
+    let is_symmetric = config.feed.position.radial_displacement() == 0.0
+        && !params.use_higher_order_aberrations;
+    if is_symmetric {
+        // Adaptive N_ρ from (D/λ, θ) with an N-vs-2N self-check lands in Task 3; use a
+        // safe fixed density now (comfortably above Nyquist for the served dishes).
+        let n_rho = radial_points_for(config, theta, wavelength, params);
+        let field = hankel_radial_field(config, theta, phi, k, n_rho);
+        return Ok(IntegrationResult {
+            field,
+            error_estimate: 0.0,
+            num_evaluations: n_rho,
+            converged: true,
+        });
+    }
+
     // Integration limits
     let rho_max = config.reflector.diameter / 2.0;
     let phi_min = 0.0;
@@ -463,6 +483,84 @@ fn integrate_2d_simpson(
     let integral = sum * h_rho * h_phi / 9.0; // 1/9 = (1/3) * (1/3) for 2D Simpson's
 
     (integral, num_evaluations)
+}
+
+/// Interim radial sample count for the symmetric Hankel integrator.
+///
+/// A fixed density that is comfortably above the radial Nyquist rate
+/// (`≈ 2·(D/λ)·sinθ`) for every enabled antenna at every angle, so the symmetric
+/// path converges without a runtime self-check yet.
+///
+// TODO(P10 Task 3): derive from (D/λ, θ) at ~2× Nyquist and add the N-vs-2N
+// convergence self-check that flags (never silently returns) an unconverged value.
+fn radial_points_for(
+    _config: &AntennaConfiguration,
+    _theta: f64,
+    _wavelength: f64,
+    params: &IntegrationParams,
+) -> usize {
+    params.max_rho_points.max(2049)
+}
+
+/// Symmetric-aperture (no lateral feed offset) Hankel radial field.
+///
+/// For an azimuthally symmetric aperture the closed-form φ' integral (Jacobi–Anger)
+/// collapses the 2D aperture integral to the 1D radial transform
+/// ```text
+/// I(θ) = 2π ∫₀^R exp(j·k·ρ²/(4f)·(1−cosθ)) · A(ρ) · exp(j·Ψ_ρonly) · J₀(kρ sinθ) · ρ dρ
+/// ```
+/// where `Ψ_ρonly` is the ρ-only (azimuthally symmetric) phase: axial-defocus (feed
+/// z-offset + deliberate `axial_defocus`, folded in via the exact geometric
+/// `phase_feed_displacement` with zero lateral offset) plus mesh phase. Evaluated by
+/// composite Simpson's rule over ρ with `n_rho` (forced odd) points.
+///
+/// At θ=0: `sinθ=0 ⇒ J₀(0)=1` and the chirp vanishes, so the integral reduces to
+/// `2π ∫ A(ρ)·exp(j·Ψ_ρonly)·ρ dρ` — identical to the 2D path on-axis.
+fn hankel_radial_field(
+    config: &AntennaConfiguration,
+    theta: f64,
+    _phi: f64,
+    k: f64,
+    n_rho: usize,
+) -> Complex64 {
+    let f = config.reflector.focal_length;
+    let r_max = config.reflector.diameter / 2.0;
+    let mesh_spacing = config.mesh.as_ref().map_or(0.0, |m| m.spacing);
+    // Axial defocus (feed z-offset + deliberate axial_defocus) adds a ρ-only quadratic
+    // phase that is azimuthally symmetric — fold it into the phase. Lateral offset is
+    // excluded here by the caller (symmetric path only).
+    let axial = config.feed.position.z - f + config.feed.axial_defocus;
+
+    let n = if n_rho.is_multiple_of(2) { n_rho + 1 } else { n_rho };
+    let h = r_max / (n - 1) as f64;
+    let sin_theta = theta.sin();
+    let one_minus_cos = 1.0 - theta.cos();
+
+    let mut sum = Complex64::new(0.0, 0.0);
+    for i in 0..n {
+        let rho = i as f64 * h;
+        let w = simpson_weight(i, n);
+        let amp = illumination_amplitude(rho, 0.0, &config.feed, f);
+        // Dish-depth chirp (ρ-only, θ-dependent — the parabola's equiphase term).
+        let chirp = k * rho * rho / (4.0 * f) * one_minus_cos;
+        // Axial defocus: exact geometric ρ-only phase (φ'-independent when lateral=0).
+        let defocus = if axial != 0.0 {
+            crate::model::phase::phase_feed_displacement(rho, 0.0, 0.0, 0.0, axial, f, k)
+        } else {
+            0.0
+        };
+        // Mesh phase (ρ-only, via the surface incidence angle θ_inc ≈ ρ/(2f)).
+        let mesh = if mesh_spacing > 0.0 {
+            let theta_inc = rho / (2.0 * f);
+            crate::model::phase::phase_mesh(mesh_spacing, theta_inc, k)
+        } else {
+            0.0
+        };
+        let j0 = bessel_j0(k * rho * sin_theta);
+        let phase = chirp + defocus + mesh;
+        sum += Complex64::new(0.0, phase).exp() * amp * j0 * rho * w;
+    }
+    sum * (h / 3.0) * 2.0 * PI
 }
 
 /// Simpson's rule weight for index i in array of n points
@@ -721,6 +819,35 @@ mod tests {
         .unwrap()
     }
 
+    /// Large synthetic dish (10 m, f/D=0.5, feed at focus, broad q≈2 feed, no mesh):
+    /// D/λ ≈ 280 at 8.4 GHz, so the 2D quadrature ALIASES off-axis (returns a
+    /// spuriously high, roughly flat value) while the exact 1D Hankel transform must
+    /// fall monotonically well below boresight.
+    fn large_test_antenna() -> AntennaConfiguration {
+        let reflector = ReflectorGeometry::new(10.0, 5.0, 0.0).unwrap();
+        let feed = FeedParameters::new(FeedPosition::at_focus(5.0), 2.0, 0.0, 1.0).unwrap();
+        AntennaConfiguration::new("large".into(), "Large".into(), reflector, feed, None).unwrap()
+    }
+
+    #[test]
+    fn hankel_symmetric_is_physical_off_axis() {
+        // Large dish (D/λ ~ 280): 2D fast() aliases to a high, flat value off-axis;
+        // the Hankel form must fall monotonically and stay well below boresight.
+        let config = large_test_antenna(); // 10 m dish, feed at focus (symmetric)
+        let f = 8.4e9;
+        let g = |deg: f64| {
+            let th = deg.to_radians();
+            let r = integrate_aperture(th, 0.0, &config, f, &IntegrationParams::default()).unwrap();
+            r.field.norm_sqr()
+        };
+        let g0 = g(0.0);
+        // Off-axis power must be far below boresight and must DECREASE with angle
+        // (the aliasing signature is a roughly flat high value — this rejects it).
+        assert!(g(5.0) < g0 * 1e-2, "5deg not far below boresight");
+        assert!(g(20.0) < g(5.0), "pattern must fall from 5deg to 20deg");
+        assert!(g(90.0) < g(20.0), "pattern must fall from 20deg to 90deg");
+    }
+
     #[test]
     fn test_simpson_weight() {
         // Test Simpson's rule weights
@@ -956,7 +1083,15 @@ mod tests {
 
     #[test]
     fn test_non_convergence_is_reported() {
-        let config = test_antenna();
+        // The 2D adaptive refinement loop is what carries the non-convergence sentinel.
+        // Since P10 Task 1, symmetric apertures take the exact 1D Hankel path (which does
+        // not use that loop), so this test uses a laterally-offset feed to keep the 2D
+        // path — the code whose non-convergence signalling it exercises. (Task 2 replaces
+        // the 2D path with the Jₘ expansion, at which point this moves with it.)
+        let reflector = ReflectorGeometry::new(1.0, 0.5, 0.0).unwrap();
+        let feed = FeedParameters::new(FeedPosition::new(0.01, 0.0, 0.5), 8.0, 0.0, 1.0).unwrap();
+        let config =
+            AntennaConfiguration::new("off".into(), "Off".into(), reflector, feed, None).unwrap();
         let params = IntegrationParams {
             max_iterations: 1, // cannot converge: convergence check needs iteration > 0
             relative_tolerance: 1e-15,

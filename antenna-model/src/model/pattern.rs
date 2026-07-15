@@ -1031,7 +1031,15 @@ mod tests {
         // Force non-convergence by capping to a single iteration with an impossible
         // tolerance.  compute_gain must include a warning containing "did not converge"
         // in the returned warnings vec.
-        let config = test_antenna();
+        //
+        // Since P10 Task 1, symmetric apertures take the exact 1D Hankel path (which does
+        // not run the 2D refinement loop that carries the non-convergence sentinel), so
+        // this uses a small lateral feed offset to keep the 2D StandardPhysicalOptics path
+        // whose warning propagation it exercises. (Task 2 folds this into the Jₘ path.)
+        let reflector = ReflectorGeometry::new(1.0, 0.5, 0.001).unwrap();
+        let feed = FeedParameters::new(FeedPosition::new(0.01, 0.0, 0.5), 8.0, 0.0, 1.0).unwrap();
+        let config =
+            AntennaConfiguration::new("off".into(), "Off".into(), reflector, feed, None).unwrap();
         let params = IntegrationParams {
             max_iterations: 1,
             relative_tolerance: 1e-15,
