@@ -293,6 +293,27 @@ identical inputs, per this unit's own bump policy).
 These are genuine calls, not implementation detail. Per roadmap principle 3 ("no silent physics
 changes"), get them decided before/while executing; recommended defaults given.
 
+> **✅ ALL SIX DECIDED 2026-07-14 (maintainer).** D-1..D-4 confirmed at their recommended
+> defaults via decision review; D-5/D-6 adopted as engineering defaults. Summary:
+> - **D-1 → (a) azimuthal-mode expansion.** Confirmed *required*, not optional: the enabled
+>   `gs_3.7m` / `dsn_13m` / `dsn_34m` antennas run **laterally-offset feeds** in
+>   `antennas.yaml` (`[0.05,0,0]`, `[0.08,0,0]`/`[0,0.08,0]`, `[0.15,0,0]`/`[0,0.15,0]`), so
+>   the symmetric J₀ form does not cover the served configs — a 2D fallback would leave those
+>   exact feeds aliased. Offsets are small (offset/f ≈ 0.004–0.011 ⇒ coma is m≈1-dominated),
+>   so few modes suffice; establish an explicit mode-count error budget (target <0.1 dB).
+> - **D-2 → P10 = correct integrator + honesty warning; the statistical substitution/blend is
+>   a SEPARATE F7-redesign unit** the maintainer decides later. Keeps P10 contained to the
+>   numerical-correctness defect; does not re-couple the two defects that sank F7.
+> - **D-3 → (a) ship the interim honesty fix on `main` now** (strengthen P8 wording to
+>   "numerically invalid" and/or clamp reported off-axis gain), ahead of the multi-session P10.
+> - **D-4 → (a) single adaptive correct path**, `N_rho` from `(D/λ, θ)` at ~2× Nyquist;
+>   presets demoted to a safety-factor knob. Closes the test/production integrator gap at the
+>   root (P10 exit criterion 4).
+> - **D-5 → (a) fix `compute_gain_higher_order` too** (shares the integrand); flag—don't
+>   fix—`compute_gain_ray_tracing` (already a P3 stub).
+> - **D-6 → ~2× Nyquist** (`N_rho ≈ 4·(D/λ)·sinθ`) + a runtime N-vs-2N convergence self-check
+>   that warns/refuses, never silently returns an unconverged value.
+
 | # | Decision | Options | Recommended default |
 |---|---|---|---|
 | **D-1** | **Coma / asymmetric apertures.** The Hankel collapse assumes azimuthal symmetry. A laterally displaced feed breaks it. **Settle this FIRST — it decides whether P10 is a day or a week.** | (a) azimuthal-mode expansion (`e^{jmφ′}` ⇒ `2π(−j)^m J_m(a) e^{jmφ}`); (b) keep 2D quadrature for asymmetric cases; (c) restrict/refuse | **(a)** — textbook and general. (b) is a trap: those cases would stay *aliased*, i.e. silently broken, which is the bug we are fixing. Establish an explicit mode-count error budget. |
