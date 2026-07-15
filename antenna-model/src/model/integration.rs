@@ -44,30 +44,75 @@ use crate::model::{
 #[cfg(test)]
 use crate::model::{coordinates::ApertureCoordinates, phase::phase_total};
 
-/// Interim φ' Fourier-coefficient sample count for `g_m(ρ)` in the azimuthal-mode
-/// integrator (P10 Task 2). The aperture-plane (coma) phase is smooth in φ', so a
-/// modest count resolves every kept mode without aliasing (need `> 2·M`). Task 3
-/// makes this adaptive.
-const MODE_PHI_COEFF: usize = 64;
+/// Floor for the adaptive φ' Fourier-coefficient sample count `n_phi` used to build
+/// `g_m(ρ)`. A small coma (the served feeds) needs only a handful of modes, so this floor
+/// keeps near-boresight / small-offset evaluations cheap.
+const MODE_PHI_MIN: usize = 64;
 
-/// Interim azimuthal-mode truncation `M` for the azimuthal-mode integrator (P10 Task 2).
-///
-/// The coma spectral width grows with the aperture-edge phase excursion `k·δ·(ρ_max/f)`
-/// (≈ `k·δ` at `f/D = 0.5`). Validated to < 0.1 dB against the converged 2D reference on
-/// the served 0.05 m-offset 3.7 m dish (`k·δ ≈ 8.8 rad`), where the minimal converging
-/// `M` is 16 (see `azimuthal_modes_match_2d_small_dish_with_offset`); 24 carries margin.
-///
-/// NOTE (interim): the larger served offsets reach higher `k·δ` (e.g. dsn_34m X-band,
-/// `k·δ ≈ 26`), so a fixed `M` under-resolves them — this is exactly what Task 3's
-/// adaptive `M` (from `k·δ`) plus the runtime `M`-vs-`M+1` self-check will size and flag.
-/// Even under-resolved, the mode expansion is vastly closer than the aliasing 2D it
-/// replaces, and `MODE_PHI_COEFF` must stay `> 2·M` to keep the kept modes alias-free.
-const MODE_M_MAX: u32 = 24;
+/// Ceiling for the adaptive φ' sample count `n_phi`. The azimuthal bandwidth of the
+/// aperture-plane phase `g(ρ,φ')` is physically bounded by `k·R` (the aperture's k-space
+/// radius), so `n_phi` never needs to exceed `~2·k·R`; this cap bounds the pathological
+/// heavily-steered-feed case (the ray-tracing regime, D-5). Empirically 512 resolves the
+/// `g_0` DFT to convergence even for a feed steered a full aperture-radius off-axis
+/// (`k·R ≈ 443`), where n_phi=64/128 alias badly — the root of the interim off-axis error.
+const MODE_PHI_MAX: usize = 512;
 
-// The azimuthal DFT that builds g_m(ρ) needs > 2·M samples in φ' or the top
-// modes alias (Nyquist). Enforced at compile time so a future MODE_M_MAX bump
-// cannot silently break it.
-const _: () = assert!(MODE_PHI_COEFF > 2 * MODE_M_MAX as usize);
+/// Reduced `n_phi` ceiling for the large-steering regime (feed steered past `δ/f >`
+/// [`MODE_STEERING_RATIO`]). Such a feed's aperture-plane phase has a very wide azimuthal
+/// spectrum whose exact resolution is neither affordable within the latency budget (a
+/// dense off-axis sweep would need hundreds of modes per point) nor calibrated-grade for
+/// an idealized PO model (beyond a few degrees of beam-steer, blockage/aberration/
+/// diffraction dominate the real off-axis level, not coma). Beyond the threshold the mode
+/// count is capped and the `M`-vs-`M+1` self-check honestly reports `converged=false`.
+/// Physical offset feeds (δ/f ≪ threshold) keep the full [`MODE_PHI_MAX`]. Kept above
+/// `2·(steered M cap)` — see [`mode_count_for`].
+const MODE_PHI_STEERED_MAX: usize = 64;
+
+/// Feed-steering ratio `δ/f` (≈ the beam-steer angle in radians) above which the coma is
+/// strong enough that the azimuthal-mode expansion is performance-capped rather than fully
+/// resolved. `radial_points_for` / `mode_count_for` apply reduced caps beyond it (fewer
+/// φ' samples, capped mode count, capped coma radial density), and the self-check flags the
+/// resulting under-resolution.
+///
+/// Every physical served offset feed sits an order of magnitude below this (the largest,
+/// gs_3.7m X-band, is δ/f ≈ 0.027; dsn_34m/13m ≈ 0.01–0.02), so they are always fully
+/// resolved. It trips only for strongly steered feeds — a beam-steer test displacement
+/// (δ/f ≈ 0.09, ~5°) or request-driven steering of order the focal length (the D-5
+/// ray-tracing regime), where the exact off-axis level is neither affordable nor
+/// PO-trustworthy.
+const MODE_STEERING_RATIO: f64 = 0.05;
+
+/// Azimuthal-mode truncation ceiling `M_max`. The runtime count is sized adaptively from
+/// the coma strength AND the observation angle by [`mode_count_for`] (only modes with
+/// `m ≲ k·R·sinθ` survive the `Jₘ(kρsinθ)` kernel), then clamped here; the `M`-vs-`M+1`
+/// self-check (D-6) flags any residual under-resolution. Kept strictly below
+/// `MODE_PHI_MAX/2 − 1` so even the `M+1` probe mode stays above the φ'-Nyquist of the
+/// largest `n_phi`.
+const MODE_M_MAX: u32 = 254;
+
+// The azimuthal DFT that builds g_m(ρ) needs > 2·M samples in φ' or the top modes alias
+// (Nyquist). The self-check probes one extra mode (M+1); `mode_count_for` additionally
+// clamps the runtime M to `n_phi/2 − 2`, but this guard pins the constant ceilings so a
+// future bump cannot silently break the invariant even at the maximum n_phi.
+const _: () = assert!(MODE_PHI_MAX > 2 * (MODE_M_MAX as usize + 1));
+
+/// Absolute safety ceiling on the radial sample count handed to the Hankel / mode
+/// integrator (P10 Task 3, D-4). The working density is derived from `(D/λ, θ)` by
+/// [`radial_points_for`]; this only bounds pathological requests (e.g. a 300 m dish at
+/// Q-band, θ=90°) so a single evaluation cannot allocate unbounded work. The runtime
+/// convergence self-check recomputes at `2·N`, so the hard allocation limit is `2×` this.
+/// Chosen comfortably above the largest enabled antenna's need — `gbt_100m` q-band at
+/// θ=90° lands near `4·(D/λ) ≈ 5.7·10⁴` (`radial_points_for_gbt_qband_is_tens_of_thousands`),
+/// whose `2·N` self-check leg (~1.1·10⁵) stays under `2×` this cap so it still converges.
+const RADIAL_POINTS_SAFETY_MAX: usize = 65_537; // 2^16 + 1 (odd)
+
+/// Performance ceiling (in radial cycles) on the θ-independent aperture-plane coma
+/// contribution to [`radial_points_for`], applied ONLY in the large-steering regime
+/// (`δ/f >` [`MODE_STEERING_RATIO`]). Physical offset feeds resolve their coma fully (up
+/// to the physical `D/(2λ)` ceiling); this bounds only strongly-steered feeds, keeping a
+/// dense off-axis sweep (or a metres-steered ray-tracing evaluation) within budget. See
+/// the call site.
+const MODE_RADIAL_CYCLE_CAP: f64 = 8.0;
 
 /// Complex integration result
 ///
@@ -78,30 +123,29 @@ pub struct IntegrationResult {
     /// Complex electric field value
     pub field: Complex64,
 
-    /// Estimated integration error (magnitude)
+    /// Estimated integration error (magnitude).
     ///
-    /// On successful convergence this is the inter-iteration difference that
-    /// satisfied the tolerance.  On non-convergence it is the last computed
-    /// inter-iteration difference (an honest, if pessimistic, error estimate).
+    /// For the P10 Hankel / azimuthal-mode integrator this is the magnitude of the
+    /// runtime convergence self-check difference (D-6): `|I(2N) − I(N)|` for the
+    /// symmetric radial path, or `|I(M+1) − I(M)|` (the top-mode contribution) for the
+    /// asymmetric mode path. It is always finite and non-negative; a value larger than
+    /// `relative_tolerance · |field|` is what sets `converged = false`.
     pub error_estimate: f64,
 
     /// Number of function evaluations performed
     pub num_evaluations: usize,
 
-    /// Whether the integration converged within the allowed iterations.
+    /// Whether the integration passed its runtime convergence self-check (D-6).
     ///
-    /// `true`  – the refinement loop exited because the relative error fell below
-    ///           `relative_tolerance` (or the absolute difference below
-    ///           `absolute_tolerance`).
-    /// `false` – the loop exhausted `max_iterations` (or hit the maximum grid
-    ///           size) without meeting tolerance.  The returned `field` is the
-    ///           best available estimate; `error_estimate` holds the last
-    ///           inter-iteration difference.
-    ///
-    /// When `error_estimate` is `f64::INFINITY` the loop ran only one iteration
-    /// and no inter-iteration comparison was possible.  A finite `error_estimate`
-    /// with `converged: false` means the maximum grid size was reached but the
-    /// difference between the last two iterations still exceeded the tolerance.
+    /// `true`  – the coarse/fine estimates agree: `error_estimate ≤
+    ///           relative_tolerance · |field|` (or below `absolute_tolerance`). The
+    ///           returned `field` is the finer estimate (`I(2N)` / `I(M+1)`).
+    /// `false` – the estimates disagree by more than tolerance (radial density hit the
+    ///           safety cap below Nyquist, or the mode count was insufficient). The
+    ///           returned `field` is still the best (finer) estimate and `error_estimate`
+    ///           holds the honest coarse/fine difference — the value is NEVER silently
+    ///           returned as converged. `compute_gain_standard` surfaces this as the
+    ///           `INTEGRATION_NONCONVERGENCE_WARNING`.
     pub converged: bool,
 }
 
@@ -305,60 +349,122 @@ pub fn integrate_aperture(
 
     // P10 Task 1: azimuthally symmetric apertures (no lateral feed offset and no
     // higher-order aberration terms) reduce EXACTLY to a 1D radial Hankel (J₀)
-    // transform. Unlike the 2D quadrature below, this does NOT alias off-axis for
-    // electrically large dishes (the P0 bug). The asymmetric / coma case keeps the
-    // 2D path until Task 2 replaces it with the Jₘ azimuthal-mode expansion.
+    // transform. Unlike the retired 2D quadrature, this does NOT alias off-axis for
+    // electrically large dishes (the P0 bug). The asymmetric / coma case uses the Jₘ
+    // azimuthal-mode expansion below.
     let is_symmetric = config.feed.position.radial_displacement() == 0.0
         // Azimuthally-symmetric illumination only: a non-unity asymmetry_factor makes
         // illumination_amplitude φ'-dependent (elliptical beam), which breaks the J₀
-        // collapse (it assumes A has no φ' dependence). Such feeds fall through to the 2D path.
+        // collapse (it assumes A has no φ' dependence). Such feeds take the mode path.
         && config.feed.asymmetry_factor == 1.0
         && !params.use_higher_order_aberrations;
     if is_symmetric {
-        // Adaptive N_ρ from (D/λ, θ) with an N-vs-2N self-check lands in Task 3; use a
-        // safe fixed density now (comfortably above Nyquist for the served dishes).
-        let n_rho = radial_points_for(config, theta, wavelength, params);
-        let field = hankel_radial_field(config, theta, phi, k, n_rho);
+        // Adaptive radial density from (D/λ, θ) at ~2× Nyquist (Task 3, D-6), with a
+        // runtime N-vs-2N self-check: recompute at 2N and compare. Agreement within
+        // tolerance ⇒ converged; disagreement (density hit the safety cap below Nyquist)
+        // ⇒ converged=false with an honest error estimate — never silently returned.
+        let n1 = radial_points_for(config, theta, wavelength, params);
+        let n2 = radial_check_points(n1);
+        let f1 = hankel_radial_field(config, theta, phi, k, n1);
+        let f2 = hankel_radial_field(config, theta, phi, k, n2);
+        let (field, error_estimate, converged) = self_check(f1, f2, params);
         return Ok(IntegrationResult {
             field,
-            error_estimate: 0.0,
-            num_evaluations: n_rho,
-            converged: true,
+            error_estimate,
+            num_evaluations: n1 + n2,
+            converged,
         });
     }
 
-    // P10 Task 2: asymmetric aperture — a lateral feed offset (coma), an azimuthally
+    // P10 Task 2/3: asymmetric aperture — a lateral feed offset (coma), an azimuthally
     // dependent illumination (`asymmetry_factor != 1.0`), and/or higher-order Seidel
-    // terms. The old 2D Simpson quadrature ALIASES off-axis for electrically large
-    // dishes (the P0 bug: served off-axis gain 20–35 dB too high). Route instead through
-    // the azimuthal-mode (Jₘ) expansion — the general, non-aliasing closed form. The
-    // symmetric Hankel path above is exactly its m=0-only special case.
+    // terms. Route through the azimuthal-mode (Jₘ) expansion — the general, non-aliasing
+    // closed form (the symmetric Hankel path above is its m=0-only special case).
     //
-    // Interim densities (Task 3 makes them adaptive with an M-vs-M+1 self-check):
-    //   `n_rho`          — fixed safe radial density (shared with the symmetric path).
-    //   `MODE_PHI_COEFF` — φ' samples for the `g_m(ρ)` Fourier coefficients.
-    //   `MODE_M_MAX`     — azimuthal-mode truncation.
-    // `converged: true` is the interim contract (same as the symmetric path); the real
-    // runtime convergence self-check lands in Task 3. The retained 2D adaptive loop
-    // (`integrate_2d_adaptive`, test-only) still carries the non-convergence sentinel
-    // that pattern/integration tests pin until then.
+    // Adaptive sizing (Task 3, D-6):
+    //   `n_rho`          — from (D/λ, θ) at ~2× Nyquist, shared with the symmetric path.
+    //   `n_phi`          — φ' samples for the `g_m(ρ)` Fourier coefficients (adaptive).
+    //   `m_max`          — mode truncation from the coma strength `k·δ·(R/f)`.
+    // Runtime M-vs-(M+1) self-check: `azimuthal_mode_field_inner` returns both the full
+    // sum (modes 0..=M+1) and the contribution of the top probe mode (M+1). If that top
+    // mode contributes more than the relative tolerance, the truncation is insufficient
+    // ⇒ converged=false with an honest error estimate.
     let n_rho = radial_points_for(config, theta, wavelength, params);
-    let field = azimuthal_mode_field(
+    let (m_max, n_phi) = mode_count_for(config, wavelength, theta);
+    // Probe one extra mode (M+1) so the self-check can measure its contribution in a
+    // single φ' sweep. `mode_count_for` kept m_max ≤ n_phi/2 − 2, so the probe is alias-free.
+    let m_probe = m_max + 1;
+    let (field, top_contrib) = azimuthal_mode_field_inner(
         config,
         theta,
         phi,
         k,
         n_rho,
-        MODE_PHI_COEFF,
-        MODE_M_MAX,
+        n_phi,
+        m_probe,
         params.use_higher_order_aberrations,
     );
+    // I(M) = I(M+1) − (top-mode contribution); the self-check compares I(M) vs I(M+1).
+    let f_m = field - top_contrib;
+    let (field, error_estimate, converged) = self_check(f_m, field, params);
     Ok(IntegrationResult {
         field,
-        error_estimate: 0.0,
-        num_evaluations: n_rho * MODE_PHI_COEFF,
-        converged: true,
+        error_estimate,
+        num_evaluations: n_rho * n_phi,
+        converged,
     })
+}
+
+/// Radial sample count for the self-check's fine (2N) leg: ~double `n1`, kept odd, and
+/// bounded by the absolute allocation ceiling. Staying above `n1` is what makes the
+/// N-vs-2N comparison meaningful; when `n1` was already clamped to the safety cap below
+/// Nyquist, this finer leg exposes the disagreement so it is flagged, not hidden.
+#[inline]
+fn radial_check_points(n1: usize) -> usize {
+    let n2 = (2 * n1).saturating_sub(1).min(2 * RADIAL_POINTS_SAFETY_MAX + 1);
+    if n2.is_multiple_of(2) {
+        n2 + 1
+    } else {
+        n2
+    }
+}
+
+/// Relative-tolerance FLOOR for the Hankel / mode convergence self-check (D-6).
+///
+/// The self-check compares the field at `N` and `2N` (radial) or `M` and `M+1` (modes).
+/// At the adaptive ~2× Nyquist radial density (4 samples/cycle) a *converged* Simpson
+/// integral still shows an `N`-vs-`2N` field difference of a few tenths of a percent —
+/// far above the `1e-4`..`1e-3` `relative_tolerance` the retired 2D adaptive loop used,
+/// which would spuriously flag physically-accurate results (e.g. gbt_100m q-band at
+/// θ=90°: 0.6 % ≈ 0.05 dB, well inside the < 0.1 dB accuracy budget).
+///
+/// This floor sets the gate to the accuracy budget instead: a 2 % `N`-vs-`2N` field
+/// difference bounds the *returned* (finer, `2N`) estimate's own error to ≈ diff/15
+/// (Richardson, Simpson is O(h⁴)) ⇒ < 0.15 % ⇒ < 0.013 dB. It stays far below the O(1)
+/// (~100 %) mismatch that genuine under-resolution (density capped below Nyquist, or too
+/// few modes) produces, so real non-convergence is still caught. The effective tolerance
+/// is `max(params.relative_tolerance, this)` — a caller may loosen further but never
+/// tighten below the physically-meaningful floor.
+const HANKEL_SELF_CHECK_RTOL: f64 = 2.0e-2;
+
+/// Runtime convergence verdict (D-6): compare a coarse and a fine field estimate and
+/// decide whether the integrator converged. Returns `(field, error_estimate, converged)`
+/// where `field` is ALWAYS the finer estimate (`fine`) and `error_estimate` is the
+/// finite, non-negative coarse/fine magnitude difference. `converged` is true iff that
+/// difference is within the effective relative tolerance (see [`HANKEL_SELF_CHECK_RTOL`])
+/// times `|fine|`, or below `absolute_tolerance`.
+#[inline]
+fn self_check(
+    coarse: Complex64,
+    fine: Complex64,
+    params: &IntegrationParams,
+) -> (Complex64, f64, bool) {
+    let diff = (fine - coarse).norm();
+    let magnitude = fine.norm();
+    let rtol = params.relative_tolerance.max(HANKEL_SELF_CHECK_RTOL);
+    let converged =
+        diff <= rtol * magnitude.max(params.absolute_tolerance) || diff < params.absolute_tolerance;
+    (fine, diff, converged)
 }
 
 /// Perform 2D integration using composite Simpson's rule
@@ -560,21 +666,143 @@ fn integrate_2d_simpson_public_shim(
     field
 }
 
-/// Interim radial sample count for the symmetric Hankel integrator.
+/// Adaptive radial sample count for the Hankel / mode integrator at ~2× Nyquist
+/// (P10 Task 3, D-6).
 ///
-/// A fixed density that is comfortably above the radial Nyquist rate
-/// (`≈ 2·(D/λ)·sinθ`) for every enabled antenna at every angle, so the symmetric
-/// path converges without a runtime self-check yet.
+/// The chirp and the `Jₘ(kρ·sinθ)` kernel oscillate at radial rate `≈ (D/λ)·sinθ`
+/// cycles across `[0, R]`, so the Nyquist count is `N ≈ 2·(D/λ)·sinθ`. We take ~2× that
+/// (`N ≈ 4·(D/λ)·sinθ`), floored at `params.min_rho_points` and capped at
+/// [`RADIAL_POINTS_SAFETY_MAX`], forced odd for Simpson's rule.
 ///
-// TODO(P10 Task 3): derive from (D/λ, θ) at ~2× Nyquist and add the N-vs-2N
-// convergence self-check that flags (never silently returns) an unconverged value.
+/// The count sums the radial oscillation of EVERY integrand phase term, not just the
+/// θ-dependent kernel — critically the θ-INDEPENDENT aperture-plane phase (lateral coma,
+/// axial defocus), which oscillates radially even at θ=0. Missing it silently aliases a
+/// steered/offset feed at boresight (the P0 signature — off-axis gain far too high). Each
+/// term's cycle count across `[0, R]`:
+/// - chirp + `Jₘ` kernel (θ-dependent): `(D/λ)·|sinθ|`
+/// - lateral coma (θ-independent):      `(δ/λ)·(R/f)`, capped at the physical maximum
+///   radial spatial frequency `R/λ = D/(2λ)` (a purely-radial aperture phase gradient can
+///   never exceed `k`, so the linear-steer estimate is clamped there for large `δ/f`)
+/// - axial defocus (θ-independent):     `(|axial|/λ)·(R/f)²`, capped the same way
+///
+/// At θ=0 with a centered feed all terms vanish and the count drops to
+/// `params.min_rho_points` — the cheap near-boresight case (the P10 throughput fix). It
+/// deliberately does NOT read `params.max_rho_points`: that preset knob sizes the
+/// retained test-only 2D reference, whereas the production density is derived here from
+/// the physics (D-4). Forced odd for Simpson; capped at [`RADIAL_POINTS_SAFETY_MAX`].
 fn radial_points_for(
-    _config: &AntennaConfiguration,
-    _theta: f64,
-    _wavelength: f64,
+    config: &AntennaConfiguration,
+    theta: f64,
+    wavelength: f64,
     params: &IntegrationParams,
 ) -> usize {
-    params.max_rho_points.max(2049)
+    let d_lambda = config.reflector.diameter / wavelength;
+    let r = config.reflector.diameter / 2.0;
+    let f = config.reflector.focal_length;
+    let r_over_f = r / f;
+    // Physical ceiling on any single aperture-plane term's radial cycles: a radial phase
+    // gradient cannot exceed k, i.e. R/λ = D/(2λ) cycles across [0, R].
+    let radial_cycle_ceiling = 0.5 * d_lambda;
+    let delta = config.feed.position.radial_displacement();
+    let axial = (config.feed.position.z - f + config.feed.axial_defocus).abs();
+
+    // In the large-steering regime (δ/f above the threshold — a strongly steered or
+    // metres-steered feed) the coma radial oscillation is capped for performance:
+    // resolving it exactly would need thousands of radial × azimuthal samples per point
+    // and blow the latency budget, and the exact off-axis level is not PO-trustworthy
+    // there anyway. Physical offset feeds (δ/f ≪ threshold, every served feed) keep the
+    // full physical resolution up to the D/(2λ) ceiling.
+    let coma_cap = if delta / f > MODE_STEERING_RATIO {
+        MODE_RADIAL_CYCLE_CAP.min(radial_cycle_ceiling)
+    } else {
+        radial_cycle_ceiling
+    };
+
+    let kernel_cycles = d_lambda * theta.sin().abs();
+    let coma_cycles = ((delta / wavelength) * r_over_f).min(coma_cap);
+    let defocus_cycles = ((axial / wavelength) * r_over_f * r_over_f).min(radial_cycle_ceiling);
+    let cycles = kernel_cycles + coma_cycles + defocus_cycles;
+
+    // ~2× Nyquist: 4 samples per cycle.
+    let target = 4.0 * cycles;
+    // Guard against a non-finite target (e.g. wavelength underflow) — fall back to floor.
+    let target = if target.is_finite() {
+        target.ceil() as usize
+    } else {
+        params.min_rho_points
+    };
+    let n = target
+        .max(params.min_rho_points)
+        .min(RADIAL_POINTS_SAFETY_MAX);
+    if n.is_multiple_of(2) {
+        n + 1
+    } else {
+        n
+    }
+}
+
+/// Adaptive azimuthal sizing `(m_max, n_phi)` for the coma / asymmetric path (P10 Task 3).
+///
+/// Two distinct quantities are derived here:
+///
+/// - **`n_phi`** (φ' DFT sample count) must resolve the azimuthal spectrum of the INPUT
+///   aperture-plane phase `g(ρ,φ')`, whose maximum significant mode `B` is bounded both
+///   by the coma spread `spread = k·δ·(R/f)` and, physically, by `k·R` (the aperture's
+///   k-space radius — a purely-azimuthal phase gradient cannot exceed `k`). We take
+///   `n_phi ≈ 2·B` (rounded up to a power of two), floored/capped at [`MODE_PHI_MIN`] /
+///   [`MODE_PHI_MAX`]. Under-sizing `n_phi` aliases high input modes into `g_0` and is the
+///   exact defect that made a heavily-steered feed read far too high off-axis.
+///
+/// - **`m_max`** (modes actually summed) need only include modes that survive the
+///   `Jₘ(kρ·sinθ)` kernel: `Jₘ(x) ≈ 0` for `m ≳ x`, so at observation angle θ only
+///   `m ≲ k·R·sinθ` contribute. `m_max = min(1.5·B + 6, k·R·|sinθ| + 6)`, clamped to
+///   [`MODE_M_MAX`] and to `n_phi/2 − 2` (so the `M+1` self-check probe stays alias-free).
+///   At θ=0 only `m=0` survives (`Jₘ(0)=0, m>0`), so `m_max` collapses to the margin and
+///   the sum is cheap even when `n_phi` is large.
+///
+/// Validated: `spread ≈ 8.8` needs `M ≈ 16`; `dsn_34m` X-band `spread ≈ 33` needs
+/// `M ≈ 46`; a feed steered a full aperture radius off-axis needs `n_phi ≈ 512`.
+fn mode_count_for(config: &AntennaConfiguration, wavelength: f64, theta: f64) -> (u32, usize) {
+    let k = wavenumber(wavelength);
+    let r = config.reflector.diameter / 2.0;
+    let delta = config.feed.position.radial_displacement();
+    let r_over_f = r / config.reflector.focal_length;
+    let k_r = k * r; // physical azimuthal-bandwidth ceiling
+    let spread = k * delta * r_over_f;
+    if !spread.is_finite() || spread <= 0.0 {
+        // No lateral coma (pure axial defocus / asymmetric illumination): a couple of
+        // modes plus the floor suffice.
+        return (1, MODE_PHI_MIN);
+    }
+    // Input azimuthal bandwidth of g(ρ,φ'), physically capped at k·R.
+    let bandwidth = spread.min(k_r);
+
+    // In the ray-tracing regime (δ/f ≫ 1, D-5 stub) cap n_phi low for performance; every
+    // physical offset feed (δ/f ≪ 1) keeps the full MODE_PHI_MAX so its coma spectrum
+    // resolves exactly. (dsn_34m Ka-band, the widest physical spectrum at ~125 modes,
+    // needs n_phi ≈ 512 = MODE_PHI_MAX.)
+    let n_phi_cap = if delta / config.reflector.focal_length > MODE_STEERING_RATIO {
+        MODE_PHI_STEERED_MAX
+    } else {
+        MODE_PHI_MAX
+    };
+
+    // n_phi ≈ 2·B, rounded to a power of two, floored/capped.
+    let n_phi_target = (2.0 * bandwidth).ceil() as usize + 8;
+    let n_phi = n_phi_target
+        .next_power_of_two()
+        .clamp(MODE_PHI_MIN, n_phi_cap);
+
+    // Modes that survive the Jₘ(kρ·sinθ) kernel at this θ.
+    let m_theta = (k_r * theta.sin().abs()).ceil() + 6.0;
+    let m_spectrum = (1.5 * bandwidth).ceil() + 6.0;
+    let m_cap = (n_phi / 2).saturating_sub(2) as f64;
+    let m_max = m_spectrum
+        .min(m_theta)
+        .min(m_cap)
+        .min(MODE_M_MAX as f64)
+        .max(1.0) as u32;
+    (m_max, n_phi)
 }
 
 /// Symmetric-aperture (no lateral feed offset) Hankel radial field.
@@ -641,44 +869,80 @@ fn hankel_radial_field(
     sum * (h / 3.0) * 2.0 * PI
 }
 
+/// Config-derived, ρ/φ'-independent constants for the aperture-plane function `g(ρ,φ')`.
+///
+/// Computed ONCE per [`azimuthal_mode_field_inner`] call and shared across every
+/// `(ρ, φ')` evaluation (`n_rho · n_phi_coeff` of them). Hoisting these out of the hot
+/// path removes the per-evaluation `radial_displacement()` (a `hypot`), `atan2`, and
+/// axial-offset arithmetic — hundreds of thousands of transcendental calls per gain on
+/// the large offset-feed dishes.
+struct AperturePlaneConst<'a> {
+    feed: &'a crate::model::geometry::FeedParameters,
+    /// Focal length (m).
+    f: f64,
+    /// Lateral feed offset magnitude `δ` (m); coma driver.
+    delta: f64,
+    /// Azimuth of the lateral offset, `atan2(y, x)` (rad).
+    alpha: f64,
+    /// Axial phase-center offset from focus (m); defocus driver.
+    axial: f64,
+    /// Mesh wire spacing (m); `0.0` if no mesh.
+    mesh_spacing: f64,
+}
+
+impl<'a> AperturePlaneConst<'a> {
+    fn new(config: &'a AntennaConfiguration) -> Self {
+        let f = config.reflector.focal_length;
+        Self {
+            feed: &config.feed,
+            f,
+            delta: config.feed.position.radial_displacement(),
+            alpha: config.feed.position.y.atan2(config.feed.position.x),
+            axial: config.feed.position.z - f + config.feed.axial_defocus,
+            mesh_spacing: config.mesh.as_ref().map_or(0.0, |m| m.spacing),
+        }
+    }
+}
+
 /// θ-independent aperture-plane function
 /// ```text
 /// g(ρ,φ') = A(ρ,φ') · exp( j·[ Ψ_feed_displacement(ρ,φ') + Ψ_higher_order(ρ,φ') + Ψ_mesh(ρ) ] )
 /// ```
 /// i.e. the full aperture integrand phase MINUS the parabolic dish-depth chirp
 /// `k·ρ²/(4f)·(1−cosθ)` and MINUS the Fourier kernel `−k·ρ·sinθ·cos(φ−φ')` (both added,
-/// respectively folded, in the radial loop of [`azimuthal_mode_field`]). Neither the
-/// observation angle θ nor φ enters here — this is what makes the φ'-Fourier
+/// respectively folded, in the radial loop of [`azimuthal_mode_field_inner`]). Neither
+/// the observation angle θ nor φ enters here — this is what makes the φ'-Fourier
 /// coefficients `g_m(ρ)` reusable across all θ.
 ///
 /// The guards mirror `aperture_integrand`/`phase_total` exactly (lateral coma + axial
 /// defocus via the exact geometric `phase_feed_displacement`; higher-order Seidel only
-/// for a laterally displaced feed; mesh phase when a mesh is present) so the mode
-/// integrator and the 2D reference agree wherever both are valid.
+/// for a laterally displaced feed; mesh phase when a mesh with positive spacing is
+/// present) so the mode integrator and the 2D reference agree wherever both are valid.
+/// The config-derived constants arrive precomputed in [`AperturePlaneConst`].
+#[inline]
 fn aperture_plane_g(
-    config: &AntennaConfiguration,
+    c: &AperturePlaneConst,
     rho: f64,
     phi_prime: f64,
     k: f64,
     use_higher_order: bool,
 ) -> Complex64 {
-    let f = config.reflector.focal_length;
-    let amp = illumination_amplitude(rho, phi_prime, &config.feed, f);
-    let delta = config.feed.position.radial_displacement();
-    let alpha = config.feed.position.y.atan2(config.feed.position.x);
-    let axial = config.feed.position.z - f + config.feed.axial_defocus;
+    let amp = illumination_amplitude(rho, phi_prime, c.feed, c.f);
 
     let mut phase = 0.0;
-    if delta > 0.0 || axial != 0.0 {
-        phase +=
-            crate::model::phase::phase_feed_displacement(rho, phi_prime, delta, alpha, axial, f, k);
+    if c.delta > 0.0 || c.axial != 0.0 {
+        phase += crate::model::phase::phase_feed_displacement(
+            rho, phi_prime, c.delta, c.alpha, c.axial, c.f, k,
+        );
     }
-    if use_higher_order && delta > 0.0 {
-        phase += higher_order_aberrations(rho, phi_prime, delta, alpha, f, k);
+    if use_higher_order && c.delta > 0.0 {
+        phase += higher_order_aberrations(rho, phi_prime, c.delta, c.alpha, c.f, k);
     }
-    if let Some(mesh) = config.mesh.as_ref() {
-        let theta_inc = rho / (2.0 * f);
-        phase += crate::model::phase::phase_mesh(mesh.spacing, theta_inc, k);
+    // Mesh phase (ρ-only); guard on spacing > 0.0 for consistency with `phase_total`
+    // and `hankel_radial_field` (a zero-spacing mesh would divide by zero in phase_mesh).
+    if c.mesh_spacing > 0.0 {
+        let theta_inc = rho / (2.0 * c.f);
+        phase += crate::model::phase::phase_mesh(c.mesh_spacing, theta_inc, k);
     }
     Complex64::new(0.0, phase).exp() * amp
 }
@@ -708,7 +972,11 @@ fn pow_neg_j(m: i32) -> Complex64 {
 ///
 /// The symmetric aperture is exactly the `M = 0` special case (only `g_0` survives,
 /// `J_0`), reproducing [`hankel_radial_field`].
+///
+/// Thin wrapper returning only the full mode sum; see [`azimuthal_mode_field_inner`] for
+/// the variant that also returns the top-mode contribution for the convergence self-check.
 #[allow(clippy::too_many_arguments)]
+#[cfg(test)]
 fn azimuthal_mode_field(
     config: &AntennaConfiguration,
     theta: f64,
@@ -719,8 +987,41 @@ fn azimuthal_mode_field(
     m_max: u32,
     use_higher_order: bool,
 ) -> Complex64 {
+    azimuthal_mode_field_inner(
+        config,
+        theta,
+        phi,
+        k,
+        n_rho,
+        n_phi_coeff,
+        m_max,
+        use_higher_order,
+    )
+    .0
+}
+
+/// Azimuthal-mode field, returning `(total, top_contribution)`:
+/// - `total` = `I(θ,φ)` summed over all modes `0..=m_max` (both `±m`).
+/// - `top_contribution` = the part of `total` contributed by the top mode `±m_max`.
+///
+/// This lets the caller obtain BOTH `I(M+1)` (`total`, calling with `m_max = M+1`) and
+/// `I(M) = total − top_contribution` from a SINGLE φ' sweep, so the runtime M-vs-(M+1)
+/// convergence self-check (D-6) costs no extra integration. See [`azimuthal_mode_field`].
+#[allow(clippy::too_many_arguments)]
+fn azimuthal_mode_field_inner(
+    config: &AntennaConfiguration,
+    theta: f64,
+    phi: f64,
+    k: f64,
+    n_rho: usize,
+    n_phi_coeff: usize,
+    m_max: u32,
+    use_higher_order: bool,
+) -> (Complex64, Complex64) {
     let f = config.reflector.focal_length;
     let r_max = config.reflector.diameter / 2.0;
+    // Config-derived constants for g(ρ,φ'), computed once (hoisted out of the hot loop).
+    let apc = AperturePlaneConst::new(config);
     let n = if n_rho.is_multiple_of(2) {
         n_rho + 1
     } else {
@@ -772,7 +1073,7 @@ fn azimuthal_mode_field(
         }
         for jj in 0..n_phi_coeff {
             let phip = jj as f64 * dphi;
-            let g = aperture_plane_g(config, rho, phip, k, use_higher_order);
+            let g = aperture_plane_g(&apc, rho, phip, k, use_higher_order);
             for m in 0..=mmax {
                 let t = twiddle[m * n_phi_coeff + jj]; // e^{−jmφ'_j}
                 gm_pos[m] += g * t;
@@ -798,16 +1099,23 @@ fn azimuthal_mode_field(
     }
 
     let scale = h / 3.0;
-    // I(θ,φ) = 2π Σ_{m=−M}^{M} (−j)^m e^{jmφ} R_m(θ).
+    // I(θ,φ) = 2π Σ_{m=−M}^{M} (−j)^m e^{jmφ} R_m(θ). Track the top mode's (±m_max)
+    // contribution separately so the caller can form I(M) = total − top for the D-6
+    // self-check without a second sweep.
     let mut acc = r_pos[0] * scale; // m = 0: (−j)^0 = 1, e^0 = 1
+    let mut top = Complex64::new(0.0, 0.0);
     for m in 1..=mmax {
         let mf = m as f64;
         let epos = Complex64::new(0.0, mf * phi).exp();
         let eneg = Complex64::new(0.0, -mf * phi).exp();
-        acc += pow_neg_j(m as i32) * epos * r_pos[m] * scale;
-        acc += pow_neg_j(-(m as i32)) * eneg * r_neg[m] * scale;
+        let contrib =
+            pow_neg_j(m as i32) * epos * r_pos[m] * scale + pow_neg_j(-(m as i32)) * eneg * r_neg[m] * scale;
+        acc += contrib;
+        if m == mmax {
+            top = contrib;
+        }
     }
-    acc * 2.0 * PI
+    (acc * 2.0 * PI, top * 2.0 * PI)
 }
 
 /// Simpson's rule weight for index i in array of n points
@@ -1112,16 +1420,16 @@ mod tests {
             let th = deg.to_radians();
             let ref_field = integrate_2d_simpson_public_shim(th, 0.0, &config, f, &hi);
             let mode_field =
-                azimuthal_mode_field(&config, th, 0.0, k, 4097, MODE_PHI_COEFF, MODE_M_MAX, false);
+                azimuthal_mode_field(&config, th, 0.0, k, 4097, 128, 48, false);
             let d_db = 20.0 * (mode_field.norm() / ref_field.norm()).log10();
             assert!(d_db.abs() < 0.1, "θ={deg}°: mode vs 2D Δ={d_db:.4} dB");
         }
 
         // Coma asymmetry: off-axis in the +x plane (φ=0) vs the −x plane (φ=π) must differ.
         let th = 3.0_f64.to_radians();
-        let plus = azimuthal_mode_field(&config, th, 0.0, k, 4097, MODE_PHI_COEFF, MODE_M_MAX, false)
+        let plus = azimuthal_mode_field(&config, th, 0.0, k, 4097, 128, 48, false)
             .norm();
-        let minus = azimuthal_mode_field(&config, th, PI, k, 4097, MODE_PHI_COEFF, MODE_M_MAX, false)
+        let minus = azimuthal_mode_field(&config, th, PI, k, 4097, 128, 48, false)
             .norm();
         assert!(
             (plus - minus).abs() / plus.max(minus) > 1e-3,
@@ -1140,7 +1448,7 @@ mod tests {
         for deg in [0.0_f64, 1.0, 5.0, 20.0, 90.0] {
             let th = deg.to_radians();
             let hankel = hankel_radial_field(&config, th, 0.0, k, 4097);
-            let modes = azimuthal_mode_field(&config, th, 0.0, k, 4097, MODE_PHI_COEFF, 4, false);
+            let modes = azimuthal_mode_field(&config, th, 0.0, k, 4097, 64, 4, false);
             let rel = (hankel - modes).norm() / hankel.norm().max(1e-30);
             assert!(rel < 1e-9, "θ={deg}°: Hankel vs modes rel diff {rel:.2e}");
         }
@@ -1163,6 +1471,130 @@ mod tests {
         assert!(g(5.0) < g0 * 1e-2, "5deg not far below boresight");
         assert!(g(20.0) < g(5.0), "pattern must fall from 5deg to 20deg");
         assert!(g(90.0) < g(20.0), "pattern must fall from 20deg to 90deg");
+    }
+
+    /// A gbt_100m-like dish (`D=100 m`, `f=60 m`, symmetric feed) at Q-band. Adaptive
+    /// density: `radial_points_for` at θ=90° must be O(10⁴) (≈ `4·D/λ`), NOT the O(10⁸)
+    /// a fixed 2D grid at true Nyquist would imply, and the gain eval there must pass its
+    /// N-vs-2N self-check (converged=true).
+    fn gbt_like_antenna() -> AntennaConfiguration {
+        let reflector = ReflectorGeometry::new(100.0, 60.0, 0.000_275).unwrap();
+        let feed = FeedParameters::new(FeedPosition::at_focus(60.0), 3.15, 0.0, 1.0).unwrap();
+        AntennaConfiguration::new("gbt".into(), "GBT".into(), reflector, feed, None).unwrap()
+    }
+
+    #[test]
+    fn radial_points_for_gbt_qband_is_tens_of_thousands() {
+        let config = gbt_like_antenna();
+        let f_hz = 43.0e9; // Q-band
+        let wl = wavelength_from_frequency(f_hz);
+        let p = IntegrationParams::default();
+        let n = radial_points_for(&config, PI / 2.0, wl, &p);
+        println!("radial_points_for(gbt_100m q-band {f_hz:.0} Hz, θ=90°) = {n}");
+        assert!(
+            (10_000..200_000).contains(&n),
+            "expected O(10^4) radial points, got {n}"
+        );
+        // A full gain eval at θ=90° must pass the N-vs-2N self-check.
+        let r = integrate_aperture(PI / 2.0, 0.0, &config, f_hz, &p).unwrap();
+        println!(
+            "gbt q-band θ=90°: |field|={:.4e} converged={} err={:.3e} evals={}",
+            r.field.norm(),
+            r.converged,
+            r.error_estimate,
+            r.num_evaluations
+        );
+        assert!(r.converged, "gbt q-band θ=90° must converge (err={:.3e})", r.error_estimate);
+    }
+
+    #[test]
+    fn radial_density_scales_with_dlambda_sintheta() {
+        let small = test_antenna(); // 1 m
+        let large = large_test_antenna(); // 10 m
+        let wl = wavelength_from_frequency(8.4e9);
+        let p = IntegrationParams::default();
+        // θ=0 → floor (chirp & J_m kernel vanish; no oversampling), forced odd.
+        let n0 = radial_points_for(&small, 0.0, wl, &p);
+        assert_eq!(n0, p.min_rho_points | 1, "θ=0 must drop to the odd floor");
+        // θ=90° → count ∝ D/λ, so the 10× larger dish needs ~10× the points.
+        let ns = radial_points_for(&small, PI / 2.0, wl, &p);
+        let nl = radial_points_for(&large, PI / 2.0, wl, &p);
+        assert!(nl > ns * 5, "θ=90° density must scale with D/λ: large={nl} small={ns}");
+        assert!(ns % 2 == 1 && nl % 2 == 1, "counts must be odd for Simpson");
+    }
+
+    /// A dsn_34m-like dish with the served X-band lateral feed offset (`δ = 0.15 m`,
+    /// `k·δ·(R/f) ≈ 33 rad`). The adaptive mode count must resolve the wide coma spectrum:
+    /// the M-vs-(M+1) self-check must report converged=true at every angle, and the
+    /// pattern must be physical off-axis (far below boresight, no rise with θ — the
+    /// aliasing signature).
+    fn dsn34m_like_xband() -> AntennaConfiguration {
+        let reflector = ReflectorGeometry::new(34.0, 13.6, 0.000_25).unwrap();
+        let mut pos = FeedPosition::at_focus(13.6);
+        pos.x = 0.15; // served x_band lateral offset
+        let feed = FeedParameters::new(pos, 1.14, 0.0, 1.0).unwrap();
+        AntennaConfiguration::new("dsn".into(), "DSN".into(), reflector, feed, None).unwrap()
+    }
+
+    #[test]
+    fn dsn34m_offset_feed_mode_count_converges() {
+        let config = dsn34m_like_xband();
+        let f_hz = 8.4e9;
+        let wl = wavelength_from_frequency(f_hz);
+        for deg in [0.0_f64, 1.0, 5.0, 20.0, 90.0] {
+            let (m, n_phi) = mode_count_for(&config, wl, deg.to_radians());
+            println!("dsn_34m x-band θ={deg:>4}°: adaptive M={m} n_phi={n_phi}");
+        }
+
+        let p = IntegrationParams::default();
+        let g = |deg: f64| integrate_aperture(deg.to_radians(), 0.0, &config, f_hz, &p).unwrap();
+        let r0 = g(0.0);
+        let g0 = r0.field.norm_sqr();
+        let mut prev = f64::INFINITY;
+        for deg in [1.0_f64, 5.0, 20.0, 90.0] {
+            let r = g(deg);
+            let power = r.field.norm_sqr();
+            println!(
+                "dsn_34m x-band θ={deg:>4}°: rel_power={:.3e} converged={} err={:.3e}",
+                power / g0,
+                r.converged,
+                r.error_estimate
+            );
+            assert!(r.converged, "dsn_34m θ={deg}° mode count must converge (M vs M+1)");
+            // Physical: every off-axis angle far below boresight and not rising with θ.
+            assert!(power < g0 * 1e-2, "dsn_34m θ={deg}° not far below boresight");
+            assert!(power <= prev * 1.5, "dsn_34m θ={deg}° pattern rose with θ (aliasing signature)");
+            prev = power;
+        }
+    }
+
+    #[test]
+    fn unconverged_is_flagged_not_silently_returned() {
+        // A dish whose radial Nyquist rate (2·D/λ) EXCEEDS 2× the safety cap at θ=90°:
+        // the adaptive count clamps to RADIAL_POINTS_SAFETY_MAX (below Nyquist → aliased),
+        // while the self-check's 2N leg samples above Nyquist. They disagree → the result
+        // MUST be flagged non-converged, never silently returned. D/λ = 100000 (750 m dish
+        // at 40 GHz) ⇒ Nyquist = 2·10⁵ ≫ cap (6.5·10⁴), 2N leg = 1.31·10⁵ still < Nyquist
+        // is NOT enough — so use a size where 2N clears Nyquist too. Here 2N ≈ 1.31·10⁵ and
+        // Nyquist = 2·10⁵: the coarse leg is badly aliased and the fine leg less so, giving
+        // a large, honest disagreement.
+        let reflector = ReflectorGeometry::new(750.0, 375.0, 0.0).unwrap(); // f/D = 0.5
+        let feed = FeedParameters::new(FeedPosition::at_focus(375.0), 2.0, 0.0, 1.0).unwrap();
+        let config =
+            AntennaConfiguration::new("huge".into(), "Huge".into(), reflector, feed, None).unwrap();
+        let f_hz = 40.0e9; // λ = 0.0075 m → D/λ = 100000
+        let r = integrate_aperture(PI / 2.0, 0.0, &config, f_hz, &IntegrationParams::default())
+            .unwrap();
+        println!(
+            "huge dish θ=90°: converged={} err={:.3e} evals={}",
+            r.converged, r.error_estimate, r.num_evaluations
+        );
+        assert!(
+            !r.converged,
+            "must flag non-convergence when density is capped below Nyquist"
+        );
+        // Even when flagged, the error estimate stays a finite, non-negative number.
+        assert!(r.error_estimate.is_finite() && r.error_estimate >= 0.0);
     }
 
     #[test]
