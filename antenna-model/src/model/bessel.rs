@@ -188,6 +188,21 @@ mod tests {
     }
 
     #[test]
+    fn jn_negative_x_symmetry() {
+        // Jn(-x) = (-1)^n Jn(x): exercises the n>=2 downward-recurrence sign path.
+        for &x in &[2.5, 7.0, 12.0] {
+            assert!(
+                (bessel_jn(4, -x) - bessel_jn(4, x)).abs() < 1e-12,
+                "J4 even n: x={x}"
+            ); // even n
+            assert!(
+                (bessel_jn(5, -x) + bessel_jn(5, x)).abs() < 1e-12,
+                "J5 odd n: x={x}"
+            ); // odd n
+        }
+    }
+
+    #[test]
     fn jn_known_values() {
         // J2(5)=0.046565..., J3(10)=0.058379..., J5(10)=-0.234061...
         assert!((bessel_jn(2, 5.0) - 0.046_565_116_3).abs() < TOL);
