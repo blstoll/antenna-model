@@ -276,6 +276,10 @@ pub fn integrate_aperture(
     // electrically large dishes (the P0 bug). The asymmetric / coma case keeps the
     // 2D path until Task 2 replaces it with the Jₘ azimuthal-mode expansion.
     let is_symmetric = config.feed.position.radial_displacement() == 0.0
+        // Azimuthally-symmetric illumination only: a non-unity asymmetry_factor makes
+        // illumination_amplitude φ'-dependent (elliptical beam), which breaks the J₀
+        // collapse (it assumes A has no φ' dependence). Such feeds fall through to the 2D path.
+        && config.feed.asymmetry_factor == 1.0
         && !params.use_higher_order_aberrations;
     if is_symmetric {
         // Adaptive N_ρ from (D/λ, θ) with an N-vs-2N self-check lands in Task 3; use a
@@ -542,6 +546,9 @@ fn hankel_radial_field(
         let w = simpson_weight(i, n);
         let amp = illumination_amplitude(rho, 0.0, &config.feed, f);
         // Dish-depth chirp (ρ-only, θ-dependent — the parabola's equiphase term).
+        // NOTE: must stay in sync with phase_path's term1 in phase.rs — it is
+        // duplicated from there because phase_path returns term1−term2 fused and
+        // only term1 (this ρ²/(4f)·(1−cosθ) chirp) is wanted here.
         let chirp = k * rho * rho / (4.0 * f) * one_minus_cos;
         // Axial defocus: exact geometric ρ-only phase (φ'-independent when lateral=0).
         let defocus = if axial != 0.0 {
@@ -846,6 +853,36 @@ mod tests {
         assert!(g(5.0) < g0 * 1e-2, "5deg not far below boresight");
         assert!(g(20.0) < g(5.0), "pattern must fall from 5deg to 20deg");
         assert!(g(90.0) < g(20.0), "pattern must fall from 20deg to 90deg");
+    }
+
+    #[test]
+    fn asymmetric_amplitude_feed_bypasses_symmetric_hankel_path() {
+        // A centered feed (no lateral offset) with a non-unity asymmetry_factor has an
+        // azimuthally-dependent (elliptical) illumination, so it must NOT take the J₀
+        // Hankel path — that path hardcodes phi_prime=0 and ignores observation φ.
+        // Proof: the retained 2D path yields an observation-φ-dependent field, whereas
+        // the Hankel path would return the identical value for every φ.
+        let reflector = ReflectorGeometry::new(1.0, 0.5, 0.0).unwrap();
+        let feed = FeedParameters::new(FeedPosition::at_focus(0.5), 8.0, 0.0, 1.5).unwrap();
+        let config =
+            AntennaConfiguration::new("asym".into(), "Asym".into(), reflector, feed, None).unwrap();
+        let params = IntegrationParams::fast();
+
+        let theta = 0.05; // ~2.9° off-axis, where the elliptical beam is resolvable
+        let g_e = integrate_aperture(theta, 0.0, &config, 8.4e9, &params)
+            .unwrap()
+            .field
+            .norm();
+        let g_h = integrate_aperture(theta, PI / 2.0, &config, 8.4e9, &params)
+            .unwrap()
+            .field
+            .norm();
+
+        // Non-trivial φ dependence proves the 2D (non-Hankel) path was taken.
+        assert!(
+            (g_e - g_h).abs() > 1e-6 * g_e.max(g_h),
+            "asymmetric centered feed must retain φ dependence (2D path): E-plane={g_e}, H-plane={g_h}"
+        );
     }
 
     #[test]
