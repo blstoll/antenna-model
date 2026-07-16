@@ -50,8 +50,11 @@ P7 DECIDED 2026-07-10 (auto-refocus), IMPLEMENTED 2026-07-10 (branch
 feat/p7-phase-center-auto-refocus; P1b dependency implemented in the same branch);
 P8 IMPLEMENTED 2026-07-12 (branch feat/p8-off-axis-honesty-warning);
 F7 IMPLEMENTED 2026-07-12 then PARKED 2026-07-13 (inverted premise — see the F7 unit);
-UNBLOCKED by P10 2026-07-15, REDESIGN PENDING (D-2) — sequence WITH P10-perf (they interact);
+UNBLOCKED by P10 2026-07-15; REDESIGN DECIDED 2026-07-16 (power-sum + obliquity factor +
+floor-only rear hemisphere) — sequence WITH P10-perf (they interact);
 P10 DONE 2026-07-15; post-P10 assessment follow-ups filed 2026-07-15: P10-perf, P10-tail, P11
+(P10-tail + P11 DONE 2026-07-15/16); P2 DECIDED 2026-07-16 (REMOVE double-counted Seidel mode,
+superseding "fence"); P3 DECIDED 2026-07-16 (document + flag, default adopted)
 ```
 
 ---
@@ -478,25 +481,49 @@ gap that let this ship.
 - **Depends on:** nothing. **Blocks:** the F7 redesign *should* build on the unified predicate
   (its gate reuses this seam) — land P11 first.
 
-### P2 `[DECISION]` — Seidel higher-order aberration coefficients: verify or fence — Effort: M
+### P2 `[DECISION]` — Seidel higher-order aberration terms: REMOVE (double-counted) — Effort: S/M
 
-- **Question:** `higher_order_aberrations` (`antenna-model/src/model/edge_cases.rs:250`)
-  adds astigmatism/field-curvature/distortion terms with heuristic coefficient 1 (and one
-  bare `/2`), consumed on the live path via `integration.rs:559-570`. No citation.
-- **Recommended default:** **Fence, don't fix:** (a) annotate the function
-  "HEURISTIC — unverified, see roadmap P2"; (b) add a response-level warning when the
-  higher-order term contributes more than 0.1 dB to the result, reusing the existing
-  warnings plumbing (trace how `edge_cases.rs` warnings reach `GainResponse` via
-  `service/evaluator.rs`); (c) file a follow-up for a domain-expert citation (Seidel
-  aberration theory for offset-fed reflectors). **Do not change any coefficient without a
-  citation.**
-- **Exit criteria:** register row Decided; annotation + threshold warning implemented with
-  a test that triggers it; **all existing gain tests pass with unchanged values**.
-- **Gotchas for the executing agent:** You are adding a *warning*, not altering math. If
-  any existing gain test changes value, you broke something — revert and retry.
-- **Depends on:** G1.
+**DECIDED 2026-07-16 (maintainer): remove after a redundancy check** — superseding the
+original "fence" default, on new evidence found 2026-07-16: the base coma model
+(`phase_feed_displacement`, `model/phase.rs:156`) is the **exact geometric path difference**
+`k·(path_displaced − path_ideal)` and therefore already contains *every* order of the
+feed-displacement aberration (steering, defocus, astigmatism, coma, distortion) exactly. The
+Seidel terms in `higher_order_aberrations` (`model/edge_cases.rs:253`) are low-order Taylor
+approximations of that same physics, ADDED ON TOP of the exact value in `aperture_plane_g`
+(`model/integration.rs`) when `use_higher_order_aberrations` is set — i.e. the
+`HigherOrderAberrations` mode double-counts the δ², δ³ terms and makes the phase *less*
+accurate than the standard mode it replaces. They are not merely "unverified"; they are
+structurally redundant.
+
+- **Work (in order):**
+  1. **Redundancy check first (the safety gate):** a test that numerically extracts the
+     δ²·ρ²·cos(2(φ'−α)), δ²·ρ², and δ³·ρ³·cos(φ'−α) components from the exact
+     `phase_feed_displacement` output (fit at a 0.35f offset across the aperture) and shows
+     they match the Seidel forms to leading order — *proving* the double count, not just
+     asserting it. **If this check fails, STOP: revert to the original fence plan and
+     re-open the register row.**
+  2. Remove `higher_order_aberrations`, the `HigherOrderAberrations` computation mode
+     (`pattern.rs` dispatch + `edge_cases.rs` mode selection), the
+     `use_higher_order_aberrations` param plumbing, and the mode-path branches in
+     `integration.rs` (`aperture_plane_g`, `mode_count_for` asymmetry handling stays — it
+     serves the illumination/coma cases, not Seidel).
+  3. Offsets formerly routed to the removed mode (0.3f–0.5f) fall through to
+     `StandardPhysicalOptics`, whose exact coma phase covers them; the ray-tracing threshold
+     (>0.5f) is untouched.
+- **Exit criteria:** redundancy test committed and green; mode removed; **no served value
+  changes for any enabled antenna** (all offsets ≤0.027f never entered the mode — every
+  existing anchor/gain test passes unchanged); a 0.3–0.5f-offset regression test pins the
+  new (exact-only) behavior; `PHYSICS_MODEL_VERSION` bumped (values in the 0.3–0.5f band
+  change by construction — that is the fix); domain-contract + CLAUDE.md coma sections
+  updated.
+- **Depends on:** G1 (done). **Coordinate with:** F7 redesign (both bump
+  `PHYSICS_MODEL_VERSION`; land P2 first or batch the bump).
 
 ### P3 `[DECISION]` — Ray-trace stub (feed offsets > 0.5·f) disposition — Effort: S
+
+**DECIDED 2026-07-16 (maintainer): document + flag** — the recommended default, adopted
+as-is. Real ray tracing stays gated as feature F2; rejection was ruled out (warn-don't-refuse
+philosophy, heatmap grid totality). Execute the unit as specified below.
 
 - **Question:** Offsets > 0.5·f route to an acknowledged stub (`pattern.rs:260-270` pushes
   a degraded-accuracy warning; `ray_trace.rs:336` TODO: all aperture points "hit" by
@@ -1165,6 +1192,33 @@ applied across 4π, implying 136–326% of the antenna's total radiated power. A
 `apply_sidelobe_floor` flag, the uncalibrated gate, the `PHYSICS_MODEL_VERSION` stamp, and the
 digitised NTIA/NASA datasets. Register decision had been revised to **best-estimate (median)**,
 not conservative envelope (maintainer, 2026-07-12) — that call still stands for the redesign.
+
+**✅ REDESIGN DECIDED 2026-07-16 (maintainer) — all three open calls resolved at the
+recommended options; the unit is now implementable:**
+
+1. **Combination rule: incoherent POWER SUM** — `G = 10·log₁₀(10^(PO/10) + 10^(floor/10))`
+   (not `max()`, not hard substitution). No θ_valid threshold parameter exists in the
+   forward hemisphere; the floor takes over smoothly wherever idealised PO under-predicts.
+2. **Add the Huygens obliquity factor `(1+cosθ)/2` to the far-field integrand** — the
+   missing textbook element factor P10-tail identified (root cause of the fictitious
+   converged rear backlobe; forward levels ~up-to-6 dB hot at 90°). Applies to BOTH the
+   Hankel and azimuthal-mode paths (it is a θ-only multiplier outside the aperture
+   integral, so it does not disturb the P10 quadrature). Re-derive the wide-angle anchors
+   in `reference_validation.rs` (they are internal-consistency values, not measurements) and
+   re-run the full P10 validation protocol; the θ=0 peak anchors must NOT move (factor = 1
+   at boresight).
+3. **Rear hemisphere (θ > 90°): floor-only** — exclude the PO term from the power-sum
+   entirely behind the dish (aperture PO is categorically invalid there even with
+   obliquity, and P10-tail measured a +7…+13 dBi converged-but-fictitious backlobe that
+   would dominate the ≤0 dBi floor). The NTIA 84-164 calibration data spans 1°–180°, so the
+   floor is data-backed in the rear hemisphere. P10-tail's rear-hemisphere warning stays
+   (reworded from "value is an extrapolation artifact" to "statistical floor only").
+
+Confirmed unchanged from earlier decisions: best-estimate **median** level (2026-07-12);
+`Ω = 4π`, `floor = 1 − η_ruze`, 0 dBi bound; gate on P11's
+`physics_is_uncorrected()` predicate; the boresight-tuner `surface_rms`→floor coupling must
+be measured/bounded before shipping (precondition 2 below); `PHYSICS_MODEL_VERSION` bump
+(coordinate with P2's bump); re-scope P10-perf after landing.
 
 **Redesign guidance (2026-07-15 post-P10 assessment) — read before scoping:**
 
