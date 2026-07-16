@@ -752,17 +752,23 @@ fn integrate_2d_simpson_public_shim(
 /// Adaptive radial sample count for the Hankel / mode integrator at ~2× Nyquist
 /// (P10 Task 3, D-6).
 ///
-/// The chirp and the `Jₘ(kρ·sinθ)` kernel oscillate at radial rate `≈ (D/λ)·sinθ`
-/// cycles across `[0, R]`, so the Nyquist count is `N ≈ 2·(D/λ)·sinθ`. We take ~2× that
-/// (`N ≈ 4·(D/λ)·sinθ`), floored at `params.min_rho_points` and capped at
-/// [`RADIAL_POINTS_SAFETY_MAX`], forced odd for Simpson's rule.
+/// The `Jₘ(kρ·sinθ)` kernel oscillates at radial rate `≈ (D/λ)·sinθ` cycles across
+/// `[0, R]`, so its Nyquist count is `N ≈ 2·(D/λ)·sinθ`. We take ~2× that
+/// (`N ≈ 4·(D/λ)·sinθ`) for the kernel, sum in the other phase terms below, then floor at
+/// `params.min_rho_points`, cap at [`RADIAL_POINTS_SAFETY_MAX`], and force odd for
+/// Simpson's rule.
 ///
 /// The count sums the radial oscillation of EVERY integrand phase term, not just the
 /// θ-dependent kernel — critically the θ-INDEPENDENT aperture-plane phase (lateral coma,
 /// axial defocus), which oscillates radially even at θ=0. Missing it silently aliases a
 /// steered/offset feed at boresight (the P0 signature — off-axis gain far too high). Each
 /// term's cycle count across `[0, R]`:
-/// - chirp + `Jₘ` kernel (θ-dependent): `(D/λ)·|sinθ|`
+/// - `Jₘ` kernel (θ-dependent):         `(D/λ)·|sinθ|`
+/// - dish-depth chirp (θ-dependent):    `(R²/(4fλ))·(1−cosθ)`, from the parabola's axial
+///   sag `k·ρ²/(4f)·(1−cosθ)`. SUBDOMINANT in the forward hemisphere (why every P10 test
+///   passes without it) but DOMINANT in the rear hemisphere: as θ→180° the `sinθ` kernel
+///   budget collapses toward `min_rho_points` while this chirp peaks at `R²/(2fλ)` cycles.
+///   Uncapped — it is a genuine radial phase term the self-check must be able to resolve.
 /// - lateral coma (θ-independent):      `(δ/λ)·(R/f)`, capped at the physical maximum
 ///   radial spatial frequency `R/λ = D/(2λ)` (a purely-radial aperture phase gradient can
 ///   never exceed `k`, so the linear-steer estimate is clamped there for large `δ/f`)
@@ -804,7 +810,10 @@ fn radial_points_for(
     let kernel_cycles = d_lambda * theta.sin().abs();
     let coma_cycles = ((delta / wavelength) * r_over_f).min(coma_cap);
     let defocus_cycles = ((axial / wavelength) * r_over_f * r_over_f).min(radial_cycle_ceiling);
-    let cycles = kernel_cycles + coma_cycles + defocus_cycles;
+    // Dish-depth chirp k·ρ²/(4f)·(1−cosθ): (R²/(4fλ))·(1−cosθ) cycles across [0,R].
+    // Subdominant forward, DOMINANT behind the dish (θ→180°: kernel_cycles→0 while this peaks).
+    let chirp_cycles = r * r / (4.0 * f * wavelength) * (1.0 - theta.cos());
+    let cycles = kernel_cycles + coma_cycles + defocus_cycles + chirp_cycles;
 
     // ~2× Nyquist: 4 samples per cycle.
     let target = 4.0 * cycles;

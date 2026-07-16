@@ -45,12 +45,13 @@ G1 ─┬─ G2 ── G3
     ├─ D1 ─ D2 ─ D3;  D6                     │
     └─ (Phases 1–3 done) ─ D4 ─ D7
 Superseded by C8 (do not implement): S7, C5, C6
-Phase 5: F1..F9 (F7, F8 done) gated on register rows (P3, P5/F4, F5, D9, F9); P1 + C8 DECIDED 2026-07-08;
+Phase 5: F1..F9 (F8 done) gated on register rows (P3, P5/F4, F5, D9, F9); P1 + C8 DECIDED 2026-07-08;
 P7 DECIDED 2026-07-10 (auto-refocus), IMPLEMENTED 2026-07-10 (branch
 feat/p7-phase-center-auto-refocus; P1b dependency implemented in the same branch);
 P8 IMPLEMENTED 2026-07-12 (branch feat/p8-off-axis-honesty-warning);
-F7 DECIDED and IMPLEMENTED 2026-07-12 (branch feat/f7-sidelobe-floor; F9 per-antenna
-correlation length deferred)
+F7 IMPLEMENTED 2026-07-12 then PARKED 2026-07-13 (inverted premise — see the F7 unit);
+UNBLOCKED by P10 2026-07-15, REDESIGN PENDING (D-2) — sequence WITH P10-perf (they interact);
+P10 DONE 2026-07-15; post-P10 assessment follow-ups filed 2026-07-15: P10-perf, P10-tail, P11
 ```
 
 ---
@@ -407,8 +408,75 @@ gap that let this ship.
 - **Also fold in the P10 review minors:** (a) relax the near-null spurious non-convergence warning
   (absolute-floor on the N-vs-2N check); (b) add a high-order Bessel test near the turning point
   (`m≈a`, m up to ~200); (c) fix `num_evaluations` to count the ×M mode work.
-- **Depends on:** P10 (done). **Blocks:** nothing (correctness already shipped). Pre-production, so no
-  live SLA is breached today.
+- **SEQUENCING (2026-07-15 post-P10 assessment): plan this unit TOGETHER with the F7 redesign,
+  not independently.** The F7 redesign will substitute (or blend in) a statistical model beyond a
+  physical `θ_valid` — and the expensive integrations are precisely the ones beyond `θ_valid`
+  (wide-angle Ka on offset-feed dishes). Deciding F7's `θ_valid` and combination rule FIRST may
+  shrink P10-perf substantially or eliminate its worst cases entirely; conversely, optimizing the
+  wide-angle mode path first risks building speed for angles F7 then stops serving from PO at
+  all. Concretely: settle the F7-redesign decision (register row F7), then re-scope this unit
+  against whatever PO angular range actually remains served.
+- **Depends on:** P10 (done). **Blocks:** nothing hard (correctness already shipped); soft-coupled
+  to the F7 redesign per the sequencing note. Pre-production, so no live SLA is breached today.
+
+### P10-tail — Rear-hemisphere radial budget + physicality coverage beyond 90° — Effort: S
+
+**Filed 2026-07-15 (post-P10 assessment).**
+
+- **Finding:** `radial_points_for` (`antenna-model/src/model/integration.rs:776`) sizes the
+  radial density from `kernel + coma + defocus` cycles but **omits the dish-depth chirp**
+  `k·ρ²/(4f)·(1−cosθ)`. In the forward hemisphere the chirp is subdominant (which is why every
+  P10 test passes), but behind the dish it inverts: as θ→180°, `sinθ→0` collapses the kernel
+  budget toward `min_rho_points` while the chirp peaks at ~`R²/(2fλ)` cycles (dsn_34m X-band:
+  ~340 cycles against a ~16-point floor). The N-vs-2N self-check should flag the resulting
+  under-sampling as `converged=false` (honest, not silent), but nothing *demonstrates*
+  rear-hemisphere behavior: the P10 validation protocol stops at θ=90°, even though the
+  original findings tables (`docs/findings-2026-07-13-off-axis-integration-aliasing.md` §2.1)
+  included θ=163°.
+- **Work:**
+  1. Add `chirp_cycles = (R²/(4fλ))·(1−cosθ)` to the cycle sum in `radial_points_for` (one
+     line; the safety cap, odd-forcing, and self-check machinery need no change).
+  2. Extend `p10_served_offaxis_is_physical_all_enabled_antennas` (or add a sibling test)
+     past 90° — at least θ ∈ {120°, 163°, 180°} — asserting no high backlobe and
+     converged-or-warned for every enabled antenna × band.
+  3. Decide and document the **rear-hemisphere policy**: PO from an unshadowed aperture is
+     physically meaningless behind a reflector regardless of numerical convergence (no rim
+     diffraction, no dish shadowing of the aperture field). Either fold θ>90° into the F7
+     redesign's `θ_valid` or emit a dedicated warning; record the choice in
+     `docs/domain-contract.md` ("Off-axis pattern / sidelobe fidelity").
+- **Exit criteria:** chirp counted in the radial budget; rear-hemisphere physicality tests
+  green; policy documented; every existing forward-hemisphere anchor in
+  `reference_validation.rs` still green **unchanged** (standing rule 2 — the chirp addition
+  only *raises* sample counts, it must not move any converged value).
+- **Depends on:** P10 (done). **Blocks:** nothing; feeds the θ_valid discussion in the F7
+  redesign.
+
+### P11 — One predicate for "physics is uncorrected" gates and warnings — Effort: S
+
+**Filed 2026-07-15 (post-P10 assessment) — promoted from
+`docs/findings-2026-07-13-off-axis-integration-aliasing.md` §7, where it was recorded on
+2026-07-12 but never tracked as a unit.**
+
+- **Finding:** the spillover gate keys on `calibration.correction_surface.is_none()`
+  (`service/evaluator.rs:222`) while the P8 off-axis honesty warning keys on
+  `CalibrationStatus::Uncalibrated` (`service/evaluator.rs:536-541`). These are **different
+  sets**: `calibrate/src/boresight_calibration.rs` (~:637,642,687) produces
+  `PartiallyCalibrated` with **no** correction surface whenever there is no frequency
+  correction. Such an antenna has its physics modified (spillover applied — and any future F7
+  floor would follow the same gate) while serving only a "±1–1.5 dB" partial-calibration
+  accuracy claim and **no** off-axis honesty warning.
+- **Work:** introduce one named predicate on the calibration (e.g.
+  `AntennaCalibration::physics_is_uncorrected()`, true iff there is no correction surface) and
+  use it for BOTH the spillover/floor gate and the off-axis warning. Revisit the P8 "don't
+  stack warnings on partially-calibrated antennas" design constraint explicitly while doing so
+  — that constraint predates the discovery of the no-surface partial-cal case and should be
+  re-decided, not silently inherited. Pin with a test: `PartiallyCalibrated` + no surface ⇒
+  spillover applied AND the off-axis warning fires.
+- **Exit criteria:** a single predicate used by every uncalibrated-physics gate; the mismatch
+  case pinned by test; behavior recorded in `docs/domain-contract.md`; any warning-text change
+  mirrored in `openapi.yaml`/`docs/api-documentation.md` (standing rule 4).
+- **Depends on:** nothing. **Blocks:** the F7 redesign *should* build on the unified predicate
+  (its gate reuses this seam) — land P11 first.
 
 ### P2 `[DECISION]` — Seidel higher-order aberration coefficients: verify or fence — Effort: M
 
@@ -1097,6 +1165,32 @@ applied across 4π, implying 136–326% of the antenna's total radiated power. A
 `apply_sidelobe_floor` flag, the uncalibrated gate, the `PHYSICS_MODEL_VERSION` stamp, and the
 digitised NTIA/NASA datasets. Register decision had been revised to **best-estimate (median)**,
 not conservative envelope (maintainer, 2026-07-12) — that call still stands for the redesign.
+
+**Redesign guidance (2026-07-15 post-P10 assessment) — read before scoping:**
+
+1. **Prefer an incoherent power sum over both `max()` and hard substitution at θ_valid:**
+   `G = 10·log₁₀(10^(PO/10) + 10^(floor/10))`. Scattered energy adds to the coherent pattern
+   in *power*, so this is the physically motivated combination; it is continuous (no seam
+   artifacts in heatmaps), converges to the floor exactly where idealised PO underestimates,
+   and softens the need to pick a sharp θ_valid at all. Keep the salvaged level
+   (`Ω = 4π`, `floor = 1 − η_ruze`, 0 dBi bound, NTIA-median pinning) and the existing honest
+   framing that `(1 − η_ruze)` is a surface-quality-scaled empirical proxy, not a literal
+   power budget (the measured floor's frequency-flatness already shows it is not literally
+   Ruze scatter).
+2. **Precondition — bound the boresight-tuner coupling first** (findings §7 item 2, currently
+   untracked anywhere else): `calibrate/src/boresight_calibration.rs` tunes `surface_rms` as a
+   catch-all for boresight gain deficits, and any floor keyed on `(1 − η_ruze)` converts that
+   inflated σ directly into off-axis power. Bounded by the 0 dBi ceiling, but it must be
+   measured on the real calibrations and documented (or the tuner constrained) before the
+   floor ships.
+3. **Build on P11's unified predicate** (land P11 first) so the floor's gate and the honesty
+   warning can never diverge again.
+4. **Sequence with P10-perf** (see that unit's note): decide θ_valid / the combination rule
+   here first — it determines how much of P10-perf's wide-angle optimization work is even
+   needed.
+5. **Take the rear-hemisphere policy from P10-tail** as an input: θ > 90° is outside PO's
+   physical validity regardless of convergence and is a natural part of this unit's θ_valid
+   definition.
 
 **✅ DONE 2026-07-12** — branch `feat/f7-sidelobe-floor`, commits `06b8cfe` (Ruze sidelobe
 scatter floor + `apply_sidelobe_floor` flag), `7e043b4` (gate on uncalibrated antennas, all

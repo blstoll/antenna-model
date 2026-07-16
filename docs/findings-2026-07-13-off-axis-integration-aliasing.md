@@ -263,6 +263,11 @@ Still good, and reusable by the redesign:
 
 ## 7. Also open (from the 2026-07-12 review, independent of the above)
 
+> **TRACKED 2026-07-15** (post-P10 assessment — these two items had been recorded here but
+> never promoted to work units): item 1 is now unit **P11** (unified predicate); item 2 is now
+> an explicit **precondition in the F7-redesign unit** (bound/document the tuner coupling
+> before any floor ships). See `roadmap-2026-07-work-units.md`.
+
 - **Gate/warning predicate mismatch.** The spillover + floor gate on
   `correction_surface.is_none()`, but the P8 warning gates on
   `CalibrationStatus::Uncalibrated`. These are different sets:

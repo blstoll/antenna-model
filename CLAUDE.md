@@ -129,7 +129,8 @@ antenna-model/           # Cargo workspace root
 - **`geometry.rs`** - `ReflectorGeometry`, `FeedParameters`, `MeshParameters`
 - **`phase.rs`** - Phase functions: path length, coma (full path-length model), surface error (statistical Ruze model; per-point Zernike maps are not implemented — the aperture integrand uses `surface_error = 0.0` and the calibration correction surface absorbs systematic surface deviations), mesh
 - **`illumination.rs`** - Feed pattern: cos^q with q-factor
-- **`integration.rs`** - Adaptive Simpson's rule aperture integration
+- **`integration.rs`** - Aperture integration via the **Hankel / azimuthal-mode (Jₘ) integrator** (roadmap P10, landed 2026-07-15): the φ' integral is collapsed analytically (Jacobi–Anger), radial density is derived adaptively from `(D/λ, θ)` at ~2× Nyquist, and a runtime N-vs-2N / M-vs-(M+1) self-check flags non-convergence (surfaced as a response warning, never silent). The legacy 2D Simpson quadrature survives only as a `#[cfg(test)]` reference oracle. The `IntegrationParams` presets (`fast()`, `high_accuracy()`) no longer gate served correctness — the served path uses `adaptive()` and most preset fields are inert (see the docstrings in `integration.rs`).
+- **`bessel.rs`** - In-house Bessel Jₘ (pure Rust, Numerical Recipes rational approximations + two-branch recurrence), pinned by tests in both the small-argument and asymptotic branches
 - **`pattern.rs`** - Far-field pattern computation with Ruze efficiency
 - **`coordinates_3d.rs`** - 3D position → antenna-frame direction transforms (ECEF/geodetic vehicle geometry)
 - **`correction_interpolator.rs`** - 4D B-spline evaluation of the residual correction surface
@@ -225,6 +226,11 @@ Per `docs/implementation-plan.md`, Sprints 1–7 are complete:
   partial-calibration statuses, multi-feed support.
 - The **4D B-spline correction surface is implemented and live** (`model/correction_interpolator.rs`,
   applied at `service/evaluator.rs:265-287`).
+- The **P10 off-axis integrator landed 2026-07-15**: served off-axis gain is numerically
+  converged at all angles (the pre-P10 aliasing that returned gain 20–35 dB too high beyond a
+  few degrees is fixed). Served values on uncalibrated antennas are *idealised* physical optics
+  (no blockage/strut/edge-diffraction), stated honestly by the off-axis warning; the F7
+  statistical sidelobe model is a pending redesign (see the roadmap's F7 row).
 
 Active hardening and debt work is tracked in `docs/roadmap-2026-07.md` and
 `docs/roadmap-2026-07-work-units.md`.
@@ -233,7 +239,7 @@ Active hardening and debt work is tracked in `docs/roadmap-2026-07.md` and
 
 1. **Coordinate System Confusion**: See `docs/domain-contract.md` for the frame table and known gotchas (ENU axis direction, GEO-altitude auto-detection, antenna-frame origin, `feed_position` = pointing target not physical offset) before touching coordinate transforms.
 
-2. **Aperture Integration Performance**: This is the computational bottleneck. The adaptive Simpson's rule must converge accurately within time budget.
+2. **A wrong oscillatory integrator is not obviously wrong** — it returns a plausible number. Any change to `integration.rs` or `bessel.rs` must be cross-checked at angles whose answers are independently known, spanning the full θ range **and both Bessel branches** (small-argument and asymptotic): a P10-era spike was confidently wrong by 22 dB at θ=0 while looking flawless at θ=90°, because special-function bugs fail branch-locally. The validation protocol lives in `antenna-model/tests/reference_validation.rs` (anchors, independent Hankel oracle, physicality sweeps) — run it, and never validate at a single angle. Performance note: the integrator is O(D/λ) per point, cheap near boresight; the remaining hot case is wide-angle Ka on offset-feed (coma) antennas — see roadmap unit P10-perf before "optimizing" anything by reducing sample density.
 
 3. **Phase Wrapping**: Phase functions must handle 2π wrapping correctly (see the phase accumulation in `model/phase.rs`).
 
@@ -259,4 +265,4 @@ Active hardening and debt work is tracked in `docs/roadmap-2026-07.md` and
 - **Ruze Equation**: J. Ruze "Antenna Tolerance Theory" (1966) - surface error effects
 - **Zernike Polynomials**: Noll "Zernike Polynomials and Atmospheric Turbulence" - standard ordering
 - **Mesh Reflectors**: Wire mesh EM scattering literature
-- **Numerical Integration**: Gaussian quadrature, adaptive Simpson's rule (Press et al. "Numerical Recipes")
+- **Numerical Integration & Special Functions**: Jacobi–Anger expansion / Hankel transforms for the azimuthal collapse; composite Simpson's rule for the radial quadrature; Bessel Jₘ rational approximations and recurrences (Press et al. "Numerical Recipes"; Abramowitz & Stegun for reference values)

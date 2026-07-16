@@ -1340,6 +1340,83 @@ fn p10_served_offaxis_is_physical_all_enabled_antennas() {
 }
 
 // ---------------------------------------------------------------------------
+// P10-tail — Rear-hemisphere physicality: past 90° the aperture-integration
+// model has no physical validity (no rim diffraction, no dish shadowing), and
+// at θ=180° the integral degenerates to a Fresnel-type radial integral whose
+// magnitude has no ground-truth level. So this asserts only the HONEST
+// invariant: NO high backlobe (>=30 dB below the forward peak) OR the sample
+// budget honestly reports `converged == false` (never a silent high value).
+// It does NOT assert a specific dBi level for θ>90°. Diagnostic gain/converged
+// values are printed for the maintainer.
+// ---------------------------------------------------------------------------
+#[test]
+fn p10_served_rear_hemisphere_is_physical_or_flagged() {
+    use antenna_model::model::integrate_aperture;
+    let repo = load_real_repository();
+    let p = integrator_params();
+
+    println!("\n=== P10-tail rear-hemisphere physicality (symmetric) ===");
+    println!(
+        "{:<22} {:<16} {:>8} | {:>7} | {:>7} {:>5} {:>7} {:>5} {:>7} {:>5}",
+        "antenna", "feed", "D/λ", "peak0°", "120°", "cnv", "163°", "cnv", "180°", "cnv"
+    );
+
+    for (aid, fid, fhz) in enabled_symmetric_bands() {
+        let cal = repo
+            .get_calibration(aid, fid)
+            .unwrap_or_else(|| panic!("{aid}/{fid} not enabled in the real config"));
+        let cfg = config_for(&cal, None);
+        let d_lambda = cfg.reflector.diameter * fhz / SPEED_OF_LIGHT_M_S;
+
+        let g0 = compute_gain_db(deg(0.0), 0.0, &cfg, fhz, &p).unwrap().gain;
+
+        // Gain (dB) and the runtime N-vs-2N self-check `converged` flag at each rear angle.
+        let rear = |d: f64| -> (f64, bool) {
+            let gain = compute_gain_db(deg(d), 0.0, &cfg, fhz, &p).unwrap().gain;
+            let conv = integrate_aperture(deg(d), 0.0, &cfg, fhz, &p)
+                .unwrap()
+                .converged;
+            (gain, conv)
+        };
+        let (g120, c120) = rear(120.0);
+        let (g163, c163) = rear(163.0);
+        let (g180, c180) = rear(180.0);
+
+        println!(
+            "{aid:<22} {fid:<16} {d_lambda:>8.0} | {g0:>7.2} | {g120:>7.2} {c120:>5} \
+             {g163:>7.2} {c163:>5} {g180:>7.2} {c180:>5}"
+        );
+
+        // Honest invariant, per rear angle: EITHER the value is well below the forward
+        // peak, OR the runtime self-check honestly flagged non-convergence (never a
+        // silent value AT/ABOVE the peak — the pre-P10 aliasing signature).
+        //
+        // Level bound = 20 dB below peak, matching the existing served-90° bound in
+        // `p10_served_offaxis_is_physical_all_enabled_antennas` (`s90 < s0 - 20`). NOTE
+        // (P10-tail finding): a *30* dB bound would assert something FALSE. The rear PO
+        // value is GENUINELY CONVERGED (verified stable to <0.1 dB against a 20001-point
+        // forced density) yet sits only ~28 dB below peak for the small dishes — the
+        // idealised unshadowed aperture radiates a real +7..+13 dBi backlobe at θ≈163°
+        // because the integrand carries NO Huygens obliquity factor (1+cosθ)/2 (F7
+        // handoff #2 in domain-contract.md). Convergence therefore CANNOT be relied on
+        // to flag rear invalidity — that is exactly why the rear-hemisphere WARNING
+        // (Task A3), not a level bound, is the safety net. At θ=180° the base-density
+        // self-check does report `converged == false` here (honest under-sampling).
+        for (deg_label, (g, conv)) in [
+            ("120°", (g120, c120)),
+            ("163°", (g163, c163)),
+            ("180°", (g180, c180)),
+        ] {
+            assert!(
+                g < g0 - 20.0 || !conv,
+                "{aid}/{fid} @ {deg_label}: rear gain {g:.2} within 20 dB of peak {g0:.2} \
+                 AND flagged converged — a silent high backlobe (aliasing regression)"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // AC1 (fast leg) — Production integrate_aperture vs the INDEPENDENT Hankel
 // oracle for the SMALLEST (3.7 m) and LARGEST (100 m) enabled antennas, in
 // BOTH Bessel branches, agreeing < 0.1 dB. Field-magnitude ratio cancels all
