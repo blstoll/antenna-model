@@ -121,6 +121,19 @@ sidelobe-floor redesign (unblocked by P10, redesign pending) would address the a
 off-axis levels separately — see `docs/domain-contract.md`, "Off-axis pattern / sidelobe
 fidelity".
 
+**Rear-hemisphere caveat — no physical validity behind the reflector (θ > 90°):** queries
+more than **90° off boresight** return a separate, harder warning on **every** antenna —
+**including fully calibrated ones** (a correction surface fitted from forward-hemisphere
+measurements says nothing about back lobes). The aperture-integration model is a
+forward-radiating formulation with no Huygens obliquity factor; behind the reflector the
+returned value is a **numerical extrapolation of an idealised, unshadowed aperture field, not
+a prediction**. Real rear-hemisphere levels are set by feed spillover past the rim,
+aperture-edge diffraction, and mesh leakage — none of which are modeled. The value is still
+returned (grid totality on `/heatmap` and `/h3-heatmap` is preserved) but must be replaced by
+measured data or a regulatory rear-lobe envelope for any rear-hemisphere analysis. The
+warning message is constant per (antenna, frequency), so heatmap/H3 aggregation deduplicates
+it to a single entry.
+
 ### Coordinate System Auto-Detection
 
 3D positions automatically detect coordinate system:

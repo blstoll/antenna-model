@@ -637,7 +637,15 @@ components:
             model now include a Ruze scatter-floor best estimate (tracks
             measured median sidelobe statistics, not a precise per-antenna
             prediction) and must not be used in place of calibrated data for
-            interference / off-axis-EIRP analysis.
+            interference / off-axis-EIRP analysis; and the REAR-HEMISPHERE
+            warning — emitted for ANY antenna (calibrated or not) when a query is
+            more than 90 degrees off boresight: the aperture-integration model
+            has no physical validity behind the reflector, so the returned value
+            is a numerical extrapolation of an idealised unshadowed aperture
+            field, not a prediction (real rear levels come from feed spillover,
+            edge diffraction, and mesh leakage, none of which are modeled). Use
+            measured data or a regulatory rear-lobe envelope for rear-hemisphere
+            analysis.
           items:
             type: string
         metadata:
@@ -867,11 +875,13 @@ components:
           type: array
           description: >
             Aggregated, deduplicated warnings across all cells (e.g.,
-            extrapolated cells, out-of-range queries, and the off-axis honesty
+            extrapolated cells, out-of-range queries, the off-axis honesty
             warning for uncalibrated antennas when cells fall beyond ~3x the
             first-null angle ~1.6*lambda/D — sidelobe levels there now include
             a Ruze scatter-floor best estimate, not a precise per-antenna
-            prediction).
+            prediction — and the rear-hemisphere warning for ANY antenna when
+            cells fall more than 90 degrees off boresight, where the
+            aperture-integration model has no physical validity).
           items:
             type: string
         metadata:
@@ -1008,11 +1018,13 @@ components:
           type: array
           description: >
             Aggregated, deduplicated warnings across all grid points (e.g.,
-            extrapolated points, and the off-axis honesty warning for
+            extrapolated points, the off-axis honesty warning for
             uncalibrated antennas when grid points fall beyond ~3x the
             first-null angle ~1.6*lambda/D — sidelobe levels there now include
             a Ruze scatter-floor best estimate, not a precise per-antenna
-            prediction).
+            prediction — and the rear-hemisphere warning for ANY antenna when
+            grid points fall more than 90 degrees off boresight, where the
+            aperture-integration model has no physical validity).
           items:
             type: string
         metadata:

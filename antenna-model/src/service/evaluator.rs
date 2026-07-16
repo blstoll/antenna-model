@@ -219,7 +219,7 @@ pub fn compute_gain_from_request(
     // spillover. The ideal-reference computation below tracks the ACTUAL result's spillover
     // state (not this raw flag) so that base spillover cancels in loss_db without introducing a
     // one-sided bias.
-    integration_params.apply_spillover = calibration.correction_surface.is_none();
+    integration_params.apply_spillover = calibration.physics_is_uncorrected();
     // F7 sidelobe floor is OFF on the served path (D-2): now that the P10 integrator makes the
     // off-axis pattern numerically correct, the served value is the RAW physical-optics gain.
     // The floor plumbing (`sidelobe_floor_gain`, this flag) is retained for the separate F7
@@ -358,6 +358,15 @@ pub fn compute_gain_from_request(
     // Off-axis honesty warning (P8): corrected_el is the off-boresight angle
     // (elevation = 0° at boresight in this pipeline's convention).
     warnings.extend(off_axis_unvalidated_warning(
+        &calibration,
+        corrected_el,
+        request.frequency_mhz,
+    ));
+
+    // Rear-hemisphere hard-invalidity warning (P10-tail): fires for θ>90° on ANY
+    // antenna, calibrated or not — a forward-hemisphere correction surface says
+    // nothing about back lobes. Same off-boresight angle as the off-axis warning.
+    warnings.extend(rear_hemisphere_warning(
         &calibration,
         corrected_el,
         request.frequency_mhz,
@@ -512,15 +521,24 @@ const FIRST_NULL_COEFFICIENT: f64 = 1.6;
 /// redesign is a separate unit). The warning below states this physical caveat.
 const OFF_AXIS_FIRST_NULL_MULTIPLE: f64 = 3.0;
 
-/// Off-axis honesty warning for uncalibrated antennas (roadmap unit P8).
+/// Off-axis honesty warning for uncorrected-physics antennas (roadmap units P8, P11).
 ///
-/// Returns a warning when a query on an antenna with
-/// `CalibrationStatus::Uncalibrated` falls beyond the validated
-/// main-beam/near-in region (3× the first-null angle ≈ 1.6·λ/D — a
-/// beamwidth-relative threshold, not a fixed angle). Calibrated and
-/// partially-calibrated antennas are excluded: out-of-coverage queries there
-/// already receive the extrapolation warning, and stacking a second warning
-/// was explicitly ruled out (P8 design constraint 1).
+/// Returns a warning when a query on an antenna whose served gain is RAW
+/// (uncorrected) physics falls beyond the validated main-beam/near-in region
+/// (3× the first-null angle ≈ 1.6·λ/D — a beamwidth-relative threshold, not a
+/// fixed angle).
+///
+/// The gate is [`AntennaCalibration::physics_is_uncorrected`] — the SAME
+/// predicate that gates the spillover fold-in (roadmap P11). Any antenna that
+/// carries a correction surface stays silent (regardless of calibration
+/// status): out-of-coverage queries there already receive the extrapolation
+/// warning, so stacking a second warning was explicitly ruled out (P8 design
+/// constraint 1), and that constraint is preserved exactly by keying on surface
+/// presence. Conversely a `PartiallyCalibrated` antenna produced with NO
+/// frequency correction (see `calibrate/boresight_calibration.rs`) has no
+/// surface to extrapolate and DOES warn — closing the pre-P11 honesty gap where
+/// such an antenna had its physics modified (spillover) yet served no off-axis
+/// honesty warning.
 ///
 /// The message is intentionally constant per (antenna, frequency) — it must
 /// not embed the query angle, so that heatmap/H3 warning aggregation
@@ -533,10 +551,7 @@ pub(crate) fn off_axis_unvalidated_warning(
     off_boresight_deg: f64,
     frequency_mhz: f64,
 ) -> Option<String> {
-    if !matches!(
-        calibration.calibration_status,
-        Some(CalibrationStatus::Uncalibrated { .. })
-    ) {
+    if !calibration.physics_is_uncorrected() {
         return None;
     }
 
@@ -567,6 +582,56 @@ pub(crate) fn off_axis_unvalidated_warning(
          adjacent-satellite analysis, use calibration data or a regulatory envelope such as \
          the ITU-R S.580 mask.",
         calibration.antenna_id, threshold_deg, frequency_mhz
+    ))
+}
+
+/// Rear-hemisphere hard-invalidity warning (roadmap unit P10-tail, maintainer
+/// decision 2026-07-15).
+///
+/// Fires iff the observation direction has ANY backward component, i.e.
+/// `|off_boresight_deg| > 90.0`. The aperture-integration formulation is a
+/// forward-radiating model: the moment θ crosses 90° the returned value is a
+/// numerical extrapolation of an idealised UNSHADOWED aperture field with no
+/// physical validity behind the reflector — the integrand carries no Huygens
+/// obliquity factor to suppress backward radiation, and there is no rim
+/// diffraction, dish shadowing, feed spillover, or mesh leakage modeled (those,
+/// not the aperture field, set real rear levels). The value is numerically
+/// converged in the forward hemisphere but categorically meaningless here, so
+/// per the maintainer decision it is still returned (grid totality on
+/// `/heatmap` and `/h3-heatmap` must be preserved, and D-2 serves raw PO) but
+/// carries this harder warning.
+///
+/// Unlike [`off_axis_unvalidated_warning`], this is **NOT** gated on calibration
+/// status: a correction surface fitted from forward-hemisphere measurements says
+/// nothing about back lobes, so it fires for calibrated antennas too and takes
+/// no calibration/status argument for the gate.
+///
+/// The message is intentionally constant per (antenna, frequency) — it embeds no
+/// query angle — so heatmap/H3 warning aggregation deduplicates it to a single
+/// entry across grid points (the P8 convention).
+///
+/// C8 will later convert this string warning to a typed code (e.g.
+/// `rear_hemisphere_invalid`).
+pub(crate) fn rear_hemisphere_warning(
+    calibration: &crate::data::types::AntennaCalibration,
+    off_boresight_deg: f64,
+    frequency_mhz: f64,
+) -> Option<String> {
+    // Gate at exactly θ=90°: the aperture formulation is meaningless the moment
+    // the observation direction has a backward component.
+    if off_boresight_deg.abs() <= 90.0 {
+        return None;
+    }
+
+    Some(format!(
+        "Antenna '{}' query at {:.0} MHz is in the REAR HEMISPHERE (more than 90° off \
+         boresight). The aperture-integration model has NO physical validity behind the \
+         reflector: the returned value is a numerical extrapolation of an idealised, \
+         unshadowed aperture field, not a prediction. Real rear-hemisphere levels are set \
+         by feed spillover past the rim, aperture-edge diffraction, and mesh leakage — none \
+         of which are modeled here. Use measured data or a regulatory envelope (e.g. an \
+         ITU-R rear-lobe mask) for any rear-hemisphere analysis.",
+        calibration.antenna_id, frequency_mhz
     ))
 }
 
@@ -629,6 +694,25 @@ mod tests {
         }
 
         builder.build().unwrap()
+    }
+
+    /// A valid, evaluable correction surface for tests that need to represent
+    /// "corrected physics" (surface present ⇒ off-axis warning silent, spillover
+    /// off). All coefficients are zero, so it contributes 0 dB wherever it is
+    /// evaluated; its clamped knot vectors span the full validity range so an
+    /// end-to-end query does not extrapolate. Only its PRESENCE matters for the
+    /// P11 predicate, but making it evaluable lets it also be used in the
+    /// end-to-end `compute_gain` tests.
+    fn dummy_correction_surface() -> crate::data::types::BSplineModel4D {
+        crate::data::types::BSplineModel4D {
+            coefficients: vec![0.0; 2 * 2 * 2],
+            shape: [2, 2, 2, 1],
+            knots_azimuth: vec![0.0, 0.0, 0.0, 360.0, 360.0, 360.0],
+            knots_elevation: vec![0.0, 0.0, 0.0, 90.0, 90.0, 90.0],
+            knots_frequency: vec![1000.0, 1000.0, 1000.0, 10000.0, 10000.0, 10000.0],
+            knots_temperature: vec![290.0, 290.0, 290.0, 290.0, 290.0, 290.0],
+            spline_order: 3,
+        }
     }
 
     fn create_test_request() -> GainRequest {
@@ -887,15 +971,19 @@ mod tests {
         assert!(off_axis_unvalidated_warning(&calibration, -2.0, 8400.0).is_some());
     }
 
-    /// Calibrated / partially-calibrated antennas must NOT get the off-axis
-    /// warning: out-of-coverage queries there already receive the extrapolation
+    /// Antennas whose served gain is CORRECTED physics (a correction surface is
+    /// present) must NOT get the off-axis warning, regardless of calibration
+    /// status: out-of-coverage queries there already receive the extrapolation
     /// warning, and stacking a second warning was explicitly ruled out (P8
-    /// design constraint 1).
+    /// design constraint 1). Roadmap P11 keys this on surface presence
+    /// (`physics_is_uncorrected()`), so this test attaches a surface to each
+    /// fixture to pin the true invariant "surface present ⇒ silent".
     #[test]
-    fn test_off_axis_warning_only_for_uncalibrated_status() {
-        let fully = create_test_calibration(CalibrationStatus::FullyCalibrated {
+    fn test_off_axis_warning_silent_when_correction_surface_present() {
+        let mut fully = create_test_calibration(CalibrationStatus::FullyCalibrated {
             accuracy_estimate_db: 1.0,
         });
+        fully.correction_surface = Some(dummy_correction_surface());
         assert!(off_axis_unvalidated_warning(&fully, 45.0, 8400.0).is_none());
 
         let coverage = CalibrationCoverage::builder()
@@ -906,18 +994,65 @@ mod tests {
             .has_correction_surface(true)
             .build()
             .unwrap();
-        let partial = create_test_calibration(CalibrationStatus::PartiallyCalibrated {
+        let mut partial = create_test_calibration(CalibrationStatus::PartiallyCalibrated {
             accuracy_estimate_db: 1.5,
             coverage,
         });
+        partial.correction_surface = Some(dummy_correction_surface());
         assert!(off_axis_unvalidated_warning(&partial, 45.0, 8400.0).is_none());
 
-        // Status None is treated as fully calibrated (backward compatibility).
+        // Status None is treated as fully calibrated (backward compatibility);
+        // with a surface present it must stay silent.
         let mut unspecified = create_test_calibration(CalibrationStatus::FullyCalibrated {
             accuracy_estimate_db: 1.0,
         });
         unspecified.calibration_status = None;
+        unspecified.correction_surface = Some(dummy_correction_surface());
         assert!(off_axis_unvalidated_warning(&unspecified, 45.0, 8400.0).is_none());
+    }
+
+    /// P11 mismatch case (roadmap P11, from
+    /// `docs/findings-2026-07-13-off-axis-integration-aliasing.md` §7): a
+    /// `PartiallyCalibrated` antenna produced with NO correction surface (the
+    /// no-frequency-correction path in `calibrate/boresight_calibration.rs`) has
+    /// UNCORRECTED physics. Both uncorrected-physics behaviors must engage: the
+    /// spillover fold-in gate is ON, and the off-axis honesty warning fires
+    /// beyond threshold. Pre-P11 this antenna had spillover applied yet served no
+    /// off-axis warning — the silent honesty gap this unit closes.
+    #[test]
+    fn test_partially_calibrated_without_surface_is_uncorrected_physics() {
+        let coverage = CalibrationCoverage::builder()
+            .azimuth_range(0.0, 0.0)
+            .elevation_range(0.0, 0.0)
+            .frequency_range(8000.0, 9000.0)
+            .num_measurements(50)
+            .has_correction_surface(false)
+            .build()
+            .unwrap();
+        let calibration = create_test_calibration(CalibrationStatus::PartiallyCalibrated {
+            accuracy_estimate_db: 1.5,
+            coverage,
+        });
+
+        // No correction surface ⇒ uncorrected physics.
+        assert!(calibration.correction_surface.is_none());
+        assert!(calibration.physics_is_uncorrected());
+
+        // (a) Spillover gate is ON (the same predicate drives it — evaluator.rs:222).
+        assert!(
+            calibration.physics_is_uncorrected(),
+            "spillover fold-in must be gated ON for surfaceless partial calibration"
+        );
+
+        // (b) Off-axis honesty warning fires beyond threshold (~0.98° at 8400 MHz).
+        let warning = off_axis_unvalidated_warning(&calibration, 2.0, 8400.0);
+        let msg = warning.expect(
+            "surfaceless PartiallyCalibrated antenna must get the off-axis honesty warning",
+        );
+        assert!(msg.contains("beyond the validated main-beam region"));
+
+        // And stays silent inside the main beam (gate is the same, threshold intact).
+        assert!(off_axis_unvalidated_warning(&calibration, 0.0, 8400.0).is_none());
     }
 
     /// The threshold is beamwidth-relative (λ/D), not a fixed angle: the same
@@ -934,6 +1069,76 @@ mod tests {
         assert!(off_axis_unvalidated_warning(&calibration, 0.6, 2000.0).is_none());
         // 0.6° at 30000 MHz: threshold ≈ 0.27° → warns.
         assert!(off_axis_unvalidated_warning(&calibration, 0.6, 30000.0).is_some());
+    }
+
+    /// P10-tail: the rear-hemisphere warning fires for θ>90° and is gated at
+    /// exactly 90° (frequency-independent — the gate is purely geometric).
+    #[test]
+    fn test_rear_hemisphere_warning_fires_beyond_90_degrees() {
+        let calibration = create_test_calibration(CalibrationStatus::Uncalibrated {
+            accuracy_estimate_db: 3.0,
+            loss_accuracy_estimate_db: 2.0,
+        });
+
+        // Silent up to and including exactly 90°.
+        assert!(rear_hemisphere_warning(&calibration, 0.0, 8400.0).is_none());
+        assert!(rear_hemisphere_warning(&calibration, 45.0, 8400.0).is_none());
+        assert!(rear_hemisphere_warning(&calibration, 90.0, 8400.0).is_none());
+
+        // Fires the moment there is any backward component (and uses |angle|).
+        let msg =
+            rear_hemisphere_warning(&calibration, 90.001, 8400.0).expect("just past 90° must warn");
+        assert!(msg.contains("REAR HEMISPHERE"));
+        assert!(msg.contains("no physical validity") || msg.contains("NO physical validity"));
+        assert!(rear_hemisphere_warning(&calibration, 120.0, 8400.0).is_some());
+        assert!(rear_hemisphere_warning(&calibration, 180.0, 8400.0).is_some());
+        // Absolute angle: negative backward angles warn too.
+        assert!(rear_hemisphere_warning(&calibration, -163.0, 8400.0).is_some());
+    }
+
+    /// P10-tail: UNLIKE the off-axis warning, the rear-hemisphere warning is NOT
+    /// gated on calibration status — a correction surface fitted from
+    /// forward-hemisphere measurements says nothing about back lobes, so it fires
+    /// for a FullyCalibrated antenna too.
+    #[test]
+    fn test_rear_hemisphere_warning_fires_for_calibrated_antenna() {
+        let mut fully = create_test_calibration(CalibrationStatus::FullyCalibrated {
+            accuracy_estimate_db: 1.0,
+        });
+        // Corrected physics ⇒ a correction surface is present (P11 predicate gate).
+        fully.correction_surface = Some(dummy_correction_surface());
+        // The off-axis warning stays silent for a calibrated antenna even far off-axis...
+        assert!(off_axis_unvalidated_warning(&fully, 120.0, 8400.0).is_none());
+        // ...but the rear-hemisphere warning fires regardless of calibration status.
+        assert!(rear_hemisphere_warning(&fully, 120.0, 8400.0).is_some());
+
+        // Status None (treated as fully calibrated) also gets the rear warning.
+        let mut unspecified = create_test_calibration(CalibrationStatus::FullyCalibrated {
+            accuracy_estimate_db: 1.0,
+        });
+        unspecified.calibration_status = None;
+        assert!(rear_hemisphere_warning(&unspecified, 120.0, 8400.0).is_some());
+    }
+
+    /// P10-tail: the message is constant per (antenna, frequency) — it embeds no
+    /// query angle — so heatmap/H3 warning-set aggregation deduplicates it to a
+    /// single entry across a grid of rear-hemisphere cells (the P8 convention).
+    #[test]
+    fn test_rear_hemisphere_warning_dedups_across_grid() {
+        let calibration = create_test_calibration(CalibrationStatus::FullyCalibrated {
+            accuracy_estimate_db: 1.0,
+        });
+        let mut set = std::collections::HashSet::new();
+        for angle in [95.0_f64, 110.0, 130.0, 163.0, 179.9] {
+            if let Some(msg) = rear_hemisphere_warning(&calibration, angle, 8400.0) {
+                set.insert(msg);
+            }
+        }
+        assert_eq!(
+            set.len(),
+            1,
+            "rear-hemisphere warning must dedup to one entry across a rear grid"
+        );
     }
 
     /// The correction surface must be evaluated at the calibration's
@@ -1402,9 +1607,13 @@ mod tests {
     #[test]
     fn test_compute_gain_fully_calibrated() {
         let mut repo = CalibrationRepository::new();
-        let calibration = create_test_calibration(CalibrationStatus::FullyCalibrated {
+        let mut calibration = create_test_calibration(CalibrationStatus::FullyCalibrated {
             accuracy_estimate_db: 1.0,
         });
+        // Corrected physics ⇒ a correction surface is present. Without it the P11
+        // predicate treats the served gain as raw physics and (correctly) fires the
+        // off-axis honesty warning; a fully-calibrated antenna carries a surface.
+        calibration.correction_surface = Some(dummy_correction_surface());
         repo.add_calibration(calibration);
 
         let request = create_test_request();
@@ -1666,7 +1875,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let calibration = AntennaCalibration::builder()
+        let mut calibration = AntennaCalibration::builder()
             .antenna_id("test_antenna")
             .feed_id("test_feed")
             .metadata(metadata)
@@ -1697,6 +1906,11 @@ mod tests {
             })
             .build()
             .unwrap();
+        // Old-format calibrated .bin: no calibration_status field, but a correction
+        // surface IS present (corrected physics). This test pins the status-None
+        // backward-compat path; the surface keeps the P11 off-axis warning silent, as
+        // it must for a corrected antenna.
+        calibration.correction_surface = Some(dummy_correction_surface());
 
         repo.add_calibration(calibration);
 

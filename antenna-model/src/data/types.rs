@@ -69,6 +69,16 @@ impl AntennaCalibration {
         AntennaCalibrationBuilder::default()
     }
 
+    /// True iff no correction surface exists, so the served gain is RAW (uncorrected)
+    /// physics. This is the single gate for every "uncorrected-physics" behavior: the
+    /// spillover fold-in and the off-axis honesty warning (roadmap P11). It is NOT the same
+    /// as `CalibrationStatus::Uncalibrated` — a `PartiallyCalibrated` antenna produced with no
+    /// frequency correction (see calibrate/boresight_calibration.rs) also has uncorrected
+    /// physics and must be gated the same way.
+    pub fn physics_is_uncorrected(&self) -> bool {
+        self.correction_surface.is_none()
+    }
+
     /// Validates that the calibration data is internally consistent.
     pub fn validate(&self) -> Result<(), ValidationError> {
         // Validate antenna ID is not empty

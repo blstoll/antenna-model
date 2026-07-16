@@ -156,6 +156,21 @@ are optimistic and not calibrated-grade (shape validated, absolute levels not). 
 UNBLOCKED (redesign pending, D-2).** The history below is preserved as-was and annotated with
 its resolution.
 
+**✅ P11 LANDED 2026-07-15 — one predicate gates both "uncorrected-physics" behaviors.** The
+spillover fold-in and the off-axis honesty warning are now gated by a single named predicate,
+`AntennaCalibration::physics_is_uncorrected()` (`data/types.rs`), which is true iff there is no
+correction surface (`correction_surface.is_none()`). Before P11 these two gates disagreed: the
+spillover fold-in keyed on surface presence while the off-axis warning keyed on
+`CalibrationStatus::Uncalibrated`. Those are *different sets* — `calibrate/boresight_calibration.rs`
+emits `PartiallyCalibrated` with **no** correction surface whenever there is no frequency
+correction, so such an antenna had its physics modified (spillover applied) yet served only a
+partial-calibration accuracy claim with **no** off-axis honesty warning (a silent honesty gap).
+Under the unified predicate a **partially-calibrated-but-surfaceless** antenna is treated as
+uncorrected physics for **both** behaviors: spillover is folded in **and** the off-axis warning
+fires beyond threshold. The P8 "don't stack a second warning where a correction surface already
+provides an extrapolation warning" constraint is preserved exactly — keying on surface presence
+means any surface-bearing antenna (any calibration status) stays silent.
+
 **The model is a main-beam / peak-gain instrument.** Until 2026-07-12 its off-axis (sidelobe)
 gain on the uncalibrated path was systematically *optimistic* (too low). **As of F7
 (2026-07-12), uncalibrated-path off-axis gain instead includes a Ruze scattered-power sidelobe
@@ -310,6 +325,56 @@ added (only warning-description text in `openapi.yaml` was refreshed) — the fl
 served gain values only, gated silently on `calibration_status`, and — per the P10 note above —
 does not currently change anything actually served, because the served pattern it is `max`'d
 against is already aliased higher than the floor at every angle tested.
+
+### Three-tier off-axis policy (P10-tail, 2026-07-15)
+
+The served angular range is now governed by three explicit tiers:
+
+1. **θ ≤ ~3 first-nulls (≈ 3·1.6·λ/D) — VALIDATED.** Main beam / near-in region, <1 dB
+   against measurements. No off-axis warning.
+2. **3 first-nulls < θ ≤ 90° — IDEALISED-PO, WARNED.** Numerically converged (post-P10) but
+   idealised physical optics (no blockage/strut/edge diffraction); the existing off-axis
+   honesty warning fires on **uncalibrated** antennas. Pattern shape validated, absolute
+   levels optimistic / not calibrated-grade.
+3. **θ > 90° — REAR HEMISPHERE, HARD WARNING.** The value is still served (grid totality on
+   `/heatmap` and `/h3-heatmap` must be preserved, and D-2 serves raw PO) but is
+   **categorically outside physical validity**: PO from an unshadowed aperture is physically
+   meaningless behind a reflector *regardless of numerical convergence* — there is no rim
+   diffraction, no dish shadowing of the aperture field, and (see handoff 2 below) no Huygens
+   obliquity factor to suppress backward radiation. A new **rear-hemisphere hard warning**
+   (`service/evaluator.rs::rear_hemisphere_warning`, wired into the gain pipeline and the H3
+   per-cell path exactly like the off-axis warning) fires for **ANY** antenna — **including
+   fully calibrated ones**, because a forward-hemisphere correction surface says nothing about
+   back lobes. It is gated purely geometrically at `|θ| > 90°` (not on calibration status) and
+   its message is constant per (antenna, frequency) so heatmap/H3 aggregation deduplicates it.
+   C8 will later convert it to typed code `rear_hemisphere_invalid`.
+
+   **P10-tail radial-budget fix that makes this honest:** `integration.rs::radial_points_for`
+   now counts the **dish-depth chirp** `k·ρ²/(4f)·(1−cosθ)` (= `(R²/(4fλ))·(1−cosθ)` radial
+   cycles) in the sample budget. Forward it is subdominant (why every P10 test passed without
+   it); behind the dish it inverts — as θ→180° the `sinθ` kernel budget collapses toward the
+   floor while this chirp peaks at ~`R²/(2fλ)` cycles — so without it the N-vs-2N self-check
+   would silently under-sample the rear integral. **Diagnostic finding (2026-07-15):** the
+   rear PO value is nonetheless GENUINELY CONVERGED at θ≈120°/163° (verified stable to <0.1 dB
+   against a 20 001-point forced density) and yet reads a physically-meaningless **+7…+13 dBi**
+   backlobe on every enabled antenna at θ≈163° — only ~28 dB below peak for the small dishes.
+   Convergence therefore **cannot** flag rear invalidity; the *warning*, not a numerical check
+   or a level bound, is the safety net. (At θ=180° the base-density self-check does report
+   `converged=false`.) Test: `reference_validation::p10_served_rear_hemisphere_is_physical_or_flagged`.
+
+**Two handoffs to the F7 redesign (do NOT touch in P10-tail):**
+
+1. **Rear becomes floor-dominated once F7 lands.** The digitized NTIA 84-164 dataset spans
+   1°–180°, so the salvaged statistical floor's calibration already covers the back hemisphere.
+   F7 should consider **EXCLUDING the PO term from its power-sum for θ > 90°** rather than
+   letting a meaningless PO backlobe compete with the statistical floor.
+2. **The integrand has no Huygens obliquity factor `(1+cosθ)/2`.** Physically that factor
+   suppresses an aperture field's backward radiation; without it, rear-hemisphere PO is
+   extra-wrong (it is the direct cause of the converged +7…+13 dBi backlobes above), and
+   forward wide-angle levels may be up to ~6 dB hot near 90°. Adding it would **shift the θ=90°
+   internal-consistency anchors**, so it is a physics decision for F7's "what to serve far
+   off-axis" scope — flagged here, deliberately **not** changed in P10-tail (which is a
+   sampling-density change only, never an integrand/physics-math change).
 
 ## Open items surfaced while mining (not fixed here)
 

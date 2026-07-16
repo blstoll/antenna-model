@@ -258,6 +258,15 @@ fn compute_cell_gain(
         request.frequency_mhz,
     ));
 
+    // Rear-hemisphere hard-invalidity warning (P10-tail): fires for θ>90° on ANY
+    // antenna, calibrated or not. Constant per (antenna, frequency), so the
+    // caller's warning-set aggregation deduplicates it across cells.
+    captured_warnings.extend(crate::service::evaluator::rear_hemisphere_warning(
+        calibration,
+        el_deg,
+        request.frequency_mhz,
+    ));
+
     Ok((
         gain_db,
         az_deg,
