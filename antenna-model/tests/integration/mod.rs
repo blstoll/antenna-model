@@ -87,4 +87,5 @@ pub mod error_tests;
 pub mod h3_link_budget_tests;
 pub mod off_axis_warning_tests;
 pub mod partial_calibration_tests;
+pub mod ray_trace_stub_warning_tests;
 pub mod resilience_tests;

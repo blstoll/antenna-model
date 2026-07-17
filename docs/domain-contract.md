@@ -382,6 +382,39 @@ The served angular range is now governed by three explicit tiers:
    off-axis" scope — flagged here, deliberately **not** changed in P10-tail (which is a
    sampling-density change only, never an integrand/physics-math change).
 
+### Large feed offsets (> 0.5·f): ray-tracing stub (P3, decided 2026-07-16)
+
+This is a **separate axis** from the off-boresight *emitter* angle θ above: it concerns how far
+the **feed** is displaced from the focal point, i.e. the angular gap between the request's
+`feed_position` (a pointing target) and the `reflector_boresight`, mapped to a physical
+displacement (`compute_feed_position_from_pointing` → `≈ 2·f·tan(cone/2)/bdf`). The offset ratio
+is geometry-driven and effectively antenna-independent.
+
+| Feed offset | Mode | Fidelity |
+|---|---|---|
+| ≤ 0.3·f | `StandardPhysicalOptics` | exact coma phase + spillover modeled |
+| 0.3·f – 0.5·f | `StandardPhysicalOptics` | exact coma phase; spillover **not** modeled (unvalidated there) — carries its own degraded-accuracy warning |
+| **> 0.5·f** | **`RayTracing` stub** (`model/ray_trace.rs`) | **acknowledged stub — gain accuracy degraded** |
+
+Beyond 0.5·f the model routes to `model/ray_trace.rs`, which samples the aperture but does **not**
+implement true spillover or geometric ray–reflector intersection (`ray_trace.rs` TODO). Real ray
+tracing is gated as feature **F2** and is not implemented. Per maintainer decision **P3
+(2026-07-16): document + flag** — the request is **not rejected** (warn-don't-refuse; `/heatmap`
+and `/h3-heatmap` grid totality must be preserved), but every such result carries the honest
+degraded-accuracy warning `model::pattern::RAY_TRACING_STUB_WARNING` ("…not fully implemented;
+gain accuracy may be degraded"). `spillover_loss_db` is `null` in this regime (see the offset gate
+above).
+
+**The warning reaches all four compute endpoints.** On `/gain`, `/gain/batch`, and `/heatmap` the
+model pushes it directly (those paths run the integrator per query/point). `/h3-heatmap` caches
+physics-only gain and runs the model only on a cache **miss**, so it re-emits the identical warning
+at the service layer (`service/evaluator.rs::ray_trace_stub_warning`) **outside** the gain-cache
+closure — exactly as the P8 off-axis and P10-tail rear-hemisphere warnings are re-emitted — so the
+warning survives cache **hits** too. The message is constant per antenna config, so heatmap/H3
+aggregation deduplicates it to a single entry. Pinned by
+`tests/integration/ray_trace_stub_warning_tests.rs` (one test per endpoint + a warm-cache H3 test +
+a small-offset negative control). `ray_trace.rs` math is untouched by P3.
+
 ## Open items surfaced while mining (not fixed here)
 
 - **Resolved 2026-07-10 (roadmap P7, implemented).** `phase_center_offset` is now a

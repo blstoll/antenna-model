@@ -267,6 +267,16 @@ fn compute_cell_gain(
         request.frequency_mhz,
     ));
 
+    // Ray-tracing stub degraded-accuracy warning (P3): fires when the feed offset
+    // exceeds 0.5·f. Emitted here, OUTSIDE the cache closure, so it surfaces on
+    // cache hits too — the model pushes the identical string only inside the
+    // miss closure (into `result.warnings` above), which the shared, persistent
+    // `GainCache` would otherwise drop on a hit. On a miss both are present; the
+    // caller's warning-set aggregation deduplicates them to one entry.
+    captured_warnings.extend(crate::service::evaluator::ray_trace_stub_warning(
+        antenna_config,
+    ));
+
     Ok((
         gain_db,
         az_deg,

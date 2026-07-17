@@ -635,6 +635,45 @@ pub(crate) fn rear_hemisphere_warning(
     ))
 }
 
+/// Ray-tracing stub degraded-accuracy warning (roadmap unit P3, maintainer
+/// decision 2026-07-16: document + flag).
+///
+/// Returns [`crate::model::pattern::RAY_TRACING_STUB_WARNING`] iff the antenna's
+/// feed offset exceeds the severe threshold (> 0.5·f), i.e. the regime that the
+/// model routes to the acknowledged ray-tracing stub (`ray_trace.rs`). The gate
+/// mirrors the model's own `analyze_edge_cases` mode selection exactly: same
+/// `displacement_from_focus / focal_length` ratio, same
+/// [`crate::model::edge_cases::SEVERE_OFFSET_THRESHOLD`].
+///
+/// **Why this exists at the service layer.** For single gain / batch / rectangular
+/// heatmap the model pushes this warning itself (those paths call `compute_gain_db`
+/// directly per query/point). The `/h3-heatmap` path instead caches PHYSICS-ONLY
+/// gain and only runs `compute_gain_db` on a cache MISS, so the model-pushed
+/// warning is lost on cache hits. This helper is re-emitted OUTSIDE the cache
+/// closure in `compute_cell_gain`, exactly like [`off_axis_unvalidated_warning`]
+/// and [`rear_hemisphere_warning`], so the honesty warning survives cache hits.
+/// On a cache miss the model also emits the identical string; the H3 warning-set
+/// aggregation deduplicates the pair to a single entry.
+///
+/// Deliberately **not** gated on calibration status: the ray-tracing stub is a
+/// numerical/geometric limitation independent of whether a correction surface
+/// exists. The message is constant per antenna config, so heatmap/H3 aggregation
+/// deduplicates it to a single entry.
+pub(crate) fn ray_trace_stub_warning(
+    config: &crate::model::geometry::AntennaConfiguration,
+) -> Option<String> {
+    let focal_length = config.reflector.focal_length;
+    if focal_length <= 0.0 {
+        return None;
+    }
+    let offset_ratio = config.feed.position.displacement_from_focus(focal_length) / focal_length;
+    if offset_ratio > crate::model::edge_cases::SEVERE_OFFSET_THRESHOLD {
+        Some(crate::model::pattern::RAY_TRACING_STUB_WARNING.to_string())
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

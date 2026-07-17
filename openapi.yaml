@@ -879,9 +879,12 @@ components:
             warning for uncalibrated antennas when cells fall beyond ~3x the
             first-null angle ~1.6*lambda/D — sidelobe levels there now include
             a Ruze scatter-floor best estimate, not a precise per-antenna
-            prediction — and the rear-hemisphere warning for ANY antenna when
+            prediction — the rear-hemisphere warning for ANY antenna when
             cells fall more than 90 degrees off boresight, where the
-            aperture-integration model has no physical validity).
+            aperture-integration model has no physical validity, and the
+            degraded-accuracy warning for large feed offsets (> 0.5*f, routed
+            through the acknowledged ray-tracing stub; real ray tracing is
+            gated as feature F2)).
           items:
             type: string
         metadata:
@@ -1022,9 +1025,12 @@ components:
             uncalibrated antennas when grid points fall beyond ~3x the
             first-null angle ~1.6*lambda/D — sidelobe levels there now include
             a Ruze scatter-floor best estimate, not a precise per-antenna
-            prediction — and the rear-hemisphere warning for ANY antenna when
+            prediction — the rear-hemisphere warning for ANY antenna when
             grid points fall more than 90 degrees off boresight, where the
-            aperture-integration model has no physical validity).
+            aperture-integration model has no physical validity, and the
+            degraded-accuracy warning for large feed offsets (> 0.5*f, routed
+            through the acknowledged ray-tracing stub; real ray tracing is
+            gated as feature F2)).
           items:
             type: string
         metadata:
