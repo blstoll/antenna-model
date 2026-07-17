@@ -423,6 +423,15 @@ gap that let this ship.
   against whatever PO angular range actually remains served.
 - **Depends on:** P10 (done). **Blocks:** nothing hard (correctness already shipped); soft-coupled
   to the F7 redesign per the sequencing note. Pre-production, so no live SLA is breached today.
+- **RE-SCOPED 2026-07-16/17 — F7 landed (branch `feat/f7-redesign-power-sum-obliquity`).** F7 landed
+  with a **forward power sum** (PO is still computed at every forward angle — forward wide-angle
+  cost is **unchanged** by F7) and a **floor-only rear hemisphere** (rear aperture integration is
+  now **SKIPPED** on the uncorrected-physics served path — the pathological θ→180° chirp-budget
+  case no longer runs there at all). Re-scope accordingly: the remaining hot case is **forward
+  wide-angle Ka on offset-feed antennas** (the `dsn_34m` numbers above are unaffected by F7 and
+  still apply); the rear-hemisphere half of the original latency concern is moot for antennas
+  served with uncorrected physics and unchanged (still slow, still correct) for calibrated
+  antennas that still run the rear PO integral.
 
 ### P10-tail — Rear-hemisphere radial budget + physicality coverage beyond 90° — Effort: S
 
@@ -1219,6 +1228,25 @@ Phase 2.
 
 ### F7 — Statistical sidelobe envelope/floor model — Effort: M/L (gated on register row F7 **and** reference sidelobe data)
 
+**✅ DONE 2026-07-16/17** — branch `feat/f7-redesign-power-sum-obliquity`, commits (oldest→newest,
+`main..HEAD` as of this unit's doc-cleanup task):
+- `d5f1bad` test(F7): bound the boresight-tuner surface_rms -> sidelobe-floor coupling (ship precondition 2)
+- `de83a0c` style: cargo fmt reference_validation.rs
+- `bddcf3c` docs: fix stale "Two handoffs" count after adding item 3
+- `291ed3c` feat(F7): Huygens obliquity factor (1+cos(theta))/2 on the far-field conversion; re-derive wide-angle anchors
+- `62e5414` docs(F7): re-true field_to_dbi docstring and rear-test header after the obliquity change
+- `f57721d` feat(F7): power-sum floor combination forward, floor-only rear hemisphere (model layer, flag still off)
+- `2c807e9` test(F7): re-add deep-null guard assertion to the power-sum floor test
+- `6d5fc7e` feat(F7): enable the sidelobe floor on the served path via physics_is_uncorrected() (P11 gate)
+- `00b51c6` feat(F7): re-word off-axis and rear-hemisphere honesty warnings for the power-sum floor
+- (plus this doc-cleanup commit closing out Task 6: `PHYSICS_MODEL_VERSION` 5, openapi/api-docs/
+  domain-contract/CLAUDE.md/roadmap re-trued)
+
+All three redesign calls decided 2026-07-16 (below) were executed as decided: incoherent power
+sum forward, Huygens obliquity factor on the far-field conversion, floor-only rear hemisphere
+with rear PO integration skipped on uncorrected-physics antennas. `PHYSICS_MODEL_VERSION` bumped
+to 5. The doc-truth cleanup flagged below (openapi.yaml + related docs) is this same task's scope.
+
 **✅ UNBLOCKED 2026-07-15 (redesign pending, D-2) — P10 landed and removed the blocker.**
 P10's Hankel / azimuthal-mode integrator fixed the aliasing, so off-axis gain is now numerically
 correct and (per D-2) the served path carries **raw PO with the floor OFF**. F7's remaining scope
@@ -1289,6 +1317,16 @@ serves** — a PO ⊕ statistical-floor power sum, best-estimate/median, gated o
 raw-PO/floor-OFF D-2 truth — so it needs only the floor-on update, not a stale-claim fix.) If F7
 is deferred long-term, re-true these to the raw-PO/floor-OFF present tense as a standalone
 doc-truth fix rather than leaving them wrong.
+
+**✅ DONE 2026-07-16/17 (Task 6 of the F7 redesign).** All three `openapi.yaml` `warnings`
+descriptions were rewritten to describe the power sum — idealised PO ⊕ statistical floor,
+best-estimate median tracking NTIA 84-164, gated on `physics_is_uncorrected()` — and the
+rear-hemisphere clause in each now distinguishes floor-only (uncorrected physics) from
+numerical extrapolation (corrected physics). `docs/api-documentation.md`'s off-axis and
+rear-hemisphere caveats were re-trued the same way. `docs/domain-contract.md`'s three-tier
+rear policy and F7 handoff list, `CLAUDE.md`'s Project Status/module-map bullets, and this
+roadmap's F7 register row + Risks section were all re-trued in the same pass. See the commit
+listed in the DONE block above.
 
 **Redesign guidance (2026-07-15 post-P10 assessment) — read before scoping:**
 

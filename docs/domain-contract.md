@@ -343,30 +343,43 @@ The served angular range is now governed by three explicit tiers:
    honesty warning fires on **uncalibrated** antennas. Pattern shape validated, absolute
    levels optimistic / not calibrated-grade.
 3. **θ > 90° — REAR HEMISPHERE, HARD WARNING.** The value is still served (grid totality on
-   `/heatmap` and `/h3-heatmap` must be preserved, and D-2 serves raw PO) but is
-   **categorically outside physical validity**: PO from an unshadowed aperture is physically
-   meaningless behind a reflector *regardless of numerical convergence* — there is no rim
-   diffraction, no dish shadowing of the aperture field, and (see handoff 2 below) no Huygens
-   obliquity factor to suppress backward radiation. A new **rear-hemisphere hard warning**
+   `/heatmap` and `/h3-heatmap` must be preserved) but is **categorically outside physical
+   validity**: PO from an unshadowed aperture is physically meaningless behind a reflector
+   *regardless of numerical convergence* — there is no rim diffraction and no dish shadowing
+   of the aperture field. **As of F7 (2026-07-16), what is actually served here has changed:**
+   on antennas served with **uncorrected physics** (`physics_is_uncorrected()` — currently all
+   4 enabled antennas), the rear aperture integration is **skipped entirely** and the served
+   value **is the statistical sidelobe floor only** — the PO term is excluded, not merely
+   suppressed. On antennas **with a correction surface**, PO is still computed and returned as
+   a numerical extrapolation (unchanged from P10-tail). A **rear-hemisphere hard warning**
    (`service/evaluator.rs::rear_hemisphere_warning`, wired into the gain pipeline and the H3
    per-cell path exactly like the off-axis warning) fires for **ANY** antenna — **including
    fully calibrated ones**, because a forward-hemisphere correction surface says nothing about
-   back lobes. It is gated purely geometrically at `|θ| > 90°` (not on calibration status) and
-   its message is constant per (antenna, frequency) so heatmap/H3 aggregation deduplicates it.
-   C8 will later convert it to typed code `rear_hemisphere_invalid`.
+   back lobes — and its wording now branches on which of the two cases above applies. It is
+   gated purely geometrically at `|θ| > 90°` (not on calibration status) and its message is
+   constant per (antenna, frequency) so heatmap/H3 aggregation deduplicates it. C8 will later
+   convert it to typed code `rear_hemisphere_invalid`.
 
    **P10-tail radial-budget fix that makes this honest:** `integration.rs::radial_points_for`
-   now counts the **dish-depth chirp** `k·ρ²/(4f)·(1−cosθ)` (= `(R²/(4fλ))·(1−cosθ)` radial
+   counts the **dish-depth chirp** `k·ρ²/(4f)·(1−cosθ)` (= `(R²/(4fλ))·(1−cosθ)` radial
    cycles) in the sample budget. Forward it is subdominant (why every P10 test passed without
    it); behind the dish it inverts — as θ→180° the `sinθ` kernel budget collapses toward the
    floor while this chirp peaks at ~`R²/(2fλ)` cycles — so without it the N-vs-2N self-check
-   would silently under-sample the rear integral. **Diagnostic finding (2026-07-15):** the
-   rear PO value is nonetheless GENUINELY CONVERGED at θ≈120°/163° (verified stable to <0.1 dB
-   against a 20 001-point forced density) and yet reads a physically-meaningless **+7…+13 dBi**
-   backlobe on every enabled antenna at θ≈163° — only ~28 dB below peak for the small dishes.
-   Convergence therefore **cannot** flag rear invalidity; the *warning*, not a numerical check
-   or a level bound, is the safety net. (At θ=180° the base-density self-check does report
-   `converged=false`.) Test: `reference_validation::p10_served_rear_hemisphere_is_physical_or_flagged`.
+   would silently under-sample the rear integral. This remains load-bearing for **corrected**
+   antennas, which still run the rear PO integral; it is now moot for uncorrected antennas,
+   whose rear integration is skipped.
+
+   **HISTORY — diagnostic finding (2026-07-15), RESOLVED by the obliquity factor (F7,
+   2026-07-16):** before the Huygens obliquity factor `(1+cosθ)/2` was added, the rear PO value
+   was GENUINELY CONVERGED at θ≈120°/163° (verified stable to <0.1 dB against a 20 001-point
+   forced density) and yet read a physically-meaningless **+7…+13 dBi** backlobe on every
+   enabled antenna at θ≈163° — only ~28 dB below peak for the small dishes. Convergence
+   therefore **could not** flag rear invalidity by itself; the *warning* was the safety net,
+   not a numerical check or a level bound. The obliquity factor (see handoff 2 below, now DONE)
+   suppresses that fictitious backlobe by ~33 dB at 163°, and the uncorrected-physics path no
+   longer serves the PO term there at all. (At θ=180° the base-density self-check still reports
+   `converged=false` for the corrected-antenna PO path.) Test:
+   `reference_validation::p10_served_rear_hemisphere_is_physical_or_flagged`.
 
 **Three handoffs to the F7 redesign (do NOT touch in P10-tail):**
 
@@ -374,6 +387,9 @@ The served angular range is now governed by three explicit tiers:
    1°–180°, so the salvaged statistical floor's calibration already covers the back hemisphere.
    F7 should consider **EXCLUDING the PO term from its power-sum for θ > 90°** rather than
    letting a meaningless PO backlobe compete with the statistical floor.
+   **✅ DONE 2026-07-16 (F7):** decided and implemented as described in tier 3 above — on
+   uncorrected-physics antennas the rear PO term is excluded (integration skipped), not merely
+   out-competed by a `max`/power-sum.
 2. **The integrand has no Huygens obliquity factor `(1+cosθ)/2`.** Physically that factor
    suppresses an aperture field's backward radiation; without it, rear-hemisphere PO is
    extra-wrong (it is the direct cause of the converged +7…+13 dBi backlobes above), and
@@ -381,6 +397,10 @@ The served angular range is now governed by three explicit tiers:
    internal-consistency anchors**, so it is a physics decision for F7's "what to serve far
    off-axis" scope — flagged here, deliberately **not** changed in P10-tail (which is a
    sampling-density change only, never an integrand/physics-math change).
+   **✅ DONE 2026-07-16 (F7):** the obliquity factor `(1+cosθ)/2` is now applied as a field
+   factor in `pattern.rs::absolute_gain_from_integral` (θ=0 unchanged, −6.02 dB at 90°,
+   suppresses the old fictitious rear backlobe by ~33 dB at 163°). The θ=90° anchors were
+   re-derived under the new factor as part of this same change.
 3. **Boresight-tuner → floor coupling (F7 ship precondition 2, BOUNDED 2026-07-16).**
    `calibrate/src/boresight_calibration.rs` tunes `surface_rms` within [0.3x, 3x] of the
    design value as a catch-all for boresight gain deficits, and the F7 floor
