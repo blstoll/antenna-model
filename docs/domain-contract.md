@@ -368,7 +368,7 @@ The served angular range is now governed by three explicit tiers:
    or a level bound, is the safety net. (At θ=180° the base-density self-check does report
    `converged=false`.) Test: `reference_validation::p10_served_rear_hemisphere_is_physical_or_flagged`.
 
-**Two handoffs to the F7 redesign (do NOT touch in P10-tail):**
+**Three handoffs to the F7 redesign (do NOT touch in P10-tail):**
 
 1. **Rear becomes floor-dominated once F7 lands.** The digitized NTIA 84-164 dataset spans
    1°–180°, so the salvaged statistical floor's calibration already covers the back hemisphere.
