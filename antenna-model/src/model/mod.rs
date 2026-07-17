@@ -48,7 +48,8 @@ pub mod ray_trace;
 ///   `gain_physics` at off-axis angles for identical inputs (converged physical
 ///   optics, no aliasing). NOTE: the F7 statistical sidelobe floor is a
 ///   service-layer param (`IntegrationParams::apply_sidelobe_floor`), OFF on the
-///   served path per decision D-2, and is NOT part of the calibration-fitting
+///   served path per decision D-2 (superseded in v5 — the F7 redesign turned the
+///   floor ON via a power sum), and is NOT part of the calibration-fitting
 ///   physics — calibrated antennas never had it applied, so it does not gate this
 ///   version.
 /// - 4: P2 removal of the `HigherOrderAberrations` computation mode (2026-07) — feed

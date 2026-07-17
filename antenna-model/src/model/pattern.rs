@@ -160,7 +160,10 @@ pub fn overall_efficiency(config: &AntennaConfiguration, wavelength: f64) -> f64
 /// sidelobe-floor model (F7).
 ///
 /// **Set to 4π (isotropic), which is the only power-conserving choice.** The floor is
-/// applied via `max(pattern, floor)` at *every* angle, i.e. over the whole 4π sphere.
+/// combined with the pattern as an incoherent power sum (`gain + floor`, linear) in the
+/// forward hemisphere and served floor-only behind the dish (F7 redesign 2026-07-16),
+/// but the power-conservation argument below considers the floor's own budget over the
+/// whole 4π sphere, independent of how it is combined with the pattern at any given angle.
 /// A pedestal of directivity `D` applied over 4π radiates a power fraction `D`. Since
 /// the power available to the pedestal is exactly `p_scatter = 1 − η_ruze`, requiring
 /// `D ≤ p_scatter` forces `Ω = 4π` and the level reduces to
@@ -176,8 +179,10 @@ pub fn overall_efficiency(config: &AntennaConfiguration, wavelength: f64) -> f64
 /// antenna radiates). Two useful consequences of Ω = 4π:
 ///
 /// - **Bounded:** `p_scatter ≤ 1` ⇒ the floor can never exceed **0 dBi**, so it cannot
-///   swamp the main beam or a near-in sidelobe of any real dish. (The `max()` seam in
-///   [`compute_gain`] therefore only ever lifts genuine deep sidelobe/null angles.)
+///   swamp the main beam or a near-in sidelobe of any real dish. (The power-sum
+///   combination in [`compute_gain`] therefore only ever meaningfully lifts genuine
+///   deep sidelobe/null angles — adding a ≤0 dBi floor to a strong main-beam value
+///   changes it negligibly.)
 /// - **Self-calibrating:** no free fudge constant remains.
 ///
 /// This is D-independent — the level tracks surface quality, not aperture size — which
@@ -195,7 +200,7 @@ const OMEGA_SCATTER: f64 = 4.0 * PI;
 ///
 /// Level: the Ruze-scattered fraction `p_scatter = 1 − η_ruze`, radiated isotropically
 /// (see [`OMEGA_SCATTER`]), then multiplied by `η_mesh` so the floor shares the SAME
-/// efficiency basis as the pattern it is `max`'d against in [`compute_gain`] (which
+/// efficiency basis as the pattern it is power-summed with in [`compute_gain`] (which
 /// carries η_ruze × η_mesh). Applied only via `IntegrationParams::apply_sidelobe_floor`.
 ///
 /// # Honest scope — this is EMPIRICAL, not a first-principles derivation

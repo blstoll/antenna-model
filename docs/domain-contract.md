@@ -184,15 +184,17 @@ means any surface-bearing antenna (any calibration status) stays silent.
 **The model is a main-beam / peak-gain instrument.** Until 2026-07-12 its off-axis (sidelobe)
 gain on the uncalibrated path was systematically *optimistic* (too low). **As of F7
 (2026-07-12), uncalibrated-path off-axis gain instead includes a Ruze scattered-power sidelobe
-floor (`model/pattern.rs::sidelobe_floor_gain`, applied as `max(pattern, floor)` at the
-spillover seam in `compute_gain`, gated on `correction_surface.is_none()`) that lifts deep
-off-axis nulls/sidelobes to a statistically calibrated best estimate — it tracks the measured
-median sidelobe level, not a one-sided conservative bound (register decision revised
-2026-07-12: link budget / G/T consumers need accuracy, and a one-sided upper bound is
-anti-conservative for desired-signal margin).** It must still NOT be used as a precise
-per-antenna prediction for interference, adjacent-satellite, off-axis-EIRP, or ACI analysis —
-see the "Best estimate, not a per-antenna prediction" caveat below. (Original finding
-2026-07-10; `antenna-model/tests/reference_validation.rs`,
+floor** (`model/pattern.rs::sidelobe_floor_gain`) **that lifts deep off-axis nulls/sidelobes to
+a statistically calibrated best estimate — it tracks the measured median sidelobe level, not a
+one-sided conservative bound** (register decision revised 2026-07-12: link budget / G/T
+consumers need accuracy, and a one-sided upper bound is anti-conservative for desired-signal
+margin). *Superseded 2026-07-16/17 by the F7 redesign (see the banner at the top of this
+section): the combination mechanism described here as `max(pattern, floor)` gated on
+`correction_surface.is_none()` is history — the current mechanism is the incoherent power sum
+forward / floor-only rear, gated on `physics_is_uncorrected()`.* This floor must still NOT be
+used as a precise per-antenna prediction for interference, adjacent-satellite, off-axis-EIRP,
+or ACI analysis — see the "Best estimate, not a per-antenna prediction" caveat below. (Original
+finding 2026-07-10; `antenna-model/tests/reference_validation.rs`,
 `itu_r_s580_sidelobe_envelope_small_dish` and the `itu_probe_fine_envelope` diagnostic; F7
 floor implemented 2026-07-12, branch `feat/f7-sidelobe-floor`.)
 

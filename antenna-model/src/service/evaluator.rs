@@ -603,8 +603,11 @@ pub(crate) fn off_axis_unvalidated_warning(
 /// not the aperture field, set real rear levels). The value is numerically
 /// converged in the forward hemisphere but categorically meaningless here, so
 /// per the maintainer decision it is still returned (grid totality on
-/// `/heatmap` and `/h3-heatmap` must be preserved, and D-2 serves raw PO) but
-/// carries this harder warning.
+/// `/heatmap` and `/h3-heatmap` must be preserved) but carries this harder
+/// warning. What value is actually served behind the dish depends on
+/// calibration status: uncorrected-physics antennas serve the statistical
+/// sidelobe floor only (rear integration skipped, F7 redesign 2026-07-16);
+/// corrected antennas still serve the raw physical-optics extrapolation.
 ///
 /// Unlike [`off_axis_unvalidated_warning`], this is **NOT** gated on calibration
 /// status: a correction surface fitted from forward-hemisphere measurements says
