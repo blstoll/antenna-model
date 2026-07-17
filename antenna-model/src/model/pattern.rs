@@ -1400,6 +1400,13 @@ mod tests {
         let off = compute_gain(theta_deep_null, 0.0, &config, 8.4e9, &params_off).unwrap();
         let on = compute_gain(theta_deep_null, 0.0, &config, 8.4e9, &params_on).unwrap();
 
+        assert!(
+            off.gain < floor,
+            "pattern at deep-null angle must be below the floor for this test to be meaningful: \
+             pattern={} floor={floor}",
+            off.gain
+        );
+
         // Exact linear power-sum identity.
         assert!(
             (on.gain - (off.gain + floor)).abs() <= 1e-12 * (off.gain + floor),
