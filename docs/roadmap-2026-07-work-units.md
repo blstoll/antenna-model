@@ -53,8 +53,9 @@ F7 IMPLEMENTED 2026-07-12 then PARKED 2026-07-13 (inverted premise — see the F
 UNBLOCKED by P10 2026-07-15; REDESIGN DECIDED 2026-07-16 (power-sum + obliquity factor +
 floor-only rear hemisphere) — sequence WITH P10-perf (they interact);
 P10 DONE 2026-07-15; post-P10 assessment follow-ups filed 2026-07-15: P10-perf, P10-tail, P11
-(P10-tail + P11 DONE 2026-07-15/16); P2 DECIDED 2026-07-16 (REMOVE double-counted Seidel mode,
-superseding "fence"); P3 DECIDED 2026-07-16 (document + flag, default adopted)
+(P10-tail + P11 DONE 2026-07-15/16); P2 DECIDED 2026-07-16 (REMOVE the Seidel mode; Stage-1
+gate tripped and removal re-affirmed same day — the terms are wrong-sign/wrong-scale additions
+on top of complete exact physics, not duplicates); P3 DECIDED 2026-07-16 (document + flag)
 ```
 
 ---
@@ -502,6 +503,29 @@ structurally redundant.
      they match the Seidel forms to leading order — *proving* the double count, not just
      asserting it. **If this check fails, STOP: revert to the original fence plan and
      re-open the register row.**
+
+     > **⚠️ STAGE-1 GATE TRIPPED 2026-07-16 — REMOVAL RE-AFFIRMED BY MAINTAINER SAME DAY.**
+     > The check (`p2_stage1_seidel_double_count_redundancy_check`, `edge_cases.rs:537`;
+     > extraction cross-checked against an independent closed form to 4 decimals) split:
+     > the exact phase **does** carry the full δ²/δ³ aberration content — astigmatism
+     > (cos2φ′), field curvature (constant), distortion (cos1φ′), plus a trefoil (cos3φ′)
+     > with no Seidel counterpart — but the Seidel terms **do not match** it: astigmatism
+     > sign-flipped at every radius; field-curvature/distortion ratios swing ~45×/~89×
+     > across ρ (spurious 1/f signature); distortion has the wrong pupil power (Seidel
+     > coded ρ³ where both the exact model and classical aberration theory give leading
+     > ρ¹). The "exact duplicate" rationale is falsified; the corrected rationale is
+     > **stronger**: the mode stacks wrong-sign/wrong-scale/wrong-shape terms on top of
+     > already-complete exact physics, so removal makes the 0.3–0.5f band strictly *more*
+     > correct. Proceed to step 2 under the corrected rationale. **Keep the Stage-1 test,
+     > renamed as a completeness pin** (e.g.
+     > `exact_feed_displacement_phase_contains_all_low_order_aberrations`): its
+     > load-bearing half (exact model carries the full low-order content) is the permanent
+     > justification for the mode's absence; the failed Seidel-correspondence half becomes
+     > doc-comment history explaining why the mode was removed rather than fixed. NOTE:
+     > because the removed terms were wrong-sign (not duplicates), the 0.3–0.5f
+     > before/after gain delta may be *larger* than the double-count framing implied —
+     > expected; the step-3 regression test pins the new values and the
+     > `PHYSICS_MODEL_VERSION` bump is non-negotiable.
   2. Remove `higher_order_aberrations`, the `HigherOrderAberrations` computation mode
      (`pattern.rs` dispatch + `edge_cases.rs` mode selection), the
      `use_higher_order_aberrations` param plumbing, and the mode-path branches in
@@ -510,12 +534,14 @@ structurally redundant.
   3. Offsets formerly routed to the removed mode (0.3f–0.5f) fall through to
      `StandardPhysicalOptics`, whose exact coma phase covers them; the ray-tracing threshold
      (>0.5f) is untouched.
-- **Exit criteria:** redundancy test committed and green; mode removed; **no served value
+- **Exit criteria:** the Stage-1 test committed and green **in its renamed completeness-pin
+  form** (asserting the exact model's full low-order aberration content; the failed
+  Seidel-correspondence assertion documented, not asserted); mode removed; **no served value
   changes for any enabled antenna** (all offsets ≤0.027f never entered the mode — every
   existing anchor/gain test passes unchanged); a 0.3–0.5f-offset regression test pins the
   new (exact-only) behavior; `PHYSICS_MODEL_VERSION` bumped (values in the 0.3–0.5f band
   change by construction — that is the fix); domain-contract + CLAUDE.md coma sections
-  updated.
+  updated (including the corrected removal rationale).
 - **Depends on:** G1 (done). **Coordinate with:** F7 redesign (both bump
   `PHYSICS_MODEL_VERSION`; land P2 first or batch the bump).
 
