@@ -16,14 +16,14 @@
 //! - **Mesh Reflection Efficiency**: Wire mesh reflectors have frequency-dependent reflectivity (inductive-grid model)
 //! - **Illumination Efficiency**: Non-uniform illumination reduces effective aperture
 //! - **Spillover Efficiency**: Feed pattern energy missing the reflector
-//! - **Sidelobe Floor (F7)**: Ruze-scattered power re-radiates as a wide-angle pedestal that lifts deep nulls/sidelobes (opt-in via `IntegrationParams::apply_sidelobe_floor`)
+//! - **Sidelobe Floor (F7)**: Ruze-scattered power combines with the pattern as an incoherent power sum forward and serves floor-only behind the dish (opt-in via `IntegrationParams::apply_sidelobe_floor`)
 //!
 //! # References
 //! - Design doc Section 2.1 (Core Physical Optics Model)
 //! - Design doc Section 2.4 (Mesh Reflector Efficiency)
 //! - Implementation plan Sprint 2, Task 2.5
 
-use std::f64::consts::PI;
+use std::f64::consts::{FRAC_PI_2, PI};
 
 use num_complex::Complex64;
 
@@ -322,6 +322,25 @@ pub fn compute_gain(
 
     // Dispatch based on computation mode
     let mut warnings = analysis.warnings;
+
+    // F7 rear-hemisphere policy (maintainer decision 2026-07-16): behind the dish the
+    // aperture-PO term is categorically invalid — P10-tail measured a genuinely
+    // converged but fictitious backlobe there — so when the statistical floor is active
+    // the served value is the floor ALONE, and the (pathologically expensive,
+    // discarded-anyway) rear aperture integration is skipped entirely. The NTIA 84-164
+    // data calibrating the floor spans 1-180 deg, so the floor is data-backed here.
+    // theta = 90 deg exactly is forward (matches the service rear-warning gate, which
+    // fires strictly beyond 90 deg). With the flag off (corrected-physics antennas /
+    // direct model users), rear queries keep returning raw PO plus the rear warning.
+    if params.apply_sidelobe_floor && theta.abs() > FRAC_PI_2 {
+        let gain = apply_gain_floor(sidelobe_floor_gain(config, wavelength));
+        return Ok(GainComputationResult {
+            gain,
+            warnings,
+            spillover_loss_db: None,
+        });
+    }
+
     let gain = match analysis.mode {
         ComputationMode::StandardPhysicalOptics => compute_gain_standard(
             theta,
@@ -371,10 +390,16 @@ pub fn compute_gain(
             (gain, None)
         };
 
-    // Ruze scattered-power sidelobe floor (F7): off by default, lifts deep
-    // nulls/sidelobes to a surface-error scatter pedestal when enabled.
+    // F7 statistical sidelobe floor (redesign 2026-07-16): incoherent POWER SUM with the
+    // idealised-PO pattern. In linear gain the dB-domain power sum
+    // 10*log10(10^(PO/10) + 10^(floor/10)) is simply addition. Scattered energy adds to
+    // the coherent pattern in power, so this is the physically motivated combination:
+    // continuous everywhere (no theta_valid seam in heatmaps), converging to the floor
+    // exactly where idealised PO under-predicts. The floor is a best-estimate MEDIAN
+    // wide-angle level (register F7, 2026-07-12), power-conserving by construction
+    // (Omega = 4*pi => floor = (1 - eta_ruze)*eta_mesh <= 1, i.e. <= 0 dBi).
     let gain = if params.apply_sidelobe_floor {
-        gain.max(sidelobe_floor_gain(config, wavelength))
+        gain + sidelobe_floor_gain(config, wavelength)
     } else {
         gain
     };
@@ -1351,8 +1376,13 @@ mod tests {
         );
     }
 
+    /// F7 redesign (2026-07-16): the floor combines with the pattern as an incoherent
+    /// POWER SUM (linear addition — scattered energy adds in power), not max(). Deep
+    /// nulls are lifted to ~the floor; the main beam is perturbed by an amount that is
+    /// negligible (< 0.001 dB) because pattern >> floor there — but NOT byte-identical,
+    /// by design (the sum is continuous everywhere; no seam).
     #[test]
-    fn test_sidelobe_floor_lifts_deep_null_leaves_main_beam_unchanged() {
+    fn test_sidelobe_floor_power_sum_lifts_deep_null_preserves_main_beam() {
         let config = sidelobe_floor_test_antenna();
         let params_off = IntegrationParams::fast();
         let params_on = IntegrationParams {
@@ -1360,46 +1390,80 @@ mod tests {
             ..IntegrationParams::fast()
         };
 
-        // Deep off-axis angle: well past the main beam and first few sidelobes for
-        // this 1m/8.4GHz dish (HPBW ~2.5deg), pattern gain << floor here.
-        let theta_deep_null = 10.0_f64.to_radians();
-
         let wavelength = wavelength_from_frequency(8.4e9);
         let floor = sidelobe_floor_gain(&config, wavelength);
         assert!(floor > 0.0, "floor must be positive for this config");
 
+        // Deep off-axis angle: well past the main beam and first few sidelobes for
+        // this 1m/8.4GHz dish (HPBW ~2.5deg), pattern gain << floor here.
+        let theta_deep_null = 10.0_f64.to_radians();
         let off = compute_gain(theta_deep_null, 0.0, &config, 8.4e9, &params_off).unwrap();
         let on = compute_gain(theta_deep_null, 0.0, &config, 8.4e9, &params_on).unwrap();
 
+        // Exact linear power-sum identity.
         assert!(
-            off.gain < floor,
-            "pattern at deep-null angle must be below the floor for this test to be meaningful: \
-             pattern={} floor={floor}",
-            off.gain
-        );
-        assert!(
-            (on.gain - off.gain.max(floor)).abs() < 1e-12,
-            "flag-on gain must equal max(pattern, floor): on={} expected={}",
+            (on.gain - (off.gain + floor)).abs() <= 1e-12 * (off.gain + floor),
+            "flag-on gain must equal pattern + floor (linear power sum): on={} expected={}",
             on.gain,
-            off.gain.max(floor)
+            off.gain + floor
         );
-        assert!(
-            on.gain > off.gain,
-            "deep null must be lifted by the floor: on={} off={}",
-            on.gain,
-            off.gain
-        );
+        assert!(on.gain > off.gain, "deep null must be lifted by the floor");
 
-        // Boresight and main beam: pattern >> floor, so flag on/off must match exactly.
-        for theta_deg in [0.0_f64, 1.0, 2.0] {
+        // Main beam: pattern >> floor, so the sum perturbs the dB value negligibly.
+        for theta_deg in [0.0_f64, 1.0] {
             let theta = theta_deg.to_radians();
             let off = compute_gain(theta, 0.0, &config, 8.4e9, &params_off).unwrap();
             let on = compute_gain(theta, 0.0, &config, 8.4e9, &params_on).unwrap();
-            assert_eq!(
-                on.gain, off.gain,
-                "main beam (theta={theta_deg}deg) must be byte-for-byte unchanged by the floor"
+            assert!(
+                (on.gain - (off.gain + floor)).abs() <= 1e-12 * on.gain,
+                "sum identity must hold in the main beam too (theta={theta_deg}deg)"
+            );
+            let delta_db = 10.0 * (on.gain / off.gain).log10();
+            assert!(
+                delta_db < 1e-3,
+                "main-beam perturbation must be < 0.001 dB, got {delta_db} dB \
+                 (theta={theta_deg}deg)"
             );
         }
+    }
+
+    /// F7 redesign rear-hemisphere policy (maintainer 2026-07-16): behind the dish
+    /// (theta > 90 deg) the aperture-PO term is categorically invalid, so with the floor
+    /// active the returned gain is the floor ALONE — and the (pathologically expensive,
+    /// discarded-anyway) rear aperture integration is skipped entirely. With the flag
+    /// off, rear queries keep returning raw PO (callers gate honesty via the
+    /// rear-hemisphere warning).
+    #[test]
+    fn test_sidelobe_floor_rear_hemisphere_is_floor_only() {
+        let config = sidelobe_floor_test_antenna();
+        let params_on = IntegrationParams {
+            apply_sidelobe_floor: true,
+            ..IntegrationParams::fast()
+        };
+        let wavelength = wavelength_from_frequency(8.4e9);
+        let floor = sidelobe_floor_gain(&config, wavelength);
+        assert!(floor > 0.0);
+
+        for theta_deg in [90.5_f64, 120.0, 163.0, 180.0] {
+            let theta = theta_deg.to_radians();
+            let on = compute_gain(theta, 0.0, &config, 8.4e9, &params_on).unwrap();
+            assert_eq!(
+                on.gain, floor,
+                "rear gain (theta={theta_deg}deg) must be exactly the floor (PO excluded)"
+            );
+            assert!(
+                on.spillover_loss_db.is_none(),
+                "no PO term behind the dish => no spillover loss to report"
+            );
+        }
+
+        // Boundary: theta = 90 deg exactly is FORWARD (power sum, PO included) — matches
+        // the service rear-warning gate, which fires only STRICTLY beyond 90 deg.
+        let at_90 = compute_gain(90.0_f64.to_radians(), 0.0, &config, 8.4e9, &params_on).unwrap();
+        assert!(
+            at_90.gain >= floor,
+            "at exactly 90deg the power sum must include the floor term"
+        );
     }
 
     #[test]
