@@ -532,4 +532,65 @@ mod tests {
         assert!(avg_time > 0.0);
         assert!(avg_time < 1000.0); // Should be well under 1 second per evaluation
     }
+
+    /// The batch path inherits the F7 floor from the evaluator: a rear-hemisphere
+    /// item on an uncalibrated antenna returns EXACTLY the statistical floor
+    /// (floor-only behind the dish). Pins that batch delegates the floor gate.
+    #[test]
+    fn test_batch_rear_hemisphere_uncalibrated_returns_statistical_floor() {
+        use crate::model::pattern::sidelobe_floor_gain;
+        use crate::model::wavelength_from_frequency;
+        use crate::model::{
+            AntennaConfiguration, FeedParameters as ModelFeedParams, FeedPosition,
+            MeshParameters as ModelMeshParams, ReflectorGeometry as ModelReflector,
+        };
+
+        use crate::service::test_support;
+
+        let repo = test_support::create_uncalibrated_repository();
+        let request = BatchGainRequest {
+            evaluations: vec![test_support::rear_hemisphere_request()],
+        };
+        let response = evaluate_batch(&request, &repo).unwrap();
+        assert_eq!(response.results.len(), 1);
+        let result = &response.results[0];
+
+        // Frame-safety precondition: this MUST be a rear-hemisphere query, else the
+        // exact-floor pin below would silently be testing the wrong seam.
+        assert!(
+            result.geometry.emitter_elevation_deg.abs() > 90.0,
+            "rear-hemisphere premise broken: expected >90 deg off boresight, got el={}",
+            result.geometry.emitter_elevation_deg
+        );
+
+        // Independent floor pedestal (surface 1.5 mm, mesh 5 mm / 0.5 mm — matching
+        // the repo antenna; the floor is diameter-independent).
+        let reflector = ModelReflector::new(10.0, 5.0, 0.0015).unwrap();
+        let feed = ModelFeedParams::new(FeedPosition::at_focus(5.0), 8.0, 0.0, 1.0).unwrap();
+        let mesh = ModelMeshParams::builder()
+            .spacing(0.005)
+            .wire_diameter(0.0005)
+            .build()
+            .unwrap();
+        let floor_cfg = AntennaConfiguration::new(
+            "floor_check".into(),
+            "floor_check".into(),
+            reflector,
+            feed,
+            Some(mesh),
+        )
+        .unwrap();
+        let wavelength = wavelength_from_frequency(8400.0 * 1e6);
+        let floor_db = 10.0 * sidelobe_floor_gain(&floor_cfg, wavelength).log10();
+        assert!(
+            floor_db > -20.0,
+            "floor should be a meaningful pedestal, got {floor_db} dB"
+        );
+        assert!(
+            (result.gain_db - floor_db).abs() < 1e-6,
+            "batch rear-hemisphere uncalibrated item {} dBi must be exactly the statistical \
+             floor {floor_db} dBi (F7 floor ON, floor-only behind the dish)",
+            result.gain_db
+        );
+    }
 }

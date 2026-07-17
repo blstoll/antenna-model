@@ -103,36 +103,45 @@ is now **numerically converged**: roadmap unit **P10 landed 2026-07-15**, replac
 aliasing fixed-density quadrature with a Hankel / azimuthal-mode integrator that computes the
 physical-optics pattern correctly at all angles (the old code aliased the rapidly-varying
 `2π·(D/λ)·sinθ` phase, reporting off-axis gain 20–35 dB too high — e.g. a 34 m dish at +34 dBi
-at 90° off-boresight — and gain that *rose* with angle; that P0 defect is fixed). The served
-off-axis value is the **raw physical optics** prediction: per maintainer decision D-2 the F7
-statistical sidelobe floor is intentionally **OFF** on this path.
+at 90° off-boresight — and gain that *rose* with angle; that P0 defect is fixed). On
+**uncalibrated** antennas (no correction surface — `physics_is_uncorrected()`), the served
+off-axis value is now the **incoherent power sum** of that idealised physical-optics term and
+the statistical Ruze sidelobe floor (F7 redesign, landed 2026-07-16): `10·log₁₀(10^(PO/10) +
+10^(floor/10))`, where the floor is a best-estimate **median** wide-angle level tracking
+measured earth-station statistics (NTIA 84-164), not a precise per-antenna prediction.
+Calibrated antennas (with a correction surface) do not get the floor — the double-counting
+gate keeps their served behavior unchanged.
 
 The remaining caveat is **physical, not numerical**: idealised physical optics omits
-blockage, feed/strut scatter, and aperture-edge diffraction, so far-off-axis sidelobe
-*levels* are **optimistic and not calibrated-grade** — the pattern shape is validated, the
+blockage, feed/strut scatter, and aperture-edge diffraction, and the statistical floor is a
+population median, not a per-antenna measurement — so far-off-axis sidelobe *levels* are
+**optimistic/approximate and not calibrated-grade** — the pattern shape is validated, the
 absolute levels are not. For sidelobe, interference, adjacent-satellite, or off-axis-EIRP
 analysis, use calibration data or a regulatory envelope (e.g. the ITU-R S.580 mask) instead
-of the raw off-axis levels.
+of the off-axis levels returned here.
 
 Queries on **uncalibrated** antennas beyond ~3× the first-null angle (≈ 1.6·λ/D,
 beamwidth-relative) return a warning on all four compute endpoints ("… beyond the validated
-main-beam region … not calibrated-grade …") stating this physical caveat. The F7
-sidelobe-floor redesign (unblocked by P10, redesign pending) would address the absolute
-off-axis levels separately — see `docs/domain-contract.md`, "Off-axis pattern / sidelobe
+main-beam region … not calibrated-grade …") stating this physical caveat and describing the
+power-sum combination — see `docs/domain-contract.md`, "Off-axis pattern / sidelobe
 fidelity".
 
 **Rear-hemisphere caveat — no physical validity behind the reflector (θ > 90°):** queries
 more than **90° off boresight** return a separate, harder warning on **every** antenna —
 **including fully calibrated ones** (a correction surface fitted from forward-hemisphere
-measurements says nothing about back lobes). The aperture-integration model is a
-forward-radiating formulation with no Huygens obliquity factor; behind the reflector the
-returned value is a **numerical extrapolation of an idealised, unshadowed aperture field, not
-a prediction**. Real rear-hemisphere levels are set by feed spillover past the rim,
-aperture-edge diffraction, and mesh leakage — none of which are modeled. The value is still
-returned (grid totality on `/heatmap` and `/h3-heatmap` is preserved) but must be replaced by
-measured data or a regulatory rear-lobe envelope for any rear-hemisphere analysis. The
-warning message is constant per (antenna, frequency), so heatmap/H3 aggregation deduplicates
-it to a single entry.
+measurements says nothing about back lobes). The far-field conversion now carries the Huygens
+obliquity factor `(1+cosθ)/2` (F7, 2026-07-16), which suppresses the old fictitious rear
+backlobe by ~33 dB at 163° — but the aperture-integration model still has no physical
+validity behind the reflector. On **uncalibrated** antennas the rear aperture integration is
+skipped entirely and the returned value **is the statistical sidelobe floor only** (the
+physical-optics term is excluded there). On antennas **with a correction surface**, the
+returned value remains a **numerical extrapolation of an idealised, unshadowed aperture
+field, not a prediction**. Real rear-hemisphere levels — for either case — are set by feed
+spillover past the rim, aperture-edge diffraction, and mesh leakage — none of which are
+modeled. The value is still returned (grid totality on `/heatmap` and `/h3-heatmap` is
+preserved) but must be replaced by measured data or a regulatory rear-lobe envelope for any
+rear-hemisphere analysis. The warning message is constant per (antenna, frequency), so
+heatmap/H3 aggregation deduplicates it to a single entry.
 
 **Large-feed-offset caveat — ray-tracing stub (> 0.5·f):** when the feed is aimed far enough
 from the reflector boresight that the resulting feed displacement exceeds **0.5·f**, gain is

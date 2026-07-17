@@ -131,7 +131,7 @@ antenna-model/           # Cargo workspace root
 - **`illumination.rs`** - Feed pattern: cos^q with q-factor
 - **`integration.rs`** - Aperture integration via the **Hankel / azimuthal-mode (Jₘ) integrator** (roadmap P10, landed 2026-07-15): the φ' integral is collapsed analytically (Jacobi–Anger), radial density is derived adaptively from `(D/λ, θ)` at ~2× Nyquist, and a runtime N-vs-2N / M-vs-(M+1) self-check flags non-convergence (surfaced as a response warning, never silent). The legacy 2D Simpson quadrature survives only as a `#[cfg(test)]` reference oracle. The `IntegrationParams` presets (`fast()`, `high_accuracy()`) no longer gate served correctness — the served path uses `adaptive()` and most preset fields are inert (see the docstrings in `integration.rs`).
 - **`bessel.rs`** - In-house Bessel Jₘ (pure Rust, Numerical Recipes rational approximations + two-branch recurrence), pinned by tests in both the small-argument and asymptotic branches
-- **`pattern.rs`** - Far-field pattern computation with Ruze efficiency
+- **`pattern.rs`** - Far-field pattern computation with Ruze efficiency and the Huygens obliquity factor `(1+cosθ)/2` (F7, 2026-07-16, `absolute_gain_from_integral`)
 - **`coordinates_3d.rs`** - 3D position → antenna-frame direction transforms (ECEF/geodetic vehicle geometry)
 - **`correction_interpolator.rs`** - 4D B-spline evaluation of the residual correction surface
 - **`edge_cases.rs`, `ray_trace.rs`** - Special case / large-feed-offset handling
@@ -242,8 +242,11 @@ Per `docs/implementation-plan.md`, Sprints 1–7 are complete:
 - The **P10 off-axis integrator landed 2026-07-15**: served off-axis gain is numerically
   converged at all angles (the pre-P10 aliasing that returned gain 20–35 dB too high beyond a
   few degrees is fixed). Served values on uncalibrated antennas are *idealised* physical optics
-  (no blockage/strut/edge-diffraction), stated honestly by the off-axis warning; the F7
-  statistical sidelobe model is a pending redesign (see the roadmap's F7 row).
+  (no blockage/strut/edge-diffraction), stated honestly by the off-axis warning.
+- The **F7 sidelobe-floor redesign landed 2026-07-16/17** (`PHYSICS_MODEL_VERSION` 5): Huygens
+  obliquity factor `(1+cosθ)/2` on the far-field conversion, plus the statistical Ruze sidelobe
+  floor on uncorrected-physics antennas (power sum forward, floor-only rear). Calibrated
+  antennas unaffected — see `docs/domain-contract.md`.
 
 Active hardening and debt work is tracked in `docs/roadmap-2026-07.md` and
 `docs/roadmap-2026-07-work-units.md`.

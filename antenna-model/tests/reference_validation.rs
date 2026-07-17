@@ -820,6 +820,51 @@ fn sidelobe_floor_surface_scaling_matches_nasa() {
     }
 }
 
+/// F7 ship precondition (roadmap F7 precondition 2; findings-2026-07-13 §7 item 2):
+/// the boresight tuner treats `surface_rms` as a catch-all for boresight gain deficits
+/// within [0.3x, 3x] of the design value (`design_specs_loader::get_tuning_bounds`), and
+/// the floor `(1 - eta_ruze) * eta_mesh` converts an inflated sigma directly into
+/// off-axis power. Analytic bound: floor_lin ∝ 1 - exp(-(4*pi*sigma/lambda)^2), so
+/// sigma -> 3*sigma multiplies the floor by at most 9 (+9.54 dB, the small-sigma limit),
+/// monotonically compressing toward the 0 dBi ceiling as sigma grows. This pins the
+/// worst-case coupling for every enabled antenna x band. (`model_floor_dbi` is
+/// mesh-free; eta_mesh is identical at both sigmas so it cancels in the delta.)
+#[test]
+fn sidelobe_floor_tuner_coupling_bounded() {
+    let repo = load_real_repository();
+
+    println!("\n=== F7 tuner coupling: floor at design sigma vs tuner-max 3*sigma ===");
+    println!(
+        "{:<22} {:<16} {:>12} {:>12} {:>8}",
+        "antenna", "feed", "design_dBi", "3sigma_dBi", "delta_dB"
+    );
+
+    let mut worst = 0.0f64;
+    for (aid, fid, fhz) in enabled_symmetric_bands() {
+        let cal = repo
+            .get_calibration(aid, fid)
+            .unwrap_or_else(|| panic!("{aid}/{fid} not enabled in the real config"));
+        let rms_m = cal.physical_config.reflector.surface_rms_mm / 1000.0;
+        let f_mhz = fhz / 1e6;
+
+        let floor_design = model_floor_dbi(rms_m, f_mhz);
+        let floor_tuner_max = model_floor_dbi(3.0 * rms_m, f_mhz);
+        let delta = floor_tuner_max - floor_design;
+        println!("{aid:<22} {fid:<16} {floor_design:>12.2} {floor_tuner_max:>12.2} {delta:>+8.2}");
+
+        assert!(
+            floor_tuner_max <= 0.0 + 1e-9,
+            "{aid}/{fid}: tuner-max floor {floor_tuner_max:.2} dBi exceeds the 0 dBi ceiling"
+        );
+        assert!(
+            (0.0..=9.55).contains(&delta),
+            "{aid}/{fid}: tuner coupling {delta:+.2} dB outside the analytic [0, +9.54] dB bound"
+        );
+        worst = worst.max(delta);
+    }
+    println!("worst-case tuner coupling across enabled antennas: +{worst:.2} dB");
+}
+
 // ===========================================================================
 // P10 — OFF-AXIS INTEGRATOR VALIDATION PROTOCOL (Task 4).
 //
@@ -1009,9 +1054,14 @@ fn brute_force_2d_field(
     sum * h_rho * h_phi / 9.0
 }
 
-/// Convert a raw aperture field to absolute gain in dBi using the EXACT formula
-/// `compute_gain` uses: `G = overall_efficiency * (4*pi/lambda^2) * |I|^2 / integral|A|^2`.
-/// Lets a raw oracle field be compared to `compute_gain_db` on the same scale.
+/// Convert a raw aperture field to absolute gain in dBi using the PRE-OBLIQUITY
+/// raw-field formula: `G = overall_efficiency * (4*pi/lambda^2) * |I|^2 / integral|A|^2`.
+/// Since the F7 redesign (2026-07-16) this is NO LONGER what `compute_gain` uses
+/// off-boresight — `compute_gain` multiplies the field by the Huygens obliquity factor
+/// (1+cos(theta))/2 and this helper does not. It is therefore valid ONLY for
+/// raw-field-vs-raw-field comparisons (an oracle field vs `integrate_aperture`'s field,
+/// where the missing factor cancels on both sides). Comparing its output against
+/// `compute_gain_db` off-axis would be wrong by 20*log10((1+cos(theta))/2).
 fn field_to_dbi(
     field: num_complex::Complex64,
     cfg: &AntennaConfiguration,
@@ -1207,15 +1257,14 @@ fn integrator_params() -> IntegrationParams {
 }
 
 /// The production served uncalibrated params, matching `service/evaluator.rs`:
-/// spillover ON, F7 sidelobe floor OFF (per decision D-2 the served path carries
-/// the raw physical-optics value; the F7 floor's redesign is a separate unit).
-/// Used to confirm the SERVED value stays bounded and never rises with theta —
-/// the converged P10 pattern falls off monotonically in envelope without any
-/// floor pedestal.
+/// spillover ON, F7 sidelobe floor ON (redesign 2026-07-16 — both gated on the
+/// same `physics_is_uncorrected()` predicate for uncorrected-physics antennas).
+/// Used to confirm the SERVED value stays bounded and never rises with theta, and
+/// (power sum) never sits below its own statistical floor.
 fn served_params() -> IntegrationParams {
     let mut p = IntegrationParams::fast();
     p.apply_spillover = true;
-    p.apply_sidelobe_floor = false;
+    p.apply_sidelobe_floor = true;
     p
 }
 
@@ -1244,19 +1293,64 @@ fn p10_anchor_dsn34m_xband_matches_known_reference_values() {
         "\n[P10 anchor] dsn_34m X-band: 0={g0:.2} 1={g1:.2} 5={g5:.2} 20={g20:.2} 90={g90:.2} dBi"
     );
 
-    // Ground-truth anchors (findings §2.2 / §4a, brute-force reproduced).
+    // Ground-truth anchors. theta=0 is brute-force reproduced (findings §2.2/§4a) and MUST
+    // NOT move. The off-axis values are INTERNAL-CONSISTENCY anchors re-derived 2026-07-16
+    // when the F7 redesign added the Huygens obliquity factor (1+cos(theta))/2 to the
+    // far-field conversion: each equals the pre-obliquity anchor plus
+    // 20*log10((1+cos(theta))/2), verified to +/-0.05 dB at re-derivation.
+    // NOTE: only the 90° anchor meaningfully pins the obliquity factor (shift −6.02 dB vs
+    // tol 1.5); the 1°/5°/20° shifts (−0.001/−0.017/−0.27 dB) are inside their tolerances, so
+    // those anchors pin the integrator, not the factor. The dedicated factor pin is
+    // `obliquity_factor_pinned_against_raw_field` below.
     assert!((g0 - 68.96).abs() < 0.2, "peak {g0:.2} (expect 68.96)");
     assert!((g1 - 14.53).abs() < 0.5, "1deg {g1:.2} (expect 14.53)");
-    assert!((g5 - (-9.39)).abs() < 0.6, "5deg {g5:.2} (expect -9.39)");
+    assert!((g5 - (-9.41)).abs() < 0.6, "5deg {g5:.2} (expect -9.41)");
     assert!(
-        (g20 - (-23.56)).abs() < 0.8,
-        "20deg {g20:.2} (expect -23.56)"
+        (g20 - (-23.83)).abs() < 0.8,
+        "20deg {g20:.2} (expect -23.83)"
     );
-    // The far-off value the aliasing 2D could NOT reach (it gave +1.24 / +34 dBi).
+    // Pre-obliquity this was -33.3 (the value the aliasing 2D could NOT reach); the
+    // obliquity factor is exactly -6.02 dB on power at theta=90.
     assert!(
-        (g90 - (-33.3)).abs() < 1.5,
-        "90deg {g90:.2} (expect ~-33.3, NOT a high backlobe)"
+        (g90 - (-39.32)).abs() < 1.5,
+        "90deg {g90:.2} (expect ~-39.32, NOT a high backlobe)"
     );
+}
+
+/// Dedicated obliquity pin (peer-review 2026-07-17): `field_to_dbi` is the exact
+/// PRE-obliquity gain formula (raw field + efficiency, no element factor), so the
+/// difference between the served conversion and it must be exactly
+/// 20*log10((1+cos(theta))/2) — the field factor squared into power. At theta=90
+/// that is -6.0206 dB. This catches removal or mis-powering of the factor
+/// precisely (a non-squared factor would read -3.01 dB), which the 1/5/20-degree
+/// anchors cannot (their shifts are inside tolerance).
+#[test]
+fn obliquity_factor_pinned_against_raw_field() {
+    use antenna_model::model::integrate_aperture;
+    let repo = load_real_repository();
+    let cal = repo
+        .get_calibration("dsn_34m_uncalibrated", "x_band")
+        .expect("dsn_34m_uncalibrated x_band enabled");
+    let cfg = config_for(&cal, None);
+    let f = 8.4e9;
+    let p = integrator_params();
+
+    for theta_deg in [20.0_f64, 60.0, 90.0] {
+        let theta = deg(theta_deg);
+        let served = compute_gain_db(theta, 0.0, &cfg, f, &p).unwrap().gain;
+        let raw = field_to_dbi(
+            integrate_aperture(theta, 0.0, &cfg, f, &p).unwrap().field,
+            &cfg,
+            f,
+        );
+        let expected = 20.0 * ((1.0 + theta.cos()) / 2.0).log10();
+        assert!(
+            ((served - raw) - expected).abs() < 0.01,
+            "obliquity factor mismatch at {theta_deg} deg: served-raw = {:.4} dB, \
+             expected {expected:.4} dB",
+            served - raw
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1264,7 +1358,7 @@ fn p10_anchor_dsn34m_xband_matches_known_reference_values() {
 // no high backlobe, and the pattern does not RISE with theta (the aliasing
 // signature). Symmetric configs so theta=0 is the true peak. Repeated across
 // S/X/Ka/L/Q bands. Both the raw integrator pattern AND the production served
-// path (spillover ON, F7 floor OFF per D-2) are checked.
+// path (spillover ON, F7 floor ON — incoherent power sum forward) are checked.
 // ---------------------------------------------------------------------------
 #[test]
 fn p10_served_offaxis_is_physical_all_enabled_antennas() {
@@ -1322,14 +1416,23 @@ fn p10_served_offaxis_is_physical_all_enabled_antennas() {
              near-decade envelope max(1°,5°)={near_env:.2} — pattern not falling"
         );
 
-        // Production served path (spillover ON, F7 floor OFF per D-2): value stays
-        // bounded well below peak and the envelope never rises with theta.
+        // Production served path (spillover ON, F7 floor ON — power sum forward):
+        // value stays bounded well below peak, the envelope never rises with theta,
+        // and (power sum) never sits below the antenna's own statistical floor.
         let sv = |d: f64| {
             compute_gain_db(deg(d), 0.0, &cfg, fhz, &p_served)
                 .unwrap()
                 .gain
         };
         let (s0, s1, s5, s90) = (sv(0.0), sv(1.0), sv(5.0), sv(90.0));
+        // Power sum: the served wide-angle value can never sit below the floor.
+        let floor_db = 10.0
+            * antenna_model::model::pattern::sidelobe_floor_gain(&cfg, SPEED_OF_LIGHT_M_S / fhz)
+                .log10();
+        assert!(
+            s90 >= floor_db - 1e-6,
+            "{aid}/{fid}: served 90deg {s90:.2} below its own floor {floor_db:.2}"
+        );
         assert!(
             s90 < s0 - 20.0,
             "{aid}/{fid}: served 90° {s90:.2} not 20 dB below peak {s0:.2}"
@@ -1344,7 +1447,7 @@ fn p10_served_offaxis_is_physical_all_enabled_antennas() {
 // model has no physical validity (no rim diffraction, no dish shadowing), and
 // at θ=180° the integral degenerates to a Fresnel-type radial integral whose
 // magnitude has no ground-truth level. So this asserts only the HONEST
-// invariant: NO high backlobe (>=30 dB below the forward peak) OR the sample
+// invariant: NO high backlobe (>=20 dB below the forward peak) OR the sample
 // budget honestly reports `converged == false` (never a silent high value).
 // It does NOT assert a specific dBi level for θ>90°. Diagnostic gain/converged
 // values are printed for the maintainer.
@@ -1391,17 +1494,15 @@ fn p10_served_rear_hemisphere_is_physical_or_flagged() {
         // peak, OR the runtime self-check honestly flagged non-convergence (never a
         // silent value AT/ABOVE the peak — the pre-P10 aliasing signature).
         //
-        // Level bound = 20 dB below peak, matching the existing served-90° bound in
-        // `p10_served_offaxis_is_physical_all_enabled_antennas` (`s90 < s0 - 20`). NOTE
-        // (P10-tail finding): a *30* dB bound would assert something FALSE. The rear PO
-        // value is GENUINELY CONVERGED (verified stable to <0.1 dB against a 20001-point
-        // forced density) yet sits only ~28 dB below peak for the small dishes — the
-        // idealised unshadowed aperture radiates a real +7..+13 dBi backlobe at θ≈163°
-        // because the integrand carries NO Huygens obliquity factor (1+cosθ)/2 (F7
-        // handoff #2 in domain-contract.md). Convergence therefore CANNOT be relied on
-        // to flag rear invalidity — that is exactly why the rear-hemisphere WARNING
-        // (Task A3), not a level bound, is the safety net. At θ=180° the base-density
-        // self-check does report `converged == false` here (honest under-sampling).
+        // Since the F7 redesign (2026-07-16) the far-field conversion carries the Huygens
+        // obliquity factor (1+cos(theta))/2, which suppresses the previously measured
+        // +7..+13 dBi converged-but-fictitious backlobe by ~33 dB at theta=163 — so this
+        // invariant now passes by LEVEL at every rear angle. It is kept (rather than
+        // tightened) because rear PO remains categorically non-physical (no rim
+        // diffraction, no dish shadowing); the SERVED rear value on uncorrected-physics
+        // antennas will be the statistical floor only (see the F7 redesign plan), and the
+        // rear-hemisphere warning remains the safety net for everything else. This test
+        // exercises the RAW integrator path (floor off) on purpose.
         for (deg_label, (g, conv)) in [
             ("120°", (g120, c120)),
             ("163°", (g163, c163)),

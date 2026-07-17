@@ -48,7 +48,8 @@ pub mod ray_trace;
 ///   `gain_physics` at off-axis angles for identical inputs (converged physical
 ///   optics, no aliasing). NOTE: the F7 statistical sidelobe floor is a
 ///   service-layer param (`IntegrationParams::apply_sidelobe_floor`), OFF on the
-///   served path per decision D-2, and is NOT part of the calibration-fitting
+///   served path per decision D-2 (superseded in v5 — the F7 redesign turned the
+///   floor ON via a power sum), and is NOT part of the calibration-fitting
 ///   physics — calibrated antennas never had it applied, so it does not gate this
 ///   version.
 /// - 4: P2 removal of the `HigherOrderAberrations` computation mode (2026-07) — feed
@@ -63,7 +64,11 @@ pub mod ray_trace;
 ///   enabled* antenna is affected. No `.bin` calibration artifacts exist in the wild, so
 ///   the loader's version-mismatch warning (warn, never error) fires against nothing
 ///   today; it exists to flag genuinely stale surfaces once artifacts are produced.
-pub const PHYSICS_MODEL_VERSION: u32 = 4;
+/// - 5: F7 redesign (2026-07-16) — Huygens obliquity factor (1+cosθ)/2 on the far-field
+///   conversion (all antennas), and the statistical Ruze sidelobe floor re-enabled on the
+///   uncorrected-physics path as an incoherent power sum forward / floor-only behind the
+///   dish (gated on `physics_is_uncorrected()`).
+pub const PHYSICS_MODEL_VERSION: u32 = 5;
 
 // Re-export commonly used types
 pub use bessel::{bessel_j0, bessel_j1, bessel_jn};
