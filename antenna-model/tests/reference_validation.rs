@@ -1257,15 +1257,14 @@ fn integrator_params() -> IntegrationParams {
 }
 
 /// The production served uncalibrated params, matching `service/evaluator.rs`:
-/// spillover ON, F7 sidelobe floor OFF (per decision D-2 the served path carries
-/// the raw physical-optics value; the F7 floor's redesign is a separate unit).
-/// Used to confirm the SERVED value stays bounded and never rises with theta —
-/// the converged P10 pattern falls off monotonically in envelope without any
-/// floor pedestal.
+/// spillover ON, F7 sidelobe floor ON (redesign 2026-07-16 — both gated on the
+/// same `physics_is_uncorrected()` predicate for uncorrected-physics antennas).
+/// Used to confirm the SERVED value stays bounded and never rises with theta, and
+/// (power sum) never sits below its own statistical floor.
 fn served_params() -> IntegrationParams {
     let mut p = IntegrationParams::fast();
     p.apply_spillover = true;
-    p.apply_sidelobe_floor = false;
+    p.apply_sidelobe_floor = true;
     p
 }
 
@@ -1319,7 +1318,7 @@ fn p10_anchor_dsn34m_xband_matches_known_reference_values() {
 // no high backlobe, and the pattern does not RISE with theta (the aliasing
 // signature). Symmetric configs so theta=0 is the true peak. Repeated across
 // S/X/Ka/L/Q bands. Both the raw integrator pattern AND the production served
-// path (spillover ON, F7 floor OFF per D-2) are checked.
+// path (spillover ON, F7 floor ON — incoherent power sum forward) are checked.
 // ---------------------------------------------------------------------------
 #[test]
 fn p10_served_offaxis_is_physical_all_enabled_antennas() {
@@ -1377,14 +1376,23 @@ fn p10_served_offaxis_is_physical_all_enabled_antennas() {
              near-decade envelope max(1°,5°)={near_env:.2} — pattern not falling"
         );
 
-        // Production served path (spillover ON, F7 floor OFF per D-2): value stays
-        // bounded well below peak and the envelope never rises with theta.
+        // Production served path (spillover ON, F7 floor ON — power sum forward):
+        // value stays bounded well below peak, the envelope never rises with theta,
+        // and (power sum) never sits below the antenna's own statistical floor.
         let sv = |d: f64| {
             compute_gain_db(deg(d), 0.0, &cfg, fhz, &p_served)
                 .unwrap()
                 .gain
         };
         let (s0, s1, s5, s90) = (sv(0.0), sv(1.0), sv(5.0), sv(90.0));
+        // Power sum: the served wide-angle value can never sit below the floor.
+        let floor_db = 10.0
+            * antenna_model::model::pattern::sidelobe_floor_gain(&cfg, SPEED_OF_LIGHT_M_S / fhz)
+                .log10();
+        assert!(
+            s90 >= floor_db - 1e-6,
+            "{aid}/{fid}: served 90deg {s90:.2} below its own floor {floor_db:.2}"
+        );
         assert!(
             s90 < s0 - 20.0,
             "{aid}/{fid}: served 90° {s90:.2} not 20 dB below peak {s0:.2}"

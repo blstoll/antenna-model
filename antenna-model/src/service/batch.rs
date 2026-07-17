@@ -532,4 +532,144 @@ mod tests {
         assert!(avg_time > 0.0);
         assert!(avg_time < 1000.0); // Should be well under 1 second per evaluation
     }
+
+    /// Build a repository holding a single UNCALIBRATED antenna (no correction
+    /// surface ⇒ `physics_is_uncorrected()` ⇒ F7 floor ON) with a nonzero surface
+    /// RMS so the statistical floor is a clearly nonzero pedestal.
+    fn create_uncalibrated_repository() -> CalibrationRepository {
+        use crate::data::types::CalibrationStatus;
+        let mut repo = CalibrationRepository::new();
+        let metadata = CalibrationMetadata::builder()
+            .antenna_name("Test Antenna")
+            .calibration_date("2025-01-01T00:00:00Z")
+            .format_version("2.0")
+            .data_source("test")
+            .rmse_db(0.5)
+            .r_squared(0.99)
+            .num_measurements(1000)
+            .build()
+            .unwrap();
+        let calibration = AntennaCalibration::builder()
+            .antenna_id("test_antenna")
+            .feed_id("test_feed")
+            .metadata(metadata)
+            .physical_config(PhysicalAntennaConfig {
+                reflector: ReflectorGeometry {
+                    diameter_m: 10.0,
+                    focal_length_m: 5.0,
+                    f_over_d_ratio: 0.5,
+                    surface_rms_mm: 1.5,
+                },
+                feed: FeedParameters {
+                    position: (0.0, 0.0, 5.0),
+                    q_factor: 8.0,
+                    phase_center_offset_m: 0.0,
+                    axial_defocus_m: 0.0,
+                },
+                mesh: Some(MeshParameters {
+                    mesh_spacing_mm: 5.0,
+                    wire_diameter_mm: 0.5,
+                }),
+            })
+            .validity_ranges(ValidityRanges {
+                azimuth_min_max: (0.0, 360.0),
+                elevation_min_max: (0.0, 90.0),
+                frequency_min_max: (1000.0, 10000.0),
+                temperature_const: 290.0,
+            })
+            .calibration_status(CalibrationStatus::Uncalibrated {
+                accuracy_estimate_db: 3.0,
+                loss_accuracy_estimate_db: 2.0,
+            })
+            .build()
+            .unwrap();
+        assert!(calibration.correction_surface.is_none());
+        repo.add_calibration(calibration);
+        repo
+    }
+
+    /// A batch request whose single item points BEHIND the dish (emitter dropped to
+    /// ground level at the deep-off-axis lon/lat → >90 deg off boresight, REAR
+    /// hemisphere). Mirrors the evaluator `create_rear_hemisphere_request` geometry.
+    fn rear_hemisphere_request() -> GainRequest {
+        use crate::model::coordinates_3d::geodetic_to_ecef;
+        let ecef = |lon: f64, lat: f64, alt: f64| {
+            let (x, y, z) = geodetic_to_ecef(lon, lat, alt).unwrap();
+            let mut p = Position3D::new(x, y, z);
+            p.coordinate_system = Some(CoordinateSystem::ECEF);
+            p
+        };
+        GainRequest {
+            antenna_id: "test_antenna".to_string(),
+            feed_id: "test_feed".to_string(),
+            vehicle_position: ecef(-118.1234, 34.5678, 100.0),
+            reflector_boresight: ecef(-117.0, 35.0, 400_000.0),
+            // Feed aimed at boresight target → feed at focus → StandardPhysicalOptics.
+            feed_position: ecef(-117.0, 35.0, 400_000.0),
+            emitter_position: ecef(-120.0, 30.0, 0.0),
+            frequency_mhz: 8400.0,
+            pointing_frequency_mhz: None,
+            include_reference: false,
+            vehicle_attitude: None,
+        }
+    }
+
+    /// The batch path inherits the F7 floor from the evaluator: a rear-hemisphere
+    /// item on an uncalibrated antenna returns EXACTLY the statistical floor
+    /// (floor-only behind the dish). Pins that batch delegates the floor gate.
+    #[test]
+    fn test_batch_rear_hemisphere_uncalibrated_returns_statistical_floor() {
+        use crate::model::pattern::sidelobe_floor_gain;
+        use crate::model::wavelength_from_frequency;
+        use crate::model::{
+            AntennaConfiguration, FeedParameters as ModelFeedParams, FeedPosition,
+            MeshParameters as ModelMeshParams, ReflectorGeometry as ModelReflector,
+        };
+
+        let repo = create_uncalibrated_repository();
+        let request = BatchGainRequest {
+            evaluations: vec![rear_hemisphere_request()],
+        };
+        let response = evaluate_batch(&request, &repo).unwrap();
+        assert_eq!(response.results.len(), 1);
+        let result = &response.results[0];
+
+        // Frame-safety precondition: this MUST be a rear-hemisphere query, else the
+        // exact-floor pin below would silently be testing the wrong seam.
+        assert!(
+            result.geometry.emitter_elevation_deg.abs() > 90.0,
+            "rear-hemisphere premise broken: expected >90 deg off boresight, got el={}",
+            result.geometry.emitter_elevation_deg
+        );
+
+        // Independent floor pedestal (surface 1.5 mm, mesh 5 mm / 0.5 mm — matching
+        // the repo antenna; the floor is diameter-independent).
+        let reflector = ModelReflector::new(10.0, 5.0, 0.0015).unwrap();
+        let feed = ModelFeedParams::new(FeedPosition::at_focus(5.0), 8.0, 0.0, 1.0).unwrap();
+        let mesh = ModelMeshParams::builder()
+            .spacing(0.005)
+            .wire_diameter(0.0005)
+            .build()
+            .unwrap();
+        let floor_cfg = AntennaConfiguration::new(
+            "floor_check".into(),
+            "floor_check".into(),
+            reflector,
+            feed,
+            Some(mesh),
+        )
+        .unwrap();
+        let wavelength = wavelength_from_frequency(8400.0 * 1e6);
+        let floor_db = 10.0 * sidelobe_floor_gain(&floor_cfg, wavelength).log10();
+        assert!(
+            floor_db > -20.0,
+            "floor should be a meaningful pedestal, got {floor_db} dB"
+        );
+        assert!(
+            (result.gain_db - floor_db).abs() < 1e-6,
+            "batch rear-hemisphere uncalibrated item {} dBi must be exactly the statistical \
+             floor {floor_db} dBi (F7 floor ON, floor-only behind the dish)",
+            result.gain_db
+        );
+    }
 }

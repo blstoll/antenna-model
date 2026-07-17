@@ -330,11 +330,10 @@ pub fn compute_h3_link_budget(
     // by both `compute_gain_db` call sites below (boresight reference and per-cell), matching
     // `service::evaluator::compute_gain_from_request` so the /gain, heatmap, and h3 endpoints
     // agree on an uncalibrated antenna's gain.
-    integration_params.apply_spillover = calibration.correction_surface.is_none();
-    // F7 sidelobe floor is OFF on the served path (D-2): the P10 integrator makes the off-axis
-    // pattern numerically correct, so cells report the RAW physical-optics gain. Floor plumbing
-    // is retained for the separate F7 redesign unit.
-    integration_params.apply_sidelobe_floor = false;
+    // P11 unified predicate for BOTH uncorrected-physics behaviors (spillover fold-in and
+    // the F7 sidelobe floor), matching the evaluator gain path exactly.
+    integration_params.apply_spillover = calibration.physics_is_uncorrected();
+    integration_params.apply_sidelobe_floor = calibration.physics_is_uncorrected();
     let frequency_hz = request.frequency_mhz * 1e6;
 
     let (antenna_config, feed_x, feed_y, feed_z) = build_antenna_config(calibration, request)?;
@@ -876,24 +875,25 @@ mod tests {
         );
     }
 
-    /// SERVED h3 PATH — F7 floor OFF (D-2). The h3 per-cell path sets
-    /// `apply_sidelobe_floor = false` (see `compute_h3_link_budget`), so now that
-    /// the P10 integrator makes the off-axis pattern numerically correct, an
-    /// uncalibrated antenna's off-axis ring cells report the RAW physical-optics
-    /// gain rather than being lifted to the Ruze pedestal. This pins that the
-    /// floor is NOT applied on the h3 served path: at least one deep off-axis
-    /// cell sits clearly BELOW the (would-be) floor pedestal.
+    /// SERVED h3 PATH — F7 floor ON (redesign 2026-07-16). The h3 per-cell path
+    /// sets `apply_sidelobe_floor = calibration.physics_is_uncorrected()` — the
+    /// same P11 predicate as the evaluator — so for an uncalibrated antenna every
+    /// off-axis ring cell carries the statistical floor: forward cells report the
+    /// incoherent power sum (raw PO + floor), which can never dip BELOW the floor,
+    /// and any rear cell reports the floor alone. This pins that the floor IS
+    /// applied on the h3 served path: no uncalibrated cell falls below the pedestal.
     ///
     /// Geometry mirrors the P8 off-axis h3 test: a low-altitude vehicle so the
     /// n_rings=2 ground cells fan out tens of degrees off boresight, deep in the
-    /// sidelobes. The Ruze floor is diameter-independent, so `floor_db` is computed
-    /// from the antenna's `surface_rms` and wavelength alone.
+    /// sidelobes. The Ruze floor is diameter-independent, but it DOES scale with
+    /// mesh transmission, so `floor_cfg` mirrors the antenna's mesh to reproduce
+    /// `floor_db` exactly.
     #[test]
-    fn test_h3_sidelobe_floor_off_on_served_path() {
+    fn test_h3_sidelobe_floor_on_for_uncorrected_physics() {
         use crate::api::schemas::CoordinateSystem;
         use crate::model::{
             wavelength_from_frequency, AntennaConfiguration, FeedParameters as ModelFeedParams,
-            FeedPosition, ReflectorGeometry as ModelReflector,
+            FeedPosition, MeshParameters as ModelMeshParams, ReflectorGeometry as ModelReflector,
         };
 
         let geo = |lon: f64, lat: f64, alt: f64| {
@@ -917,8 +917,10 @@ mod tests {
 
         // High surface RMS (3 mm) so the Ruze pedestal (which saturates at
         // 4π/Ω_scatter ≈ +8 dBi as η_ruze → 0) is a clearly nonzero pedestal to
-        // compare against. The floor is diameter-independent, so a reflector with
-        // the same 3 mm RMS reproduces `floor_db` exactly.
+        // compare against. The floor is diameter-independent, but scales with mesh
+        // transmission, so `floor_cfg` carries the same 3 mm RMS AND the same mesh
+        // (5 mm / 0.5 mm) as `make_h3_test_calibration` to reproduce `floor_db`
+        // exactly.
         const SURFACE_RMS_MM: f64 = 3.0;
         let wavelength = wavelength_from_frequency(8400.0e6);
         let floor_cfg = AntennaConfiguration::new(
@@ -926,15 +928,20 @@ mod tests {
             "floor_ref".into(),
             ModelReflector::new(10.0, 5.0, SURFACE_RMS_MM / 1000.0).unwrap(),
             ModelFeedParams::new(FeedPosition::at_focus(5.0), 8.0, 0.0, 1.0).unwrap(),
-            None,
+            Some(
+                ModelMeshParams::builder()
+                    .spacing(0.005)
+                    .wire_diameter(0.0005)
+                    .build()
+                    .unwrap(),
+            ),
         )
         .unwrap();
         let floor_db =
             10.0 * crate::model::pattern::sidelobe_floor_gain(&floor_cfg, wavelength).log10();
 
-        // Uncalibrated: no correction surface. With the floor OFF, deep off-axis
-        // ring cells are the raw PO pattern — below the pedestal. (With the floor
-        // wrongly ON, no cell could fall below `floor_db`.)
+        // Uncalibrated: no correction surface → floor ON. Every off-axis ring cell
+        // is the power sum (raw PO + floor), so none can fall below the pedestal.
         let mut cal_unc = make_h3_test_calibration();
         cal_unc.physical_config.reflector.surface_rms_mm = SURFACE_RMS_MM;
         assert!(cal_unc.correction_surface.is_none());
@@ -953,9 +960,9 @@ mod tests {
             .map(|c| c.gain_db)
             .fold(f64::INFINITY, f64::min);
         assert!(
-            min_uncal < floor_db - 1.0,
-            "F7 floor OFF (D-2): at least one uncalibrated off-axis cell must fall below the \
-             Ruze floor {floor_db} dB (raw PO shows through), got min {min_uncal}"
+            min_uncal >= floor_db - 1e-6,
+            "F7 floor ON: no uncalibrated off-axis cell may fall below the Ruze floor \
+             {floor_db} dB (power sum forward / floor-only rear), got min {min_uncal}"
         );
     }
 
