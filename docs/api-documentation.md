@@ -134,6 +134,18 @@ measured data or a regulatory rear-lobe envelope for any rear-hemisphere analysi
 warning message is constant per (antenna, frequency), so heatmap/H3 aggregation deduplicates
 it to a single entry.
 
+**Large-feed-offset caveat — ray-tracing stub (> 0.5·f):** when the feed is aimed far enough
+from the reflector boresight that the resulting feed displacement exceeds **0.5·f**, gain is
+computed by an acknowledged **ray-tracing stub** (`model/ray_trace.rs`) that samples the
+aperture but does not model true spillover or geometric ray–reflector intersection. Real ray
+tracing is gated as feature **F2** and is not implemented. Such requests are **not rejected**
+(warn-don't-refuse; `/heatmap` and `/h3-heatmap` grid totality is preserved) but every result
+carries a degraded-accuracy warning (`…ray tracing … not fully implemented; gain accuracy may
+be degraded`). The warning appears on **all four compute endpoints** — on `/h3-heatmap` it is
+re-emitted at the service layer so it also survives gain-cache hits — and is constant per
+antenna config, so heatmap/H3 aggregation deduplicates it to a single entry. See
+`docs/domain-contract.md`, "Large feed offsets (> 0.5·f): ray-tracing stub".
+
 ### Coordinate System Auto-Detection
 
 3D positions automatically detect coordinate system:

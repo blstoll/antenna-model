@@ -34,6 +34,17 @@ use num_complex::Complex64;
 const INTEGRATION_NONCONVERGENCE_WARNING: &str =
     "aperture integration did not converge; gain accuracy may be degraded";
 
+/// Warning message emitted when a feed offset exceeds the severe threshold
+/// (> 0.5·f) and gain is computed by the acknowledged ray-tracing stub
+/// (`ray_trace.rs`; real ray tracing is gated as feature F2). Extracted as a
+/// `pub` constant (roadmap unit P3) so the honest "not fully implemented" text
+/// stays byte-identical across the model dispatch that pushes it here and the
+/// service-layer re-emission that surfaces it on `/h3-heatmap` cache hits
+/// (`service::evaluator::ray_trace_stub_warning`).
+pub const RAY_TRACING_STUB_WARNING: &str =
+    "WARNING: Ray tracing for large feed offsets (>0.5f) is not fully implemented; \
+     gain accuracy may be degraded.";
+
 use crate::error::{ComputationError, ComputationResult};
 use crate::model::{
     edge_cases::{
@@ -324,11 +335,7 @@ pub fn compute_gain(
         ComputationMode::RayTracing => {
             // Ray tracing is a stub: aperture sampling is used but true spillover and
             // geometric ray-reflector intersection are not fully implemented.
-            warnings.push(
-                "WARNING: Ray tracing for large feed offsets (>0.5f) is not fully implemented; \
-                 gain accuracy may be degraded."
-                    .to_string(),
-            );
+            warnings.push(RAY_TRACING_STUB_WARNING.to_string());
             compute_gain_ray_tracing(
                 theta,
                 phi,

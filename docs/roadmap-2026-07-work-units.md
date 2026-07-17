@@ -55,7 +55,8 @@ floor-only rear hemisphere) — sequence WITH P10-perf (they interact);
 P10 DONE 2026-07-15; post-P10 assessment follow-ups filed 2026-07-15: P10-perf, P10-tail, P11
 (P10-tail + P11 DONE 2026-07-15/16); P2 DECIDED 2026-07-16 (REMOVE the Seidel mode; Stage-1
 gate tripped and removal re-affirmed same day — the terms are wrong-sign/wrong-scale additions
-on top of complete exact physics, not duplicates); P3 DECIDED 2026-07-16 (document + flag)
+on top of complete exact physics, not duplicates); P3 DECIDED + EXECUTED 2026-07-16 (document +
+flag; warning pinned on all four endpoints, H3 cache-hit gap fixed)
 ```
 
 ---
@@ -550,6 +551,29 @@ structurally redundant.
 **DECIDED 2026-07-16 (maintainer): document + flag** — the recommended default, adopted
 as-is. Real ray tracing stays gated as feature F2; rejection was ruled out (warn-don't-refuse
 philosophy, heatmap grid totality). Execute the unit as specified below.
+
+> **✅ DONE 2026-07-16 (pending commit).** All exit criteria met; no physics/`ray_trace.rs`
+> math changed; `PHYSICS_MODEL_VERSION` unchanged (4); every existing served value unchanged
+> (full workspace green). Landed:
+> - **Per-endpoint tests** (`tests/integration/ray_trace_stub_warning_tests.rs`): gain, batch,
+>   heatmap, h3-heatmap each pinned to surface the stub warning for a > 0.5·f request; a
+>   small-offset negative control; **and a warm-cache H3 test** proving the fix (verified
+>   load-bearing — the warm-cache assertion fails when the fix is reverted). Large-offset
+>   geometry reuses `builders::uncalibrated_antenna_request` (feed aimed at ground beside the
+>   vehicle vs. boresight at a 400 km satellite ⇒ offset ≈ 3·f). *Note:*
+>   `geo_large_feed_offset.json` was NOT used — from GEO the feed/boresight angular gap is
+>   small (offset < 0.5·f); the "ready fixture" premise in the plan was wrong, corrected during
+>   execution.
+> - **h3-heatmap cache-hit gap fixed:** the ray-tracing warning was captured only inside the H3
+>   gain-cache miss closure, so a warm (shared, persistent) cache dropped it. Now re-emitted at
+>   the service layer via `service/evaluator.rs::ray_trace_stub_warning` **outside** the closure,
+>   mirroring the P8 off-axis and P10-tail rear-hemisphere precedents in `h3_link_budget.rs`. The
+>   warning string was extracted to `model::pattern::RAY_TRACING_STUB_WARNING` (a `pub const`) as
+>   the single source of truth shared by the model push and the service re-emission.
+> - **Docs:** `docs/domain-contract.md` gained a "Large feed offsets (> 0.5·f): ray-tracing stub"
+>   subsection; `openapi.yaml` heatmap + h3-heatmap `warnings` descriptions now mention the stub
+>   warning (GainResponse already did); `docs/api-documentation.md` gained a large-feed-offset
+>   caveat. Plan: `docs/plan-p3-ray-trace-stub-disposition.md`.
 
 - **Question:** Offsets > 0.5·f route to an acknowledged stub (`pattern.rs:260-270` pushes
   a degraded-accuracy warning; `ray_trace.rs:336` TODO: all aperture points "hit" by
@@ -1245,6 +1269,26 @@ Confirmed unchanged from earlier decisions: best-estimate **median** level (2026
 `physics_is_uncorrected()` predicate; the boresight-tuner `surface_rms`→floor coupling must
 be measured/bounded before shipping (precondition 2 below); `PHYSICS_MODEL_VERSION` bump
 (coordinate with P2's bump); re-scope P10-perf after landing.
+
+**Doc-truth cleanup owned by this unit (filed 2026-07-16 during P3 execution).** The three
+`openapi.yaml` `warnings`-field descriptions still describe the F7 floor as *active* —
+"off-axis sidelobe levels … now include a Ruze scatter-floor best estimate (tracks measured
+median sidelobe statistics, not a precise per-antenna prediction)". That has been **stale since
+D-2/P10 (2026-07-15)**: the served path carries **raw idealised PO with the floor OFF**, so the
+current served off-axis value is *not* floor-blended. The warning *message strings* were already
+re-trued at P10 (they now say "idealised PO … floor intentionally off"); only these schema-level
+summaries lag. Locations to re-true (verify line numbers — openapi is hand-maintained, standing
+rule 4):
+  - `openapi.yaml` `GainResponse.warnings` description (~:636–639) — reused by `/gain` + `/gain/batch`.
+  - `openapi.yaml` heatmap-response `warnings` description (~:1023–1024).
+  - `openapi.yaml` h3-response `warnings` description (~:880–881).
+When F7 lands (floor back on via the power-sum), rewrite these to describe **what F7 actually
+serves** — a PO ⊕ statistical-floor power sum, best-estimate/median, gated on
+`physics_is_uncorrected()` — rather than reverting to the old "best estimate" wording verbatim.
+(`docs/api-documentation.md`'s off-axis caveat, ~:100–121, is already current — it states the
+raw-PO/floor-OFF D-2 truth — so it needs only the floor-on update, not a stale-claim fix.) If F7
+is deferred long-term, re-true these to the raw-PO/floor-OFF present tense as a standalone
+doc-truth fix rather than leaving them wrong.
 
 **Redesign guidance (2026-07-15 post-P10 assessment) — read before scoping:**
 
