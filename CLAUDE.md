@@ -154,6 +154,19 @@ The model is more accurate than simplified linear approximations, especially for
 - Predicting gain loss at boresight when feed is displaced
 - Computing asymmetric sidelobe patterns (coma lobes)
 
+**No separate higher-order aberration mode (roadmap P2, 2026-07):** because
+`phase_feed_displacement` is the *exact* geometric path difference, it already carries the
+complete low-order aberration content (astigmatism, field curvature, distortion, trefoil) as
+an exact function of the displacement. The former `HigherOrderAberrations` computation mode
+(0.3f–0.5f band) added heuristic Seidel terms *on top of* that exact phase — a double-count,
+and worse, with wrong-sign/wrong-scale/wrong-pupil-power coefficients (e.g. it coded ρ³
+distortion where the exact model and classical theory give leading ρ¹). It was removed;
+0.3f–0.5f offsets now route through `StandardPhysicalOptics`, whose exact coma phase covers
+them. The completeness pin
+`edge_cases::exact_feed_displacement_phase_contains_all_low_order_aberrations` proves the
+exact phase's full content against an independent closed form. Offsets >0.5f still route to
+the ray-tracing stub (roadmap P3). This is why `PHYSICS_MODEL_VERSION` is 4.
+
 ### Calibration Workflow
 
 The `calibrate` tool processes measurement data:

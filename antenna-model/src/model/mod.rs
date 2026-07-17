@@ -51,7 +51,19 @@ pub mod ray_trace;
 ///   served path per decision D-2, and is NOT part of the calibration-fitting
 ///   physics — calibrated antennas never had it applied, so it does not gate this
 ///   version.
-pub const PHYSICS_MODEL_VERSION: u32 = 3;
+/// - 4: P2 removal of the `HigherOrderAberrations` computation mode (2026-07) — feed
+///   offsets in the 0.3f–0.5f band now route through `StandardPhysicalOptics`, whose
+///   exact geometric coma phase (`phase::phase_feed_displacement`) already carries the
+///   full low-order aberration content. The removed mode stacked wrong-sign/wrong-scale
+///   Seidel terms on top of that exact phase (double-count), so served gain in that
+///   offset band changes by construction — that IS the fix. No enabled antenna enters
+///   this band (max served offset 0.027f), so no served value changes in practice.
+///   The bump follows P1b's policy (stamp whenever `gain_physics` changes for identical
+///   inputs — it does, in the 0.3f–0.5f band), independent of whether any *currently
+///   enabled* antenna is affected. No `.bin` calibration artifacts exist in the wild, so
+///   the loader's version-mismatch warning (warn, never error) fires against nothing
+///   today; it exists to flag genuinely stale surfaces once artifacts are produced.
+pub const PHYSICS_MODEL_VERSION: u32 = 4;
 
 // Re-export commonly used types
 pub use bessel::{bessel_j0, bessel_j1, bessel_jn};
@@ -99,9 +111,8 @@ pub use phase::{
 pub use mesh::mesh_reflection_efficiency;
 
 pub use edge_cases::{
-    analyze_edge_cases, apply_gain_floor, apply_gain_floor_db, higher_order_aberrations,
-    needs_adaptive_integration, ComputationMode, EdgeCaseAnalysis, LARGE_OFFSET_THRESHOLD,
-    MIN_GAIN_FLOOR, MIN_GAIN_FLOOR_DB, SEVERE_OFFSET_THRESHOLD,
+    analyze_edge_cases, apply_gain_floor, apply_gain_floor_db, needs_adaptive_integration,
+    ComputationMode, EdgeCaseAnalysis, MIN_GAIN_FLOOR, MIN_GAIN_FLOOR_DB, SEVERE_OFFSET_THRESHOLD,
 };
 
 pub use ray_trace::{compute_gain_ray_trace, ray_trace_aperture, Ray, RayTraceResult};

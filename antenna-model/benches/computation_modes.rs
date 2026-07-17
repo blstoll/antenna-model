@@ -2,10 +2,16 @@
 //!
 //! Task 8.2: Performance optimization and benchmarking of computation modes
 //!
-//! Benchmarks the three computation modes:
-//! - StandardPhysicalOptics
-//! - HigherOrderAberrations
+//! Benchmarks the computation modes:
+//! - StandardPhysicalOptics (on-axis, and moderate-offset coma via the Jₘ azimuthal-mode
+//!   integrator)
 //! - RayTracing
+//!
+//! The former `HigherOrderAberrations` mode was removed in roadmap P2; moderate feed
+//! offsets (0.3f–0.5f) now route through `StandardPhysicalOptics`, whose exact geometric
+//! coma phase already carries the full low-order aberration content. The moderate-offset
+//! benchmark below is retained because that coma path (asymmetric aperture ⇒ more
+//! azimuthal modes) is a distinct, still-relevant cost profile.
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::hint::black_box;
@@ -30,8 +36,9 @@ fn antenna_on_axis() -> AntennaConfiguration {
     .unwrap()
 }
 
-/// Create antenna with moderate feed offset (HigherOrderAberrations mode)
-/// Feed offset ratio ~0.35 (between 0.3f and 0.5f)
+/// Create antenna with moderate feed offset ~0.35f (between 0.3f and 0.5f).
+/// Post-P2 this routes through StandardPhysicalOptics (exact coma phase; exercises the
+/// Jₘ azimuthal-mode path). Formerly the removed HigherOrderAberrations mode.
 fn antenna_moderate_offset() -> AntennaConfiguration {
     let focal_length = 13.6;
     // E-cone ~20 degrees gives offset/f ~0.35
@@ -112,12 +119,12 @@ fn bench_standard_physical_optics(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark higher-order aberrations mode
-fn bench_higher_order_aberrations(c: &mut Criterion) {
+/// Benchmark the moderate-offset coma path (StandardPhysicalOptics, Jₘ modes)
+fn bench_standard_po_moderate_offset(c: &mut Criterion) {
     let config = antenna_moderate_offset();
     let frequency_hz = 8.4e9;
 
-    let mut group = c.benchmark_group("higher_order_aberrations");
+    let mut group = c.benchmark_group("standard_po_moderate_offset_coma");
 
     for (name, params) in [
         ("fast", IntegrationParams::fast()),
@@ -253,14 +260,14 @@ fn bench_mode_comparison(c: &mut Criterion) {
         })
     });
 
-    // Higher-order mode
-    let config_ho = antenna_moderate_offset();
-    group.bench_function("HigherOrderAberrations", |b| {
+    // Moderate-offset coma (StandardPhysicalOptics, Jₘ modes — formerly HigherOrderAberrations)
+    let config_coma = antenna_moderate_offset();
+    group.bench_function("StandardPhysicalOptics_moderate_offset_coma", |b| {
         b.iter(|| {
             compute_gain(
                 black_box(0.05),
                 black_box(0.0),
-                black_box(&config_ho),
+                black_box(&config_coma),
                 black_box(frequency_hz),
                 black_box(&params),
             )
@@ -287,7 +294,7 @@ fn bench_mode_comparison(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_standard_physical_optics,
-    bench_higher_order_aberrations,
+    bench_standard_po_moderate_offset,
     bench_ray_tracing,
     bench_gain_db,
     bench_adaptive_integration,

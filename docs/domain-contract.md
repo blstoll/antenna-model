@@ -114,15 +114,21 @@ surface at all (whole-antenna gate, decided in the service layer — `compute_ga
 and mirrored on the h3 path). For calibrated antennas the fitted correction surface already
 absorbs spillover empirically, so applying it again would double-count.
 
-**Mode gate:** spillover is additionally applied only in
-`ComputationMode::StandardPhysicalOptics` (small feed offsets). At large offsets (>0.3·f,
-routing to higher-order / ray-tracing modes) `estimate_spillover`'s linear offset
-extrapolation is unvalidated and saturates to ~100%; those cases already carry
-degraded-accuracy warnings and retain their exact pre-P1 gain. So `spillover_loss_db` is
-`null` for large-offset queries even on uncalibrated antennas.
+**Offset gate:** spillover is additionally applied only for feed offsets
+≤ `SPILLOVER_MAX_OFFSET_RATIO`·f (0.3·f) — the validity limit of `estimate_spillover`'s
+small-offset approximation. Beyond it (the 0.3·f–0.5·f band and the >0.5·f ray-tracing
+regime) the linear offset extrapolation is unvalidated and saturates to ~100%, which would
+clamp gain to the degenerate −60 dB floor; those cases already carry degraded-accuracy
+warnings and retain their exact pre-P1 gain. So `spillover_loss_db` is `null` for
+large-offset queries even on uncalibrated antennas. (Roadmap **P2** removed the former
+`HigherOrderAberrations` mode that used to cover the 0.3·f–0.5·f band; that band now routes
+through `StandardPhysicalOptics` — its exact coma phase already carries the full low-order
+aberration content. The spillover gate keys off the offset ratio rather than the mode enum
+precisely so that removing the mode did **not** widen the spillover regime into the band
+where `estimate_spillover` is invalid; behavior is unchanged from P1.)
 
 **Signal:** the applied loss is reported as `ComputationMetadata.spillover_loss_db`
-(dB, negative; `null` when not applied — calibrated antenna, or large-offset/non-standard-PO).
+(dB, negative; `null` when not applied — calibrated antenna, or feed offset > 0.3·f).
 
 **Magnitude reality (finding 2026-07-09, revised 2026-07-10):** this note originally observed
 that the modeled spillover was only ~0.001–0.05 dB — but that was **because** the enabled feeds

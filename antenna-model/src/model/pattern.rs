@@ -38,7 +38,7 @@ use crate::error::{ComputationError, ComputationResult};
 use crate::model::{
     edge_cases::{
         analyze_edge_cases, apply_gain_floor, apply_gain_floor_db, needs_adaptive_integration,
-        ComputationMode,
+        ComputationMode, SPILLOVER_MAX_OFFSET_RATIO,
     },
     geometry::AntennaConfiguration,
     integration::{integrate_amplitude_squared, integrate_aperture, IntegrationParams},
@@ -321,21 +321,6 @@ pub fn compute_gain(
             params,
             &mut warnings,
         )?,
-        ComputationMode::HigherOrderAberrations => {
-            tracing::debug!(
-                "Using higher-order aberrations mode (feed offset ratio: {:.3})",
-                analysis.feed_offset_ratio
-            );
-            compute_gain_higher_order(
-                theta,
-                phi,
-                config,
-                frequency_hz,
-                wavelength,
-                params,
-                &mut warnings,
-            )?
-        }
         ComputationMode::RayTracing => {
             // Ray tracing is a stub: aperture sampling is used but true spillover and
             // geometric ray-reflector intersection are not fully implemented.
@@ -359,19 +344,25 @@ pub fn compute_gain(
     // Physical spillover efficiency (uncalibrated path only; gated by the caller).
     // `analysis.spillover_fraction` is the LOST fraction, so η = 1 − fraction.
     //
-    // Only fold spillover in where the physical-optics model AND estimate_spillover are
-    // valid — the StandardPhysicalOptics regime (small feed offsets). In higher-order /
-    // ray-tracing modes (large offsets) estimate_spillover's linear offset extrapolation
-    // saturates to ~100%; those cases already carry degraded-accuracy warnings and keep
-    // their pre-P1 gain. (Roadmap P1 finding, 2026-07-09.)
-    let (gain, spillover_loss_db) = if params.apply_spillover
-        && matches!(analysis.mode, ComputationMode::StandardPhysicalOptics)
-    {
-        let eta = (1.0 - analysis.spillover_fraction).clamp(1e-6, 1.0);
-        (gain * eta, Some(10.0 * eta.log10()))
-    } else {
-        (gain, None)
-    };
+    // Only fold spillover in for feed offsets ≤ SPILLOVER_MAX_OFFSET_RATIO·f (0.3f), the
+    // regime where `estimate_spillover` is trusted. Beyond 0.3f its `offset_factor` term
+    // (`1 + 2·offset_ratio`) is an unvalidated empirical extrapolation — P1 classed
+    // large-offset spillover as F2/ray-tracing territory. For the deeper dishes it
+    // saturates to 100% (effective edge angle ≥ π/2) and would clamp gain to the
+    // degenerate −60 dB floor; for shallow (high-f/D) dishes it instead returns a small
+    // but still-unvalidated value. Either way it is not served here: those offsets carry
+    // a degraded-accuracy warning from `analyze_edge_cases` (moderate for 0.3f–0.5f,
+    // ray-tracing for >0.5f) and keep their pre-P1 gain. Gating on the offset ratio (not
+    // the mode enum) preserves P1's approved behavior after P2 folded 0.3f–0.5f into
+    // StandardPhysicalOptics. (P1 finding 2026-07-09; boundary made explicit by P2
+    // 2026-07-16.)
+    let (gain, spillover_loss_db) =
+        if params.apply_spillover && analysis.feed_offset_ratio <= SPILLOVER_MAX_OFFSET_RATIO {
+            let eta = (1.0 - analysis.spillover_fraction).clamp(1e-6, 1.0);
+            (gain * eta, Some(10.0 * eta.log10()))
+        } else {
+            (gain, None)
+        };
 
     // Ruze scattered-power sidelobe floor (F7): off by default, lifts deep
     // nulls/sidelobes to a surface-error scatter pedestal when enabled.
@@ -445,39 +436,6 @@ fn compute_gain_standard(
     }
 
     absolute_gain_from_integral(result.field, config, wavelength, &effective_params)
-}
-
-/// Higher-order aberrations gain computation for moderate feed offsets
-///
-/// Uses the same approach as standard physical optics but includes
-/// explicit Seidel aberration terms (astigmatism, field curvature, distortion)
-/// in the phase computation.
-fn compute_gain_higher_order(
-    theta: f64,
-    phi: f64,
-    config: &AntennaConfiguration,
-    frequency_hz: f64,
-    wavelength: f64,
-    params: &IntegrationParams,
-    warnings: &mut Vec<String>,
-) -> ComputationResult<f64> {
-    // Select integration parameters (adaptive near nulls)
-    let effective_params = select_integration_params(theta, phi, config, params);
-
-    // Create integration params with higher-order aberrations enabled
-    let ho_params = IntegrationParams {
-        use_higher_order_aberrations: true,
-        ..effective_params
-    };
-
-    // Raw aperture integral with higher-order aberrations included in the phase.
-    let result = integrate_aperture(theta, phi, config, frequency_hz, &ho_params)?;
-
-    if !result.converged {
-        warnings.push(INTEGRATION_NONCONVERGENCE_WARNING.to_string());
-    }
-
-    absolute_gain_from_integral(result.field, config, wavelength, &ho_params)
 }
 
 /// Ray tracing gain computation for large feed offsets
@@ -1151,17 +1109,70 @@ mod tests {
         );
     }
 
-    /// P10 (D-5): the higher-order-aberration path routes through the SAME
-    /// adaptive mode integrator as standard PO — `compute_gain_higher_order`
-    /// sets `use_higher_order_aberrations: true` → `integrate_aperture` →
-    /// `azimuthal_mode_field` — so it also benefits from the non-aliasing
-    /// off-axis fix. A moderate feed offset (0.3f–0.5f) forces
-    /// HigherOrderAberrations mode; the wide-angle gain must then be physically
-    /// plausible — a deep backlobe far below the pattern peak, NOT the
-    /// 20–35 dB-too-high plateau the old aliasing 2D quadrature produced.
     #[test]
-    fn higher_order_mode_wide_angle_is_physical_not_aliased() {
-        // 3 m dish, f/D = 0.5, lateral feed offset 0.6 m → ratio 0.4 ⇒ HigherOrder.
+    fn test_spillover_not_applied_in_moderate_offset_band_post_p2() {
+        // P2 regression: removing the HigherOrderAberrations mode folded the 0.3f–0.5f
+        // offset band into StandardPhysicalOptics. Spillover must STILL be excluded there
+        // (offset ratio > SPILLOVER_MAX_OFFSET_RATIO = 0.3), because estimate_spillover's
+        // small-offset approximation saturates to ~100% in this band and would clamp gain
+        // to the degenerate −60 dB floor. This preserves P1's exact behavior: the spillover
+        // regime did not widen when the mode was removed. (Guards against silently serving
+        // a hypothetical uncalibrated 0.3f–0.5f antenna −60 dB garbage — no enabled antenna
+        // is near this band, max served offset 0.027f.)
+        let reflector = ReflectorGeometry::builder()
+            .diameter(1.0)
+            .focal_length(0.5)
+            .surface_rms(0.001)
+            .build()
+            .unwrap();
+        let feed = FeedParameters::builder()
+            .position(FeedPosition::new(0.2, 0.0, 0.5)) // 0.2 m from focus → ratio 0.4
+            .q_factor(8.0)
+            .build()
+            .unwrap();
+        let config = AntennaConfiguration::builder()
+            .id("spill_moderate")
+            .name("Spill Moderate Offset")
+            .reflector(reflector)
+            .feed(feed)
+            .build()
+            .unwrap();
+
+        // Post-P2 this 0.4f offset routes through StandardPhysicalOptics...
+        let analysis = analyze_edge_cases(&config, 0.05, 0.0);
+        assert_eq!(analysis.mode, ComputationMode::StandardPhysicalOptics);
+        assert!(analysis.feed_offset_ratio > SPILLOVER_MAX_OFFSET_RATIO);
+
+        // ...but spillover must NOT be folded in (offset beyond estimate_spillover validity).
+        let mut params = IntegrationParams::fast();
+        params.apply_spillover = true;
+        let result = compute_gain_db(0.05, 0.0, &config, 8.4e9, &params).unwrap();
+        assert!(
+            result.spillover_loss_db.is_none(),
+            "spillover must not be applied in the 0.3f–0.5f band post-P2, got {:?}",
+            result.spillover_loss_db
+        );
+    }
+
+    /// P2 regression (0.3f–0.5f offset band): a moderate lateral feed offset now
+    /// routes through `StandardPhysicalOptics` — the exact geometric coma phase
+    /// (`phase::phase_feed_displacement`) covers this band, and the double-counting
+    /// `HigherOrderAberrations` mode was removed. This test pins the exact-only
+    /// (mode-removed) gain and confirms the routing.
+    ///
+    /// The pinned value DIFFERS from the pre-P2 mode output by construction: the
+    /// removed Seidel terms were wrong-sign/wrong-scale/wrong-shape and had been
+    /// added on top of the already-complete exact phase (see the completeness pin
+    /// `edge_cases::exact_feed_displacement_phase_contains_all_low_order_aberrations`).
+    /// That difference is the fix (hence the `PHYSICS_MODEL_VERSION` bump to 4).
+    ///
+    /// The wide-angle backlobe check also guards the P10 non-aliasing property: the
+    /// off-axis integrator (shared by this path) must not produce the 20–35 dB-too-high
+    /// plateau the retired aliasing 2D quadrature did.
+    #[test]
+    fn p2_moderate_offset_exact_only_gain_pinned_and_routes_standard_po() {
+        // 3 m dish, f/D = 0.5, lateral feed offset 0.6 m → ratio 0.4, in the
+        // (0.3f, 0.5f] band that formerly forced the removed HigherOrderAberrations mode.
         let reflector = ReflectorGeometry::builder()
             .diameter(3.0)
             .focal_length(1.5)
@@ -1174,8 +1185,8 @@ mod tests {
             .build()
             .unwrap();
         let config = AntennaConfiguration::builder()
-            .id("ho")
-            .name("Higher Order")
+            .id("p2mod")
+            .name("P2 moderate offset")
             .reflector(reflector)
             .feed(feed)
             .build()
@@ -1184,34 +1195,43 @@ mod tests {
         let freq = 8.4e9;
         let params = IntegrationParams::fast();
 
-        // Confirm the offset routes through the higher-order (mode integrator) path,
-        // not standard PO and not ray tracing.
+        // Confirm the 0.4f offset now routes through StandardPhysicalOptics (not the
+        // removed higher-order mode, and not ray tracing which begins above 0.5f).
         let analysis = analyze_edge_cases(&config, 0.3, 0.0);
         assert_eq!(
             analysis.mode,
-            ComputationMode::HigherOrderAberrations,
-            "0.4f offset must route to the higher-order mode integrator, got {:?}",
+            ComputationMode::StandardPhysicalOptics,
+            "0.4f offset must route to StandardPhysicalOptics post-P2, got {:?}",
             analysis.mode
         );
 
-        // Scan the pattern; the peak is steered off boresight (~offset/f rad ≈ 23°).
         let g = |deg: f64| {
             compute_gain_db(deg.to_radians(), 0.0, &config, freq, &params)
                 .unwrap()
                 .gain
         };
+
+        // Pin the exact-only boresight gain. At this 0.4f offset the coma is severe enough
+        // that boresight remains the pattern peak (the beam is degraded, not cleanly
+        // steered) at ~16.05 dBi. This is the exact-coma result AFTER removing the
+        // wrong-sign Seidel double-count — the value the served path produces for this
+        // band, and by construction it differs from the pre-P2 mode output.
+        let g0 = g(0.0);
+        assert!(
+            (g0 - 16.05).abs() < 0.30,
+            "exact-only (mode-removed) boresight gain should be ~16.05 dBi, got {g0:.2}"
+        );
+
+        // P10 non-aliasing guard: the wide-angle backlobe stays far below the peak.
         let peak = [0.0_f64, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0]
             .into_iter()
             .map(g)
             .fold(f64::NEG_INFINITY, f64::max);
-
         let g90 = g(90.0);
         assert!(g90.is_finite(), "wide-angle gain must be finite, got {g90}");
-        // Not aliased: the wide-angle backlobe is far below the peak. The aliasing
-        // signature was a near-peak plateau/backlobe at wide angles.
         assert!(
             g90 < peak - 25.0,
-            "higher-order 90° gain {g90:.2} dBi must be >=25 dB below peak {peak:.2} dBi \
+            "90° gain {g90:.2} dBi must be >=25 dB below peak {peak:.2} dBi \
              (an aliased pattern would sit near the peak)"
         );
     }
@@ -1406,7 +1426,7 @@ mod tests {
     fn test_edge_case_warnings_propagation() {
         use crate::model::geometry::FeedPosition;
 
-        // Create antenna with large feed offset to trigger warnings
+        // Create antenna with a severe feed offset to trigger warnings.
         let reflector = ReflectorGeometry::builder()
             .diameter(1.0)
             .focal_length(1.0)
@@ -1414,8 +1434,11 @@ mod tests {
             .build()
             .unwrap();
 
-        // Feed displaced by 0.4m (0.4f) - should trigger higher-order aberrations warning
-        let feed = FeedParameters::new(FeedPosition::new(0.4, 0.0, 1.0), 8.0, 0.0, 1.0).unwrap();
+        // Feed displaced by 0.6m (0.6f) — exceeds the 0.5f severe threshold, so the
+        // edge-case analysis emits a ray-tracing feed-offset warning that must propagate
+        // through compute_gain. (Pre-P2 this test used a 0.4f offset to trigger the
+        // removed HigherOrderAberrations warning; that band is now warning-free.)
+        let feed = FeedParameters::new(FeedPosition::new(0.6, 0.0, 1.0), 8.0, 0.0, 1.0).unwrap();
 
         let config = AntennaConfiguration::builder()
             .id("test_warnings")
