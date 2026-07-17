@@ -820,6 +820,53 @@ fn sidelobe_floor_surface_scaling_matches_nasa() {
     }
 }
 
+/// F7 ship precondition (roadmap F7 precondition 2; findings-2026-07-13 §7 item 2):
+/// the boresight tuner treats `surface_rms` as a catch-all for boresight gain deficits
+/// within [0.3x, 3x] of the design value (`design_specs_loader::get_tuning_bounds`), and
+/// the floor `(1 - eta_ruze) * eta_mesh` converts an inflated sigma directly into
+/// off-axis power. Analytic bound: floor_lin ∝ 1 - exp(-(4*pi*sigma/lambda)^2), so
+/// sigma -> 3*sigma multiplies the floor by at most 9 (+9.54 dB, the small-sigma limit),
+/// monotonically compressing toward the 0 dBi ceiling as sigma grows. This pins the
+/// worst-case coupling for every enabled antenna x band. (`model_floor_dbi` is
+/// mesh-free; eta_mesh is identical at both sigmas so it cancels in the delta.)
+#[test]
+fn sidelobe_floor_tuner_coupling_bounded() {
+    let repo = load_real_repository();
+
+    println!("\n=== F7 tuner coupling: floor at design sigma vs tuner-max 3*sigma ===");
+    println!(
+        "{:<22} {:<16} {:>12} {:>12} {:>8}",
+        "antenna", "feed", "design_dBi", "3sigma_dBi", "delta_dB"
+    );
+
+    let mut worst = 0.0f64;
+    for (aid, fid, fhz) in enabled_symmetric_bands() {
+        let cal = repo
+            .get_calibration(aid, fid)
+            .unwrap_or_else(|| panic!("{aid}/{fid} not enabled in the real config"));
+        let rms_m = cal.physical_config.reflector.surface_rms_mm / 1000.0;
+        let f_mhz = fhz / 1e6;
+
+        let floor_design = model_floor_dbi(rms_m, f_mhz);
+        let floor_tuner_max = model_floor_dbi(3.0 * rms_m, f_mhz);
+        let delta = floor_tuner_max - floor_design;
+        println!(
+            "{aid:<22} {fid:<16} {floor_design:>12.2} {floor_tuner_max:>12.2} {delta:>+8.2}"
+        );
+
+        assert!(
+            floor_tuner_max <= 0.0 + 1e-9,
+            "{aid}/{fid}: tuner-max floor {floor_tuner_max:.2} dBi exceeds the 0 dBi ceiling"
+        );
+        assert!(
+            (0.0..=9.55).contains(&delta),
+            "{aid}/{fid}: tuner coupling {delta:+.2} dB outside the analytic [0, +9.54] dB bound"
+        );
+        worst = worst.max(delta);
+    }
+    println!("worst-case tuner coupling across enabled antennas: +{worst:.2} dB");
+}
+
 // ===========================================================================
 // P10 — OFF-AXIS INTEGRATOR VALIDATION PROTOCOL (Task 4).
 //

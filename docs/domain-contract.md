@@ -381,6 +381,17 @@ The served angular range is now governed by three explicit tiers:
    internal-consistency anchors**, so it is a physics decision for F7's "what to serve far
    off-axis" scope — flagged here, deliberately **not** changed in P10-tail (which is a
    sampling-density change only, never an integrand/physics-math change).
+3. **Boresight-tuner → floor coupling (F7 ship precondition 2, BOUNDED 2026-07-16).**
+   `calibrate/src/boresight_calibration.rs` tunes `surface_rms` within [0.3x, 3x] of the
+   design value as a catch-all for boresight gain deficits, and the F7 floor
+   `(1 − η_ruze)·η_mesh` converts that σ directly into off-axis power. The coupling is
+   analytically bounded: σ→3σ multiplies the floor by at most 9 (**+9.54 dB**, small-σ
+   limit; measured worst case across the enabled antennas: +9.54 dB — see
+   `reference_validation::sidelobe_floor_tuner_coupling_bounded`), and the floor is always
+   capped at 0 dBi (Ω = 4π power conservation). Judged acceptable to ship because the
+   floor is a best-estimate median (±6 dB/bin NTIA tracking band) and the tuner bound is
+   within that band's width; if a boresight-tuned antenna without a correction surface
+   ever ships with anomalous off-axis levels, constrain the tuner's σ range first.
 
 ### Large feed offsets (> 0.5·f): ray-tracing stub (P3, decided 2026-07-16)
 
