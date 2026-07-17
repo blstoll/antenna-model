@@ -154,13 +154,17 @@ assumed surface RMS still dominate the uncertainty there.
 served path now uses the Hankel / azimuthal-mode aperture integrator (roadmap unit P10): the
 off-axis pattern is computed to convergence at all angles, so the aliasing defect described
 below (served gain 20–35 dB too high beyond a few degrees, gain rising with angle) is
-**RESOLVED**. Per maintainer decision **D-2** the served uncalibrated path carries the **raw
-physical-optics** value with the **F7 statistical sidelobe floor OFF** — the floor's redesign
-is a separate unit. The remaining caveat is therefore **physical, not numerical**: idealised
-PO omits blockage, feed/strut scatter, and edge diffraction, so far-off-axis sidelobe *levels*
-are optimistic and not calibrated-grade (shape validated, absolute levels not). **F7 is now
-UNBLOCKED (redesign pending, D-2).** The history below is preserved as-was and annotated with
-its resolution.
+**RESOLVED**. **✅ F7 LANDED 2026-07-16/17** (`PHYSICS_MODEL_VERSION` 5, branch
+`feat/f7-redesign-power-sum-obliquity`, superseding decision D-2 below): on the served
+uncalibrated path (`physics_is_uncorrected()`) the returned value is now the **incoherent power
+sum** of the idealised physical-optics value and the **F7 statistical sidelobe floor (ON)** in
+the forward hemisphere — `10·log₁₀(10^(PO/10) + 10^(floor/10))` — and the **floor ONLY** (PO
+excluded, rear integration skipped) behind the dish. See "Three-tier off-axis policy" below for
+the full angular breakdown. The remaining caveat is therefore **physical, not numerical**:
+idealised PO omits blockage, feed/strut scatter, and edge diffraction, and the floor is a
+population median, not a per-antenna measurement, so far-off-axis sidelobe *levels* are
+optimistic/approximate and not calibrated-grade (shape validated, absolute levels not). The
+history below is preserved as-was and annotated with its resolution.
 
 **✅ P11 LANDED 2026-07-15 — one predicate gates both "uncorrected-physics" behaviors.** The
 spillover fold-in and the off-axis honesty warning are now gated by a single named predicate,
@@ -192,14 +196,14 @@ see the "Best estimate, not a per-antenna prediction" caveat below. (Original fi
 `itu_r_s580_sidelobe_envelope_small_dish` and the `itu_probe_fine_envelope` diagnostic; F7
 floor implemented 2026-07-12, branch `feat/f7-sidelobe-floor`.)
 
-**⛔→✅ F7 PARKED 2026-07-13, RESOLVED-BY-P10 2026-07-15 (F7 now UNBLOCKED, redesign pending
-per D-2):** the note below is the parked-status history. It was true while the served path
-still aliased. **P10 landed 2026-07-15** and removed that blocker: the served integrator no
-longer aliases, so the premise ("a `max()` floor cannot fire against an already-too-high
-pattern") no longer holds. Per decision **D-2** P10 deliberately serves the raw converged PO
-with the **floor OFF**; F7's job is now the separate redesign — a *replacement* model for the
-idealised-PO tail beyond a physical validity angle θ_valid (not a `max()` floor over an aliased
-pattern). *Parked-status history follows:* the floor above is real code on the
+**⛔→✅ F7 PARKED 2026-07-13, RESOLVED-BY-P10 2026-07-15, REDESIGN LANDED 2026-07-16/17:** the
+note below is the parked-status history. It was true while the served path still aliased.
+**P10 landed 2026-07-15** and removed that blocker: the served integrator no longer aliases, so
+the premise ("a `max()` floor cannot fire against an already-too-high pattern") no longer
+holds. Per decision **D-2** (2026-07-15) P10 deliberately served the raw converged PO with the
+**floor OFF** — *superseded 2026-07-16/17 by the F7 redesign: the floor is now ON for
+uncorrected-physics antennas as an incoherent power sum* (see the banner at the top of this
+section and the three-tier policy below). *Parked-status history follows:* the floor above is real code on the
 `feat/f7-sidelobe-floor` branch, but it could not fire on the *served* path in 2026-07. Every
 served gain used `IntegrationParams::fast()`, whose aperture integral aliased 20–35 dB too HIGH
 beyond a few degrees off-boresight for electrically large dishes — a floor applied via `max()`
@@ -246,8 +250,11 @@ integration — any of which break the slope or violate the mask). It runs with
 aperture-integral tail described above, unaffected by F7's floor. For off-axis fidelity, use
 the calibration correction surface — or the ITU mask itself — as the sidelobe model, not the
 physics engine's tail; the F7 floor (below) raises the *served* uncalibrated-path value to a
-statistically calibrated best estimate but is not a substitute for either (and, per the P10
-note above, does not currently engage on the served path at all).
+statistically calibrated best estimate but is not a substitute for either. **As of the F7
+redesign (2026-07-16/17) the floor DOES engage on the served path** — it is combined with PO
+as an incoherent power sum in the forward hemisphere and served alone (floor-only) behind the
+dish, per the banner at the top of this section — a change from the pre-redesign state (D-2,
+2026-07-15) where the floor was code-present but OFF.
 
 **Numerical caveat — ✅ RESOLVED BY P10 (2026-07-15):** physical-optics far-sidelobe computation
 needs the aperture-phase variation (∝ D·sinθ/λ) resolved — a naive fixed-density 2D grid is
@@ -279,14 +286,17 @@ constraints honored: uncalibrated-only (calibrated/partially-calibrated
 out-of-coverage queries already get the extrapolation warning — no stacking), and
 the message is constant per (antenna, frequency) so heatmap/H3 aggregation
 deduplicates it. C8 stage 3 converts the string to typed code
-`off_axis_unvalidated`. **As of P10 (2026-07-15) the warning's wording is the post-P10
-truth:** the off-axis value is now numerically converged/correct (the P10 integrator replaced
-the aliasing quadrature), served as raw physical optics with the F7 floor OFF; the warning
-states the remaining *physical* caveat — idealised PO omits blockage/strut/edge diffraction, so
-far-off-axis levels are optimistic and "not calibrated-grade" — and points consumers at
-calibration data or the ITU-R S.580 mask. (Earlier revisions: F7 2026-07-12 reworded it for the
-scattered-power floor; the D-3 interim 2026-07-14 stated "numerically invalid" while P10 was
-built. Both are superseded.)
+`off_axis_unvalidated`. **As of the F7 redesign (2026-07-16/17) the warning's wording is the
+current truth:** the off-axis value is numerically converged/correct (the P10 integrator
+replaced the aliasing quadrature) and is served as the incoherent power sum of that idealised
+physical-optics value and the F7 statistical sidelobe floor (ON); the warning states the
+remaining caveat — idealised PO omits blockage/strut/edge diffraction and the floor is a
+population median, not a per-antenna measurement, so far-off-axis levels are
+optimistic/approximate and "not calibrated-grade" — and points consumers at calibration data or
+the ITU-R S.580 mask. (Earlier revisions: F7 2026-07-12 reworded it for the (then code-present
+but not-served) scattered-power floor; the D-3 interim 2026-07-14 stated "numerically invalid"
+while P10 was built; the P10/D-2 revision (2026-07-15) described raw PO with the floor OFF. All
+three are superseded by the F7-redesign wording above.)
 
 **F7 sidelobe floor implemented (2026-07-12, branch `feat/f7-sidelobe-floor`; parked
 2026-07-13, see the note near the top of this section).** A Ruze scattered-power floor applies
@@ -329,8 +339,12 @@ screening), use the ITU mask or calibration data instead — the floor is delibe
 `PHYSICS_MODEL_VERSION` bumped 2 → 3 for this change. No request/response schema field was
 added (only warning-description text in `openapi.yaml` was refreshed) — the floor changes
 served gain values only, gated silently on `calibration_status`, and — per the P10 note above —
-does not currently change anything actually served, because the served pattern it is `max`'d
-against is already aliased higher than the floor at every angle tested.
+did not, AT THAT TIME (2026-07-12, before P10 fixed the aliasing), change anything actually
+served, because the served pattern it was `max`'d against was already aliased higher than the
+floor at every angle tested. **Superseded 2026-07-16/17 by the F7 redesign:** P10 (2026-07-15)
+fixed the aliasing and the F7 redesign replaced the `max()` combination with an incoherent power
+sum, gated on `physics_is_uncorrected()` — the floor now materially changes served values (see
+the banner at the top of this section); `PHYSICS_MODEL_VERSION` is now 5.
 
 ### Three-tier off-axis policy (P10-tail, 2026-07-15)
 
