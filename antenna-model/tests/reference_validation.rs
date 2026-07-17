@@ -1054,9 +1054,14 @@ fn brute_force_2d_field(
     sum * h_rho * h_phi / 9.0
 }
 
-/// Convert a raw aperture field to absolute gain in dBi using the EXACT formula
-/// `compute_gain` uses: `G = overall_efficiency * (4*pi/lambda^2) * |I|^2 / integral|A|^2`.
-/// Lets a raw oracle field be compared to `compute_gain_db` on the same scale.
+/// Convert a raw aperture field to absolute gain in dBi using the PRE-OBLIQUITY
+/// raw-field formula: `G = overall_efficiency * (4*pi/lambda^2) * |I|^2 / integral|A|^2`.
+/// Since the F7 redesign (2026-07-16) this is NO LONGER what `compute_gain` uses
+/// off-boresight — `compute_gain` multiplies the field by the Huygens obliquity factor
+/// (1+cos(theta))/2 and this helper does not. It is therefore valid ONLY for
+/// raw-field-vs-raw-field comparisons (an oracle field vs `integrate_aperture`'s field,
+/// where the missing factor cancels on both sides). Comparing its output against
+/// `compute_gain_db` off-axis would be wrong by 20*log10((1+cos(theta))/2).
 fn field_to_dbi(
     field: num_complex::Complex64,
     cfg: &AntennaConfiguration,
@@ -1394,7 +1399,7 @@ fn p10_served_offaxis_is_physical_all_enabled_antennas() {
 // model has no physical validity (no rim diffraction, no dish shadowing), and
 // at θ=180° the integral degenerates to a Fresnel-type radial integral whose
 // magnitude has no ground-truth level. So this asserts only the HONEST
-// invariant: NO high backlobe (>=30 dB below the forward peak) OR the sample
+// invariant: NO high backlobe (>=20 dB below the forward peak) OR the sample
 // budget honestly reports `converged == false` (never a silent high value).
 // It does NOT assert a specific dBi level for θ>90°. Diagnostic gain/converged
 // values are printed for the maintainer.
