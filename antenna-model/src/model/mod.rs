@@ -58,6 +58,11 @@ pub mod ray_trace;
 ///   Seidel terms on top of that exact phase (double-count), so served gain in that
 ///   offset band changes by construction — that IS the fix. No enabled antenna enters
 ///   this band (max served offset 0.027f), so no served value changes in practice.
+///   The bump follows P1b's policy (stamp whenever `gain_physics` changes for identical
+///   inputs — it does, in the 0.3f–0.5f band), independent of whether any *currently
+///   enabled* antenna is affected. No `.bin` calibration artifacts exist in the wild, so
+///   the loader's version-mismatch warning (warn, never error) fires against nothing
+///   today; it exists to flag genuinely stale surfaces once artifacts are produced.
 pub const PHYSICS_MODEL_VERSION: u32 = 4;
 
 // Re-export commonly used types

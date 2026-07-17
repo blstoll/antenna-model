@@ -344,14 +344,18 @@ pub fn compute_gain(
     // Physical spillover efficiency (uncalibrated path only; gated by the caller).
     // `analysis.spillover_fraction` is the LOST fraction, so η = 1 − fraction.
     //
-    // Only fold spillover in where `estimate_spillover`'s small-offset approximation is
-    // valid — feed offsets ≤ SPILLOVER_MAX_OFFSET_RATIO·f. Beyond that (both the removed-
-    // mode 0.3f–0.5f band, which P2 folded into StandardPhysicalOptics, and the >0.5f
-    // ray-tracing regime) the linear offset extrapolation saturates to ~100%, which would
-    // clamp gain to the degenerate −60 dB floor; those cases already carry degraded-
-    // accuracy warnings and keep their pre-P1 gain. Gating on the offset ratio (not the
-    // mode enum) keeps this boundary at 0.3f after P2's mode removal. (Roadmap P1 finding
-    // 2026-07-09; boundary made explicit by P2 2026-07-16.)
+    // Only fold spillover in for feed offsets ≤ SPILLOVER_MAX_OFFSET_RATIO·f (0.3f), the
+    // regime where `estimate_spillover` is trusted. Beyond 0.3f its `offset_factor` term
+    // (`1 + 2·offset_ratio`) is an unvalidated empirical extrapolation — P1 classed
+    // large-offset spillover as F2/ray-tracing territory. For the deeper dishes it
+    // saturates to 100% (effective edge angle ≥ π/2) and would clamp gain to the
+    // degenerate −60 dB floor; for shallow (high-f/D) dishes it instead returns a small
+    // but still-unvalidated value. Either way it is not served here: those offsets carry
+    // a degraded-accuracy warning from `analyze_edge_cases` (moderate for 0.3f–0.5f,
+    // ray-tracing for >0.5f) and keep their pre-P1 gain. Gating on the offset ratio (not
+    // the mode enum) preserves P1's approved behavior after P2 folded 0.3f–0.5f into
+    // StandardPhysicalOptics. (P1 finding 2026-07-09; boundary made explicit by P2
+    // 2026-07-16.)
     let (gain, spillover_loss_db) =
         if params.apply_spillover && analysis.feed_offset_ratio <= SPILLOVER_MAX_OFFSET_RATIO {
             let eta = (1.0 - analysis.spillover_fraction).clamp(1e-6, 1.0);

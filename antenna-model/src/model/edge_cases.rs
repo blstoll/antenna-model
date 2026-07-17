@@ -111,6 +111,16 @@ pub fn analyze_edge_cases(
             "Feed offset ({:.2}f = {:.3} m) exceeds severe threshold ({:.1}f). Ray tracing recommended.",
             offset_ratio, offset_mag, SEVERE_OFFSET_THRESHOLD
         ));
+    } else if offset_ratio > SPILLOVER_MAX_OFFSET_RATIO {
+        // Moderate-offset band (0.3f–0.5f). Post-P2 these route through
+        // StandardPhysicalOptics (exact coma phase), but spillover efficiency is not
+        // modeled beyond 0.3f (estimate_spillover's offset extrapolation is unvalidated
+        // there — see the spillover gate in pattern.rs), so flag the degraded accuracy.
+        warnings.push(format!(
+            "Feed offset ({:.2}f = {:.3} m) exceeds {:.1}f: spillover efficiency is not modeled \
+             in this regime and off-axis accuracy may be degraded.",
+            offset_ratio, offset_mag, SPILLOVER_MAX_OFFSET_RATIO
+        ));
     }
 
     if spillover > 0.1 {
@@ -356,12 +366,22 @@ mod tests {
         assert_eq!(analysis.mode, ComputationMode::StandardPhysicalOptics);
         assert!(analysis.feed_offset_ratio > 0.3);
         assert!(analysis.feed_offset_ratio < SEVERE_OFFSET_THRESHOLD);
-        // No "higher-order aberrations" warning is emitted; the offset is below the
-        // severe (ray-tracing) threshold, so this config produces no offset warning.
+        // The removed HigherOrderAberrations warning must NOT reappear. Match
+        // case-insensitively: the old text was "Higher-order aberrations included."
+        // (capital H), so a case-sensitive `contains("higher-order")` guard would be
+        // vacuous. Also assert no ray-tracing warning (offset is below the severe
+        // threshold).
         assert!(!analysis
             .warnings
             .iter()
-            .any(|w| w.contains("Ray tracing") || w.contains("higher-order")),);
+            .any(|w| w.to_lowercase().contains("higher-order") || w.contains("Ray tracing")));
+        // ...but the 0.3f–0.5f band DOES carry an honest degraded-accuracy warning
+        // (spillover unmodeled beyond 0.3f), so the pattern.rs / domain-contract claim
+        // that these cases "already carry degraded-accuracy warnings" holds.
+        assert!(analysis
+            .warnings
+            .iter()
+            .any(|w| w.contains("spillover efficiency is not modeled")));
     }
 
     #[test]

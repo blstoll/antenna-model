@@ -128,7 +128,7 @@ precisely so that removing the mode did **not** widen the spillover regime into 
 where `estimate_spillover` is invalid; behavior is unchanged from P1.)
 
 **Signal:** the applied loss is reported as `ComputationMetadata.spillover_loss_db`
-(dB, negative; `null` when not applied — calibrated antenna, or large-offset/non-standard-PO).
+(dB, negative; `null` when not applied — calibrated antenna, or feed offset > 0.3·f).
 
 **Magnitude reality (finding 2026-07-09, revised 2026-07-10):** this note originally observed
 that the modeled spillover was only ~0.001–0.05 dB — but that was **because** the enabled feeds
