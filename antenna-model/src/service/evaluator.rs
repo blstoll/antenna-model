@@ -518,9 +518,12 @@ const FIRST_NULL_COEFFICIENT: f64 = 1.6;
 /// numerical**: the served value is *idealised* physical optics — it omits
 /// blockage, feed/strut scatter, and aperture-edge diffraction — so far-off-axis
 /// sidelobe *levels* are optimistic and not calibrated-grade (the pattern shape is
-/// validated; the absolute levels are not). Per maintainer decision D-2 the served
-/// path carries the raw PO value with the F7 statistical sidelobe floor OFF (its
-/// redesign is a separate unit). The warning below states this physical caveat.
+/// validated; the absolute levels are not). Per the F7 redesign (landed
+/// 2026-07-16) the served path on uncorrected-physics antennas combines this
+/// idealised PO term with the F7 statistical sidelobe floor as an incoherent
+/// power sum, so far off-axis the returned value tracks a best-estimate MEDIAN
+/// wide-angle level rather than the raw PO number alone. The warning below
+/// states this physical caveat.
 const OFF_AXIS_FIRST_NULL_MULTIPLE: f64 = 3.0;
 
 /// Off-axis honesty warning for uncorrected-physics antennas (roadmap units P8, P11).
@@ -576,13 +579,13 @@ pub(crate) fn off_axis_unvalidated_warning(
          (3× the first-null angle ≈ 1.6·λ/D at {:.0} MHz) — beyond the validated main-beam \
          region. The off-axis gain returned here is numerically converged (the P10 Hankel / \
          azimuthal-mode integrator computes the physical-optics pattern correctly at all \
-         angles), but it is IDEALISED physical optics: it omits blockage, feed/strut scatter, \
-         and aperture-edge diffraction, so far-off-axis sidelobe LEVELS are optimistic and \
-         NOT calibrated-grade (the pattern shape is validated; the absolute levels are not). \
-         The statistical sidelobe floor is intentionally off on this path, so this is the raw \
-         physical-optics prediction. For sidelobe, interference, off-axis-EIRP, or \
-         adjacent-satellite analysis, use calibration data or a regulatory envelope such as \
-         the ITU-R S.580 mask.",
+         angles), but the physical-optics term is IDEALISED: it omits blockage, feed/strut \
+         scatter, and aperture-edge diffraction. The value includes the statistical Ruze \
+         sidelobe floor as an incoherent power sum — a best-estimate MEDIAN wide-angle \
+         level tracking measured earth-station statistics (NTIA 84-164), not a precise \
+         per-antenna prediction. For sidelobe, interference, off-axis-EIRP, or \
+         adjacent-satellite analysis, use calibration data or a regulatory envelope such \
+         as the ITU-R S.580 mask.",
         calibration.antenna_id, threshold_deg, frequency_mhz
     ))
 }
@@ -606,7 +609,11 @@ pub(crate) fn off_axis_unvalidated_warning(
 /// Unlike [`off_axis_unvalidated_warning`], this is **NOT** gated on calibration
 /// status: a correction surface fitted from forward-hemisphere measurements says
 /// nothing about back lobes, so it fires for calibrated antennas too and takes
-/// no calibration/status argument for the gate.
+/// no calibration/status argument for the gate. The warning fires for every
+/// antenna (a forward-hemisphere correction surface says nothing about back
+/// lobes); only the WORDING branches on `physics_is_uncorrected()` —
+/// uncorrected-physics antennas serve the statistical floor (F7 redesign
+/// 2026-07-16), corrected antennas still serve the raw PO extrapolation.
 ///
 /// The message is intentionally constant per (antenna, frequency) — it embeds no
 /// query angle — so heatmap/H3 warning aggregation deduplicates it to a single
@@ -625,16 +632,33 @@ pub(crate) fn rear_hemisphere_warning(
         return None;
     }
 
-    Some(format!(
-        "Antenna '{}' query at {:.0} MHz is in the REAR HEMISPHERE (more than 90° off \
-         boresight). The aperture-integration model has NO physical validity behind the \
-         reflector: the returned value is a numerical extrapolation of an idealised, \
-         unshadowed aperture field, not a prediction. Real rear-hemisphere levels are set \
-         by feed spillover past the rim, aperture-edge diffraction, and mesh leakage — none \
-         of which are modeled here. Use measured data or a regulatory envelope (e.g. an \
-         ITU-R rear-lobe mask) for any rear-hemisphere analysis.",
-        calibration.antenna_id, frequency_mhz
-    ))
+    if calibration.physics_is_uncorrected() {
+        // F7 redesign (2026-07-16): on uncorrected-physics antennas the rear value IS
+        // the statistical floor (PO excluded behind the dish).
+        Some(format!(
+            "Antenna '{}' query at {:.0} MHz is in the REAR HEMISPHERE (more than 90° off \
+             boresight). The returned value is the statistical sidelobe floor ONLY — a \
+             best-estimate median wide-angle level (NTIA 84-164) scaled by this antenna's \
+             surface quality; the aperture-integration model has no physical validity \
+             behind the reflector, so its term is excluded there. Real rear-hemisphere \
+             levels are set by feed spillover past the rim, aperture-edge diffraction, and \
+             mesh leakage — none of which are modeled individually. Use measured data or a \
+             regulatory envelope (e.g. an ITU-R rear-lobe mask) for any rear-hemisphere \
+             analysis.",
+            calibration.antenna_id, frequency_mhz
+        ))
+    } else {
+        Some(format!(
+            "Antenna '{}' query at {:.0} MHz is in the REAR HEMISPHERE (more than 90° off \
+             boresight). The aperture-integration model has NO physical validity behind the \
+             reflector: the returned value is a numerical extrapolation of an idealised, \
+             unshadowed aperture field, not a prediction. Real rear-hemisphere levels are set \
+             by feed spillover past the rim, aperture-edge diffraction, and mesh leakage — none \
+             of which are modeled here. Use measured data or a regulatory envelope (e.g. an \
+             ITU-R rear-lobe mask) for any rear-hemisphere analysis.",
+            calibration.antenna_id, frequency_mhz
+        ))
+    }
 }
 
 /// Ray-tracing stub degraded-accuracy warning (roadmap unit P3, maintainer
@@ -974,15 +998,26 @@ mod tests {
         assert!(msg.contains("ITU-R S.580"));
         // Post-P10 honesty (2026-07-15): the P10 integrator landed, so the
         // off-axis value is now numerically converged/correct. The remaining
-        // caveat is PHYSICAL — idealised PO omits blockage/strut/edge diffraction,
-        // so far-off-axis levels are optimistic and not calibrated-grade.
-        assert!(
-            msg.contains("calibrated-grade"),
-            "message must state levels are not calibrated-grade: {msg}"
-        );
+        // caveat is PHYSICAL — idealised PO omits blockage/strut/edge diffraction.
         assert!(
             msg.contains("IDEALISED"),
             "message must describe idealised physical optics: {msg}"
+        );
+        // F7 redesign (2026-07-16): the served value now includes the statistical
+        // Ruze sidelobe floor as an incoherent power sum — a best-estimate median,
+        // not a precise per-antenna prediction. It no longer claims the floor is
+        // "intentionally off".
+        assert!(
+            msg.contains("incoherent power sum"),
+            "message must describe the power-sum floor: {msg}"
+        );
+        assert!(
+            msg.contains("best-estimate MEDIAN"),
+            "message must state the floor is a best-estimate median: {msg}"
+        );
+        assert!(
+            !msg.contains("intentionally off"),
+            "stale D-2 wording (floor intentionally off) must not return: {msg}"
         );
         // The stale D-3 interim wording (numerical invalidity / aliasing) must be gone.
         assert!(
@@ -1180,6 +1215,43 @@ mod tests {
             1,
             "rear-hemisphere warning must dedup to one entry across a rear grid"
         );
+    }
+
+    /// F7 redesign (2026-07-16): on an uncorrected-physics antenna (no
+    /// correction surface — `physics_is_uncorrected()` true) the rear-hemisphere
+    /// value IS the statistical sidelobe floor, since the PO term is excluded
+    /// behind the dish. The wording must say so, and must still carry the
+    /// pinned `REAR HEMISPHERE` marker.
+    #[test]
+    fn test_rear_hemisphere_warning_uncorrected_physics_states_floor_only() {
+        let calibration = create_test_calibration(CalibrationStatus::Uncalibrated {
+            accuracy_estimate_db: 3.0,
+            loss_accuracy_estimate_db: 2.0,
+        });
+        assert!(calibration.physics_is_uncorrected());
+
+        let msg = rear_hemisphere_warning(&calibration, 120.0, 8400.0)
+            .expect("rear hemisphere must warn on uncorrected-physics antennas");
+        assert!(msg.contains("REAR HEMISPHERE"));
+        assert!(msg.contains("statistical sidelobe floor ONLY"));
+    }
+
+    /// F7 redesign (2026-07-16): an antenna WITH a correction surface
+    /// (`physics_is_uncorrected()` false) keeps the pre-existing extrapolation
+    /// wording — a forward-hemisphere fit says nothing about back lobes, so no
+    /// statistical floor is served there.
+    #[test]
+    fn test_rear_hemisphere_warning_corrected_physics_keeps_extrapolation_wording() {
+        let mut calibration = create_test_calibration(CalibrationStatus::FullyCalibrated {
+            accuracy_estimate_db: 1.0,
+        });
+        calibration.correction_surface = Some(dummy_correction_surface());
+        assert!(!calibration.physics_is_uncorrected());
+
+        let msg = rear_hemisphere_warning(&calibration, 120.0, 8400.0)
+            .expect("rear hemisphere must warn regardless of calibration status");
+        assert!(msg.contains("REAR HEMISPHERE"));
+        assert!(msg.contains("numerical extrapolation"));
     }
 
     /// The correction surface must be evaluated at the calibration's
