@@ -32,7 +32,6 @@ use std::f64::consts::PI;
 use crate::error::{ComputationError, ComputationResult};
 use crate::model::{
     bessel::{bessel_j0, bessel_jn},
-    edge_cases::higher_order_aberrations,
     geometry::AntennaConfiguration,
     illumination::illumination_amplitude,
     wavelength_from_frequency, wavenumber,
@@ -173,12 +172,6 @@ pub struct IntegrationParams {
     /// Maximum number of refinement iterations
     pub max_iterations: usize,
 
-    /// Include higher-order Seidel aberrations in phase computation
-    ///
-    /// When true, adds astigmatism, field curvature, and distortion terms
-    /// for feeds with moderate offsets (0.3f - 0.5f).
-    pub use_higher_order_aberrations: bool,
-
     /// Fold physical feed-spillover efficiency into the returned gain.
     ///
     /// Decided by the SERVICE layer (set only for antennas with no correction
@@ -204,7 +197,6 @@ impl Default for IntegrationParams {
             relative_tolerance: 1e-4, // 0.01% relative error
             absolute_tolerance: 1e-8, // Absolute error floor
             max_iterations: 5,        // Refinement iteration limit
-            use_higher_order_aberrations: false,
             apply_spillover: false,
             apply_sidelobe_floor: false,
         }
@@ -245,7 +237,6 @@ impl IntegrationParams {
             relative_tolerance: 1e-3,
             absolute_tolerance: 1e-7,
             max_iterations: 3,
-            use_higher_order_aberrations: false,
             apply_spillover: false,
             apply_sidelobe_floor: false,
         }
@@ -267,7 +258,6 @@ impl IntegrationParams {
             relative_tolerance: 1e-3,
             absolute_tolerance: 1e-7,
             max_iterations: 3,
-            use_higher_order_aberrations: false,
             apply_spillover: false,
             apply_sidelobe_floor: false,
         }
@@ -288,16 +278,9 @@ impl IntegrationParams {
             relative_tolerance: 1e-6,
             absolute_tolerance: 1e-10,
             max_iterations: 8,
-            use_higher_order_aberrations: false,
             apply_spillover: false,
             apply_sidelobe_floor: false,
         }
-    }
-
-    /// Enable higher-order aberrations for moderate feed offsets
-    pub fn with_higher_order_aberrations(mut self) -> Self {
-        self.use_higher_order_aberrations = true;
-        self
     }
 
     /// Create adaptive integration parameters with doubled sampling density
@@ -397,17 +380,15 @@ pub fn integrate_aperture(
     let wavelength = wavelength_from_frequency(frequency_hz);
     let k = wavenumber(wavelength);
 
-    // P10 Task 1: azimuthally symmetric apertures (no lateral feed offset and no
-    // higher-order aberration terms) reduce EXACTLY to a 1D radial Hankel (J₀)
-    // transform. Unlike the retired 2D quadrature, this does NOT alias off-axis for
-    // electrically large dishes (the P0 bug). The asymmetric / coma case uses the Jₘ
-    // azimuthal-mode expansion below.
+    // P10 Task 1: azimuthally symmetric apertures (no lateral feed offset) reduce EXACTLY
+    // to a 1D radial Hankel (J₀) transform. Unlike the retired 2D quadrature, this does
+    // NOT alias off-axis for electrically large dishes (the P0 bug). The asymmetric / coma
+    // case uses the Jₘ azimuthal-mode expansion below.
     let is_symmetric = config.feed.position.radial_displacement() == 0.0
         // Azimuthally-symmetric illumination only: a non-unity asymmetry_factor makes
         // illumination_amplitude φ'-dependent (elliptical beam), which breaks the J₀
         // collapse (it assumes A has no φ' dependence). Such feeds take the mode path.
-        && config.feed.asymmetry_factor == 1.0
-        && !params.use_higher_order_aberrations;
+        && config.feed.asymmetry_factor == 1.0;
     if is_symmetric {
         // Adaptive radial density from (D/λ, θ) at ~2× Nyquist (Task 3, D-6), with a
         // runtime N-vs-2N self-check: recompute at 2N and compare. Agreement within
@@ -426,10 +407,10 @@ pub fn integrate_aperture(
         });
     }
 
-    // P10 Task 2/3: asymmetric aperture — a lateral feed offset (coma), an azimuthally
-    // dependent illumination (`asymmetry_factor != 1.0`), and/or higher-order Seidel
-    // terms. Route through the azimuthal-mode (Jₘ) expansion — the general, non-aliasing
-    // closed form (the symmetric Hankel path above is its m=0-only special case).
+    // P10 Task 2/3: asymmetric aperture — a lateral feed offset (coma) and/or an
+    // azimuthally dependent illumination (`asymmetry_factor != 1.0`). Route through the
+    // azimuthal-mode (Jₘ) expansion — the general, non-aliasing closed form (the symmetric
+    // Hankel path above is its m=0-only special case).
     //
     // Adaptive sizing (Task 3, D-6):
     //   `n_rho`          — from (D/λ, θ) at ~2× Nyquist, shared with the symmetric path.
@@ -444,16 +425,8 @@ pub fn integrate_aperture(
     // Probe one extra mode (M+1) so the self-check can measure its contribution in a
     // single φ' sweep. `mode_count_for` kept m_max ≤ n_phi/2 − 2, so the probe is alias-free.
     let m_probe = m_max + 1;
-    let (field, top_contrib) = azimuthal_mode_field_inner(
-        config,
-        theta,
-        phi,
-        k,
-        n_rho,
-        n_phi,
-        m_probe,
-        params.use_higher_order_aberrations,
-    );
+    let (field, top_contrib) =
+        azimuthal_mode_field_inner(config, theta, phi, k, n_rho, n_phi, m_probe);
     // I(M) = I(M+1) − (top-mode contribution); the self-check compares I(M) vs I(M+1).
     let f_m = field - top_contrib;
     let (field, error_estimate, converged) = self_check(f_m, field, params, MODE_SELF_CHECK_RTOL);
@@ -576,7 +549,6 @@ fn integrate_2d_simpson(
     phi_max: f64,
     n_rho: usize,
     n_phi: usize,
-    use_higher_order_aberrations: bool,
 ) -> (Complex64, usize) {
     // Ensure odd number of points for Simpson's rule
     let n_rho = if n_rho.is_multiple_of(2) {
@@ -609,16 +581,8 @@ fn integrate_2d_simpson(
             let rho_weight = simpson_weight(i, n_rho);
 
             // Evaluate integrand
-            let integrand_value = aperture_integrand(
-                rho,
-                phi_prime,
-                theta,
-                phi,
-                config,
-                k,
-                wavelength,
-                use_higher_order_aberrations,
-            );
+            let integrand_value =
+                aperture_integrand(rho, phi_prime, theta, phi, config, k, wavelength);
 
             num_evaluations += 1;
 
@@ -667,18 +631,7 @@ pub(crate) fn integrate_2d_adaptive(
 
     for iteration in 0..params.max_iterations {
         let (result, evals) = integrate_2d_simpson(
-            theta,
-            phi,
-            config,
-            k,
-            wavelength,
-            0.0,
-            rho_max,
-            phi_min,
-            phi_max,
-            n_rho,
-            n_phi,
-            params.use_higher_order_aberrations,
+            theta, phi, config, k, wavelength, 0.0, rho_max, phi_min, phi_max, n_rho, n_phi,
         );
         num_evaluations += evals;
 
@@ -744,7 +697,6 @@ fn integrate_2d_simpson_public_shim(
         2.0 * PI,
         params.max_rho_points,
         params.max_phi_points,
-        params.use_higher_order_aberrations,
     );
     field
 }
@@ -1030,7 +982,7 @@ impl<'a> AperturePlaneConst<'a> {
 
 /// θ-independent aperture-plane function
 /// ```text
-/// g(ρ,φ') = A(ρ,φ') · exp( j·[ Ψ_feed_displacement(ρ,φ') + Ψ_higher_order(ρ,φ') + Ψ_mesh(ρ) ] )
+/// g(ρ,φ') = A(ρ,φ') · exp( j·[ Ψ_feed_displacement(ρ,φ') + Ψ_mesh(ρ) ] )
 /// ```
 /// i.e. the full aperture integrand phase MINUS the parabolic dish-depth chirp
 /// `k·ρ²/(4f)·(1−cosθ)` and MINUS the Fourier kernel `−k·ρ·sinθ·cos(φ−φ')` (both added,
@@ -1039,18 +991,11 @@ impl<'a> AperturePlaneConst<'a> {
 /// coefficients `g_m(ρ)` reusable across all θ.
 ///
 /// The guards mirror `aperture_integrand`/`phase_total` exactly (lateral coma + axial
-/// defocus via the exact geometric `phase_feed_displacement`; higher-order Seidel only
-/// for a laterally displaced feed; mesh phase when a mesh with positive spacing is
-/// present) so the mode integrator and the 2D reference agree wherever both are valid.
-/// The config-derived constants arrive precomputed in [`AperturePlaneConst`].
+/// defocus via the exact geometric `phase_feed_displacement`; mesh phase when a mesh with
+/// positive spacing is present) so the mode integrator and the 2D reference agree wherever
+/// both are valid. The config-derived constants arrive precomputed in [`AperturePlaneConst`].
 #[inline]
-fn aperture_plane_g(
-    c: &AperturePlaneConst,
-    rho: f64,
-    phi_prime: f64,
-    k: f64,
-    use_higher_order: bool,
-) -> Complex64 {
+fn aperture_plane_g(c: &AperturePlaneConst, rho: f64, phi_prime: f64, k: f64) -> Complex64 {
     let amp = illumination_amplitude(rho, phi_prime, c.feed, c.f);
 
     let mut phase = 0.0;
@@ -1058,9 +1003,6 @@ fn aperture_plane_g(
         phase += crate::model::phase::phase_feed_displacement(
             rho, phi_prime, c.delta, c.alpha, c.axial, c.f, k,
         );
-    }
-    if use_higher_order && c.delta > 0.0 {
-        phase += higher_order_aberrations(rho, phi_prime, c.delta, c.alpha, c.f, k);
     }
     // Mesh phase (ρ-only); guard on spacing > 0.0 for consistency with `phase_total`
     // and `hankel_radial_field` (a zero-spacing mesh would divide by zero in phase_mesh).
@@ -1099,7 +1041,6 @@ fn pow_neg_j(m: i32) -> Complex64 {
 ///
 /// Thin wrapper returning only the full mode sum; see [`azimuthal_mode_field_inner`] for
 /// the variant that also returns the top-mode contribution for the convergence self-check.
-#[allow(clippy::too_many_arguments)]
 #[cfg(test)]
 fn azimuthal_mode_field(
     config: &AntennaConfiguration,
@@ -1109,19 +1050,8 @@ fn azimuthal_mode_field(
     n_rho: usize,
     n_phi_coeff: usize,
     m_max: u32,
-    use_higher_order: bool,
 ) -> Complex64 {
-    azimuthal_mode_field_inner(
-        config,
-        theta,
-        phi,
-        k,
-        n_rho,
-        n_phi_coeff,
-        m_max,
-        use_higher_order,
-    )
-    .0
+    azimuthal_mode_field_inner(config, theta, phi, k, n_rho, n_phi_coeff, m_max).0
 }
 
 /// Azimuthal-mode field, returning `(total, top_contribution)`:
@@ -1131,7 +1061,6 @@ fn azimuthal_mode_field(
 /// This lets the caller obtain BOTH `I(M+1)` (`total`, calling with `m_max = M+1`) and
 /// `I(M) = total − top_contribution` from a SINGLE φ' sweep, so the runtime M-vs-(M+1)
 /// convergence self-check (D-6) costs no extra integration. See [`azimuthal_mode_field`].
-#[allow(clippy::too_many_arguments)]
 fn azimuthal_mode_field_inner(
     config: &AntennaConfiguration,
     theta: f64,
@@ -1140,7 +1069,6 @@ fn azimuthal_mode_field_inner(
     n_rho: usize,
     n_phi_coeff: usize,
     m_max: u32,
-    use_higher_order: bool,
 ) -> (Complex64, Complex64) {
     let f = config.reflector.focal_length;
     let r_max = config.reflector.diameter / 2.0;
@@ -1197,7 +1125,7 @@ fn azimuthal_mode_field_inner(
         }
         for jj in 0..n_phi_coeff {
             let phip = jj as f64 * dphi;
-            let g = aperture_plane_g(&apc, rho, phip, k, use_higher_order);
+            let g = aperture_plane_g(&apc, rho, phip, k);
             for m in 0..=mmax {
                 let t = twiddle[m * n_phi_coeff + jj]; // e^{−jmφ'_j}
                 gm_pos[m] += g * t;
@@ -1289,7 +1217,6 @@ fn simpson_weight(i: usize, n: usize) -> f64 {
 /// reference (`integrate_2d_simpson`), which no longer runs in production.
 #[cfg(test)]
 #[inline]
-#[allow(clippy::too_many_arguments)]
 fn aperture_integrand(
     rho: f64,
     phi_prime: f64,
@@ -1298,7 +1225,6 @@ fn aperture_integrand(
     config: &AntennaConfiguration,
     k: f64,
     _wavelength: f64,
-    use_higher_order_aberrations: bool,
 ) -> Complex64 {
     // Calculate illumination amplitude
     let amplitude =
@@ -1345,7 +1271,7 @@ fn aperture_integrand(
     let surface_error = 0.0;
 
     // Calculate total phase
-    let mut total_phase = phase_total(
+    let total_phase = phase_total(
         aperture,
         theta,
         phi,
@@ -1358,19 +1284,6 @@ fn aperture_integrand(
         mesh_spacing,
         k,
     );
-
-    // Add higher-order Seidel aberrations if enabled
-    // These include astigmatism, field curvature, and distortion terms
-    if use_higher_order_aberrations && feed_displacement > 0.0 {
-        total_phase += higher_order_aberrations(
-            rho,
-            phi_prime,
-            feed_displacement,
-            feed_displacement_angle,
-            config.reflector.focal_length,
-            k,
-        );
-    }
 
     // Combine: A(ρ,φ') · exp(j·Ψ)
     let phase_factor = Complex64::new(0.0, total_phase).exp();
@@ -1543,15 +1456,15 @@ mod tests {
         for deg in [0.0_f64, 1.0, 5.0, 20.0] {
             let th = deg.to_radians();
             let ref_field = integrate_2d_simpson_public_shim(th, 0.0, &config, f, &hi);
-            let mode_field = azimuthal_mode_field(&config, th, 0.0, k, 4097, 128, 48, false);
+            let mode_field = azimuthal_mode_field(&config, th, 0.0, k, 4097, 128, 48);
             let d_db = 20.0 * (mode_field.norm() / ref_field.norm()).log10();
             assert!(d_db.abs() < 0.1, "θ={deg}°: mode vs 2D Δ={d_db:.4} dB");
         }
 
         // Coma asymmetry: off-axis in the +x plane (φ=0) vs the −x plane (φ=π) must differ.
         let th = 3.0_f64.to_radians();
-        let plus = azimuthal_mode_field(&config, th, 0.0, k, 4097, 128, 48, false).norm();
-        let minus = azimuthal_mode_field(&config, th, PI, k, 4097, 128, 48, false).norm();
+        let plus = azimuthal_mode_field(&config, th, 0.0, k, 4097, 128, 48).norm();
+        let minus = azimuthal_mode_field(&config, th, PI, k, 4097, 128, 48).norm();
         assert!(
             (plus - minus).abs() / plus.max(minus) > 1e-3,
             "coma asymmetry absent: |E(φ=0)|={plus}, |E(φ=π)|={minus}"
@@ -1569,7 +1482,7 @@ mod tests {
         for deg in [0.0_f64, 1.0, 5.0, 20.0, 90.0] {
             let th = deg.to_radians();
             let hankel = hankel_radial_field(&config, th, 0.0, k, 4097);
-            let modes = azimuthal_mode_field(&config, th, 0.0, k, 4097, 64, 4, false);
+            let modes = azimuthal_mode_field(&config, th, 0.0, k, 4097, 64, 4);
             let rel = (hankel - modes).norm() / hankel.norm().max(1e-30);
             assert!(rel < 1e-9, "θ={deg}°: Hankel vs modes rel diff {rel:.2e}");
         }
@@ -1812,7 +1725,7 @@ mod tests {
             m_max >= 6,
             "asym illumination must resolve at least ~m=6, got M={m_max}"
         );
-        let mode_field = azimuthal_mode_field(&config, theta, 0.0, k, 4097, n_phi, m_max, false);
+        let mode_field = azimuthal_mode_field(&config, theta, 0.0, k, 4097, n_phi, m_max);
         let d_db = 20.0 * (mode_field.norm() / ref_field.norm()).log10();
         assert!(
             d_db.abs() < 0.1,
@@ -1869,7 +1782,7 @@ mod tests {
         let k = wavenumber(wavelength);
 
         // On-axis (θ=0, φ=0), center of aperture (ρ=0)
-        let integrand = aperture_integrand(0.0, 0.0, 0.0, 0.0, &config, k, wavelength, false);
+        let integrand = aperture_integrand(0.0, 0.0, 0.0, 0.0, &config, k, wavelength);
 
         // At center, amplitude should be near maximum, phase should be well-defined
         assert!(integrand.norm() > 0.0);
@@ -1886,17 +1799,9 @@ mod tests {
         let rho = 0.2;
         let theta = 0.1;
 
-        let integrand_0 = aperture_integrand(rho, 0.0, theta, 0.0, &config, k, wavelength, false);
-        let integrand_90 = aperture_integrand(
-            rho,
-            PI / 2.0,
-            theta,
-            PI / 2.0,
-            &config,
-            k,
-            wavelength,
-            false,
-        );
+        let integrand_0 = aperture_integrand(rho, 0.0, theta, 0.0, &config, k, wavelength);
+        let integrand_90 =
+            aperture_integrand(rho, PI / 2.0, theta, PI / 2.0, &config, k, wavelength);
 
         // Magnitudes should be equal due to symmetry
         assert!((integrand_0.norm() - integrand_90.norm()).abs() < 1e-6);
@@ -2099,7 +2004,6 @@ mod tests {
             2.0 * PI, // phi_max
             17,       // n_rho (odd)
             33,       // n_phi (odd)
-            false,    // use_higher_order_aberrations
         );
 
         // Should produce non-zero result

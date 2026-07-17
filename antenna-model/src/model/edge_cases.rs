@@ -3,7 +3,7 @@
 //! This module identifies edge cases where standard physical optics approximations
 //! may be inaccurate and selects appropriate computational methods:
 //!
-//! - **Large feed offsets** (> 0.3f): Switch to ray tracing
+//! - **Severe feed offsets** (> 0.5f): Switch to ray tracing
 //! - **Pattern nulls**: Apply numerical stability measures
 //!
 //! # References
@@ -15,11 +15,20 @@ use tracing::info;
 use crate::model::geometry::AntennaConfiguration;
 use std::f64::consts::PI;
 
-/// Threshold for large feed offset detection (fraction of focal length)
-pub const LARGE_OFFSET_THRESHOLD: f64 = 0.3;
-
 /// Threshold for severe feed offset requiring ray tracing (fraction of focal length)
 pub const SEVERE_OFFSET_THRESHOLD: f64 = 0.5;
+
+/// Validity limit (fraction of focal length) of `estimate_spillover`'s small-offset
+/// linear approximation, and therefore of the physical spillover efficiency applied on
+/// the uncalibrated path. Beyond this offset the approximation saturates toward ~100%
+/// spillover, which would clamp gain to the degenerate −60 dB floor (roadmap P1 finding,
+/// 2026-07-09). Before P2 this boundary was implicit — it coincided with the old
+/// `HigherOrderAberrations` mode threshold, and the spillover gate keyed off the mode
+/// enum. P2 removed that mode (its 0.3f–0.5f band now routes through
+/// `StandardPhysicalOptics`), so the spillover-validity boundary is made explicit here to
+/// keep the spillover regime unchanged rather than silently widening it into the band
+/// where `estimate_spillover` is invalid.
+pub const SPILLOVER_MAX_OFFSET_RATIO: f64 = 0.3;
 
 /// Minimum gain floor to prevent numerical instabilities (in linear units)
 /// Corresponds to -60 dB
@@ -31,11 +40,14 @@ pub const MIN_GAIN_FLOOR_DB: f64 = -60.0;
 /// Classification of antenna configuration computational requirements
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComputationMode {
-    /// Standard physical optics (small feed offsets)
+    /// Standard physical optics (feed offsets ≤ 0.5f)
+    ///
+    /// The exact geometric coma phase (`phase::phase_feed_displacement`) already carries
+    /// every order of the feed-displacement aberration, so this mode covers the full
+    /// 0f–0.5f offset band. (The former `HigherOrderAberrations` mode for 0.3f–0.5f was
+    /// removed in roadmap P2 — it double-counted with wrong-sign Seidel terms; see the
+    /// completeness pin `exact_feed_displacement_phase_contains_all_low_order_aberrations`.)
     StandardPhysicalOptics,
-
-    /// Physical optics with higher-order aberration terms (moderate feed offsets)
-    HigherOrderAberrations,
 
     /// Ray tracing required (large feed offsets > 0.5f)
     RayTracing,
@@ -99,11 +111,6 @@ pub fn analyze_edge_cases(
             "Feed offset ({:.2}f = {:.3} m) exceeds severe threshold ({:.1}f). Ray tracing recommended.",
             offset_ratio, offset_mag, SEVERE_OFFSET_THRESHOLD
         ));
-    } else if offset_ratio > LARGE_OFFSET_THRESHOLD {
-        warnings.push(format!(
-            "Feed offset ({:.2}f = {:.3} m) exceeds standard threshold ({:.1}f). Higher-order aberrations included.",
-            offset_ratio, offset_mag, LARGE_OFFSET_THRESHOLD
-        ));
     }
 
     if spillover > 0.1 {
@@ -135,23 +142,20 @@ fn calculate_feed_offset(config: &AntennaConfiguration) -> (f64, f64) {
 
 /// Select appropriate computation mode based on edge case analysis
 fn select_computation_mode(offset_ratio: f64) -> ComputationMode {
-    // Priority: ray tracing > higher-order > standard
+    // Priority: ray tracing (> 0.5f) > standard physical optics (≤ 0.5f).
+    // The exact geometric coma phase covers the whole ≤ 0.5f band, so offsets in
+    // (0.3f, 0.5f] fall through to StandardPhysicalOptics (P2: the removed
+    // HigherOrderAberrations mode double-counted wrong-sign Seidel terms).
     if offset_ratio > SEVERE_OFFSET_THRESHOLD {
         info!(
             "Severe offset threshold detected ({:.3} > {:.1}), switching to ray-tracing",
             offset_ratio, SEVERE_OFFSET_THRESHOLD
         );
         ComputationMode::RayTracing
-    } else if offset_ratio > LARGE_OFFSET_THRESHOLD {
-        info!(
-            "Large offset threshold detected ({:.3} > {:.1}), computing higher-order aberrations",
-            offset_ratio, LARGE_OFFSET_THRESHOLD
-        );
-        ComputationMode::HigherOrderAberrations
     } else {
         info!(
             "Using standard physical optics (offset_ratio={:.3} <= threshold={:.1})",
-            offset_ratio, LARGE_OFFSET_THRESHOLD
+            offset_ratio, SEVERE_OFFSET_THRESHOLD
         );
         ComputationMode::StandardPhysicalOptics
     }
@@ -231,48 +235,6 @@ pub fn apply_gain_floor(gain_linear: f64) -> f64 {
 #[inline]
 pub fn apply_gain_floor_db(gain_db: f64) -> f64 {
     gain_db.max(MIN_GAIN_FLOOR_DB)
-}
-
-/// Higher-order Seidel aberration coefficients for large feed offsets
-///
-/// For offsets > 0.3f, include additional aberration terms beyond coma:
-/// - Astigmatism
-/// - Field curvature
-/// - Distortion
-///
-/// # Arguments
-/// * `rho` - Aperture radius coordinate (meters)
-/// * `phi_prime` - Aperture azimuth coordinate (radians)
-/// * `delta_feed` - Feed displacement magnitude (meters)
-/// * `alpha` - Feed displacement angle (radians)
-/// * `focal_length` - Focal length (meters)
-/// * `wavenumber` - Wave number k = 2π/λ (rad/m)
-///
-/// # Returns
-/// Additional phase contribution from higher-order aberrations (radians)
-pub fn higher_order_aberrations(
-    rho: f64,
-    phi_prime: f64,
-    delta_feed: f64,
-    alpha: f64,
-    focal_length: f64,
-    wavenumber: f64,
-) -> f64 {
-    // Normalized aperture coordinate
-    let rho_norm = rho / (2.0 * focal_length);
-    let delta_norm = delta_feed / focal_length;
-
-    // Astigmatism (proportional to δ²·ρ²)
-    let astigmatism =
-        wavenumber * delta_norm.powi(2) * rho_norm.powi(2) * (2.0 * phi_prime - 2.0 * alpha).cos();
-
-    // Field curvature (proportional to δ²·ρ²)
-    let field_curvature = wavenumber * delta_norm.powi(2) * rho_norm.powi(2) / 2.0;
-
-    // Distortion (proportional to δ³·ρ³)
-    let distortion = wavenumber * delta_norm.powi(3) * rho_norm.powi(3) * (phi_prime - alpha).cos();
-
-    astigmatism + field_curvature + distortion
 }
 
 /// Check if adaptive integration is needed near pattern null
@@ -379,20 +341,27 @@ mod tests {
         let analysis = analyze_edge_cases(&config, 0.0, 0.0);
 
         assert_eq!(analysis.mode, ComputationMode::StandardPhysicalOptics);
-        assert!(analysis.feed_offset_ratio < LARGE_OFFSET_THRESHOLD);
+        assert!(analysis.feed_offset_ratio < 0.3);
         assert!(analysis.warnings.is_empty());
     }
 
     #[test]
-    fn test_moderate_offset_higher_order() {
-        // E-cone = 20 degrees -> offset/f ≈ 0.35 > 0.3
+    fn test_moderate_offset_now_standard_po() {
+        // E-cone = 20 degrees -> offset/f ≈ 0.35, in the (0.3f, 0.5f] band that formerly
+        // selected the removed HigherOrderAberrations mode. P2: it now falls through to
+        // StandardPhysicalOptics, whose exact coma phase already covers this band.
         let config = test_antenna_offset(20.0);
         let analysis = analyze_edge_cases(&config, 0.05, 0.0); // 2.86 degrees
 
-        assert_eq!(analysis.mode, ComputationMode::HigherOrderAberrations);
-        assert!(analysis.feed_offset_ratio > LARGE_OFFSET_THRESHOLD);
+        assert_eq!(analysis.mode, ComputationMode::StandardPhysicalOptics);
+        assert!(analysis.feed_offset_ratio > 0.3);
         assert!(analysis.feed_offset_ratio < SEVERE_OFFSET_THRESHOLD);
-        assert!(!analysis.warnings.is_empty());
+        // No "higher-order aberrations" warning is emitted; the offset is below the
+        // severe (ray-tracing) threshold, so this config produces no offset warning.
+        assert!(!analysis
+            .warnings
+            .iter()
+            .any(|w| w.contains("Ray tracing") || w.contains("higher-order")),);
     }
 
     #[test]
@@ -472,20 +441,6 @@ mod tests {
     }
 
     #[test]
-    fn test_higher_order_aberrations_zero_offset() {
-        // Zero offset should give zero aberrations
-        let phase = higher_order_aberrations(0.1, 0.0, 0.0, 0.0, 0.5, 100.0);
-        assert_eq!(phase, 0.0);
-    }
-
-    #[test]
-    fn test_higher_order_aberrations_nonzero() {
-        // Nonzero offset should give nonzero aberrations
-        let phase = higher_order_aberrations(0.1, 0.0, 0.1, 0.0, 0.5, 100.0);
-        assert!(phase.abs() > 0.0);
-    }
-
-    #[test]
     fn test_adaptive_integration_needed() {
         let config = test_antenna_on_axis();
 
@@ -522,9 +477,10 @@ mod tests {
         let mode = select_computation_mode(0.6);
         assert_eq!(mode, ComputationMode::RayTracing);
 
-        // Higher-order when moderate offset
+        // Standard PO for moderate offsets — the (0.3f, 0.5f] band now routes here
+        // (P2: HigherOrderAberrations mode removed).
         let mode = select_computation_mode(0.35);
-        assert_eq!(mode, ComputationMode::HigherOrderAberrations);
+        assert_eq!(mode, ComputationMode::StandardPhysicalOptics);
 
         // Standard when small offset
         let mode = select_computation_mode(0.1);
@@ -532,17 +488,38 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // P2 Stage 1 (safety gate): Seidel double-count redundancy check.
+    // P2 COMPLETENESS PIN (was the Stage-1 safety-gate redundancy check).
     //
-    // The `HigherOrderAberrations` mode adds BOTH the exact coma phase
-    // (`phase::phase_feed_displacement`) AND the Seidel approximation
-    // (`higher_order_aberrations`) into the aperture phase. The exact phase
-    // already contains every aberration order as an exact function of the
-    // feed displacement. This test numerically extracts the delta^2 / delta^3
-    // aberration content ALREADY present in the exact phase and compares it,
-    // component-by-component, against the Seidel forms, to determine whether
-    // adding the Seidel terms double-counts content that is genuinely
-    // redundant (matching coefficients) or spuriously additive (mismatched).
+    // Permanent justification for the ABSENCE of a separate higher-order
+    // aberration mode: the exact geometric coma phase
+    // (`phase::phase_feed_displacement`) ALREADY carries the full low-order
+    // feed-displacement aberration content — astigmatism (cos2φ'), field
+    // curvature (constant), distortion (cos1φ') and a trefoil (cos3φ') — as an
+    // exact function of the feed displacement. This test extracts that δ²/δ³
+    // content numerically and pins it against an independently-derived closed
+    // form. Because the exact phase is already complete, ANY additive Seidel
+    // "higher-order" term double-counts it; the former `HigherOrderAberrations`
+    // mode was removed (roadmap P2) rather than fixed.
+    //
+    // WHY REMOVED, NOT FIXED (the failed Seidel-correspondence half of the
+    // original Stage-1 gate, kept here as documentation, no longer asserted):
+    // the removed `higher_order_aberrations` Seidel forms were not even a
+    // leading-order match to the exact content they were stacked on top of —
+    //   * astigmatism (cos2φ'): SIGN-FLIPPED at every radius (exact δ²·cos2φ'
+    //     content is negative; the Seidel astigmatism term was positive), so it
+    //     opposed and overshot rather than duplicated the true content;
+    //   * field curvature / distortion: WRONG SCALE — the ratio to the exact
+    //     content swung by ~2 orders of magnitude across aperture radii
+    //     (≈48× → ≈1×), the dimensional signature of a spurious 1/f factor
+    //     (exact content scales ~1/R³, 1/R⁵; the Seidel forms scaled ~1/f⁴,
+    //     1/f⁶);
+    //   * distortion additionally had the WRONG PUPIL POWER — the exact model
+    //     and classical aberration theory give a leading ρ¹ distortion, while
+    //     the heuristic coded ρ³.
+    // So the mode stacked wrong-sign / wrong-scale / wrong-shape terms on top of
+    // already-complete exact physics; removing it makes the 0.3–0.5f offset band
+    // strictly MORE correct. (Full Stage-1 evidence: register unit P2,
+    // docs/roadmap-2026-07-work-units.md.)
     //
     // Method: with alpha = 0, delta_z = 0, at fixed (rho, phi'), fit a
     // degree-5 polynomial in the lateral offset delta over a set of SMALL,
@@ -551,9 +528,12 @@ mod tests {
     // Taylor coefficients at that aperture point. Sweeping phi' and projecting
     // those coefficients onto cos(2phi'), the phi'-constant term, cos(phi')
     // and cos(3phi') isolates the astigmatism / field-curvature / distortion /
-    // trefoil angular components. These are compared to `higher_order_aberrations`.
+    // trefoil angular components, which are pinned against the closed form.
     #[test]
-    fn p2_stage1_seidel_double_count_redundancy_check() {
+    // Index loops are the clearest form for the Gaussian-elimination solver and the
+    // Vandermonde fill below (both index multiple arrays by the same counter).
+    #[allow(clippy::needless_range_loop)]
+    fn exact_feed_displacement_phase_contains_all_low_order_aberrations() {
         use crate::model::phase::phase_feed_displacement;
 
         // Solve a 6x6 linear system by Gaussian elimination with partial pivoting.
@@ -621,17 +601,11 @@ mod tests {
         };
 
         let n = 64usize;
-        let phis: Vec<f64> =
-            (0..n).map(|i| 2.0 * std::f64::consts::PI * i as f64 / n as f64).collect();
+        let phis: Vec<f64> = (0..n)
+            .map(|i| 2.0 * std::f64::consts::PI * i as f64 / n as f64)
+            .collect();
 
-        // A genuine leading-order coefficient match means exact/seidel ~ +1
-        // (correct sign, ratio near unity), STABLE across aperture radii. We
-        // collect the ratios at several radii and test that property.
-        let mut r_astig_all = Vec::new();
-        let mut r_fc_all = Vec::new();
-        let mut r_dist_all = Vec::new();
-
-        println!("\n=== P2 Stage 1: exact-phase delta^2/delta^3 content vs Seidel forms ===");
+        println!("\n=== P2 completeness pin: exact-phase delta^2/delta^3 aberration content ===");
         println!("f = {f}, delta(context) = 0.35f = {}, k = {k:.4}", 0.35 * f);
         for &rho in &[0.1_f64, 0.25, 0.5] {
             let rr = f + rho * rho / (4.0 * f); // R = focus->surface distance
@@ -673,104 +647,55 @@ mod tests {
                 (d3_cos1 - an_d3_cos1).abs() <= 1e-4 * an_d3_cos1.abs().max(1.0),
                 "extraction/analytic mismatch d3_cos1 rho={rho}: {d3_cos1} vs {an_d3_cos1}"
             );
+            assert!(
+                (d2_const - an_d2_const).abs() <= 1e-4 * an_d2_const.abs().max(1.0),
+                "extraction/analytic mismatch d2_const rho={rho}: {d2_const} vs {an_d2_const}"
+            );
+            assert!(
+                (d3_cos3 - an_d3_cos3).abs() <= 1e-4 * an_d3_cos3.abs().max(1.0),
+                "extraction/analytic mismatch d3_cos3 rho={rho}: {d3_cos3} vs {an_d3_cos3}"
+            );
 
-            // Angular signatures must be genuinely present (nonzero) — the exact
-            // phase DOES contain astigmatism (cos2), distortion (cos1) and
-            // trefoil (cos3) delta^2/delta^3 content. This confirms that adding
-            // ANY Seidel astigmatism/distortion double-counts existing content.
-            assert!(d2_cos2.abs() > 1.0, "exact phase should carry cos(2phi) delta^2 content");
-            assert!(d3_cos1.abs() > 1.0, "exact phase should carry cos(phi) delta^3 content");
-
-            // Seidel coefficients (coefficient of delta^2 / delta^3), from
-            // `higher_order_aberrations` with rho_n = rho/(2f), delta_n = delta/f.
-            let s_astig = k * (1.0 / f).powi(2) * (rho / (2.0 * f)).powi(2); // -> cos(2phi)
-            let s_fieldcurv = s_astig / 2.0; // -> constant
-            let s_distort = k * (1.0 / f).powi(3) * (rho / (2.0 * f)).powi(3); // -> cos(phi)
-
-            let r_astig = d2_cos2 / s_astig;
-            let r_fc = d2_const / s_fieldcurv;
-            let r_dist = d3_cos1 / s_distort;
+            // The load-bearing assertions: the exact feed-displacement phase DOES
+            // carry the full low-order δ²/δ³ aberration content — astigmatism
+            // (cos2φ'), field curvature (constant), distortion (cos1φ') and a
+            // trefoil (cos3φ'). Because this content is already complete and
+            // exact, no separate higher-order aberration mode is needed (and any
+            // additive Seidel term would double-count it — see the doc comment).
+            assert!(
+                d2_cos2.abs() > 1.0,
+                "exact phase should carry cos(2phi) delta^2 (astigmatism)"
+            );
+            assert!(
+                d2_const.abs() > 1.0,
+                "exact phase should carry constant delta^2 (field curvature)"
+            );
+            assert!(
+                d3_cos1.abs() > 1.0,
+                "exact phase should carry cos(phi) delta^3 (distortion)"
+            );
+            assert!(
+                d3_cos3.abs() > 0.0,
+                "exact phase should carry cos(3phi) delta^3 (trefoil)"
+            );
 
             println!("\nrho = {rho}  (R = {rr:.4})");
             println!(
-                "  astigmatism  (d2,cos2phi): exact = {d2_cos2:>10.4}   seidel = {s_astig:>10.4}   exact/seidel = {r_astig:>8.4}"
+                "  astigmatism  (d2,cos2phi): exact = {d2_cos2:>10.4}  (analytic {an_d2_cos2:.4})"
+            );
+            println!("  fieldcurv    (d2,const  ): exact = {d2_const:>10.4}  (analytic {an_d2_const:.4})");
+            println!(
+                "  distortion   (d3,cos1phi): exact = {d3_cos1:>10.4}  (analytic {an_d3_cos1:.4})"
             );
             println!(
-                "  fieldcurv    (d2,const  ): exact = {d2_const:>10.4}   seidel = {s_fieldcurv:>10.4}   exact/seidel = {r_fc:>8.4}"
-            );
-            println!(
-                "  distortion   (d3,cos1phi): exact = {d3_cos1:>10.4}   seidel = {s_distort:>10.4}   exact/seidel = {r_dist:>8.4}"
-            );
-            println!("  trefoil      (d3,cos3phi): exact = {d3_cos3:>10.4}   (no Seidel counterpart; analytic {an_d3_cos3:.4})");
-
-            r_astig_all.push(r_astig);
-            r_fc_all.push(r_fc);
-            r_dist_all.push(r_dist);
-        }
-
-        // VERDICT — the redundancy claim is REFUTED at the coefficient level.
-        //
-        // A leading-order coefficient match would require exact/seidel ~ +1,
-        // sign-correct and STABLE across aperture radii. Instead we measure:
-        //
-        //  1) Astigmatism (the defining 2nd-order aberration, cos2phi) has the
-        //     WRONG SIGN at every radius: the exact phase's cos(2phi') delta^2
-        //     content is NEGATIVE while the Seidel astigmatism term is POSITIVE.
-        //     Adding the Seidel term does not double the true content, it opposes
-        //     and overshoots it.
-        //
-        //  2) The magnitudes are NOT a stable ratio: field-curvature and
-        //     distortion ratios swing by ~2 orders of magnitude across radii
-        //     (48 -> 1.1, 47 -> 0.53). This is the dimensional signature of a
-        //     spurious 1/f factor: exact content scales ~1/R^3, 1/R^5 while the
-        //     Seidel forms scale ~1/f^4, 1/f^6; distortion additionally carries
-        //     the wrong rho-power (exact leading term is ~rho, Seidel is ~rho^3).
-        //     (The single near-unity field-curvature point at rho=0.5 is an
-        //     f-dependent numerical coincidence of the piston-like k/(2R) term,
-        //     not a physical match.)
-        //
-        // CONCLUSION: the exact phase already CARRIES delta^2/delta^3 aberration
-        // content (asserted above: nonzero cos2/cos1/cos3 signatures reproduced
-        // by closed form), so adding ANY Seidel term double-counts -> the mode is
-        // wrong to add both. But the Seidel forms are NOT a leading-order match
-        // to that content (sign-flipped astigmatism, dimensionally-off, wrong
-        // rho-power distortion). This is a STOP signal for the "coefficients
-        // match" framing of P2 Stage 1.
-
-        // (1) Sign flip: astigmatism exact/seidel < 0 at every radius.
-        for (i, &r) in r_astig_all.iter().enumerate() {
-            assert!(
-                r < 0.0,
-                "expected astigmatism sign flip (exact/seidel < 0) at radius index {i}, got {r}"
+                "  trefoil      (d3,cos3phi): exact = {d3_cos3:>10.4}  (analytic {an_d3_cos3:.4})"
             );
         }
-
-        // (2) No stable coefficient: the magnitude-ratio spread across radii is
-        //     enormous (> 10x) for both field-curvature and distortion. A true
-        //     leading-order coefficient would be radius-stable near unity.
-        let spread = |v: &Vec<f64>| {
-            let mags: Vec<f64> = v.iter().map(|x| x.abs()).collect();
-            mags.iter().cloned().fold(f64::MIN, f64::max)
-                / mags.iter().cloned().fold(f64::MAX, f64::min)
-        };
-        assert!(
-            spread(&r_fc_all) > 10.0,
-            "expected large (unstable) field-curvature ratio spread, got {}",
-            spread(&r_fc_all)
-        );
-        assert!(
-            spread(&r_dist_all) > 10.0,
-            "expected large (unstable) distortion ratio spread, got {}",
-            spread(&r_dist_all)
-        );
 
         println!(
-            "\nVERDICT: REFUTED (coefficient match). Astigmatism sign-flipped at all radii; \
-             field-curvature/distortion ratios span {:.1}x / {:.1}x across radii. \
-             Double-counting is qualitatively real (exact phase carries the content), \
-             but the Seidel forms are NOT a leading-order coefficient match.",
-            spread(&r_fc_all),
-            spread(&r_dist_all)
+            "\nCONCLUSION: the exact feed-displacement phase already carries the full \
+             low-order aberration content (astigmatism/field-curvature/distortion/trefoil), \
+             reproduced by the closed form; no separate higher-order mode is required."
         );
     }
 }
