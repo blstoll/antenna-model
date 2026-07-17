@@ -592,8 +592,8 @@ pub(crate) fn off_axis_unvalidated_warning(
 /// `|off_boresight_deg| > 90.0`. The aperture-integration formulation is a
 /// forward-radiating model: the moment θ crosses 90° the returned value is a
 /// numerical extrapolation of an idealised UNSHADOWED aperture field with no
-/// physical validity behind the reflector — the integrand carries no Huygens
-/// obliquity factor to suppress backward radiation, and there is no rim
+/// physical validity behind the reflector — the far-field conversion carries the
+/// Huygens obliquity factor (F7, 2026-07-16), but there is still no rim
 /// diffraction, dish shadowing, feed spillover, or mesh leakage modeled (those,
 /// not the aperture field, set real rear levels). The value is numerically
 /// converged in the forward hemisphere but categorically meaningless here, so

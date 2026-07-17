@@ -1289,18 +1289,23 @@ fn p10_anchor_dsn34m_xband_matches_known_reference_values() {
         "\n[P10 anchor] dsn_34m X-band: 0={g0:.2} 1={g1:.2} 5={g5:.2} 20={g20:.2} 90={g90:.2} dBi"
     );
 
-    // Ground-truth anchors (findings §2.2 / §4a, brute-force reproduced).
+    // Ground-truth anchors. theta=0 is brute-force reproduced (findings §2.2/§4a) and MUST
+    // NOT move. The off-axis values are INTERNAL-CONSISTENCY anchors re-derived 2026-07-16
+    // when the F7 redesign added the Huygens obliquity factor (1+cos(theta))/2 to the
+    // far-field conversion: each equals the pre-obliquity anchor plus
+    // 20*log10((1+cos(theta))/2), verified to +/-0.05 dB at re-derivation.
     assert!((g0 - 68.96).abs() < 0.2, "peak {g0:.2} (expect 68.96)");
     assert!((g1 - 14.53).abs() < 0.5, "1deg {g1:.2} (expect 14.53)");
-    assert!((g5 - (-9.39)).abs() < 0.6, "5deg {g5:.2} (expect -9.39)");
+    assert!((g5 - (-9.41)).abs() < 0.6, "5deg {g5:.2} (expect -9.41)");
     assert!(
-        (g20 - (-23.56)).abs() < 0.8,
-        "20deg {g20:.2} (expect -23.56)"
+        (g20 - (-23.83)).abs() < 0.8,
+        "20deg {g20:.2} (expect -23.83)"
     );
-    // The far-off value the aliasing 2D could NOT reach (it gave +1.24 / +34 dBi).
+    // Pre-obliquity this was -33.3 (the value the aliasing 2D could NOT reach); the
+    // obliquity factor is exactly -6.02 dB on power at theta=90.
     assert!(
-        (g90 - (-33.3)).abs() < 1.5,
-        "90deg {g90:.2} (expect ~-33.3, NOT a high backlobe)"
+        (g90 - (-39.32)).abs() < 1.5,
+        "90deg {g90:.2} (expect ~-39.32, NOT a high backlobe)"
     );
 }
 
@@ -1436,17 +1441,15 @@ fn p10_served_rear_hemisphere_is_physical_or_flagged() {
         // peak, OR the runtime self-check honestly flagged non-convergence (never a
         // silent value AT/ABOVE the peak — the pre-P10 aliasing signature).
         //
-        // Level bound = 20 dB below peak, matching the existing served-90° bound in
-        // `p10_served_offaxis_is_physical_all_enabled_antennas` (`s90 < s0 - 20`). NOTE
-        // (P10-tail finding): a *30* dB bound would assert something FALSE. The rear PO
-        // value is GENUINELY CONVERGED (verified stable to <0.1 dB against a 20001-point
-        // forced density) yet sits only ~28 dB below peak for the small dishes — the
-        // idealised unshadowed aperture radiates a real +7..+13 dBi backlobe at θ≈163°
-        // because the integrand carries NO Huygens obliquity factor (1+cosθ)/2 (F7
-        // handoff #2 in domain-contract.md). Convergence therefore CANNOT be relied on
-        // to flag rear invalidity — that is exactly why the rear-hemisphere WARNING
-        // (Task A3), not a level bound, is the safety net. At θ=180° the base-density
-        // self-check does report `converged == false` here (honest under-sampling).
+        // Since the F7 redesign (2026-07-16) the far-field conversion carries the Huygens
+        // obliquity factor (1+cos(theta))/2, which suppresses the previously measured
+        // +7..+13 dBi converged-but-fictitious backlobe by ~33 dB at theta=163 — so this
+        // invariant now passes by LEVEL at every rear angle. It is kept (rather than
+        // tightened) because rear PO remains categorically non-physical (no rim
+        // diffraction, no dish shadowing); the SERVED rear value on uncorrected-physics
+        // antennas will be the statistical floor only (see the F7 redesign plan), and the
+        // rear-hemisphere warning remains the safety net for everything else. This test
+        // exercises the RAW integrator path (floor off) on purpose.
         for (deg_label, (g, conv)) in [
             ("120°", (g120, c120)),
             ("163°", (g163, c163)),

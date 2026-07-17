@@ -402,8 +402,11 @@ pub fn compute_gain(
 /// `η` here is the Ruze (surface) × mesh efficiency from [`overall_efficiency`].
 /// **Spillover efficiency is NOT modeled** — the calibration correction surface
 /// absorbs it (and any other residual systematic offset).
+///
+/// The Huygens obliquity factor (1+cosθ)/2 is applied here as a field factor (F7, 2026-07-16).
 fn absolute_gain_from_integral(
     raw_field: Complex64,
+    theta: f64,
     config: &AntennaConfiguration,
     wavelength: f64,
     params: &IntegrationParams,
@@ -417,7 +420,17 @@ fn absolute_gain_from_integral(
             reason: "amplitude integral is zero".to_string(),
         });
     }
-    let directivity = 4.0 * PI / (wavelength * wavelength) * raw_field.norm_sqr() / amp_sq;
+    // Huygens obliquity (element) factor (1+cosθ)/2 on the FIELD (F7 redesign,
+    // maintainer decision 2026-07-16): the textbook element factor of an aperture
+    // (Huygens) source. Applied here — OUTSIDE the aperture integral — because it is
+    // θ-only: the P10 quadrature, its convergence self-check, and the independent
+    // Hankel-oracle test (which compares raw `integrate_aperture` fields) are all
+    // unaffected. Equals 1 at θ=0 (boresight anchors unchanged), −6.02 dB on power at
+    // θ=90°, and suppresses the fictitious converged rear backlobe P10-tail measured.
+    let obliquity = (1.0 + theta.cos()) / 2.0;
+    let directivity =
+        4.0 * PI / (wavelength * wavelength) * raw_field.norm_sqr() * (obliquity * obliquity)
+            / amp_sq;
     Ok(directivity * overall_efficiency(config, wavelength))
 }
 
@@ -442,7 +455,7 @@ fn compute_gain_standard(
         warnings.push(INTEGRATION_NONCONVERGENCE_WARNING.to_string());
     }
 
-    absolute_gain_from_integral(result.field, config, wavelength, &effective_params)
+    absolute_gain_from_integral(result.field, theta, config, wavelength, &effective_params)
 }
 
 /// Ray tracing gain computation for large feed offsets
@@ -483,7 +496,12 @@ fn compute_gain_ray_tracing(
         warnings.push(INTEGRATION_NONCONVERGENCE_WARNING.to_string());
     }
 
-    let boresight_gain = absolute_gain_from_integral(on_axis.field, config, wavelength, params)?;
+    // theta = 0.0: this is the BORESIGHT anchor for the ray-traced relative pattern
+    // (obliquity = 1 exactly). The stub's off-axis relative pattern deliberately does
+    // NOT receive the obliquity factor — it is an acknowledged low-accuracy path
+    // (roadmap P3: flagged on all endpoints via RAY_TRACING_STUB_WARNING).
+    let boresight_gain =
+        absolute_gain_from_integral(on_axis.field, 0.0, config, wavelength, params)?;
 
     Ok(boresight_gain * relative_gain)
 }
