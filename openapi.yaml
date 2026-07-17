@@ -645,7 +645,7 @@ components:
             reflector: on antennas served with uncorrected physics the returned
             value is the statistical sidelobe floor only (the physical-optics
             term is excluded there); on antennas with a correction surface it
-            is a numerical extrapolation with no physical validity (real rear
+            is a numerical extrapolation, not a prediction (real rear
             levels come from feed spillover, edge diffraction, and mesh
             leakage, none of which are modeled). Use measured data or a
             regulatory rear-lobe envelope for rear-hemisphere analysis.

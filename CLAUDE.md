@@ -243,13 +243,10 @@ Per `docs/implementation-plan.md`, Sprints 1–7 are complete:
   converged at all angles (the pre-P10 aliasing that returned gain 20–35 dB too high beyond a
   few degrees is fixed). Served values on uncalibrated antennas are *idealised* physical optics
   (no blockage/strut/edge-diffraction), stated honestly by the off-axis warning.
-- The **F7 sidelobe-floor redesign landed 2026-07-16/17** (`PHYSICS_MODEL_VERSION` 5, branch
-  `feat/f7-redesign-power-sum-obliquity`): a Huygens obliquity factor `(1+cosθ)/2` on the
-  far-field conversion (all antennas), plus the statistical Ruze sidelobe floor re-enabled on
-  the uncorrected-physics served path (`physics_is_uncorrected()`) as an incoherent power sum
-  in the forward hemisphere and floor-only (PO excluded, rear integration skipped) behind the
-  dish. Calibrated antennas (with a correction surface) are unaffected by the floor — see
-  `docs/domain-contract.md`.
+- The **F7 sidelobe-floor redesign landed 2026-07-16/17** (`PHYSICS_MODEL_VERSION` 5): Huygens
+  obliquity factor `(1+cosθ)/2` on the far-field conversion, plus the statistical Ruze sidelobe
+  floor on uncorrected-physics antennas (power sum forward, floor-only rear). Calibrated
+  antennas unaffected — see `docs/domain-contract.md`.
 
 Active hardening and debt work is tracked in `docs/roadmap-2026-07.md` and
 `docs/roadmap-2026-07-work-units.md`.
