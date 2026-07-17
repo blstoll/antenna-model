@@ -8,6 +8,8 @@ pub use cache::{GainCache, GainCacheKey};
 pub mod evaluator;
 pub mod h3_link_budget;
 pub mod heatmap;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod validator;
 
 pub use batch::evaluate_batch;

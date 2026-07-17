@@ -1610,26 +1610,6 @@ mod tests {
         request
     }
 
-    /// Like `create_deep_offaxis_request`, but the emitter is dropped to ground
-    /// level (alt = 0) at the same lon/lat, which places it BEYOND 90 deg off the
-    /// boresight axis (~104 deg, REAR hemisphere — behind the dish). Constructed
-    /// empirically and self-checked by every consuming test via the precondition
-    /// `geometry.emitter_elevation_deg.abs() > 90.0`, so a coordinate-frame drift
-    /// that moved it back into the forward hemisphere would fail loudly rather than
-    /// silently test the wrong seam.
-    fn create_rear_hemisphere_request() -> GainRequest {
-        use crate::model::coordinates_3d::geodetic_to_ecef;
-        let ecef = |lon: f64, lat: f64, alt: f64| {
-            let (x, y, z) = geodetic_to_ecef(lon, lat, alt).unwrap();
-            let mut p = Position3D::new(x, y, z);
-            p.coordinate_system = Some(CoordinateSystem::ECEF);
-            p
-        };
-        let mut request = create_deep_offaxis_request();
-        request.emitter_position = ecef(-120.0, 30.0, 0.0);
-        request
-    }
-
     /// Regression test for the reference/actual spillover asymmetry: for an
     /// uncalibrated antenna at a LARGE feed offset, the actual gain routes to a
     /// non-standard-PO mode and gets NO spillover. The ideal reference (always a
@@ -2184,23 +2164,17 @@ mod tests {
         );
     }
 
-    /// SERVED PATH — F7 floor ON, REAR-hemisphere seam. `create_rear_hemisphere_request`
+    /// SERVED PATH — F7 floor ON, REAR-hemisphere seam. `test_support::rear_hemisphere_request`
     /// places the emitter beyond 90 deg off boresight — BEHIND the dish — where the
     /// model excludes the (fictitious, converged) rear PO backlobe and serves the
     /// statistical floor ALONE (see model::pattern::compute_gain). For an uncalibrated
     /// antenna the served value is therefore EXACTLY the floor.
     #[test]
     fn served_rear_hemisphere_uncalibrated_returns_statistical_floor() {
-        let mut repo = CalibrationRepository::new();
-        let mut calibration = create_test_calibration(CalibrationStatus::Uncalibrated {
-            accuracy_estimate_db: 3.0,
-            loss_accuracy_estimate_db: 2.0,
-        });
-        calibration.physical_config.reflector.surface_rms_mm = 1.5;
-        assert!(calibration.correction_surface.is_none());
-        repo.add_calibration(calibration);
+        use crate::service::test_support;
 
-        let request = create_rear_hemisphere_request();
+        let repo = test_support::create_uncalibrated_repository();
+        let request = test_support::rear_hemisphere_request();
         let response = compute_gain_from_request(&request, &repo).unwrap();
 
         // Frame-safety precondition: this MUST be a rear-hemisphere query, else we

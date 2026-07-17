@@ -533,87 +533,6 @@ mod tests {
         assert!(avg_time < 1000.0); // Should be well under 1 second per evaluation
     }
 
-    /// Build a repository holding a single UNCALIBRATED antenna (no correction
-    /// surface ⇒ `physics_is_uncorrected()` ⇒ F7 floor ON) with a nonzero surface
-    /// RMS so the statistical floor is a clearly nonzero pedestal.
-    fn create_uncalibrated_repository() -> CalibrationRepository {
-        use crate::data::types::CalibrationStatus;
-        let mut repo = CalibrationRepository::new();
-        let metadata = CalibrationMetadata::builder()
-            .antenna_name("Test Antenna")
-            .calibration_date("2025-01-01T00:00:00Z")
-            .format_version("2.0")
-            .data_source("test")
-            .rmse_db(0.5)
-            .r_squared(0.99)
-            .num_measurements(1000)
-            .build()
-            .unwrap();
-        let calibration = AntennaCalibration::builder()
-            .antenna_id("test_antenna")
-            .feed_id("test_feed")
-            .metadata(metadata)
-            .physical_config(PhysicalAntennaConfig {
-                reflector: ReflectorGeometry {
-                    diameter_m: 10.0,
-                    focal_length_m: 5.0,
-                    f_over_d_ratio: 0.5,
-                    surface_rms_mm: 1.5,
-                },
-                feed: FeedParameters {
-                    position: (0.0, 0.0, 5.0),
-                    q_factor: 8.0,
-                    phase_center_offset_m: 0.0,
-                    axial_defocus_m: 0.0,
-                },
-                mesh: Some(MeshParameters {
-                    mesh_spacing_mm: 5.0,
-                    wire_diameter_mm: 0.5,
-                }),
-            })
-            .validity_ranges(ValidityRanges {
-                azimuth_min_max: (0.0, 360.0),
-                elevation_min_max: (0.0, 90.0),
-                frequency_min_max: (1000.0, 10000.0),
-                temperature_const: 290.0,
-            })
-            .calibration_status(CalibrationStatus::Uncalibrated {
-                accuracy_estimate_db: 3.0,
-                loss_accuracy_estimate_db: 2.0,
-            })
-            .build()
-            .unwrap();
-        assert!(calibration.correction_surface.is_none());
-        repo.add_calibration(calibration);
-        repo
-    }
-
-    /// A batch request whose single item points BEHIND the dish (emitter dropped to
-    /// ground level at the deep-off-axis lon/lat → >90 deg off boresight, REAR
-    /// hemisphere). Mirrors the evaluator `create_rear_hemisphere_request` geometry.
-    fn rear_hemisphere_request() -> GainRequest {
-        use crate::model::coordinates_3d::geodetic_to_ecef;
-        let ecef = |lon: f64, lat: f64, alt: f64| {
-            let (x, y, z) = geodetic_to_ecef(lon, lat, alt).unwrap();
-            let mut p = Position3D::new(x, y, z);
-            p.coordinate_system = Some(CoordinateSystem::ECEF);
-            p
-        };
-        GainRequest {
-            antenna_id: "test_antenna".to_string(),
-            feed_id: "test_feed".to_string(),
-            vehicle_position: ecef(-118.1234, 34.5678, 100.0),
-            reflector_boresight: ecef(-117.0, 35.0, 400_000.0),
-            // Feed aimed at boresight target → feed at focus → StandardPhysicalOptics.
-            feed_position: ecef(-117.0, 35.0, 400_000.0),
-            emitter_position: ecef(-120.0, 30.0, 0.0),
-            frequency_mhz: 8400.0,
-            pointing_frequency_mhz: None,
-            include_reference: false,
-            vehicle_attitude: None,
-        }
-    }
-
     /// The batch path inherits the F7 floor from the evaluator: a rear-hemisphere
     /// item on an uncalibrated antenna returns EXACTLY the statistical floor
     /// (floor-only behind the dish). Pins that batch delegates the floor gate.
@@ -626,9 +545,11 @@ mod tests {
             MeshParameters as ModelMeshParams, ReflectorGeometry as ModelReflector,
         };
 
-        let repo = create_uncalibrated_repository();
+        use crate::service::test_support;
+
+        let repo = test_support::create_uncalibrated_repository();
         let request = BatchGainRequest {
-            evaluations: vec![rear_hemisphere_request()],
+            evaluations: vec![test_support::rear_hemisphere_request()],
         };
         let response = evaluate_batch(&request, &repo).unwrap();
         assert_eq!(response.results.len(), 1);

@@ -399,10 +399,13 @@ pub fn compute_gain(
     // idealised-PO pattern. In linear gain the dB-domain power sum
     // 10*log10(10^(PO/10) + 10^(floor/10)) is simply addition. Scattered energy adds to
     // the coherent pattern in power, so this is the physically motivated combination:
-    // continuous everywhere (no theta_valid seam in heatmaps), converging to the floor
-    // exactly where idealised PO under-predicts. The floor is a best-estimate MEDIAN
-    // wide-angle level (register F7, 2026-07-12), power-conserving by construction
-    // (Omega = 4*pi => floor = (1 - eta_ruze)*eta_mesh <= 1, i.e. <= 0 dBi).
+    // continuous across the forward hemisphere (no theta_valid seam in heatmaps),
+    // converging to the floor exactly where idealised PO under-predicts. At the 90°
+    // rear boundary the categorically-invalid PO term is dropped (see the early return
+    // above) — a deliberate step, negligible when PO(90°) sits well below the floor
+    // (the case for all enabled antennas) but nonzero in principle. The floor is a
+    // best-estimate MEDIAN wide-angle level (register F7, 2026-07-12), power-conserving
+    // by construction (Omega = 4*pi => floor = (1 - eta_ruze)*eta_mesh <= 1, i.e. <= 0 dBi).
     let gain = if params.apply_sidelobe_floor {
         gain + sidelobe_floor_gain(config, wavelength)
     } else {

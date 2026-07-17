@@ -1298,6 +1298,10 @@ fn p10_anchor_dsn34m_xband_matches_known_reference_values() {
     // when the F7 redesign added the Huygens obliquity factor (1+cos(theta))/2 to the
     // far-field conversion: each equals the pre-obliquity anchor plus
     // 20*log10((1+cos(theta))/2), verified to +/-0.05 dB at re-derivation.
+    // NOTE: only the 90° anchor meaningfully pins the obliquity factor (shift −6.02 dB vs
+    // tol 1.5); the 1°/5°/20° shifts (−0.001/−0.017/−0.27 dB) are inside their tolerances, so
+    // those anchors pin the integrator, not the factor. The dedicated factor pin is
+    // `obliquity_factor_pinned_against_raw_field` below.
     assert!((g0 - 68.96).abs() < 0.2, "peak {g0:.2} (expect 68.96)");
     assert!((g1 - 14.53).abs() < 0.5, "1deg {g1:.2} (expect 14.53)");
     assert!((g5 - (-9.41)).abs() < 0.6, "5deg {g5:.2} (expect -9.41)");
@@ -1311,6 +1315,42 @@ fn p10_anchor_dsn34m_xband_matches_known_reference_values() {
         (g90 - (-39.32)).abs() < 1.5,
         "90deg {g90:.2} (expect ~-39.32, NOT a high backlobe)"
     );
+}
+
+/// Dedicated obliquity pin (peer-review 2026-07-17): `field_to_dbi` is the exact
+/// PRE-obliquity gain formula (raw field + efficiency, no element factor), so the
+/// difference between the served conversion and it must be exactly
+/// 20*log10((1+cos(theta))/2) — the field factor squared into power. At theta=90
+/// that is -6.0206 dB. This catches removal or mis-powering of the factor
+/// precisely (a non-squared factor would read -3.01 dB), which the 1/5/20-degree
+/// anchors cannot (their shifts are inside tolerance).
+#[test]
+fn obliquity_factor_pinned_against_raw_field() {
+    use antenna_model::model::integrate_aperture;
+    let repo = load_real_repository();
+    let cal = repo
+        .get_calibration("dsn_34m_uncalibrated", "x_band")
+        .expect("dsn_34m_uncalibrated x_band enabled");
+    let cfg = config_for(&cal, None);
+    let f = 8.4e9;
+    let p = integrator_params();
+
+    for theta_deg in [20.0_f64, 60.0, 90.0] {
+        let theta = deg(theta_deg);
+        let served = compute_gain_db(theta, 0.0, &cfg, f, &p).unwrap().gain;
+        let raw = field_to_dbi(
+            integrate_aperture(theta, 0.0, &cfg, f, &p).unwrap().field,
+            &cfg,
+            f,
+        );
+        let expected = 20.0 * ((1.0 + theta.cos()) / 2.0).log10();
+        assert!(
+            ((served - raw) - expected).abs() < 0.01,
+            "obliquity factor mismatch at {theta_deg} deg: served-raw = {:.4} dB, \
+             expected {expected:.4} dB",
+            served - raw
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
