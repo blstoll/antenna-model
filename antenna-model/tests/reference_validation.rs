@@ -850,9 +850,7 @@ fn sidelobe_floor_tuner_coupling_bounded() {
         let floor_design = model_floor_dbi(rms_m, f_mhz);
         let floor_tuner_max = model_floor_dbi(3.0 * rms_m, f_mhz);
         let delta = floor_tuner_max - floor_design;
-        println!(
-            "{aid:<22} {fid:<16} {floor_design:>12.2} {floor_tuner_max:>12.2} {delta:>+8.2}"
-        );
+        println!("{aid:<22} {fid:<16} {floor_design:>12.2} {floor_tuner_max:>12.2} {delta:>+8.2}");
 
         assert!(
             floor_tuner_max <= 0.0 + 1e-9,
