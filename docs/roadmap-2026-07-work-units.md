@@ -597,6 +597,16 @@ philosophy, heatmap grid totality). Execute the unit as specified below.
 - **Depends on:** P1 (both edit domain-contract.md — sequence to avoid conflicts).
 
 ### P4 — f_over_d out-of-range: fail loudly — Effort: S
+**✅ DONE 2026-07-17 (pending commit).** Canonical constants `F_OVER_D_MIN`/`F_OVER_D_MAX`
+([0.2, 1.0]) added to `model/geometry.rs`; the silent no-op branch in
+`ReflectorGeometry::validate` now returns a typed `ValidationError` naming the ratio and its
+inputs. All load/validation seams aligned to the same constants (they previously disagreed):
+`data/types.rs` artifact-load validate ((0, 2.0] → [0.2, 1.0]), `config/settings.rs`
+design-spec validate (same), `calibrate/design_specs_loader.rs` ([0.2, 2.0] → [0.2, 1.0]),
+`calibrate/antenna_config.rs` ((0, 1.0) exclusive → [0.2, 1.0]). Six new tests (TDD, watched
+red first) cover below-range/above-range rejection + boundary acceptance at model, data,
+settings, and both calibrate seams; full workspace green (in-range behavior unchanged).
+Domain-contract `f_over_d` glossary row + open-items entry re-trued in the same change.
 
 - **Entrance / read first:** `antenna-model/src/model/geometry.rs:100-105` — the
   `if !(0.2..=1.0).contains(&f_over_d)` block has an **empty body** (silent no-op). Trace
@@ -610,6 +620,18 @@ philosophy, heatmap grid totality). Execute the unit as specified below.
 - **Depends on:** G1.
 
 ### P5 — Unify G/T computation; fix stale G/T docs — Effort: S
+**✅ DONE 2026-07-17 (pending commit).** The two formulas were verified textually and
+numerically identical (`gain_db − 10·log₁₀(T)`) before consolidating — no escalation needed.
+One shared implementation now exists: `pattern::g_over_t_from_gain_db` (re-exported from
+`model`), called by both `pattern::compute_g_over_t` (which keeps its T>0 check) and the H3
+per-cell path (which passes its already-corrected gain — deliberately NOT `compute_g_over_t`
+itself, which would recompute gain without the correction surface and change served values).
+H3 output pinned by `test_h3_g_over_t_matches_gain_minus_10log10_t` (written before the
+refactor, green across it; also pins G/T absent when `temperature_k` is absent). The
+evaluator module-doc header no longer advertises a `g_over_t_db` output on `GainResponse`.
+Domain-contract gains a `temperature_k` glossary row: T is a user-supplied passthrough
+(noise-temperature modeling = F4); the missing H3 temperature bound stays S6's job. No
+warning/schema text changed, so no openapi.yaml mirror needed (standing rule 4).
 
 - **Entrance / read first:** `antenna-model/src/model/pattern.rs:512`
   (`compute_g_over_t` — zero non-test callers) vs the inline duplicate at
@@ -729,6 +751,24 @@ aggregation dedups it; C8 stage 3 owns the typed-code conversion.
 - **Depends on:** G1. Independent of P7. Sequence before or with C8 stage 3.
 
 ### P6 — Refresh `docs/domain-contract.md` "Open items" — Effort: S (phase closer)
+**✅ DONE 2026-07-18 (pending commit) — Phase 1 closed.** All four exit criteria verified
+against code first (every stale claim re-checked, not assumed):
+1. Resolved items marked with pointers: `phase_center_offset` → axial-defocus rows were
+   already current (P7-era edit); the duplicate-Ruze item is now marked resolved — `surface.rs`
+   is deleted (grep-verified) and `pattern.rs::ruze_efficiency` is the single implementation
+   (glossary `surface_rms` row + open item both updated).
+2. `transparency_at_wavelength` open item + `mesh_spacing` glossary row now cross-reference
+   **D8** (still dead code, re-verified at `geometry.rs:473`; P1 deliberately did not wire it);
+   the `f_over_d` item cross-references **P4** (resolved 2026-07-17 in the P4 pass).
+3. P1/P2/P3/P5/P7/P8 outcomes confirmed present in the contract (efficiency-terms section,
+   offset-gate note, ray-trace-stub section, `temperature_k` row, P7 glossary rows, P8
+   off-axis section) — no gaps found.
+4. The design-doc-drift process item was **already resolved upstream**: design-doc §2.5 now
+   documents the beam-steering sign flip and BDF division matching
+   `coordinates.rs::to_feed_displacement_with_bdf` exactly — verified line-by-line and marked
+   resolved-with-history in the contract.
+Also fixed while verifying: the `axial_defocus` glossary row's stale `integration.rs:529`
+pointer (now `:911`/`:752`/`:981` post-P10). Docs-only change; no code touched.
 
 - **Exit criteria:**
   1. Resolved items marked resolved with pointers: `phase_center_offset_phase` → now axial
