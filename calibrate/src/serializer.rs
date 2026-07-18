@@ -26,23 +26,8 @@ pub enum SerializationError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("Serialization error: {0}")]
-    Serialization(String),
-
     #[error("Invalid artifact: {reason}")]
     InvalidArtifact { reason: String },
-
-    #[error("Version mismatch: file version {file_version}, expected {expected_version}")]
-    VersionMismatch {
-        file_version: u32,
-        expected_version: u32,
-    },
-
-    #[error("Checksum mismatch: expected {expected:#x}, got {actual:#x}")]
-    ChecksumMismatch { expected: u32, actual: u32 },
-
-    #[error("Invalid magic number: expected 'ANTC', got {actual:?}")]
-    InvalidMagicNumber { actual: Vec<u8> },
 }
 
 pub type Result<T> = std::result::Result<T, SerializationError>;
