@@ -285,6 +285,7 @@ The API uses standard HTTP status codes:
 - **200**: Success
 - **400**: Invalid request parameters (validation error, invalid coordinates/attitude)
 - **404**: Antenna or feed not found
+- **413**: Payload too large (request body exceeds the configured maximum size)
 - **500**: Internal server error (computation error, coordinate transform failure)
 - **503**: Service unavailable (startup, shutdown)
 
@@ -297,6 +298,22 @@ Error responses follow a consistent format:
   "details": {
     "antenna_id": "invalid_antenna"
   }
+}
+```
+
+### Request Body Size Limit
+
+Every request body is capped by the configured `server.max_body_size_bytes`
+(default **10 MB**). The limit is enforced on the request's `content-length`
+header: a request whose declared size exceeds the limit is rejected up front
+with **413 Payload Too Large** and the standard JSON error body, before the body
+is parsed. The default comfortably accommodates a maximum-size (1000-item) batch
+request (~0.6 MB). Operators can raise or lower the cap via configuration.
+
+```json
+{
+  "error": "payload_too_large",
+  "message": "Request body of 12000000 bytes exceeds the maximum of 10485760 bytes"
 }
 ```
 

@@ -40,6 +40,8 @@ use std::sync::Arc;
 /// 1. **Inbound**: Tracing → RequestId → RequestLogger → ErrorHandler → RequestSizeTracker → Handler
 /// 2. **Outbound**: Handler → RequestSizeTracker → ErrorHandler → RequestLogger → RequestId → Tracing
 pub fn create_routes(state: Arc<AppState>) -> impl Endpoint {
+    // Hard reject limit for request bodies (413 when exceeded), driven by config.
+    let max_body = state.config.server.max_body_size_bytes;
     Route::new()
         // Health and status endpoints (Sprint 5, Task 5.3)
         .at("/health", get(handlers::health)) // Liveness probe
@@ -68,21 +70,26 @@ pub fn create_routes(state: Arc<AppState>) -> impl Endpoint {
         .with(RequestId) // Generate unique request IDs
         .with(RequestLogger) // Comprehensive logging with timing
         .with(ErrorHandler) // Consistent error handling
-        .with(RequestSizeTracker::new()) // Track request/response sizes
+        .with(RequestSizeTracker::with_limits(
+            max_body, 1_000_000, 10_000_000,
+        )) // Enforce hard body-size limit + track request/response sizes
         // Attach application state
         .data(state)
 }
 
 /// Create routes with custom size thresholds for testing/special deployments
 ///
-/// This allows customization of the request/response size warning thresholds.
+/// This allows customization of the request-body hard reject limit and the
+/// request/response size warning thresholds.
 ///
 /// # Arguments
 /// * `state` - Application state
+/// * `max_request_size` - Hard reject limit for request bodies (bytes); 413 when exceeded
 /// * `warn_request_size` - Warn threshold for request bodies (bytes)
 /// * `warn_response_size` - Warn threshold for response bodies (bytes)
 pub fn create_routes_with_size_limits(
     state: Arc<AppState>,
+    max_request_size: usize,
     warn_request_size: usize,
     warn_response_size: usize,
 ) -> impl Endpoint {
@@ -108,7 +115,8 @@ pub fn create_routes_with_size_limits(
         .with(RequestId)
         .with(RequestLogger)
         .with(ErrorHandler)
-        .with(RequestSizeTracker::with_thresholds(
+        .with(RequestSizeTracker::with_limits(
+            max_request_size,
             warn_request_size,
             warn_response_size,
         ))
@@ -230,7 +238,7 @@ mod tests {
     #[tokio::test]
     async fn test_routes_with_custom_size_limits() {
         let state = Arc::new(AppState::with_defaults());
-        let app = create_routes_with_size_limits(state, 100, 1000);
+        let app = create_routes_with_size_limits(state, 10_000, 100, 1000);
         let cli = TestClient::new(app);
 
         let response = cli.get("/status").send().await;

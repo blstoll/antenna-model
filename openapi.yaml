@@ -275,6 +275,18 @@ paths:
                     details:
                       antenna_id: "antenna_1"
                       feed_id: "invalid_feed"
+        '413':
+          description: Request body exceeds the configured maximum size (server.max_body_size_bytes, default 10 MB)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                payload_too_large:
+                  summary: Payload too large
+                  value:
+                    error: "payload_too_large"
+                    message: "Request body of 12000000 bytes exceeds the maximum of 10485760 bytes"
         '500':
           description: Internal server error
           content:
@@ -312,6 +324,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          description: Request body exceeds the configured maximum size (server.max_body_size_bytes, default 10 MB)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                payload_too_large:
+                  summary: Payload too large
+                  value:
+                    error: "payload_too_large"
+                    message: "Request body of 12000000 bytes exceeds the maximum of 10485760 bytes"
 
   /api/v1/heatmap:
     post:
@@ -374,6 +398,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          description: Request body exceeds the configured maximum size (server.max_body_size_bytes, default 10 MB)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                payload_too_large:
+                  summary: Payload too large
+                  value:
+                    error: "payload_too_large"
+                    message: "Request body of 12000000 bytes exceeds the maximum of 10485760 bytes"
 
   /api/v1/antennas:
     get:

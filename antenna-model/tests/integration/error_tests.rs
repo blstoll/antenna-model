@@ -337,28 +337,101 @@ async fn test_oversized_batch_request() {
 
 #[tokio::test]
 async fn test_request_body_size_limit() {
-    let server = TestServer::start().await.unwrap();
+    // Configure a deliberately small body-size limit so that a *well-formed*
+    // gain request (a few hundred bytes) exceeds it. This proves the configured
+    // `max_body_size_bytes` is actually enforced (413), not that JSON parsing
+    // happens to reject a garbage payload (400).
+    let mut config = ServiceConfig::with_defaults();
+    config.server.host = "127.0.0.1".to_string();
+    config.server.port = 0;
+    config.server.max_body_size_bytes = 256; // Small hard limit
+    config.server.request_timeout_secs = 30;
+
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+    let fixtures_dir = PathBuf::from(&manifest_dir).join("tests/fixtures");
+    config.calibration.data_directory = fixtures_dir.clone();
+    config.calibration.antenna_config_file = fixtures_dir.join("test_antennas.yaml");
+    config.calibration.fail_fast = false;
+    config.performance.worker_threads = 2;
+    config.performance.max_batch_size = 1000;
+    config.performance.enable_parallel_processing = true;
+
+    let server = TestServer::start_with_config(Some(config)).await.unwrap();
     let client = reqwest::Client::new();
 
-    // Create a very large request body (>10MB limit)
-    let large_body = "x".repeat(11 * 1024 * 1024); // 11MB
+    // A valid gain request serializes to well over 256 bytes.
+    let request = builders::simple_gain_request_ecef();
+    let body = serde_json::to_string(&request).unwrap();
+    assert!(
+        body.len() > 256,
+        "test precondition: a valid gain request ({} bytes) must exceed the 256-byte limit",
+        body.len()
+    );
 
     let response = client
         .post(format!("{}/api/v1/gain", server.base_url))
         .header("Content-Type", "application/json")
-        .body(large_body)
+        .body(body)
         .send()
         .await
         .unwrap();
 
-    // Should return 400 or 413 depending on how the framework handles oversized requests
-    assert!(
-        response.status() == 400 || response.status() == 413,
-        "Should return 400 or 413 for oversized request, got {}",
-        response.status()
+    // Enforcement: a well-formed but oversized body must be rejected with exactly 413.
+    assert_eq!(
+        response.status(),
+        413,
+        "well-formed oversized request should return 413 Payload Too Large"
+    );
+
+    // Body must be the project's standard JSON ErrorResponse with the expected code.
+    let err: ErrorResponse = response.json().await.unwrap();
+    assert_eq!(err.error, "payload_too_large");
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_request_body_under_limit_control() {
+    // Control: with the default (10 MB) limit, a normal valid gain request is
+    // NOT rejected as 413. Proves the limiter does not reject legitimate traffic.
+    let server = TestServer::start().await.unwrap();
+    let client = reqwest::Client::new();
+
+    let request = builders::simple_gain_request_ecef();
+    let body = serde_json::to_string(&request).unwrap();
+
+    let response = client
+        .post(format!("{}/api/v1/gain", server.base_url))
+        .header("Content-Type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+
+    assert_ne!(
+        response.status(),
+        413,
+        "a normal request under the default limit must not be rejected as 413"
     );
 
     server.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_max_batch_fits_under_default_body_limit() {
+    // Gotcha guard: the default body-size limit must comfortably exceed a
+    // maximum-size (1000-item) batch, so the limiter never rejects valid batches.
+    let default_limit = ServiceConfig::with_defaults().server.max_body_size_bytes;
+
+    let batch = builders::simple_batch_request(1000);
+    let serialized = serde_json::to_string(&batch).unwrap();
+
+    assert!(
+        serialized.len() < default_limit,
+        "1000-item batch ({} bytes) must fit under the default limit ({} bytes)",
+        serialized.len(),
+        default_limit
+    );
 }
 
 // ============================================================================

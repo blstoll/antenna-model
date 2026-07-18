@@ -10,6 +10,7 @@
 //! - **ErrorHandler**: Consistent error response formatting
 //! - **RequestSizeTracker**: Tracks request and response body sizes
 
+use crate::api::schemas::ErrorResponse;
 use poem::{Endpoint, IntoResponse, Middleware, Request, Response, Result};
 use std::time::Instant;
 use tracing::{error, info, warn};
@@ -247,12 +248,19 @@ impl<E: Endpoint> Endpoint for ErrorHandlerImpl<E> {
     }
 }
 
-/// Request size tracking middleware
+/// Request size tracking and enforcement middleware
 ///
-/// Tracks and logs the sizes of request and response bodies.
-/// Useful for monitoring API usage patterns and identifying
-/// potentially problematic large requests.
+/// Tracks and logs the sizes of request and response bodies, and **rejects**
+/// requests whose `content-length` exceeds the configured hard limit with a
+/// `413 Payload Too Large` and the project's standard JSON error body.
+///
+/// Enforcement is keyed on the `content-length` header (the framework-blessed
+/// level, matching `poem::middleware::SizeLimit`): if the header is present and
+/// exceeds `max_request_size`, the request is rejected before body handling.
+/// Requests without a `content-length` header fall through unchanged.
 pub struct RequestSizeTracker {
+    /// Reject if request size exceeds this hard limit (bytes)
+    pub max_request_size: usize,
     /// Warn if request size exceeds this threshold (bytes)
     pub warn_request_size: usize,
     /// Warn if response size exceeds this threshold (bytes)
@@ -261,16 +269,29 @@ pub struct RequestSizeTracker {
 
 impl RequestSizeTracker {
     /// Create a new request size tracker with default thresholds
+    ///
+    /// The hard reject limit defaults to 10 MB, matching the
+    /// `server.max_body_size_bytes` config default.
     pub fn new() -> Self {
         Self {
+            max_request_size: 10_000_000,   // 10 MB (matches config default)
             warn_request_size: 1_000_000,   // 1 MB
             warn_response_size: 10_000_000, // 10 MB
         }
     }
 
     /// Create a new request size tracker with custom thresholds
-    pub fn with_thresholds(warn_request_size: usize, warn_response_size: usize) -> Self {
+    ///
+    /// * `max_request_size` - hard reject limit for request bodies (413 when exceeded)
+    /// * `warn_request_size` - soft warn threshold for request bodies
+    /// * `warn_response_size` - soft warn threshold for response bodies
+    pub fn with_limits(
+        max_request_size: usize,
+        warn_request_size: usize,
+        warn_response_size: usize,
+    ) -> Self {
         Self {
+            max_request_size,
             warn_request_size,
             warn_response_size,
         }
@@ -289,6 +310,7 @@ impl<E: Endpoint> Middleware<E> for RequestSizeTracker {
     fn transform(&self, ep: E) -> Self::Output {
         RequestSizeTrackerImpl {
             ep,
+            max_request_size: self.max_request_size,
             warn_request_size: self.warn_request_size,
             warn_response_size: self.warn_response_size,
         }
@@ -297,6 +319,7 @@ impl<E: Endpoint> Middleware<E> for RequestSizeTracker {
 
 pub struct RequestSizeTrackerImpl<E> {
     ep: E,
+    max_request_size: usize,
     warn_request_size: usize,
     warn_response_size: usize,
 }
@@ -313,7 +336,7 @@ impl<E: Endpoint> Endpoint for RequestSizeTrackerImpl<E> {
 
         let path = req.uri().path().to_string();
 
-        // Check request size
+        // Check request size (enforce the hard limit before body handling)
         if let Some(size) = req
             .headers()
             .get("content-length")
@@ -328,6 +351,28 @@ impl<E: Endpoint> Endpoint for RequestSizeTrackerImpl<E> {
                     threshold_bytes = self.warn_request_size,
                     "Large request body detected"
                 );
+            }
+
+            if size > self.max_request_size {
+                warn!(
+                    request_id = %request_id,
+                    path = %path,
+                    size_bytes = size,
+                    limit_bytes = self.max_request_size,
+                    "Request body exceeds the maximum allowed size; rejecting with 413"
+                );
+
+                let body = ErrorResponse::new(
+                    "payload_too_large",
+                    format!(
+                        "Request body of {size} bytes exceeds the maximum of {} bytes",
+                        self.max_request_size
+                    ),
+                );
+                return Err(poem::Error::from_string(
+                    serde_json::to_string(&body).unwrap_or_default(),
+                    poem::http::StatusCode::PAYLOAD_TOO_LARGE,
+                ));
             }
         }
 
