@@ -908,8 +908,12 @@ components:
         pointing_frequency_mhz:
           type: number
           format: double
+          minimum: 100
+          maximum: 50000
           nullable: true
-          description: Optional pointing frequency for beam squint correction (MHz)
+          description: >-
+            Optional pointing frequency for beam squint correction (MHz).
+            When supplied, must lie in [100, 50000] MHz.
         n_rings:
           type: integer
           minimum: 0
@@ -924,8 +928,13 @@ components:
         temperature_k:
           type: number
           format: double
+          exclusiveMinimum: true
+          minimum: 0
+          maximum: 10000
           nullable: true
-          description: System noise temperature in Kelvin (used for G/T computation)
+          description: >-
+            System noise temperature in Kelvin (used for G/T computation).
+            When supplied, must be strictly greater than 0 and at most 10000 K.
         vehicle_attitude:
           type: array
           items:

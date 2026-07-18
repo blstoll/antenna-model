@@ -370,6 +370,21 @@ stops early) is tracked as roadmap unit S3.
 - **Batch Size**: Maximum 1000 evaluations
 - **Heatmap Grid**: Maximum 100,000 points
 
+### H3 Link Budget Request
+
+The H3 link-budget request (`H3LinkBudgetRequest` schema) validates the same fields as the
+gain/heatmap endpoints, plus its H3-specific fields:
+
+- **`frequency_mhz`**: 100-50000 MHz (required).
+- **`pointing_frequency_mhz`** (optional): when supplied, 100-50000 MHz — same range as
+  `frequency_mhz`.
+- **`temperature_k`** (optional): when supplied, must be finite, strictly greater than 0, and at
+  most 10000 K (it feeds a `log10` in the G/T computation, so non-positive values are rejected up
+  front rather than producing a NaN `g_over_t_db`).
+- **`h3_resolution`** (optional): when supplied, 0-15 (validated in the request layer, not deep in
+  the H3 grid builder).
+- **`n_rings`**: 0-10.
+
 ## Performance
 
 Target performance metrics:
