@@ -61,8 +61,16 @@ impl<E: Endpoint> Endpoint for RequestIdImpl<E> {
         req.extensions_mut()
             .insert(RequestIdExt(request_id.clone()));
 
-        // Call the endpoint
-        let mut response = self.ep.call(req).await.map(IntoResponse::into_response)?;
+        // Call the endpoint. On error, convert the error into its response here
+        // (rather than propagating with `?`) so the correlation header is
+        // attached to error responses (413 / 504 / 4xx / 5xx) as well. Without
+        // this, poem's `?` short-circuit would emit error responses with no
+        // x-request-id, leaving exactly the failures operators most need to
+        // trace uncorrelatable in both logs and response headers.
+        let mut response = match self.ep.call(req).await {
+            Ok(resp) => resp.into_response(),
+            Err(err) => err.into_response(),
+        };
 
         // Add request ID to response headers
         // Note: request_id is a valid UUID string, but we handle the parse error defensively

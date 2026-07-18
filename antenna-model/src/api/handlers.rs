@@ -452,31 +452,32 @@ pub async fn generate_heatmap_endpoint(
     // synchronously (CPU-bound); offload it to the blocking pool so the async
     // task yields at the join `.await` and the RequestTimeout middleware can
     // fire. (The rayon work is not cancelled on timeout — see RequestTimeout.)
-    // `request` is cloned into the closure because the original is still needed
-    // for post-compute logging below.
+    // Pre-extract only the two small fields post-compute logging needs, then
+    // MOVE `request` into the closure — avoids deep-cloning the whole
+    // HeatmapRequest (grid config + three 3D positions) on every heavy call.
     let compute_state = state.0.clone();
-    let compute_request = request.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        generate_heatmap(&compute_request, &compute_state.repository)
-    })
-    .await
-    .map_err(|join_err| {
-        error!(error = %join_err, "Heatmap compute task failed to join");
-        let error_response = ErrorResponse::new(
-            "internal_error",
-            format!("Heatmap computation task failed: {join_err}"),
-        );
-        poem::Error::from_string(
-            serde_json::to_string(&error_response).unwrap_or_default(),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )
-    })?;
+    let antenna_id = request.antenna_id.clone();
+    let feed_id = request.feed_id.clone();
+    let result =
+        tokio::task::spawn_blocking(move || generate_heatmap(&request, &compute_state.repository))
+            .await
+            .map_err(|join_err| {
+                error!(error = %join_err, "Heatmap compute task failed to join");
+                let error_response = ErrorResponse::new(
+                    "internal_error",
+                    format!("Heatmap computation task failed: {join_err}"),
+                );
+                poem::Error::from_string(
+                    serde_json::to_string(&error_response).unwrap_or_default(),
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                )
+            })?;
 
     match result {
         Ok(response) => {
             info!(
-                antenna_id = %request.antenna_id,
-                feed_id = %request.feed_id,
+                antenna_id = %antenna_id,
+                feed_id = %feed_id,
                 points_evaluated = response.metadata.points_evaluated,
                 computation_time_ms = response.metadata.computation_time_ms,
                 peak_gain_db = response.metadata.peak_gain_db,
@@ -487,8 +488,8 @@ pub async fn generate_heatmap_endpoint(
         }
         Err(e) => {
             error!(
-                antenna_id = %request.antenna_id,
-                feed_id = %request.feed_id,
+                antenna_id = %antenna_id,
+                feed_id = %feed_id,
                 error = %e,
                 "Heatmap generation failed"
             );
@@ -988,13 +989,15 @@ pub async fn h3_link_budget(
     // Delegate to service layer. The service runs rayon synchronously
     // (CPU-bound); offload it to the blocking pool so the async task yields at
     // the join `.await` and the RequestTimeout middleware can fire. (The rayon
-    // work is not cancelled on timeout — see RequestTimeout.) `request` is cloned
-    // into the closure because the original is still needed for post-compute
-    // logging below; the looked-up `calibration` (owned) and cache `Arc` move in.
-    let compute_request = request.clone();
+    // work is not cancelled on timeout — see RequestTimeout.) Pre-extract only
+    // the two small fields post-compute logging needs, then MOVE `request` into
+    // the closure — avoids deep-cloning the whole H3LinkBudgetRequest; the
+    // looked-up `calibration` (owned) and cache `Arc` move in alongside it.
     let compute_cache = state.cache.clone();
+    let antenna_id = request.antenna_id.clone();
+    let feed_id = request.feed_id.clone();
     let result = tokio::task::spawn_blocking(move || {
-        compute_h3_link_budget(&compute_request, &calibration, &compute_cache, start_time)
+        compute_h3_link_budget(&request, &calibration, &compute_cache, start_time)
     })
     .await
     .map_err(|join_err| {
@@ -1012,8 +1015,8 @@ pub async fn h3_link_budget(
     match result {
         Ok(response) => {
             info!(
-                antenna_id = %request.antenna_id,
-                feed_id = %request.feed_id,
+                antenna_id = %antenna_id,
+                feed_id = %feed_id,
                 cells_computed = response.cells.len(),
                 computation_time_ms = response.metadata.computation_time_ms,
                 peak_gain_db = response.metadata.peak_gain_db,
@@ -1024,8 +1027,8 @@ pub async fn h3_link_budget(
         }
         Err(e) => {
             error!(
-                antenna_id = %request.antenna_id,
-                feed_id = %request.feed_id,
+                antenna_id = %antenna_id,
+                feed_id = %feed_id,
                 error = %e,
                 "H3 link budget computation failed"
             );

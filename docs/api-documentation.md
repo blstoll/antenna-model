@@ -320,12 +320,20 @@ request (~0.6 MB). Operators can raise or lower the cap via configuration.
 
 ### Request Timeout
 
-Every request is bounded by the configured `server.request_timeout_secs`
-(default **30 s**). If processing exceeds the deadline, the request is abandoned
-and the client receives **504 Gateway Timeout** with the standard JSON error
-body. This primarily bounds the compute-heavy endpoints (batch, heatmap, H3 link
-budget), whose synchronous rayon work is offloaded to a blocking thread pool so
-the timeout can fire promptly instead of blocking a server worker thread.
+The configured `server.request_timeout_secs` (default **30 s**) bounds the
+**compute-heavy endpoints** — `/api/v1/gain/batch`, `/api/v1/heatmap`, and
+`/api/v1/h3-heatmap`. Their synchronous rayon work is offloaded to a blocking
+thread pool so the async task yields and the timeout can fire promptly instead
+of blocking a server worker thread; if the deadline is exceeded the request is
+abandoned and the client receives **504 Gateway Timeout** with the standard JSON
+error body.
+
+The lightweight single-evaluation endpoint `/api/v1/gain` runs its computation
+inline (it targets the <100 ms path) and is **not** offloaded, so the timeout
+middleware cannot preempt it — a pathologically slow single evaluation would run
+to completion rather than returning 504. This is an intentional scope boundary:
+the deadline exists to bound the expensive batch/grid endpoints. Enforcing it on
+the inline path (and cancelling in-flight compute generally) is roadmap unit S3.
 
 The status is **504 (a 5xx)**, not 408: the deadline is a *server-side* budget
 (the client sent a valid request; the server exceeded its own processing limit),

@@ -2,22 +2,33 @@
 //!
 //! This module defines all the API routes and combines them with middleware.
 //!
-//! # Middleware Stack (Sprint 5)
-//! The middleware is applied in the following order (innermost to outermost):
-//! 1. **Tracing** - Built-in poem tracing middleware
+//! # Middleware Stack
+//!
+//! Execution order, **outermost → innermost → handler**:
+//! 1. **Tracing** - Built-in poem tracing middleware (outermost)
 //! 2. **RequestId** - Generate/propagate unique request IDs
 //! 3. **RequestLogger** - Comprehensive structured logging with timing
 //! 4. **ErrorHandler** - Consistent error response formatting
-//! 5. **RequestSizeTracker** - Track and warn on large request/response bodies
-//! 6. **RequestTimeout** - Enforce the configured per-request processing deadline (504)
+//! 5. **RequestSizeTracker** - Enforce/track request & response body sizes (413)
+//! 6. **RequestTimeout** - Enforce the per-request processing deadline (504, innermost)
 //!
 //! This order ensures:
-//! - Request IDs are available for all subsequent middleware and handlers
-//! - Timing starts before any processing
-//! - Errors are caught and logged consistently
-//! - Size tracking happens at the outermost layer
-//! - The timeout wraps only handler execution (innermost), so body-size
-//!   rejection stays instant and outside the deadline
+//! - `RequestId` populates the request-id extension **before** any other layer
+//!   reads it, so every log line and every error path (incl. the 413 and 504
+//!   rejections) carries the real id rather than `"unknown"`.
+//! - `RequestLogger` times and logs completion for **every** outcome, including a
+//!   timeout — because the 504 error propagates back out through it.
+//! - Body-size (413) rejection sits **outside** the timeout window (instant), and
+//!   the timeout wraps only handler execution (innermost).
+//!
+//! ## poem ordering caveat (why the `.with(...)` chain is written in reverse)
+//!
+//! `EndpointExt::with(m)` returns `m.transform(self)` — the middleware **wraps**
+//! the current endpoint — so the **last** `.with(...)` becomes the **outermost**
+//! layer. The chain in [`build_app`] is therefore written handler-inward-first
+//! (`RequestTimeout` applied first = innermost, `Tracing` last = outermost). A
+//! prior revision listed the layers in source order and got the runtime order
+//! exactly backwards; do not "tidy" the chain into declaration order.
 
 use crate::api::handlers;
 use crate::api::middleware::{
@@ -28,28 +39,24 @@ use poem::{get, middleware::Tracing, post, Endpoint, EndpointExt, Route};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Create all API routes with production-grade middleware
+/// Default soft warn thresholds for request / response body sizes (bytes).
+const DEFAULT_WARN_REQUEST_SIZE: usize = 1_000_000;
+const DEFAULT_WARN_RESPONSE_SIZE: usize = 10_000_000;
+
+/// Assemble the full route table and production middleware stack.
 ///
-/// This function sets up the routing table for the API, including:
-/// - Health and status endpoints (Sprint 5, Task 5.3)
-/// - Future: Evaluation, batch, and heatmap endpoints (Sprint 5+)
-/// - Complete middleware stack for production readiness
-///
-/// # Arguments
-/// * `state` - Application state containing server metadata and configuration
-///
-/// # Returns
-/// Configured Route with all endpoints and middleware
-///
-/// # Middleware Order
-/// Middleware is applied from innermost to outermost, so the request flows:
-/// 1. **Inbound**: Tracing → RequestId → RequestLogger → ErrorHandler → RequestSizeTracker → Handler
-/// 2. **Outbound**: Handler → RequestSizeTracker → ErrorHandler → RequestLogger → RequestId → Tracing
-pub fn create_routes(state: Arc<AppState>) -> impl Endpoint {
-    // Hard reject limit for request bodies (413 when exceeded), driven by config.
-    let max_body = state.config.server.max_body_size_bytes;
-    // Per-request processing deadline (504 when exceeded), driven by config.
-    let timeout = Duration::from_secs(state.config.server.request_timeout_secs);
+/// All public builders delegate here so the route table and middleware ordering
+/// live in exactly one place. See the module docs for the execution order and
+/// the poem `.with(...)` ordering caveat: the chain below is written
+/// handler-inward-first on purpose (the **last** `.with` is the **outermost**
+/// layer). Do not reorder it into declaration order.
+fn build_app(
+    state: Arc<AppState>,
+    max_request_size: usize,
+    warn_request_size: usize,
+    warn_response_size: usize,
+    timeout: Duration,
+) -> impl Endpoint {
     Route::new()
         // Health and status endpoints (Sprint 5, Task 5.3)
         .at("/health", get(handlers::health)) // Liveness probe
@@ -73,28 +80,43 @@ pub fn create_routes(state: Arc<AppState>) -> impl Endpoint {
             "/api/v1/antennas/:id/feeds/:feed_id",
             get(handlers::get_feed_details),
         )
-        // Apply middleware stack (innermost to outermost)
-        .with(Tracing) // Built-in poem tracing
-        .with(RequestId) // Generate unique request IDs
-        .with(RequestLogger) // Comprehensive logging with timing
-        .with(ErrorHandler) // Consistent error handling
+        // Middleware — written handler-inward-first because poem's LAST `.with`
+        // is the OUTERMOST layer (see module docs). Runtime order is therefore
+        // Tracing → RequestId → RequestLogger → ErrorHandler → RequestSizeTracker
+        // → RequestTimeout → handler.
+        .with(RequestTimeout::new(timeout)) // innermost: bounds handler execution only
         .with(RequestSizeTracker::with_limits(
-            max_body, 1_000_000, 10_000_000,
-        )) // Enforce hard body-size limit + track request/response sizes
-        // Enforce the per-request processing deadline (504). Innermost so it
-        // wraps only handler execution: body-size rejection stays instant
-        // (outside the timeout) and this bounds the future we actually want to
-        // limit. See RequestTimeout docs: the response is bounded, not the
-        // background rayon compute (that is S3).
-        .with(RequestTimeout::new(timeout))
-        // Attach application state
+            max_request_size,
+            warn_request_size,
+            warn_response_size,
+        )) // 413 reject + size tracking, outside the timeout window
+        .with(ErrorHandler) // Consistent error handling
+        .with(RequestLogger) // Comprehensive logging with timing
+        .with(RequestId) // Generate/propagate request IDs (must precede all readers)
+        .with(Tracing) // outermost: built-in poem tracing span
+        // Attach application state (available to every layer + handler)
         .data(state)
 }
 
-/// Create routes with custom size thresholds for testing/special deployments
+/// Create all API routes with production-grade middleware.
 ///
-/// This allows customization of the request-body hard reject limit and the
-/// request/response size warning thresholds.
+/// Body-size limit and request timeout are read from `state.config.server`.
+/// See the module docs for the middleware stack and execution order.
+pub fn create_routes(state: Arc<AppState>) -> impl Endpoint {
+    let max_body = state.config.server.max_body_size_bytes;
+    let timeout = Duration::from_secs(state.config.server.request_timeout_secs);
+    build_app(
+        state,
+        max_body,
+        DEFAULT_WARN_REQUEST_SIZE,
+        DEFAULT_WARN_RESPONSE_SIZE,
+        timeout,
+    )
+}
+
+/// Create routes with custom size thresholds for testing/special deployments.
+///
+/// The request timeout is still read from `state.config.server.request_timeout_secs`.
 ///
 /// # Arguments
 /// * `state` - Application state
@@ -107,37 +129,32 @@ pub fn create_routes_with_size_limits(
     warn_request_size: usize,
     warn_response_size: usize,
 ) -> impl Endpoint {
-    // Per-request processing deadline (504 when exceeded), driven by config.
     let timeout = Duration::from_secs(state.config.server.request_timeout_secs);
-    Route::new()
-        .at("/health", get(handlers::health))
-        .at("/ready", get(handlers::ready))
-        .at("/status", get(handlers::status))
-        .at("/api/v1/gain", post(handlers::compute_gain))
-        .at("/api/v1/gain/batch", post(handlers::compute_gain_batch))
-        .at("/api/v1/heatmap", post(handlers::generate_heatmap_endpoint))
-        .at("/api/v1/h3-heatmap", post(handlers::h3_link_budget))
-        .at("/api/v1/antennas", get(handlers::list_antennas))
-        .at("/api/v1/antennas/:id", get(handlers::get_antenna_details))
-        .at(
-            "/api/v1/antennas/:id/feeds",
-            get(handlers::list_antenna_feeds),
-        )
-        .at(
-            "/api/v1/antennas/:id/feeds/:feed_id",
-            get(handlers::get_feed_details),
-        )
-        .with(Tracing)
-        .with(RequestId)
-        .with(RequestLogger)
-        .with(ErrorHandler)
-        .with(RequestSizeTracker::with_limits(
-            max_request_size,
-            warn_request_size,
-            warn_response_size,
-        ))
-        .with(RequestTimeout::new(timeout))
-        .data(state)
+    build_app(
+        state,
+        max_request_size,
+        warn_request_size,
+        warn_response_size,
+        timeout,
+    )
+}
+
+/// Create routes with an explicit request-timeout `Duration`.
+///
+/// The public `server.request_timeout_secs` config is whole seconds; this
+/// builder lets tests (and special deployments) set a sub-second deadline so the
+/// 504 timeout path can be exercised quickly, with a large margin over real
+/// compute rather than depending on multi-second wall-clock timing. Body-size
+/// limit still comes from config.
+pub fn create_routes_with_timeout(state: Arc<AppState>, timeout: Duration) -> impl Endpoint {
+    let max_body = state.config.server.max_body_size_bytes;
+    build_app(
+        state,
+        max_body,
+        DEFAULT_WARN_REQUEST_SIZE,
+        DEFAULT_WARN_RESPONSE_SIZE,
+        timeout,
+    )
 }
 
 #[cfg(test)]
@@ -173,6 +190,39 @@ mod tests {
 
         let response = cli.get("/nonexistent").send().await;
         response.assert_status(poem::http::StatusCode::NOT_FOUND);
+    }
+
+    /// Regression pin for the middleware-ordering fix: RequestId is the
+    /// outermost application-layer (only Tracing is outer) and attaches the
+    /// correlation header even on the error path. Before the fix RequestId sat
+    /// near the innermost position and used `?`, so error responses carried no
+    /// x-request-id — the failures operators most need to trace were
+    /// uncorrelatable. A client-supplied id must be echoed back on the error.
+    #[tokio::test]
+    async fn test_error_response_carries_request_id() {
+        let state = Arc::new(AppState::with_defaults());
+        let app = create_routes(state);
+        let cli = TestClient::new(app);
+
+        let custom_id = "error-correlation-id-42";
+        let response = cli
+            .get("/nonexistent")
+            .header(REQUEST_ID_HEADER, custom_id)
+            .send()
+            .await;
+
+        response.assert_status(poem::http::StatusCode::NOT_FOUND);
+
+        let echoed = response
+            .0
+            .headers()
+            .get(REQUEST_ID_HEADER)
+            .and_then(|v| v.to_str().ok());
+        assert_eq!(
+            echoed,
+            Some(custom_id),
+            "error responses must carry the x-request-id correlation header"
+        );
     }
 
     #[tokio::test]

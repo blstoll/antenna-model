@@ -64,14 +64,39 @@ impl TestServer {
             cfg
         });
 
+        // Default: derive the request timeout from config (whole seconds).
+        let timeout = Duration::from_secs(config.server.request_timeout_secs);
+        Self::start_inner(config, timeout).await
+    }
+
+    /// Start test server with an explicit request-timeout `Duration`.
+    ///
+    /// The public `request_timeout_secs` config is whole seconds; this lets a
+    /// test exercise the 504 timeout path with a **sub-second** deadline, so the
+    /// timeout fires with a large margin over real compute instead of coupling
+    /// the assertion to multi-second wall-clock timing.
+    pub async fn start_with_config_and_timeout(
+        config: ServiceConfig,
+        timeout: Duration,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::start_inner(config, timeout).await
+    }
+
+    /// Shared server bring-up: load the repository, build the app with the given
+    /// request-timeout `Duration`, bind an ephemeral port, and wait for health.
+    async fn start_inner(
+        config: ServiceConfig,
+        timeout: Duration,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         // Load calibration repository
         let repository = CalibrationRepository::load_from_config(&config.calibration)
             .expect("Failed to load calibration data for tests");
 
         let state = Arc::new(AppState::new(config.clone(), repository));
 
-        // Build routes using create_routes
-        let app = antenna_model::api::routes::create_routes(state);
+        // Build routes with the resolved timeout (create_routes is exactly this
+        // with timeout = from_secs(config.request_timeout_secs)).
+        let app = antenna_model::api::routes::create_routes_with_timeout(state, timeout);
 
         // Create shutdown channel
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();

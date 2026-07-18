@@ -15,14 +15,14 @@ use antenna_model::api::schemas::*;
 use antenna_model::config::ServiceConfig;
 use std::path::PathBuf;
 
-/// Build a ServiceConfig pointed at the integration test fixtures with a
-/// caller-supplied request timeout (seconds).
-fn config_with_timeout(request_timeout_secs: u64) -> ServiceConfig {
+/// Build a ServiceConfig pointed at the integration test fixtures. The request
+/// timeout is supplied separately via `start_with_config_and_timeout`, so it is
+/// not set here.
+fn fixture_config() -> ServiceConfig {
     let mut cfg = ServiceConfig::with_defaults();
     cfg.server.host = "127.0.0.1".to_string();
     cfg.server.port = 0;
     cfg.server.max_body_size_bytes = 10_485_760;
-    cfg.server.request_timeout_secs = request_timeout_secs;
 
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
     let fixtures_dir = PathBuf::from(&manifest_dir).join("tests/fixtures");
@@ -37,12 +37,12 @@ fn config_with_timeout(request_timeout_secs: u64) -> ServiceConfig {
     cfg
 }
 
-/// A deliberately heavy heatmap request: the large (13 m) Ka-band offset-feed
-/// antenna is the most expensive per-point integration in the fixtures (high
-/// D/λ, wide-angle coma). A 23x23 grid spanning the full 0-45 deg quadrant keeps
-/// the expensive wide-angle points while bounding the point count, so the
-/// compute reliably exceeds a 1-second timeout (empirically several seconds)
-/// without spawning minutes of un-cancellable background rayon work.
+/// A heatmap heavy enough that its compute dwarfs the sub-second test deadline
+/// by a wide margin. The large (13 m) Ka-band offset-feed antenna is the most
+/// expensive per-point integration in the fixtures (high D/λ, wide-angle coma);
+/// a 12x12 grid over the full 0-45 deg quadrant costs hundreds of ms — far above
+/// the 50 ms deadline the test sets, yet bounded so the un-cancellable
+/// background rayon (the S2/S3 limitation) finishes in well under a second.
 fn heavy_heatmap_request() -> HeatmapRequest {
     let mut req = builders::simple_heatmap_request();
     req.antenna_id = "test_large".to_string();
@@ -52,45 +52,70 @@ fn heavy_heatmap_request() -> HeatmapRequest {
         azimuth_range_deg: RangeConfig {
             min: 0.0,
             max: 45.0,
-            step: 2.0,
+            step: 4.0,
         },
         elevation_range_deg: RangeConfig {
             min: 0.0,
             max: 45.0,
-            step: 2.0,
+            step: 4.0,
         },
     };
     req
 }
 
+/// The compute-heavy heatmap endpoint must honor the request timeout: when
+/// compute exceeds the deadline the client gets 504 Gateway Timeout with the
+/// standard JSON body, and the 504 is correlatable (carries `x-request-id`,
+/// echoing a client-supplied id).
+///
+/// The deadline is set to 50 ms via the `Duration` seam so the assertion rests
+/// on a large margin (hundreds of ms of compute vs 50 ms), not on exact
+/// wall-clock timing — robust across hardware and future integrator speedups.
+/// The *deterministic* firing of the timeout mechanism itself is pinned
+/// separately by the sleep-based middleware unit tests in `api::middleware`.
 #[tokio::test]
 async fn test_heavy_heatmap_times_out_with_504() {
-    // Tiny timeout (1 s, the smallest the whole-second config permits) against a
-    // heavy heatmap that reliably takes longer to compute.
-    let config = config_with_timeout(1);
-    let server = TestServer::start_with_config(Some(config)).await.unwrap();
+    let timeout = std::time::Duration::from_millis(50);
+    let server = TestServer::start_with_config_and_timeout(fixture_config(), timeout)
+        .await
+        .unwrap();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(60))
         .build()
         .unwrap();
 
     let request = heavy_heatmap_request();
+    let custom_id = "timeout-correlation-test-id";
 
     let start = std::time::Instant::now();
     let response = client
         .post(format!("{}/api/v1/heatmap", server.base_url))
         .header("Content-Type", "application/json")
+        .header("x-request-id", custom_id)
         .json(&request)
         .send()
         .await
         .unwrap();
     let elapsed = start.elapsed();
 
+    let status = response.status();
+    let echoed_id = response
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
     assert_eq!(
-        response.status(),
-        504,
-        "a heatmap exceeding request_timeout_secs must return 504 Gateway Timeout (elapsed {:?})",
-        elapsed
+        status, 504,
+        "a heatmap exceeding the request timeout must return 504 Gateway Timeout (elapsed {elapsed:?})"
+    );
+
+    // The 504 must be correlatable: RequestId (outermost) attaches the id even on
+    // the timeout error path, echoing the client-supplied value.
+    assert_eq!(
+        echoed_id.as_deref(),
+        Some(custom_id),
+        "the 504 response must carry the x-request-id correlation header"
     );
 
     let err: ErrorResponse = response.json().await.unwrap();

@@ -368,19 +368,33 @@ async fn test_request_body_size_limit() {
         body.len()
     );
 
+    let custom_id = "payload-too-large-correlation-id";
     let response = client
         .post(format!("{}/api/v1/gain", server.base_url))
         .header("Content-Type", "application/json")
+        .header("x-request-id", custom_id)
         .body(body)
         .send()
         .await
         .unwrap();
 
     // Enforcement: a well-formed but oversized body must be rejected with exactly 413.
+    let status = response.status();
+    // The 413 (emitted by RequestSizeTracker, which sits inner of RequestId in
+    // the corrected middleware order) must still be correlatable.
+    let echoed_id = response
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
     assert_eq!(
-        response.status(),
-        413,
+        status, 413,
         "well-formed oversized request should return 413 Payload Too Large"
+    );
+    assert_eq!(
+        echoed_id.as_deref(),
+        Some(custom_id),
+        "the 413 response must carry the x-request-id correlation header"
     );
 
     // Body must be the project's standard JSON ErrorResponse with the expected code.
