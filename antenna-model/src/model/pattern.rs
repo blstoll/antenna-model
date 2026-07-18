@@ -650,12 +650,21 @@ pub fn compute_g_over_t(
     }
 
     let result = compute_gain_db(theta, phi, config, frequency_hz, params)?;
-    let gain_db = result.gain;
 
-    // G/T in dB/K = G(dB) - 10·log₁₀(T)
-    let g_over_t_db = gain_db - 10.0 * temperature_k.log10();
+    Ok(g_over_t_from_gain_db(result.gain, temperature_k))
+}
 
-    Ok(g_over_t_db)
+/// G/T in dB/K from an already-computed gain: `G(dB) − 10·log₁₀(T)`.
+///
+/// The single shared G/T formula (P5): callers that already hold a gain value
+/// (e.g. the H3 link-budget per-cell path, whose gain includes the correction
+/// surface) use this directly instead of duplicating the expression.
+///
+/// T is a user-supplied system noise temperature passthrough — no antenna
+/// noise-temperature model exists (roadmap F4). Positivity of `temperature_k`
+/// is the caller's responsibility (validated at the API layer where applicable).
+pub fn g_over_t_from_gain_db(gain_db: f64, temperature_k: f64) -> f64 {
+    gain_db - 10.0 * temperature_k.log10()
 }
 
 /// Compute beamwidth at specified gain drop from peak
@@ -962,6 +971,14 @@ mod tests {
 
         let result = compute_g_over_t(0.0, 0.0, &config, 8.4e9, -10.0, &params);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_g_over_t_from_gain_db_known_value() {
+        // 30 dBi gain, 100 K → 30 − 10·log10(100) = 30 − 20 = 10 dB/K exactly.
+        assert!((g_over_t_from_gain_db(30.0, 100.0) - 10.0).abs() < 1e-12);
+        // 0 dBi, 1 K → 0 dB/K (log10(1) = 0).
+        assert!((g_over_t_from_gain_db(0.0, 1.0)).abs() < 1e-12);
     }
 
     #[test]

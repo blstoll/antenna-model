@@ -104,8 +104,8 @@ pub use integration::{
 };
 
 pub use pattern::{
-    compute_beamwidth, compute_g_over_t, compute_gain, compute_gain_db, overall_efficiency,
-    ruze_efficiency, theoretical_max_gain,
+    compute_beamwidth, compute_g_over_t, compute_gain, compute_gain_db, g_over_t_from_gain_db,
+    overall_efficiency, ruze_efficiency, theoretical_max_gain,
 };
 
 pub use phase::{
