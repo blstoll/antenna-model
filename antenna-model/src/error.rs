@@ -88,10 +88,6 @@ pub enum DataError {
         expected: u32,
     },
 
-    /// Serialization error
-    #[error("serialization error: {0}")]
-    Serialization(String),
-
     /// Deserialization error
     #[error("deserialization error in {path}: {reason}")]
     Deserialization { path: String, reason: String },
@@ -378,18 +374,6 @@ pub enum ConfigError {
 impl From<ValidationError> for ComputationError {
     fn from(err: ValidationError) -> Self {
         ComputationError::InvalidModelState(err.to_string())
-    }
-}
-
-impl From<bincode::error::EncodeError> for DataError {
-    fn from(err: bincode::error::EncodeError) -> Self {
-        DataError::Serialization(err.to_string())
-    }
-}
-
-impl From<bincode::error::DecodeError> for DataError {
-    fn from(err: bincode::error::DecodeError) -> Self {
-        DataError::Serialization(err.to_string())
     }
 }
 

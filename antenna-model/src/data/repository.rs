@@ -526,8 +526,7 @@ mod tests {
 
     fn write_calibration_file(calibration: &AntennaCalibration) -> NamedTempFile {
         let mut temp_file = NamedTempFile::new().unwrap();
-        let config = bincode::config::standard();
-        let encoded = bincode::encode_to_vec(calibration, config).unwrap();
+        let encoded = postcard::to_allocvec(calibration).unwrap();
         temp_file.write_all(&encoded).unwrap();
         temp_file.flush().unwrap();
         temp_file

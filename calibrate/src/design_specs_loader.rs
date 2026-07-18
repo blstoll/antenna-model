@@ -230,13 +230,17 @@ impl ReflectorSpecs {
             );
         }
 
-        // Check f/D ratio is reasonable (typically 0.3 - 1.5)
         let f_over_d = self.focal_length_m / self.diameter_m;
-        if !(0.2..=2.0).contains(&f_over_d) {
-            anyhow::bail!(
-                "f/D ratio {:.3} is outside reasonable range [0.2, 2.0]",
-                f_over_d
-            );
+        {
+            use antenna_model::model::geometry::{F_OVER_D_MAX, F_OVER_D_MIN};
+            if !(F_OVER_D_MIN..=F_OVER_D_MAX).contains(&f_over_d) {
+                anyhow::bail!(
+                    "f/D ratio {:.3} is outside supported range [{}, {}]",
+                    f_over_d,
+                    F_OVER_D_MIN,
+                    F_OVER_D_MAX
+                );
+            }
         }
 
         Ok(())
@@ -459,6 +463,32 @@ antenna_name: "Test"
 reflector:
   diameter_m: 1.0
   focal_length_m: 3.0  # f/D = 3.0, too high
+  surface_rms_mm: 1.0
+feeds:
+  - feed_id: "x_band"
+    name: "X-Band"
+    position: [0.0, 0.0, 0.0]
+    q_factor: 8.0
+    phase_center_offset_m: 0.0
+    frequency_range: [7100.0, 8500.0]
+"#;
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(yaml_content.as_bytes()).unwrap();
+        temp_file.flush().unwrap();
+
+        let result = DesignSpecs::load_from_file(temp_file.path());
+        assert!(result.is_err());
+        assert!(format!("{:?}", result.unwrap_err()).contains("f/D ratio"));
+    }
+
+    #[test]
+    fn test_f_over_d_ratio_above_one_rejected() {
+        let yaml_content = r#"
+antenna_id: "test"
+antenna_name: "Test"
+reflector:
+  diameter_m: 1.0
+  focal_length_m: 1.5  # f/D = 1.5, above the [0.2, 1.0] range
   surface_rms_mm: 1.0
 feeds:
   - feed_id: "x_band"

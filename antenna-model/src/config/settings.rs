@@ -595,11 +595,14 @@ impl DesignSpecsConfig {
             });
         }
 
-        if self.f_over_d_ratio <= 0.0 || self.f_over_d_ratio > 2.0 {
-            return Err(ConfigError::InvalidValue {
-                key: format!("antenna.{}.design_specs.f_over_d_ratio", antenna_id),
-                reason: "must be between 0 and 2".to_string(),
-            });
+        {
+            use crate::model::geometry::{F_OVER_D_MAX, F_OVER_D_MIN};
+            if !(F_OVER_D_MIN..=F_OVER_D_MAX).contains(&self.f_over_d_ratio) {
+                return Err(ConfigError::InvalidValue {
+                    key: format!("antenna.{}.design_specs.f_over_d_ratio", antenna_id),
+                    reason: format!("must be between {F_OVER_D_MIN} and {F_OVER_D_MAX}"),
+                });
+            }
         }
 
         if self.surface_rms_mm < 0.0 {
@@ -1277,6 +1280,36 @@ antennas:
       diameter_m: -1.0
       focal_length_m: 1.0
       f_over_d_ratio: 0.5
+      surface_rms_mm: 1.0
+      feeds:
+        - id: "test"
+          name: "Test Feed"
+          position: [0.0, 0.0, 0.0]
+          q_factor: 8.0
+          phase_center_offset_m: 0.0
+          frequency_range: [8000.0, 8500.0]
+"#;
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(yaml_content.as_bytes()).unwrap();
+        let path = temp_file.path().to_str().unwrap();
+
+        let result = AntennaConfig::from_file(path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_design_specs_validation_out_of_range_f_over_d() {
+        let yaml_content = r#"
+antennas:
+  - id: "out_of_range_f_over_d"
+    name: "Out Of Range f/D Antenna"
+    calibration_status: "uncalibrated"
+    enabled: true
+    design_specs:
+      diameter_m: 1.0
+      focal_length_m: 1.5
+      f_over_d_ratio: 1.5
       surface_rms_mm: 1.0
       feeds:
         - id: "test"

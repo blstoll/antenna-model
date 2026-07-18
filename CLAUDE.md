@@ -85,7 +85,7 @@ antenna-model/           # Cargo workspace root
 │       ├── parameter_tuner.rs    # Differential evolution optimizer
 │       ├── correction_surface.rs # B-spline/RBF fitting
 │       ├── validator.rs          # Cross-validation
-│       └── serializer.rs         # Binary artifact generation
+│       └── serializer.rs         # CalibrationArtifact type + JSON metadata/report sidecars
 └── calibration_data/   # Calibration config (antennas.yaml) + generated *.bin artifacts (none checked in; see roadmap D9)
 ```
 
@@ -175,7 +175,7 @@ The `calibrate` tool processes measurement data:
 2. **Tune Parameters** (`parameter_tuner.rs`) - Differential evolution optimizer adjusts physical parameters
 3. **Fit Correction Surface** (`correction_surface.rs`) - B-spline/RBF fitted to residuals (measured - physics)
 4. **Validate** (`validator.rs`) - Cross-validation, ensure <1 dB error in main lobe/first sidelobe
-5. **Serialize** (`serializer.rs`) - Generate binary `.bin` artifact with `AntennaCalibration` structure
+5. **Serialize** (`main.rs::write_antc_artifact`) - Generate binary `.bin` artifact: an `AntennaCalibration` encoded with **postcard** (documented, versioned wire format), wrapped in the ANTC header (magic + version + CRC32 + length). Migrated off the unmaintained `bincode` crate 2026-07-18; ANTC artifact version is 2. Do NOT add `#[serde(skip_serializing_if)]`/`skip`/`flatten` to any serialized calibration type — postcard is positional and non-self-describing, so those attributes silently corrupt the format (see the note atop `data/types.rs`).
 
 ### Configuration System
 

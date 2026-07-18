@@ -17,6 +17,16 @@
 use crate::error::{ValidationError, ValidationResult};
 use serde::{Deserialize, Serialize};
 
+/// Minimum supported f/D ratio (focal length / diameter).
+///
+/// Canonical range shared by every f/D validation site (model geometry,
+/// calibration-artifact load, design-spec config load): the physical optics
+/// model is neither designed nor validated outside [0.2, 1.0].
+pub const F_OVER_D_MIN: f64 = 0.2;
+
+/// Maximum supported f/D ratio (focal length / diameter). See [`F_OVER_D_MIN`].
+pub const F_OVER_D_MAX: f64 = 1.0;
+
 /// Reflector geometry for a parabolic dish antenna
 ///
 /// This structure captures the physical dimensions and surface quality
@@ -26,7 +36,7 @@ use serde::{Deserialize, Serialize};
 /// # Physical Constraints
 /// - Diameter must be positive (> 0)
 /// - Focal length must be positive (> 0)
-/// - f/D ratio is typically in range [0.3, 0.5] for practical antennas
+/// - f/D ratio must be within [`F_OVER_D_MIN`, `F_OVER_D_MAX`] (typically 0.3-0.5 in practice)
 /// - Surface RMS should be much smaller than the shortest wavelength
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ReflectorGeometry {
@@ -97,11 +107,15 @@ impl ReflectorGeometry {
             });
         }
 
-        // Check f/D ratio is in reasonable range (warn if unusual)
         let f_over_d = self.f_over_d();
-        if !(0.2..=1.0).contains(&f_over_d) {
-            // This is unusual but not necessarily invalid - could be a specialized design
-            // We don't error, but this might be logged at a higher level
+        if !(F_OVER_D_MIN..=F_OVER_D_MAX).contains(&f_over_d) {
+            return Err(ValidationError::InvalidValue {
+                param: "f_over_d".to_string(),
+                reason: format!(
+                    "f/D ratio {:.3} (focal_length {} m / diameter {} m) outside supported range [{}, {}]",
+                    f_over_d, self.focal_length, self.diameter, F_OVER_D_MIN, F_OVER_D_MAX
+                ),
+            });
         }
 
         Ok(())
@@ -701,6 +715,24 @@ mod tests {
     fn test_reflector_geometry_invalid_focal_length() {
         let result = ReflectorGeometry::new(34.0, -1.0, 0.001);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_reflector_geometry_rejects_f_over_d_below_range() {
+        let result = ReflectorGeometry::new(34.0, 3.4, 0.001); // f/D = 0.1
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_reflector_geometry_rejects_f_over_d_above_range() {
+        let result = ReflectorGeometry::new(34.0, 51.0, 0.001); // f/D = 1.5
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_reflector_geometry_accepts_f_over_d_range_boundaries() {
+        assert!(ReflectorGeometry::new(25.0, 5.0, 0.001).is_ok()); // f/D = 0.2
+        assert!(ReflectorGeometry::new(34.0, 34.0, 0.001).is_ok()); // f/D = 1.0
     }
 
     #[test]

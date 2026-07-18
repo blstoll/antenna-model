@@ -621,8 +621,11 @@ fn compute_cell_result(
     let fspl = free_space_path_loss_db(distance_m, frequency_hz);
     let total_path_loss_db = loss_db + fspl;
 
-    // G/T computation (if temperature provided)
-    let g_over_t_db = request.temperature_k.map(|t| gain_db - 10.0 * t.log10());
+    // G/T computation (if temperature provided) — shared formula, see
+    // `pattern::g_over_t_from_gain_db`. T is a user-supplied passthrough (F4).
+    let g_over_t_db = request
+        .temperature_k
+        .map(|t| crate::model::pattern::g_over_t_from_gain_db(gain_db, t));
 
     Ok((
         H3CellResult {
@@ -873,6 +876,46 @@ mod tests {
                 .unwrap_or(true),
             "correction_applied should be false when no correction surface"
         );
+    }
+
+    /// Pin the h3 G/T output (P5): for a known temperature, every cell's
+    /// `g_over_t_db` must equal `gain_db − 10·log₁₀(T)` — the same formula as
+    /// `pattern::compute_g_over_t` — and must be absent when no temperature is
+    /// provided. Written against the pre-unification inline expression and kept
+    /// green across the P5 consolidation onto `pattern::g_over_t_from_gain_db`.
+    #[test]
+    fn test_h3_g_over_t_matches_gain_minus_10log10_t() {
+        let mut request = make_h3_test_request();
+        request.temperature_k = Some(150.0);
+        let cal = make_h3_test_calibration();
+
+        let cache = GainCache::new(false, 1);
+        let result = compute_h3_link_budget(&request, &cal, &cache, std::time::Instant::now())
+            .expect("H3 run with temperature failed");
+
+        assert!(!result.cells.is_empty(), "expected at least one cell");
+        for cell in &result.cells {
+            let g_over_t = cell
+                .g_over_t_db
+                .expect("temperature_k provided → g_over_t_db must be present");
+            let expected = cell.gain_db - 10.0 * 150.0_f64.log10();
+            assert!(
+                (g_over_t - expected).abs() < 1e-9,
+                "cell {}: g_over_t_db {:.9} != gain_db {:.9} − 10·log10(150) = {:.9}",
+                cell.cell_id,
+                g_over_t,
+                cell.gain_db,
+                expected
+            );
+        }
+
+        // Without a temperature, G/T must be absent.
+        let request_no_t = make_h3_test_request();
+        let cache2 = GainCache::new(false, 1);
+        let result_no_t =
+            compute_h3_link_budget(&request_no_t, &cal, &cache2, std::time::Instant::now())
+                .expect("H3 run without temperature failed");
+        assert!(result_no_t.cells.iter().all(|c| c.g_over_t_db.is_none()));
     }
 
     /// SERVED h3 PATH — F7 floor ON (redesign 2026-07-16). The h3 per-cell path

@@ -429,7 +429,7 @@ Expected Accuracy:
 
 Calibration artifact saved: calibration_data/antenna_1_xband_boresight.bin
   File size: 554 bytes
-  Format: bincode v2.0 (AntennaCalibration)
+  Format: postcard (AntennaCalibration)
 
 Boresight Calibration Complete!
 ```
@@ -1692,7 +1692,7 @@ confuse because they all sound like "the version" — they answer different ques
 
 | Axis | Type | Location | Question it answers |
 |------|------|----------|----------------------|
-| ANTC container version | `u32` (header) | `ANTC_SUPPORTED_VERSION` in `data/loader.rs` | Can this build parse the on-disk byte layout (magic/CRC/bincode framing)? |
+| ANTC container version | `u32` (header) | `ANTC_SUPPORTED_VERSION` in `data/loader.rs` | Can this build parse the on-disk byte layout (magic/CRC/postcard framing)? Bumped 1→2 on the bincode→postcard migration. |
 | Format version | `String` (e.g. `"2.0"`) | `CalibrationMetadata::format_version` | Which semantic schema (which fields exist / mean what) was this artifact authored against? |
 | Physics-model version | `u32` | `CalibrationMetadata::physics_model_version` | Which `gain_physics` implementation was this artifact's correction surface fitted against? |
 

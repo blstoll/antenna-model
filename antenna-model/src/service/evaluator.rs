@@ -58,7 +58,7 @@
 //!          │
 //!          ▼
 //! ┌─────────────────┐
-//! │ GainResponse    │  Output: gain_db, g_over_t_db, loss, warnings, metadata
+//! │ GainResponse    │  Output: gain_db, loss, warnings, metadata
 //! └─────────────────┘
 //! ```
 //!

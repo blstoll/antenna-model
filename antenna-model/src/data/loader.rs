@@ -6,7 +6,6 @@
 use crate::data::types::AntennaCalibration;
 use crate::error::DataError;
 use crate::model::PHYSICS_MODEL_VERSION;
-use bincode::config;
 use std::path::Path;
 use tracing::{debug, info, warn};
 
@@ -14,7 +13,11 @@ use tracing::{debug, info, warn};
 const ANTC_MAGIC: &[u8; 4] = b"ANTC";
 
 /// The only ANTC artifact version this build can decode.
-const ANTC_SUPPORTED_VERSION: u32 = 1;
+///
+/// Bumped 1 → 2 on the bincode → postcard migration (2026-07-18): the payload
+/// encoding changed, so any pre-migration ANTC file is rejected loudly rather than
+/// risking a garbled decode.
+const ANTC_SUPPORTED_VERSION: u32 = 2;
 
 /// Minimum byte length of an ANTC header: 4 (magic) + 4 (version) + 4 (crc) + 8 (len) = 20.
 const ANTC_HEADER_LEN: usize = 20;
@@ -110,10 +113,9 @@ pub fn load_calibration_artifact<P: AsRef<Path>>(path: P) -> Result<AntennaCalib
         &bytes
     };
 
-    // Deserialize using bincode
-    let config = config::standard();
-    let (calibration, _): (AntennaCalibration, usize) = bincode::decode_from_slice(payload, config)
-        .map_err(|e| DataError::LoadError {
+    // Deserialize using postcard
+    let calibration: AntennaCalibration =
+        postcard::from_bytes(payload).map_err(|e| DataError::LoadError {
             path: path.display().to_string(),
             reason: format!("Failed to deserialize calibration data: {}", e),
         })?;
@@ -356,10 +358,9 @@ mod tests {
     fn test_load_calibration_artifact_success() {
         let calibration = create_test_calibration();
 
-        // Serialize to a temporary file
+        // Serialize to a temporary file (headerless legacy format)
         let mut temp_file = NamedTempFile::new().unwrap();
-        let config = config::standard();
-        let encoded = bincode::encode_to_vec(&calibration, config).unwrap();
+        let encoded = postcard::to_allocvec(&calibration).unwrap();
         temp_file.write_all(&encoded).unwrap();
         temp_file.flush().unwrap();
 
@@ -437,9 +438,8 @@ mod tests {
     fn test_load_antc_headered_artifact() {
         let calibration = create_test_calibration();
 
-        let config = config::standard();
-        let payload = bincode::encode_to_vec(&calibration, config).unwrap();
-        let bytes = make_antc_bytes(&payload, 1, None);
+        let payload = postcard::to_allocvec(&calibration).unwrap();
+        let bytes = make_antc_bytes(&payload, ANTC_SUPPORTED_VERSION, None);
 
         let mut temp_file = NamedTempFile::new().unwrap();
         temp_file.write_all(&bytes).unwrap();
@@ -456,8 +456,7 @@ mod tests {
     fn test_load_antc_bad_crc_rejected() {
         let calibration = create_test_calibration();
 
-        let config = config::standard();
-        let mut payload = bincode::encode_to_vec(&calibration, config).unwrap();
+        let mut payload = postcard::to_allocvec(&calibration).unwrap();
 
         // Build header with correct CRC, then corrupt a payload byte.
         let correct_crc = crc32fast::hash(&payload);
@@ -465,7 +464,7 @@ mod tests {
         if let Some(last) = payload.last_mut() {
             *last ^= 0xff;
         }
-        let bytes = make_antc_bytes(&payload, 1, Some(correct_crc));
+        let bytes = make_antc_bytes(&payload, ANTC_SUPPORTED_VERSION, Some(correct_crc));
 
         let mut temp_file = NamedTempFile::new().unwrap();
         temp_file.write_all(&bytes).unwrap();
@@ -489,8 +488,7 @@ mod tests {
     fn test_load_antc_truncated_length_rejected() {
         let calibration = create_test_calibration();
 
-        let config = config::standard();
-        let payload = bincode::encode_to_vec(&calibration, config).unwrap();
+        let payload = postcard::to_allocvec(&calibration).unwrap();
 
         // Claim the payload is 100 bytes longer than it actually is.
         let inflated_len = payload.len() as u64 + 100;
@@ -498,7 +496,7 @@ mod tests {
 
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"ANTC");
-        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&ANTC_SUPPORTED_VERSION.to_le_bytes());
         bytes.extend_from_slice(&crc.to_le_bytes());
         bytes.extend_from_slice(&inflated_len.to_le_bytes());
         bytes.extend_from_slice(&payload); // actual payload is shorter than claimed
@@ -528,10 +526,9 @@ mod tests {
     fn test_load_antc_unsupported_version_rejected() {
         let calibration = create_test_calibration();
 
-        let config = config::standard();
-        let payload = bincode::encode_to_vec(&calibration, config).unwrap();
-        // Build a valid ANTC artifact but with version = 2 (unsupported).
-        let bytes = make_antc_bytes(&payload, 2, None);
+        let payload = postcard::to_allocvec(&calibration).unwrap();
+        // Build a valid ANTC artifact but with version = 3 (unsupported).
+        let bytes = make_antc_bytes(&payload, 3, None);
 
         let mut temp_file = NamedTempFile::new().unwrap();
         temp_file.write_all(&bytes).unwrap();
@@ -545,8 +542,8 @@ mod tests {
         match result {
             Err(DataError::LoadError { reason, .. }) => {
                 assert!(
-                    reason.contains("version 2"),
-                    "Expected message to mention 'version 2', got: {}",
+                    reason.contains("version 3"),
+                    "Expected message to mention 'version 3', got: {}",
                     reason
                 );
             }
@@ -572,8 +569,7 @@ mod tests {
         calibration.metadata.physics_model_version = 999;
 
         let mut temp_file = NamedTempFile::new().unwrap();
-        let config = config::standard();
-        let encoded = bincode::encode_to_vec(&calibration, config).unwrap();
+        let encoded = postcard::to_allocvec(&calibration).unwrap();
         temp_file.write_all(&encoded).unwrap();
         temp_file.flush().unwrap();
 
