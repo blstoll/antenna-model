@@ -373,12 +373,15 @@ impl ReflectorGeometry {
             });
         }
 
-        if self.f_over_d_ratio <= 0.0 || self.f_over_d_ratio > 2.0 {
-            return Err(ValidationError::InvalidPhysicalParameter {
-                parameter: "f_over_d_ratio".to_string(),
-                value: self.f_over_d_ratio,
-                reason: "must be between 0 and 2".to_string(),
-            });
+        {
+            use crate::model::geometry::{F_OVER_D_MAX, F_OVER_D_MIN};
+            if !(F_OVER_D_MIN..=F_OVER_D_MAX).contains(&self.f_over_d_ratio) {
+                return Err(ValidationError::InvalidPhysicalParameter {
+                    parameter: "f_over_d_ratio".to_string(),
+                    value: self.f_over_d_ratio,
+                    reason: format!("must be between {F_OVER_D_MIN} and {F_OVER_D_MAX}"),
+                });
+            }
         }
 
         // f_over_d_ratio is redundant with focal_length_m / diameter_m; reject
@@ -1459,6 +1462,26 @@ mod tests {
             surface_rms_mm: 0.5,
         };
         assert!(consistent.validate().is_ok());
+    }
+
+    #[test]
+    fn test_reflector_geometry_rejects_out_of_range_f_over_d() {
+        // Ratios consistent with focal_length_m/diameter_m but outside [0.2, 1.0].
+        let too_high = ReflectorGeometry {
+            diameter_m: 10.0,
+            focal_length_m: 15.0,
+            f_over_d_ratio: 1.5,
+            surface_rms_mm: 0.5,
+        };
+        assert!(too_high.validate().is_err());
+
+        let too_low = ReflectorGeometry {
+            diameter_m: 10.0,
+            focal_length_m: 1.0,
+            f_over_d_ratio: 0.1,
+            surface_rms_mm: 0.5,
+        };
+        assert!(too_low.validate().is_err());
     }
 
     // Helper function to create a test physical config

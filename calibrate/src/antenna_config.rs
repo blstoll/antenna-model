@@ -281,11 +281,14 @@ impl AntennaClass {
             ));
         }
 
-        if self.geometry.f_over_d <= 0.0 || self.geometry.f_over_d >= 1.0 {
-            return Err(format!(
-                "Invalid f/D ratio: {} (must be in (0, 1))",
-                self.geometry.f_over_d
-            ));
+        {
+            use antenna_model::model::geometry::{F_OVER_D_MAX, F_OVER_D_MIN};
+            if !(F_OVER_D_MIN..=F_OVER_D_MAX).contains(&self.geometry.f_over_d) {
+                return Err(format!(
+                    "Invalid f/D ratio: {} (must be in [{}, {}])",
+                    self.geometry.f_over_d, F_OVER_D_MIN, F_OVER_D_MAX
+                ));
+            }
         }
 
         // Validate feed
@@ -442,6 +445,13 @@ mod tests {
     fn test_antenna_class_invalid_f_over_d() {
         let mut class = create_test_class();
         class.geometry.f_over_d = 1.5;
+        assert!(class.validate().is_err());
+    }
+
+    #[test]
+    fn test_antenna_class_f_over_d_below_range_rejected() {
+        let mut class = create_test_class();
+        class.geometry.f_over_d = 0.15;
         assert!(class.validate().is_err());
     }
 
