@@ -840,6 +840,14 @@ pointer (now `:911`/`:752`/`:981` post-P10). Docs-only change; no code touched.
      startup (recommended) — or removed from config; recommended: wire it.
   2. A semaphore caps concurrent heavy requests (batch/heatmap/h3-heatmap); when saturated,
      return 429 or 503 with the standard JSON error; limit configurable.
+- **Status-code note (from S2, 2026-07-18):** admission-control saturation *is* a transient
+  condition — a slot frees when an in-flight request finishes — so this is the place for
+  **`503 + Retry-After`** with a *defensible* `Retry-After` (≈ a typical heavy request's service
+  time, or a small fixed backoff). This is deliberately distinct from S2's request-timeout, which
+  returns **504** with **no** `Retry-After` because that failure is deterministic in the request
+  payload (retrying the same heavy grid re-fails identically; the remedy is a smaller request, not
+  waiting). Do not reuse 504 here, and do not omit `Retry-After` on the 503. See the 504-vs-503
+  rationale in `RequestTimeout` (`api/middleware.rs`) and `docs/plan-s2-request-timeout.md`.
 - **Gotchas:** `build_global` can only be called once and errors if a pool already exists
   (tests may have initialized it) — handle the `Err` gracefully. Do not create per-request
   rayon pools.

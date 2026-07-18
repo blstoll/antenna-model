@@ -1,7 +1,7 @@
 //! Request Timeout Tests (roadmap S2)
 //!
 //! Verifies that `server.request_timeout_secs` is actually enforced: a request
-//! whose processing exceeds the configured timeout returns `408 Request Timeout`
+//! whose processing exceeds the configured timeout returns `504 Gateway Timeout`
 //! with the project's standard JSON `ErrorResponse` body.
 //!
 //! The heavy compute path (heatmap/batch/h3) runs rayon synchronously; the
@@ -64,7 +64,7 @@ fn heavy_heatmap_request() -> HeatmapRequest {
 }
 
 #[tokio::test]
-async fn test_heavy_heatmap_times_out_with_408() {
+async fn test_heavy_heatmap_times_out_with_504() {
     // Tiny timeout (1 s, the smallest the whole-second config permits) against a
     // heavy heatmap that reliably takes longer to compute.
     let config = config_with_timeout(1);
@@ -88,8 +88,8 @@ async fn test_heavy_heatmap_times_out_with_408() {
 
     assert_eq!(
         response.status(),
-        408,
-        "a heatmap exceeding request_timeout_secs must return 408 Request Timeout (elapsed {:?})",
+        504,
+        "a heatmap exceeding request_timeout_secs must return 504 Gateway Timeout (elapsed {:?})",
         elapsed
     );
 

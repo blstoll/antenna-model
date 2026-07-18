@@ -36,17 +36,24 @@ exit-criterion test (tiny timeout + heavy heatmap → timeout status) would get 
 
 ## Design decision (made — do not re-litigate)
 
-- **Status: `408 REQUEST_TIMEOUT`** (maintainer decision, 2026-07-18). Chosen over 504 because it
-  reuses the codebase's existing timeout taxonomy — `ApiError::Timeout(String)` already maps to 408
-  (`error.rs:159-160,177`) — and 504 is a semantic stretch (we are not a gateway with an upstream).
-  Known caveat, accepted: RFC 7231 §6.5.7 scopes 408 to a client that was slow to *send*, and as a
-  4xx it classifies the timeout as client-fault (so processing-timeouts won't surface in server-side
-  error-rate SLOs). Fine for this service (a timeout is usually a client-requested huge grid) and
-  reversible pre-C8; revisit with `503 + Retry-After` only if server-latency alerting is ever needed.
+- **Status: `504 GATEWAY_TIMEOUT`** (maintainer decision, 2026-07-18; revised from an initial 408).
+  The deadline is a *server-side* wall-clock budget — the client sent a valid request promptly and
+  the server then exceeded its own configured processing limit — so the fault belongs on the server
+  side (5xx). RFC 7231 §6.5.7 scopes `408 Request Timeout` to a client slow to *send*; a 4xx would
+  misattribute the overrun as client-fault and hide it from server-side error-rate SLOs. 504 is
+  chosen over `503 + Retry-After` because our timeout is **deterministic in the request payload**
+  (the same heavy grid re-costs the same), so there is no honest `Retry-After` value — the remedy is
+  a smaller request, not waiting; 503's transient-recovery semantics do not hold here. The literal
+  "gateway" framing is a mild stretch (no upstream), accepted as the least-bad standard code and
+  reversible pre-C8. **The latent `ApiError::Timeout` mapping is updated 408 → 504 to match**
+  (`error.rs`), keeping the taxonomy consistent even though the middleware emits the status directly.
+  **S4 follow-up:** admission-control / overload rejection *is* transient (retry when a slot frees),
+  so that path should use `503 + Retry-After` — reconsider under S4.
 - **Emit the standard JSON body** the same way S1 does (do NOT change error content-type — C4):
-  `poem::Error::from_string(serde_json::to_string(&ErrorResponse::new("request_timeout", msg)).unwrap_or_default(), StatusCode::REQUEST_TIMEOUT)`.
-  (The `ApiError::Timeout` variant confirms 408 is the house style; keep emitting via the
-  `from_string` + `ErrorResponse` idiom for body consistency with every sibling error.)
+  `poem::Error::from_string(serde_json::to_string(&ErrorResponse::new("request_timeout", msg)).unwrap_or_default(), StatusCode::GATEWAY_TIMEOUT)`.
+  The machine `error` code stays **`request_timeout`** — it names the condition, not the wire status —
+  so no client contract on the code string changes. Keep emitting via the `from_string` +
+  `ErrorResponse` idiom for body consistency with every sibling error.
 - **Middleware placement:** apply the timeout so it wraps handler execution. Inner of
   `RequestSizeTracker` is fine (size rejection should still be instant). It must wrap the endpoint
   whose future we want to bound.
@@ -65,7 +72,7 @@ code untouched (standing rule 2).
    `spawn_blocking` (call sites only — not the service internals).
 4. `antenna-model/tests/integration/error_tests.rs` (or a new `timeout_tests.rs`) — failing-first
    integration test.
-5. `openapi.yaml` — add a `408` response to the POST compute endpoints (standing rule 4).
+5. `openapi.yaml` — add a `504` response to the POST compute endpoints (standing rule 4).
 6. `docs/api-documentation.md` — document the timeout + its honest limitation.
 
 ## Steps (TDD — write the test first, watch it fail, then implement)
@@ -74,7 +81,7 @@ code untouched (standing rule 2).
 - `TestServer::start_with_config(Some(cfg))` with a **small** `cfg.server.request_timeout_secs`
   (the field is `u64` seconds; if sub-second is needed for a fast test, see the note below).
 - POST a **heavy** heatmap request (large grid / fine step, or a big H3 `n_rings`) that reliably
-  exceeds the timeout. Assert status **408** and a JSON body parsing to `ErrorResponse` with
+  exceeds the timeout. Assert status **504** and a JSON body parsing to `ErrorResponse` with
   `error == "request_timeout"`.
 - Run it, confirm it **fails** (today: no timeout, so a late 200).
 - **Sub-second note:** `request_timeout_secs` is whole seconds. If a 1 s timeout makes the test
@@ -85,7 +92,7 @@ code untouched (standing rule 2).
 ### Step 2 — `RequestTimeout` middleware (`api/middleware.rs`)
 - Struct `RequestTimeout { timeout: std::time::Duration }` + `Middleware`/`Endpoint` impls
   (mirror `RequestSizeTracker`'s shape).
-- In `call`: `match tokio::time::timeout(self.timeout, self.ep.call(req)).await { Ok(r) => r, Err(_elapsed) => Err(<408 JSON error>) }`.
+- In `call`: `match tokio::time::timeout(self.timeout, self.ep.call(req)).await { Ok(r) => r, Err(_elapsed) => Err(<504 JSON error>) }`.
 - Add a code comment stating plainly: the timeout returns a response to the client but does **not**
   cancel rayon compute already running on the blocking pool; cooperative compute bounding is S3.
 - Import `ErrorResponse` from `crate::api::schemas`.
@@ -114,10 +121,10 @@ For `compute_gain_batch`, `generate_heatmap_endpoint`, and `h3_link_budget`:
   (optional — call it out either way).
 
 ### Step 5 — Docs + spec (standing rule 4)
-- `openapi.yaml`: add a `408` response referencing `ErrorResponse` to `/api/v1/gain/batch`,
+- `openapi.yaml`: add a `504` response referencing `ErrorResponse` to `/api/v1/gain/batch`,
   `/api/v1/heatmap` (and `/api/v1/gain` if included). Note the `/api/v1/h3-heatmap` **path** is
   absent from openapi (roadmap C1) — do not add the path here; only touch documented endpoints.
-- `docs/api-documentation.md`: document `request_timeout_secs`, the 408, and the **honest
+- `docs/api-documentation.md`: document `request_timeout_secs`, the 504, and the **honest
   limitation** — the server stops waiting and responds, but background compute continues until it
   completes or S3's budget halts it.
 
@@ -127,7 +134,7 @@ For `compute_gain_batch`, `generate_heatmap_endpoint`, and `h3_link_budget`:
 
 ## Exit criteria (definition of done)
 
-1. A request exceeding `request_timeout_secs` returns a timeout status (408) with the standard JSON
+1. A request exceeding `request_timeout_secs` returns a timeout status (504) with the standard JSON
    body — proven by a failing-first integration test using a tiny timeout + heavy heatmap.
 2. The timeout is wired to config and configurable.
 3. The "rayon not cancelled" limitation is stated in a code comment **and** in api-documentation.md.

@@ -404,9 +404,26 @@ impl<E: Endpoint> Endpoint for RequestSizeTrackerImpl<E> {
 ///
 /// Bounds how long the wrapped endpoint may run. If the endpoint future does not
 /// complete within `timeout`, the request is abandoned and the client receives a
-/// `408 Request Timeout` with the project's standard JSON error body
+/// `504 Gateway Timeout` with the project's standard JSON error body
 /// (`request_timeout`). This makes `server.request_timeout_secs` an enforced
 /// limit rather than a decorative log line.
+///
+/// # Why 504 (a 5xx), not 408
+///
+/// This deadline is a *server-side* wall-clock budget: the client sent a valid
+/// request promptly, and the server then exceeded its own configured processing
+/// limit. RFC 7231 §6.5.7 scopes `408 Request Timeout` to a client that was slow
+/// to *send* — a 4xx (client-fault) classification that would misattribute a
+/// server-side overrun and hide it from server error-rate SLOs. `504 Gateway
+/// Timeout` keeps the fault on the server side (5xx) and, unlike `503`, implies
+/// no transient recovery: our timeout is deterministic in the request payload
+/// (the same heavy grid re-costs the same), so there is no honest `Retry-After`
+/// value — the remedy is a smaller request, not waiting. The literal "gateway"
+/// framing is a mild stretch (we have no upstream), accepted as the least-bad
+/// standard code. Reconsider `503 + Retry-After` for S4's admission-control /
+/// overload rejection, where the condition genuinely *is* transient. The machine
+/// `error` code stays `request_timeout` (it names the condition, not the wire
+/// status).
 ///
 /// # Important limitation — background compute is NOT cancelled
 ///
@@ -468,7 +485,7 @@ impl<E: Endpoint> Endpoint for RequestTimeoutImpl<E> {
                     request_id = %request_id,
                     path = %path,
                     timeout_ms = self.timeout.as_millis(),
-                    "Request exceeded the configured timeout; responding with 408"
+                    "Request exceeded the configured timeout; responding with 504"
                 );
                 let body = ErrorResponse::new(
                     "request_timeout",
@@ -479,7 +496,7 @@ impl<E: Endpoint> Endpoint for RequestTimeoutImpl<E> {
                 );
                 Err(poem::Error::from_string(
                     serde_json::to_string(&body).unwrap_or_default(),
-                    poem::http::StatusCode::REQUEST_TIMEOUT,
+                    poem::http::StatusCode::GATEWAY_TIMEOUT,
                 ))
             }
         }
@@ -625,7 +642,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_request_timeout_fires_on_slow_endpoint() {
-        // A handler that sleeps well past the timeout must yield a 408 with the
+        // A handler that sleeps well past the timeout must yield a 504 with the
         // standard JSON error body.
         let app = Route::new()
             .at(
@@ -640,7 +657,7 @@ mod tests {
 
         let cli = TestClient::new(app);
         let response = cli.get("/slow").send().await;
-        response.assert_status(StatusCode::REQUEST_TIMEOUT);
+        response.assert_status(StatusCode::GATEWAY_TIMEOUT);
 
         let body = response.0.into_body().into_string().await.unwrap();
         let err: ErrorResponse = serde_json::from_str(&body).unwrap();

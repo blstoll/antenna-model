@@ -285,7 +285,7 @@ The API uses standard HTTP status codes:
 - **200**: Success
 - **400**: Invalid request parameters (validation error, invalid coordinates/attitude)
 - **404**: Antenna or feed not found
-- **408**: Request timeout (processing exceeded the configured `server.request_timeout_secs`)
+- **504**: Request timeout (processing exceeded the configured `server.request_timeout_secs`)
 - **413**: Payload too large (request body exceeds the configured maximum size)
 - **500**: Internal server error (computation error, coordinate transform failure)
 - **503**: Service unavailable (startup, shutdown)
@@ -322,10 +322,19 @@ request (~0.6 MB). Operators can raise or lower the cap via configuration.
 
 Every request is bounded by the configured `server.request_timeout_secs`
 (default **30 s**). If processing exceeds the deadline, the request is abandoned
-and the client receives **408 Request Timeout** with the standard JSON error
+and the client receives **504 Gateway Timeout** with the standard JSON error
 body. This primarily bounds the compute-heavy endpoints (batch, heatmap, H3 link
 budget), whose synchronous rayon work is offloaded to a blocking thread pool so
 the timeout can fire promptly instead of blocking a server worker thread.
+
+The status is **504 (a 5xx)**, not 408: the deadline is a *server-side* budget
+(the client sent a valid request; the server exceeded its own processing limit),
+so the fault belongs on the server side. It is deliberately not **503 +
+Retry-After** — the failure is deterministic in the request payload (the same
+heavy grid re-costs the same), so no honest retry delay exists; the remedy is a
+smaller request. The machine `error` code stays `request_timeout`. (Admission-
+control/overload rejection, which *is* transient, will use 503 + Retry-After
+under roadmap S4.)
 
 ```json
 {
@@ -335,7 +344,7 @@ the timeout can fire promptly instead of blocking a server worker thread.
 ```
 
 **Honest limitation — the response is bounded, the compute is not.** When the
-timeout fires, the server stops waiting and returns 408, but the background
+timeout fires, the server stops waiting and returns 504, but the background
 rayon computation already running on the blocking pool is **not cancelled**: it
 continues to completion, consuming CPU. Dropping the future does not stop the
 pool. Cooperative, wall-clock-bounded compute cancellation (so the work itself
