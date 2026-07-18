@@ -3,13 +3,6 @@
 # Exits nonzero on the first failing check.
 set -euo pipefail
 
-# macOS OpenBLAS linking for the calibrate crate (ndarray-linalg openblas-system).
-# No-op on Linux, where libopenblas-dev provides the system paths.
-if [[ "$(uname)" == "Darwin" ]]; then
-  export LDFLAGS="${LDFLAGS:-} -L/opt/homebrew/opt/openblas/lib"
-  export CPPFLAGS="${CPPFLAGS:-} -I/opt/homebrew/opt/openblas/include"
-fi
-
 # Match CI: give libtest worker threads a larger stack. The calibrate 3D→4D
 # round-trip evaluation overflows the ~2 MiB default on Linux debug builds.
 export RUST_MIN_STACK="${RUST_MIN_STACK:-16777216}"

@@ -285,6 +285,8 @@ The API uses standard HTTP status codes:
 - **200**: Success
 - **400**: Invalid request parameters (validation error, invalid coordinates/attitude)
 - **404**: Antenna or feed not found
+- **504**: Request timeout (processing exceeded the configured `server.request_timeout_secs`)
+- **413**: Payload too large (request body exceeds the configured maximum size)
 - **500**: Internal server error (computation error, coordinate transform failure)
 - **503**: Service unavailable (startup, shutdown)
 
@@ -299,6 +301,62 @@ Error responses follow a consistent format:
   }
 }
 ```
+
+### Request Body Size Limit
+
+Every request body is capped by the configured `server.max_body_size_bytes`
+(default **10 MB**). The limit is enforced on the request's `content-length`
+header: a request whose declared size exceeds the limit is rejected up front
+with **413 Payload Too Large** and the standard JSON error body, before the body
+is parsed. The default comfortably accommodates a maximum-size (1000-item) batch
+request (~0.6 MB). Operators can raise or lower the cap via configuration.
+
+```json
+{
+  "error": "payload_too_large",
+  "message": "Request body of 12000000 bytes exceeds the maximum of 10485760 bytes"
+}
+```
+
+### Request Timeout
+
+The configured `server.request_timeout_secs` (default **30 s**) bounds the
+**compute-heavy endpoints** — `/api/v1/gain/batch`, `/api/v1/heatmap`, and
+`/api/v1/h3-heatmap`. Their synchronous rayon work is offloaded to a blocking
+thread pool so the async task yields and the timeout can fire promptly instead
+of blocking a server worker thread; if the deadline is exceeded the request is
+abandoned and the client receives **504 Gateway Timeout** with the standard JSON
+error body.
+
+The lightweight single-evaluation endpoint `/api/v1/gain` runs its computation
+inline (it targets the <100 ms path) and is **not** offloaded, so the timeout
+middleware cannot preempt it — a pathologically slow single evaluation would run
+to completion rather than returning 504. This is an intentional scope boundary:
+the deadline exists to bound the expensive batch/grid endpoints. Enforcing it on
+the inline path (and cancelling in-flight compute generally) is roadmap unit S3.
+
+The status is **504 (a 5xx)**, not 408: the deadline is a *server-side* budget
+(the client sent a valid request; the server exceeded its own processing limit),
+so the fault belongs on the server side. It is deliberately not **503 +
+Retry-After** — the failure is deterministic in the request payload (the same
+heavy grid re-costs the same), so no honest retry delay exists; the remedy is a
+smaller request. The machine `error` code stays `request_timeout`. (Admission-
+control/overload rejection, which *is* transient, will use 503 + Retry-After
+under roadmap S4.)
+
+```json
+{
+  "error": "request_timeout",
+  "message": "Request processing exceeded the configured timeout of 30000 ms"
+}
+```
+
+**Honest limitation — the response is bounded, the compute is not.** When the
+timeout fires, the server stops waiting and returns 504, but the background
+rayon computation already running on the blocking pool is **not cancelled**: it
+continues to completion, consuming CPU. Dropping the future does not stop the
+pool. Cooperative, wall-clock-bounded compute cancellation (so the work itself
+stops early) is tracked as roadmap unit S3.
 
 ## Validation Rules
 

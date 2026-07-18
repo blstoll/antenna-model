@@ -10,8 +10,9 @@
 //! - **ErrorHandler**: Consistent error response formatting
 //! - **RequestSizeTracker**: Tracks request and response body sizes
 
+use crate::api::schemas::ErrorResponse;
 use poem::{Endpoint, IntoResponse, Middleware, Request, Response, Result};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -60,8 +61,16 @@ impl<E: Endpoint> Endpoint for RequestIdImpl<E> {
         req.extensions_mut()
             .insert(RequestIdExt(request_id.clone()));
 
-        // Call the endpoint
-        let mut response = self.ep.call(req).await.map(IntoResponse::into_response)?;
+        // Call the endpoint. On error, convert the error into its response here
+        // (rather than propagating with `?`) so the correlation header is
+        // attached to error responses (413 / 504 / 4xx / 5xx) as well. Without
+        // this, poem's `?` short-circuit would emit error responses with no
+        // x-request-id, leaving exactly the failures operators most need to
+        // trace uncorrelatable in both logs and response headers.
+        let mut response = match self.ep.call(req).await {
+            Ok(resp) => resp.into_response(),
+            Err(err) => err.into_response(),
+        };
 
         // Add request ID to response headers
         // Note: request_id is a valid UUID string, but we handle the parse error defensively
@@ -247,12 +256,19 @@ impl<E: Endpoint> Endpoint for ErrorHandlerImpl<E> {
     }
 }
 
-/// Request size tracking middleware
+/// Request size tracking and enforcement middleware
 ///
-/// Tracks and logs the sizes of request and response bodies.
-/// Useful for monitoring API usage patterns and identifying
-/// potentially problematic large requests.
+/// Tracks and logs the sizes of request and response bodies, and **rejects**
+/// requests whose `content-length` exceeds the configured hard limit with a
+/// `413 Payload Too Large` and the project's standard JSON error body.
+///
+/// Enforcement is keyed on the `content-length` header (the framework-blessed
+/// level, matching `poem::middleware::SizeLimit`): if the header is present and
+/// exceeds `max_request_size`, the request is rejected before body handling.
+/// Requests without a `content-length` header fall through unchanged.
 pub struct RequestSizeTracker {
+    /// Reject if request size exceeds this hard limit (bytes)
+    pub max_request_size: usize,
     /// Warn if request size exceeds this threshold (bytes)
     pub warn_request_size: usize,
     /// Warn if response size exceeds this threshold (bytes)
@@ -261,16 +277,29 @@ pub struct RequestSizeTracker {
 
 impl RequestSizeTracker {
     /// Create a new request size tracker with default thresholds
+    ///
+    /// The hard reject limit defaults to 10 MB, matching the
+    /// `server.max_body_size_bytes` config default.
     pub fn new() -> Self {
         Self {
+            max_request_size: 10_000_000,   // 10 MB (matches config default)
             warn_request_size: 1_000_000,   // 1 MB
             warn_response_size: 10_000_000, // 10 MB
         }
     }
 
     /// Create a new request size tracker with custom thresholds
-    pub fn with_thresholds(warn_request_size: usize, warn_response_size: usize) -> Self {
+    ///
+    /// * `max_request_size` - hard reject limit for request bodies (413 when exceeded)
+    /// * `warn_request_size` - soft warn threshold for request bodies
+    /// * `warn_response_size` - soft warn threshold for response bodies
+    pub fn with_limits(
+        max_request_size: usize,
+        warn_request_size: usize,
+        warn_response_size: usize,
+    ) -> Self {
         Self {
+            max_request_size,
             warn_request_size,
             warn_response_size,
         }
@@ -289,6 +318,7 @@ impl<E: Endpoint> Middleware<E> for RequestSizeTracker {
     fn transform(&self, ep: E) -> Self::Output {
         RequestSizeTrackerImpl {
             ep,
+            max_request_size: self.max_request_size,
             warn_request_size: self.warn_request_size,
             warn_response_size: self.warn_response_size,
         }
@@ -297,6 +327,7 @@ impl<E: Endpoint> Middleware<E> for RequestSizeTracker {
 
 pub struct RequestSizeTrackerImpl<E> {
     ep: E,
+    max_request_size: usize,
     warn_request_size: usize,
     warn_response_size: usize,
 }
@@ -313,7 +344,7 @@ impl<E: Endpoint> Endpoint for RequestSizeTrackerImpl<E> {
 
         let path = req.uri().path().to_string();
 
-        // Check request size
+        // Check request size (enforce the hard limit before body handling)
         if let Some(size) = req
             .headers()
             .get("content-length")
@@ -328,6 +359,28 @@ impl<E: Endpoint> Endpoint for RequestSizeTrackerImpl<E> {
                     threshold_bytes = self.warn_request_size,
                     "Large request body detected"
                 );
+            }
+
+            if size > self.max_request_size {
+                warn!(
+                    request_id = %request_id,
+                    path = %path,
+                    size_bytes = size,
+                    limit_bytes = self.max_request_size,
+                    "Request body exceeds the maximum allowed size; rejecting with 413"
+                );
+
+                let body = ErrorResponse::new(
+                    "payload_too_large",
+                    format!(
+                        "Request body of {size} bytes exceeds the maximum of {} bytes",
+                        self.max_request_size
+                    ),
+                );
+                return Err(poem::Error::from_string(
+                    serde_json::to_string(&body).unwrap_or_default(),
+                    poem::http::StatusCode::PAYLOAD_TOO_LARGE,
+                ));
             }
         }
 
@@ -352,6 +405,109 @@ impl<E: Endpoint> Endpoint for RequestSizeTrackerImpl<E> {
         }
 
         Ok(response)
+    }
+}
+
+/// Request timeout enforcement middleware
+///
+/// Bounds how long the wrapped endpoint may run. If the endpoint future does not
+/// complete within `timeout`, the request is abandoned and the client receives a
+/// `504 Gateway Timeout` with the project's standard JSON error body
+/// (`request_timeout`). This makes `server.request_timeout_secs` an enforced
+/// limit rather than a decorative log line.
+///
+/// # Why 504 (a 5xx), not 408
+///
+/// This deadline is a *server-side* wall-clock budget: the client sent a valid
+/// request promptly, and the server then exceeded its own configured processing
+/// limit. RFC 7231 §6.5.7 scopes `408 Request Timeout` to a client that was slow
+/// to *send* — a 4xx (client-fault) classification that would misattribute a
+/// server-side overrun and hide it from server error-rate SLOs. `504 Gateway
+/// Timeout` keeps the fault on the server side (5xx) and, unlike `503`, implies
+/// no transient recovery: our timeout is deterministic in the request payload
+/// (the same heavy grid re-costs the same), so there is no honest `Retry-After`
+/// value — the remedy is a smaller request, not waiting. The literal "gateway"
+/// framing is a mild stretch (we have no upstream), accepted as the least-bad
+/// standard code. Reconsider `503 + Retry-After` for S4's admission-control /
+/// overload rejection, where the condition genuinely *is* transient. The machine
+/// `error` code stays `request_timeout` (it names the condition, not the wire
+/// status).
+///
+/// # Important limitation — background compute is NOT cancelled
+///
+/// `tokio::time::timeout` only fires while the wrapped future is `Pending`. The
+/// heavy handlers (batch / heatmap / h3) therefore offload their synchronous
+/// rayon compute onto `tokio::task::spawn_blocking` so the async task yields at a
+/// real `.await`, letting this timeout fire. When the timeout fires we stop
+/// awaiting and return a response to the client, but **the rayon work already
+/// running on the blocking pool is not aborted** — dropping the join handle does
+/// not stop the pool. It runs to completion (wasting CPU) until it finishes.
+/// Cooperative, wall-clock-bounded compute cancellation is roadmap unit S3.
+pub struct RequestTimeout {
+    timeout: Duration,
+}
+
+impl RequestTimeout {
+    /// Create a new request-timeout middleware with the given deadline.
+    pub fn new(timeout: Duration) -> Self {
+        Self { timeout }
+    }
+}
+
+impl<E: Endpoint> Middleware<E> for RequestTimeout {
+    type Output = RequestTimeoutImpl<E>;
+
+    fn transform(&self, ep: E) -> Self::Output {
+        RequestTimeoutImpl {
+            ep,
+            timeout: self.timeout,
+        }
+    }
+}
+
+pub struct RequestTimeoutImpl<E> {
+    ep: E,
+    timeout: Duration,
+}
+
+impl<E: Endpoint> Endpoint for RequestTimeoutImpl<E> {
+    type Output = Response;
+
+    async fn call(&self, req: Request) -> Result<Self::Output> {
+        let request_id = req
+            .extensions()
+            .get::<RequestIdExt>()
+            .map(|ext| ext.0.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        let path = req.uri().path().to_string();
+
+        match tokio::time::timeout(self.timeout, self.ep.call(req)).await {
+            // Endpoint completed within the deadline (Ok or Err both pass through).
+            Ok(result) => result.map(IntoResponse::into_response),
+            // Deadline elapsed. NOTE: this returns a response to the client but
+            // does NOT cancel any rayon compute already running on the blocking
+            // pool; that work runs to completion. Cooperative compute bounding
+            // is S3.
+            Err(_elapsed) => {
+                warn!(
+                    request_id = %request_id,
+                    path = %path,
+                    timeout_ms = self.timeout.as_millis(),
+                    "Request exceeded the configured timeout; responding with 504"
+                );
+                let body = ErrorResponse::new(
+                    "request_timeout",
+                    format!(
+                        "Request processing exceeded the configured timeout of {} ms",
+                        self.timeout.as_millis()
+                    ),
+                );
+                Err(poem::Error::from_string(
+                    serde_json::to_string(&body).unwrap_or_default(),
+                    poem::http::StatusCode::GATEWAY_TIMEOUT,
+                ))
+            }
+        }
     }
 }
 
@@ -489,6 +645,43 @@ mod tests {
 
         let cli = TestClient::new(app);
         let response = cli.get("/test").send().await;
+        response.assert_status_is_ok();
+    }
+
+    #[tokio::test]
+    async fn test_request_timeout_fires_on_slow_endpoint() {
+        // A handler that sleeps well past the timeout must yield a 504 with the
+        // standard JSON error body.
+        let app = Route::new()
+            .at(
+                "/slow",
+                poem::endpoint::make(|_req| async {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    Ok::<_, poem::Error>("done")
+                }),
+            )
+            .with(RequestId)
+            .with(RequestTimeout::new(Duration::from_millis(20)));
+
+        let cli = TestClient::new(app);
+        let response = cli.get("/slow").send().await;
+        response.assert_status(StatusCode::GATEWAY_TIMEOUT);
+
+        let body = response.0.into_body().into_string().await.unwrap();
+        let err: ErrorResponse = serde_json::from_str(&body).unwrap();
+        assert_eq!(err.error, "request_timeout");
+    }
+
+    #[tokio::test]
+    async fn test_request_timeout_passes_fast_endpoint() {
+        // A handler that completes comfortably within the deadline is untouched.
+        let app = Route::new()
+            .at("/fast", poem::endpoint::make_sync(|_req: Request| "OK"))
+            .with(RequestId)
+            .with(RequestTimeout::new(Duration::from_secs(5)));
+
+        let cli = TestClient::new(app);
+        let response = cli.get("/fast").send().await;
         response.assert_status_is_ok();
     }
 

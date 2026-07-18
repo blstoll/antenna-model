@@ -155,7 +155,9 @@ pub enum ApiError {
     #[error("service unavailable: {0}")]
     ServiceUnavailable(String),
 
-    /// Request timeout (408)
+    /// Request timeout (504) — server-side processing exceeded its wall-clock
+    /// budget. 504 (a 5xx) keeps the fault server-side; see the `RequestTimeout`
+    /// middleware for the full 504-vs-408-vs-503 rationale.
     #[error("request timeout: {0}")]
     Timeout(String),
 
@@ -174,7 +176,7 @@ impl ApiError {
         match self {
             ApiError::BadRequest(_) => 400,
             ApiError::NotFound(_) => 404,
-            ApiError::Timeout(_) => 408,
+            ApiError::Timeout(_) => 504,
             ApiError::PayloadTooLarge(_) => 413,
             ApiError::UnprocessableEntity(_) => 422,
             ApiError::RateLimitExceeded(_) => 429,
@@ -545,7 +547,7 @@ mod tests {
     fn test_api_error_status_codes() {
         assert_eq!(ApiError::BadRequest("test".to_string()).status_code(), 400);
         assert_eq!(ApiError::NotFound("test".to_string()).status_code(), 404);
-        assert_eq!(ApiError::Timeout("test".to_string()).status_code(), 408);
+        assert_eq!(ApiError::Timeout("test".to_string()).status_code(), 504);
         assert_eq!(
             ApiError::PayloadTooLarge("test".to_string()).status_code(),
             413

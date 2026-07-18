@@ -275,6 +275,37 @@ paths:
                     details:
                       antenna_id: "antenna_1"
                       feed_id: "invalid_feed"
+        '413':
+          description: Request body exceeds the configured maximum size (server.max_body_size_bytes, default 10 MB)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                payload_too_large:
+                  summary: Payload too large
+                  value:
+                    error: "payload_too_large"
+                    message: "Request body of 12000000 bytes exceeds the maximum of 10485760 bytes"
+        '504':
+          description: |
+            Request processing exceeded the configured timeout (server.request_timeout_secs,
+            default 30 s). This is a server-side wall-clock budget, so a 5xx (504) is used
+            rather than 408; there is no honest Retry-After because the failure is
+            deterministic in the request (the remedy is a smaller request, not waiting).
+            The machine `error` code remains `request_timeout`. Honest limitation: the server
+            stops waiting and responds, but the background compute is NOT cancelled and runs
+            to completion (see roadmap S3).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                request_timeout:
+                  summary: Request timeout
+                  value:
+                    error: "request_timeout"
+                    message: "Request processing exceeded the configured timeout of 30000 ms"
         '500':
           description: Internal server error
           content:
@@ -312,6 +343,37 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          description: Request body exceeds the configured maximum size (server.max_body_size_bytes, default 10 MB)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                payload_too_large:
+                  summary: Payload too large
+                  value:
+                    error: "payload_too_large"
+                    message: "Request body of 12000000 bytes exceeds the maximum of 10485760 bytes"
+        '504':
+          description: |
+            Request processing exceeded the configured timeout (server.request_timeout_secs,
+            default 30 s). This is a server-side wall-clock budget, so a 5xx (504) is used
+            rather than 408; there is no honest Retry-After because the failure is
+            deterministic in the request (the remedy is a smaller request, not waiting).
+            The machine `error` code remains `request_timeout`. Honest limitation: the server
+            stops waiting and responds, but the background compute is NOT cancelled and runs
+            to completion (see roadmap S3).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                request_timeout:
+                  summary: Request timeout
+                  value:
+                    error: "request_timeout"
+                    message: "Request processing exceeded the configured timeout of 30000 ms"
 
   /api/v1/heatmap:
     post:
@@ -374,6 +436,37 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '413':
+          description: Request body exceeds the configured maximum size (server.max_body_size_bytes, default 10 MB)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                payload_too_large:
+                  summary: Payload too large
+                  value:
+                    error: "payload_too_large"
+                    message: "Request body of 12000000 bytes exceeds the maximum of 10485760 bytes"
+        '504':
+          description: |
+            Request processing exceeded the configured timeout (server.request_timeout_secs,
+            default 30 s). This is a server-side wall-clock budget, so a 5xx (504) is used
+            rather than 408; there is no honest Retry-After because the failure is
+            deterministic in the request (the remedy is a smaller request, not waiting).
+            The machine `error` code remains `request_timeout`. Honest limitation: the server
+            stops waiting and responds, but the background compute is NOT cancelled and runs
+            to completion (see roadmap S3).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                request_timeout:
+                  summary: Request timeout
+                  value:
+                    error: "request_timeout"
+                    message: "Request processing exceeded the configured timeout of 30000 ms"
 
   /api/v1/antennas:
     get:
