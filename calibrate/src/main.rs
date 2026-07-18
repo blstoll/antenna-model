@@ -141,19 +141,20 @@ struct Args {
 /// Serialize an [`AntennaCalibration`] with an ANTC header and write it to `path`.
 ///
 /// The ANTC header is `[magic "ANTC"][version u32 LE][crc32 u32 LE][len u64 LE]`
-/// followed by the bincode payload, matching the service loader's CRC-checked
+/// followed by the postcard payload, matching the service loader's CRC-checked
 /// path in `antenna_model::data::loader::load_calibration_artifact`.
 fn write_antc_artifact(
     calibration: &antenna_model::data::types::AntennaCalibration,
     path: &std::path::Path,
 ) -> Result<()> {
-    let payload = bincode::encode_to_vec(calibration, bincode::config::standard())
-        .context("Failed to bincode-encode calibration artifact")?;
+    let payload = postcard::to_allocvec(calibration)
+        .context("Failed to postcard-encode calibration artifact")?;
 
     let crc = crc32fast::hash(&payload);
     let mut bytes = Vec::with_capacity(20 + payload.len());
     bytes.extend_from_slice(b"ANTC");
-    bytes.extend_from_slice(&1u32.to_le_bytes());
+    // ANTC artifact version 2 (postcard payload; see loader::ANTC_SUPPORTED_VERSION).
+    bytes.extend_from_slice(&2u32.to_le_bytes());
     bytes.extend_from_slice(&crc.to_le_bytes());
     bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
     bytes.extend_from_slice(&payload);
@@ -338,9 +339,9 @@ async fn run_boresight_calibration(args: Args) -> Result<()> {
         .validate()
         .context("Calibration artifact failed validation")?;
 
-    // Serialize and save
-    let artifact_bytes = bincode::encode_to_vec(&calibration, bincode::config::standard())
-        .context("Failed to serialize calibration artifact")?;
+    // Serialize and save (headerless legacy format)
+    let artifact_bytes =
+        postcard::to_allocvec(&calibration).context("Failed to serialize calibration artifact")?;
 
     std::fs::write(&args.output, &artifact_bytes)
         .with_context(|| format!("Failed to write artifact to {}", args.output.display()))?;

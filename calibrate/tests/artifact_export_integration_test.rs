@@ -37,11 +37,11 @@ fn write_antc(
     calibration: &antenna_model::data::types::AntennaCalibration,
     path: &std::path::Path,
 ) {
-    let payload = bincode::encode_to_vec(calibration, bincode::config::standard()).expect("encode");
+    let payload = postcard::to_allocvec(calibration).expect("encode");
     let crc = crc32fast::hash(&payload);
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"ANTC");
-    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&2u32.to_le_bytes());
     bytes.extend_from_slice(&crc.to_le_bytes());
     bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
     bytes.extend_from_slice(&payload);
@@ -98,7 +98,7 @@ fn test_full_export_loads_via_service() {
     let tmp = tempfile::NamedTempFile::new().expect("tmp");
     write_antc(&calibration, tmp.path());
 
-    // Load via the service loader (exercises ANTC + CRC + bincode + validate).
+    // Load via the service loader (exercises ANTC + CRC + postcard + validate).
     let loaded = load_calibration_artifact(tmp.path()).expect("service load");
 
     assert_eq!(loaded.antenna_id, "integ_antenna");

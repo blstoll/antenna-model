@@ -307,9 +307,10 @@ ERROR Service startup failed: Invalid calibration artifact
 ```
 
 **Solutions:**
-1. **Verify bincode format:**
-   - Calibrate tool must use same bincode version as service
-   - Check Cargo.toml versions match
+1. **Verify postcard format:**
+   - Calibrate tool must use same postcard version as service
+   - Check Cargo.toml versions match, and that the ANTC artifact version matches
+     `ANTC_SUPPORTED_VERSION` in the service (currently 2)
 
 2. **Check artifact integrity:**
    ```bash

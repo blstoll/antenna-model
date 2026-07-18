@@ -2,8 +2,21 @@
 //!
 //! This module defines the fundamental data structures used throughout the antenna
 //! model service, including calibration data, B-spline models, and metadata.
+//!
+//! # Binary serialization constraint (postcard)
+//!
+//! These types are serialized to the on-disk `.bin` calibration artifacts with
+//! [`postcard`], a **non-self-describing** format that decodes fields positionally.
+//! Do **NOT** add `#[serde(skip_serializing_if = ...)]` (or `#[serde(skip)]`,
+//! `#[serde(flatten)]`, untagged/internally-tagged enums) to any field reachable
+//! from `AntennaCalibration`: those attributes change the serialized field set, so a
+//! conditionally-omitted field desyncs positional decoding and silently corrupts
+//! everything after it. `#[serde(default)]` alone is fine (it only affects decoding
+//! of a missing field, which never happens in a fixed positional layout). The
+//! round-trip tests at the bottom of this file are the regression guard.
+//! (Pre-2026-07-18 this module used bincode's native `Encode`/`Decode` derives,
+//! which ignored serde attributes entirely; postcard honors them.)
 
-use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -28,7 +41,7 @@ use std::fmt;
 /// multiple feeds (e.g., S-band, X-band, Ka-band), separate calibration files are created
 /// with different `feed_id` values. The repository aggregates these using composite
 /// `(antenna_id, feed_id)` identifiers.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AntennaCalibration {
     /// Unique identifier for this antenna
     pub antenna_id: String,
@@ -45,7 +58,7 @@ pub struct AntennaCalibration {
 
     /// B-spline correction surface (v2.0 - optional, for residual corrections)
     /// This is fitted to (measured - physics_model) residuals during calibration.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub correction_surface: Option<BSplineModel4D>,
 
     /// Valid ranges for query parameters
@@ -54,12 +67,12 @@ pub struct AntennaCalibration {
     // ========== v2.0 Partial Calibration Support ==========
     /// Calibration status indicating level of calibration data available (v2.0).
     /// Optional for backward compatibility with existing .bin files.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub calibration_status: Option<CalibrationStatus>,
 
     /// Calibration coverage metadata for partially calibrated antennas (v2.0).
     /// Only present for PartiallyCalibrated status.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub calibration_coverage: Option<CalibrationCoverage>,
 }
 
@@ -117,7 +130,7 @@ impl AntennaCalibration {
 ///
 /// Tracks quality metrics for both the physics-only model and the combined
 /// physics + correction surface model.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CalibrationMetadata {
     /// Human-readable antenna name
     pub antenna_name: String,
@@ -145,11 +158,11 @@ pub struct CalibrationMetadata {
 
     // ========== v2.0-specific fields ==========
     /// RMSE of physics-only model (before correction) in dB (v2.0)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub physics_only_rmse_db: Option<f64>,
 
     /// RMSE improvement from adding correction surface in dB (v2.0)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub correction_improvement_db: Option<f64>,
 
     /// Whether physical parameter tuning was performed (v2.0)
@@ -157,24 +170,24 @@ pub struct CalibrationMetadata {
     pub parameters_tuned: bool,
 
     /// Reference to antenna class for shared parameters (v2.0)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub antenna_class: Option<String>,
 
     // ========== v2.0 Partial Calibration Support ==========
     /// Source of physical parameters (v2.0 - partial calibration support)
     /// Optional for backward compatibility with existing .bin files.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub parameters_source: Option<ParameterSource>,
 
     /// Measurement density indicator (v2.0 - partial calibration support)
     /// Optional for backward compatibility with existing .bin files.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub measurement_density: Option<MeasurementDensity>,
 
     // ========== Physics-model versioning (roadmap P1b) ==========
     /// Version of the physics model this calibration was fitted against
     /// (see `crate::model::PHYSICS_MODEL_VERSION`). 0 = unknown (artifact predates
-    /// the version stamp). NOTE: adding this field changed the bincode layout;
+    /// the version stamp). NOTE: adding this field changed the serialized layout;
     /// pre-P1b `.bin` artifacts no longer decode (none exist — sanctioned by P1b).
     #[serde(default)]
     pub physics_model_version: u32,
@@ -191,7 +204,7 @@ impl CalibrationMetadata {
 ///
 /// Represents a tensor product B-spline over four dimensions:
 /// azimuth, elevation, frequency, and temperature.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BSplineModel4D {
     /// Flattened 4D array of B-spline coefficients.
     /// Indexing: coefficients[i_az + n_az * (i_el + n_el * (i_freq + n_freq * i_temp))]
@@ -334,7 +347,7 @@ impl BSplineModel4D {
 /// Physical reflector geometry parameters.
 ///
 /// Describes the parabolic dish reflector geometry used in the physical optics model.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ReflectorGeometry {
     /// Dish diameter in meters
     pub diameter_m: f64,
@@ -412,7 +425,7 @@ impl ReflectorGeometry {
 /// Feed antenna parameters.
 ///
 /// Describes the feed horn characteristics and position for physical optics computation.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FeedParameters {
     /// Feed position in Cartesian coordinates (x, y, z) in meters
     pub position: (f64, f64, f64),
@@ -454,7 +467,7 @@ impl FeedParameters {
 /// Mesh reflector parameters.
 ///
 /// Describes wire mesh characteristics for mesh reflector antennas.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MeshParameters {
     /// Mesh spacing (hole size) in millimeters
     pub mesh_spacing_mm: f64,
@@ -502,7 +515,7 @@ impl MeshParameters {
 /// Complete physical antenna configuration.
 ///
 /// Combines all physical parameters needed for physics-based antenna modeling.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PhysicalAntennaConfig {
     /// Reflector geometry
     pub reflector: ReflectorGeometry,
@@ -534,7 +547,7 @@ impl PhysicalAntennaConfig {
 /// Valid ranges for antenna model parameters.
 ///
 /// Queries outside these ranges will trigger extrapolation warnings.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ValidityRanges {
     /// Azimuth range in degrees: (min, max)
     pub azimuth_min_max: (f64, f64),
@@ -621,7 +634,7 @@ impl ValidityRanges {
 /// 3. **Uncalibrated** - Design specifications only, no measurements
 ///
 /// Each status includes accuracy estimates to help users understand prediction quality.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum CalibrationStatus {
     /// Fully calibrated with dense measurement grid across azimuth, elevation, and frequency.
     /// Provides highest accuracy (typically ±1 dB in main lobe and first sidelobe).
@@ -696,7 +709,7 @@ impl CalibrationStatus {
 /// Describes the spatial, frequency, and measurement density of partial calibration data.
 /// Used to determine whether queries are in-coverage (use correction surface) or
 /// out-of-coverage (physics model only).
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CalibrationCoverage {
     /// Azimuth coverage range in degrees (min, max)
     /// For boresight-only: (0.0, 0.0)
@@ -773,7 +786,7 @@ impl CalibrationCoverage {
 ///
 /// Indicates how the physical parameters (surface RMS, q-factor, mesh properties)
 /// were determined. This helps users understand parameter confidence.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ParameterSource {
     /// Parameters from design specifications (vendor data, CAD models)
     /// Typical accuracy: ±20-30% on individual parameters
@@ -822,7 +835,7 @@ impl ParameterSource {
 ///
 /// Describes the spatial density of measurement data relative to the antenna beamwidth.
 /// Higher density provides better accuracy and supports finer correction surfaces.
-#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum MeasurementDensity {
     /// No measurements (uncalibrated - design specs only)
     None,
@@ -1829,11 +1842,9 @@ mod tests {
             .build()
             .unwrap();
 
-        // Test bincode serialization (bincode 2.x API)
-        let config = bincode::config::standard();
-        let encoded = bincode::encode_to_vec(&original, config).unwrap();
-        let (decoded, _): (AntennaCalibration, usize) =
-            bincode::decode_from_slice(&encoded, config).unwrap();
+        // Test postcard serialization round-trip
+        let encoded = postcard::to_allocvec(&original).unwrap();
+        let decoded: AntennaCalibration = postcard::from_bytes(&encoded).unwrap();
 
         assert_eq!(original, decoded);
         assert_eq!(original.antenna_id, decoded.antenna_id);
@@ -2168,10 +2179,8 @@ mod tests {
         assert!(calibration.validate().is_ok());
 
         // Should serialize/deserialize correctly
-        let config = bincode::config::standard();
-        let encoded = bincode::encode_to_vec(&calibration, config).unwrap();
-        let (decoded, _): (AntennaCalibration, usize) =
-            bincode::decode_from_slice(&encoded, config).unwrap();
+        let encoded = postcard::to_allocvec(&calibration).unwrap();
+        let decoded: AntennaCalibration = postcard::from_bytes(&encoded).unwrap();
 
         assert_eq!(calibration, decoded);
         assert!(decoded.calibration_status.is_none());
@@ -2194,11 +2203,9 @@ mod tests {
             coverage: coverage.clone(),
         };
 
-        // Test bincode serialization
-        let config = bincode::config::standard();
-        let encoded = bincode::encode_to_vec(&status, config).unwrap();
-        let (decoded, _): (CalibrationStatus, usize) =
-            bincode::decode_from_slice(&encoded, config).unwrap();
+        // Test postcard serialization
+        let encoded = postcard::to_allocvec(&status).unwrap();
+        let decoded: CalibrationStatus = postcard::from_bytes(&encoded).unwrap();
 
         assert_eq!(status, decoded);
 

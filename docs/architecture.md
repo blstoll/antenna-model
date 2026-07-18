@@ -502,7 +502,7 @@ azimuth_deg, elevation_deg, frequency_mhz, temperature_k, g_over_t_db
 ```
 
 #### Calibration Artifact Format
-Binary format (bincode):
+Binary format (postcard):
 ```rust
 struct AntennaCalibration {
     antenna_id: String,
@@ -1309,8 +1309,7 @@ anyhow = "1.0"
 thiserror = "1.0"
 
 # Serialization (for calibration artifacts)
-bincode = "1.3"
-# or serde_messagepack = "0.15"
+postcard = { version = "1.1", features = ["use-std"] }
 
 # Optional: Parallelization
 rayon = "1.8"

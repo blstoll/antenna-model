@@ -55,8 +55,8 @@ pub use validator::{
 };
 
 pub use serializer::{
-    artifact_format_info, export_metadata_json, export_validation_json, load_artifact,
-    save_artifact, ArtifactMetadata, CalibrationArtifact, SerializationError,
+    export_metadata_json, export_validation_json, ArtifactMetadata, CalibrationArtifact,
+    SerializationError,
 };
 
 pub use design_specs_loader::{DesignSpecs, FeedSpecs, MeshSpecs, ReflectorSpecs, TuningBounds};

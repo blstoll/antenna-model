@@ -381,14 +381,8 @@ impl From<ValidationError> for ComputationError {
     }
 }
 
-impl From<bincode::error::EncodeError> for DataError {
-    fn from(err: bincode::error::EncodeError) -> Self {
-        DataError::Serialization(err.to_string())
-    }
-}
-
-impl From<bincode::error::DecodeError> for DataError {
-    fn from(err: bincode::error::DecodeError) -> Self {
+impl From<postcard::Error> for DataError {
+    fn from(err: postcard::Error) -> Self {
         DataError::Serialization(err.to_string())
     }
 }
