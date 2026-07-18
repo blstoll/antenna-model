@@ -307,8 +307,27 @@ pub async fn compute_gain_batch(
     // Note: Individual request validation is performed within evaluate_batch
     // Batch-level validation (size limit) is also handled there
 
-    // Process the batch using the service layer
-    match evaluate_batch(&request, &state.repository) {
+    // Process the batch using the service layer. The service runs rayon
+    // synchronously (CPU-bound), which would otherwise block the async worker
+    // thread and defeat the RequestTimeout middleware. Offload it to the blocking
+    // pool so the async task yields at the join `.await`, letting the timeout
+    // fire. (The rayon work is not cancelled on timeout — see RequestTimeout.)
+    let state = state.0.clone();
+    let result = tokio::task::spawn_blocking(move || evaluate_batch(&request, &state.repository))
+        .await
+        .map_err(|join_err| {
+            error!(error = %join_err, "Batch compute task failed to join");
+            let error_response = ErrorResponse::new(
+                "internal_error",
+                format!("Batch computation task failed: {join_err}"),
+            );
+            poem::Error::from_string(
+                serde_json::to_string(&error_response).unwrap_or_default(),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            )
+        })?;
+
+    match result {
         Ok(response) => {
             let success_count = response
                 .results
@@ -429,8 +448,31 @@ pub async fn generate_heatmap_endpoint(
         ));
     }
 
-    // Generate heatmap using the service layer
-    match generate_heatmap(&request, &state.repository) {
+    // Generate heatmap using the service layer. The service runs rayon
+    // synchronously (CPU-bound); offload it to the blocking pool so the async
+    // task yields at the join `.await` and the RequestTimeout middleware can
+    // fire. (The rayon work is not cancelled on timeout — see RequestTimeout.)
+    // `request` is cloned into the closure because the original is still needed
+    // for post-compute logging below.
+    let compute_state = state.0.clone();
+    let compute_request = request.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        generate_heatmap(&compute_request, &compute_state.repository)
+    })
+    .await
+    .map_err(|join_err| {
+        error!(error = %join_err, "Heatmap compute task failed to join");
+        let error_response = ErrorResponse::new(
+            "internal_error",
+            format!("Heatmap computation task failed: {join_err}"),
+        );
+        poem::Error::from_string(
+            serde_json::to_string(&error_response).unwrap_or_default(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+    })?;
+
+    match result {
         Ok(response) => {
             info!(
                 antenna_id = %request.antenna_id,
@@ -943,8 +985,31 @@ pub async fn h3_link_budget(
         }
     };
 
-    // Delegate to service layer
-    match compute_h3_link_budget(&request, &calibration, &state.cache, start_time) {
+    // Delegate to service layer. The service runs rayon synchronously
+    // (CPU-bound); offload it to the blocking pool so the async task yields at
+    // the join `.await` and the RequestTimeout middleware can fire. (The rayon
+    // work is not cancelled on timeout — see RequestTimeout.) `request` is cloned
+    // into the closure because the original is still needed for post-compute
+    // logging below; the looked-up `calibration` (owned) and cache `Arc` move in.
+    let compute_request = request.clone();
+    let compute_cache = state.cache.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        compute_h3_link_budget(&compute_request, &calibration, &compute_cache, start_time)
+    })
+    .await
+    .map_err(|join_err| {
+        error!(error = %join_err, "H3 link budget compute task failed to join");
+        let error_response = ErrorResponse::new(
+            "internal_error",
+            format!("H3 link budget computation task failed: {join_err}"),
+        );
+        poem::Error::from_string(
+            serde_json::to_string(&error_response).unwrap_or_default(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+    })?;
+
+    match result {
         Ok(response) => {
             info!(
                 antenna_id = %request.antenna_id,

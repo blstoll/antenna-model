@@ -285,6 +285,7 @@ The API uses standard HTTP status codes:
 - **200**: Success
 - **400**: Invalid request parameters (validation error, invalid coordinates/attitude)
 - **404**: Antenna or feed not found
+- **408**: Request timeout (processing exceeded the configured `server.request_timeout_secs`)
 - **413**: Payload too large (request body exceeds the configured maximum size)
 - **500**: Internal server error (computation error, coordinate transform failure)
 - **503**: Service unavailable (startup, shutdown)
@@ -316,6 +317,29 @@ request (~0.6 MB). Operators can raise or lower the cap via configuration.
   "message": "Request body of 12000000 bytes exceeds the maximum of 10485760 bytes"
 }
 ```
+
+### Request Timeout
+
+Every request is bounded by the configured `server.request_timeout_secs`
+(default **30 s**). If processing exceeds the deadline, the request is abandoned
+and the client receives **408 Request Timeout** with the standard JSON error
+body. This primarily bounds the compute-heavy endpoints (batch, heatmap, H3 link
+budget), whose synchronous rayon work is offloaded to a blocking thread pool so
+the timeout can fire promptly instead of blocking a server worker thread.
+
+```json
+{
+  "error": "request_timeout",
+  "message": "Request processing exceeded the configured timeout of 30000 ms"
+}
+```
+
+**Honest limitation — the response is bounded, the compute is not.** When the
+timeout fires, the server stops waiting and returns 408, but the background
+rayon computation already running on the blocking pool is **not cancelled**: it
+continues to completion, consuming CPU. Dropping the future does not stop the
+pool. Cooperative, wall-clock-bounded compute cancellation (so the work itself
+stops early) is tracked as roadmap unit S3.
 
 ## Validation Rules
 

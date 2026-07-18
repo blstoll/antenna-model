@@ -12,7 +12,7 @@
 
 use crate::api::schemas::ErrorResponse;
 use poem::{Endpoint, IntoResponse, Middleware, Request, Response, Result};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -400,6 +400,92 @@ impl<E: Endpoint> Endpoint for RequestSizeTrackerImpl<E> {
     }
 }
 
+/// Request timeout enforcement middleware
+///
+/// Bounds how long the wrapped endpoint may run. If the endpoint future does not
+/// complete within `timeout`, the request is abandoned and the client receives a
+/// `408 Request Timeout` with the project's standard JSON error body
+/// (`request_timeout`). This makes `server.request_timeout_secs` an enforced
+/// limit rather than a decorative log line.
+///
+/// # Important limitation — background compute is NOT cancelled
+///
+/// `tokio::time::timeout` only fires while the wrapped future is `Pending`. The
+/// heavy handlers (batch / heatmap / h3) therefore offload their synchronous
+/// rayon compute onto `tokio::task::spawn_blocking` so the async task yields at a
+/// real `.await`, letting this timeout fire. When the timeout fires we stop
+/// awaiting and return a response to the client, but **the rayon work already
+/// running on the blocking pool is not aborted** — dropping the join handle does
+/// not stop the pool. It runs to completion (wasting CPU) until it finishes.
+/// Cooperative, wall-clock-bounded compute cancellation is roadmap unit S3.
+pub struct RequestTimeout {
+    timeout: Duration,
+}
+
+impl RequestTimeout {
+    /// Create a new request-timeout middleware with the given deadline.
+    pub fn new(timeout: Duration) -> Self {
+        Self { timeout }
+    }
+}
+
+impl<E: Endpoint> Middleware<E> for RequestTimeout {
+    type Output = RequestTimeoutImpl<E>;
+
+    fn transform(&self, ep: E) -> Self::Output {
+        RequestTimeoutImpl {
+            ep,
+            timeout: self.timeout,
+        }
+    }
+}
+
+pub struct RequestTimeoutImpl<E> {
+    ep: E,
+    timeout: Duration,
+}
+
+impl<E: Endpoint> Endpoint for RequestTimeoutImpl<E> {
+    type Output = Response;
+
+    async fn call(&self, req: Request) -> Result<Self::Output> {
+        let request_id = req
+            .extensions()
+            .get::<RequestIdExt>()
+            .map(|ext| ext.0.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        let path = req.uri().path().to_string();
+
+        match tokio::time::timeout(self.timeout, self.ep.call(req)).await {
+            // Endpoint completed within the deadline (Ok or Err both pass through).
+            Ok(result) => result.map(IntoResponse::into_response),
+            // Deadline elapsed. NOTE: this returns a response to the client but
+            // does NOT cancel any rayon compute already running on the blocking
+            // pool; that work runs to completion. Cooperative compute bounding
+            // is S3.
+            Err(_elapsed) => {
+                warn!(
+                    request_id = %request_id,
+                    path = %path,
+                    timeout_ms = self.timeout.as_millis(),
+                    "Request exceeded the configured timeout; responding with 408"
+                );
+                let body = ErrorResponse::new(
+                    "request_timeout",
+                    format!(
+                        "Request processing exceeded the configured timeout of {} ms",
+                        self.timeout.as_millis()
+                    ),
+                );
+                Err(poem::Error::from_string(
+                    serde_json::to_string(&body).unwrap_or_default(),
+                    poem::http::StatusCode::REQUEST_TIMEOUT,
+                ))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -534,6 +620,43 @@ mod tests {
 
         let cli = TestClient::new(app);
         let response = cli.get("/test").send().await;
+        response.assert_status_is_ok();
+    }
+
+    #[tokio::test]
+    async fn test_request_timeout_fires_on_slow_endpoint() {
+        // A handler that sleeps well past the timeout must yield a 408 with the
+        // standard JSON error body.
+        let app = Route::new()
+            .at(
+                "/slow",
+                poem::endpoint::make(|_req| async {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    Ok::<_, poem::Error>("done")
+                }),
+            )
+            .with(RequestId)
+            .with(RequestTimeout::new(Duration::from_millis(20)));
+
+        let cli = TestClient::new(app);
+        let response = cli.get("/slow").send().await;
+        response.assert_status(StatusCode::REQUEST_TIMEOUT);
+
+        let body = response.0.into_body().into_string().await.unwrap();
+        let err: ErrorResponse = serde_json::from_str(&body).unwrap();
+        assert_eq!(err.error, "request_timeout");
+    }
+
+    #[tokio::test]
+    async fn test_request_timeout_passes_fast_endpoint() {
+        // A handler that completes comfortably within the deadline is untouched.
+        let app = Route::new()
+            .at("/fast", poem::endpoint::make_sync(|_req: Request| "OK"))
+            .with(RequestId)
+            .with(RequestTimeout::new(Duration::from_secs(5)));
+
+        let cli = TestClient::new(app);
+        let response = cli.get("/fast").send().await;
         response.assert_status_is_ok();
     }
 

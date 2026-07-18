@@ -9,18 +9,24 @@
 //! 3. **RequestLogger** - Comprehensive structured logging with timing
 //! 4. **ErrorHandler** - Consistent error response formatting
 //! 5. **RequestSizeTracker** - Track and warn on large request/response bodies
+//! 6. **RequestTimeout** - Enforce the configured per-request processing deadline (408)
 //!
 //! This order ensures:
 //! - Request IDs are available for all subsequent middleware and handlers
 //! - Timing starts before any processing
 //! - Errors are caught and logged consistently
 //! - Size tracking happens at the outermost layer
+//! - The timeout wraps only handler execution (innermost), so body-size
+//!   rejection stays instant and outside the deadline
 
 use crate::api::handlers;
-use crate::api::middleware::{ErrorHandler, RequestId, RequestLogger, RequestSizeTracker};
+use crate::api::middleware::{
+    ErrorHandler, RequestId, RequestLogger, RequestSizeTracker, RequestTimeout,
+};
 use crate::api::AppState;
 use poem::{get, middleware::Tracing, post, Endpoint, EndpointExt, Route};
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Create all API routes with production-grade middleware
 ///
@@ -42,6 +48,8 @@ use std::sync::Arc;
 pub fn create_routes(state: Arc<AppState>) -> impl Endpoint {
     // Hard reject limit for request bodies (413 when exceeded), driven by config.
     let max_body = state.config.server.max_body_size_bytes;
+    // Per-request processing deadline (408 when exceeded), driven by config.
+    let timeout = Duration::from_secs(state.config.server.request_timeout_secs);
     Route::new()
         // Health and status endpoints (Sprint 5, Task 5.3)
         .at("/health", get(handlers::health)) // Liveness probe
@@ -73,6 +81,12 @@ pub fn create_routes(state: Arc<AppState>) -> impl Endpoint {
         .with(RequestSizeTracker::with_limits(
             max_body, 1_000_000, 10_000_000,
         )) // Enforce hard body-size limit + track request/response sizes
+        // Enforce the per-request processing deadline (408). Innermost so it
+        // wraps only handler execution: body-size rejection stays instant
+        // (outside the timeout) and this bounds the future we actually want to
+        // limit. See RequestTimeout docs: the response is bounded, not the
+        // background rayon compute (that is S3).
+        .with(RequestTimeout::new(timeout))
         // Attach application state
         .data(state)
 }
@@ -93,6 +107,8 @@ pub fn create_routes_with_size_limits(
     warn_request_size: usize,
     warn_response_size: usize,
 ) -> impl Endpoint {
+    // Per-request processing deadline (408 when exceeded), driven by config.
+    let timeout = Duration::from_secs(state.config.server.request_timeout_secs);
     Route::new()
         .at("/health", get(handlers::health))
         .at("/ready", get(handlers::ready))
@@ -120,6 +136,7 @@ pub fn create_routes_with_size_limits(
             warn_request_size,
             warn_response_size,
         ))
+        .with(RequestTimeout::new(timeout))
         .data(state)
 }
 
