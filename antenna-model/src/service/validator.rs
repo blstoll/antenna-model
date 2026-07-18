@@ -209,6 +209,28 @@ pub fn validate_h3_link_budget_request(req: &H3LinkBudgetRequest) -> ValidationR
     // Validate frequency (handles NaN and enforces [100, 50000] MHz range)
     validate_frequency(req.frequency_mhz, "frequency_mhz")?;
 
+    // Validate pointing frequency if specified (same range as the gain/heatmap validators)
+    if let Some(pointing_freq) = req.pointing_frequency_mhz {
+        validate_frequency(pointing_freq, "pointing_frequency_mhz")?;
+    }
+
+    // Validate system temperature if specified (feeds log10 in g_over_t_from_gain_db)
+    if let Some(t) = req.temperature_k {
+        validate_temperature(t, "temperature_k")?;
+    }
+
+    // Validate H3 resolution if specified (0-15; caught here, not late in h3_link_budget.rs)
+    if let Some(r) = req.h3_resolution {
+        if r > 15 {
+            return Err(ValidationError::OutOfRange {
+                param: "h3_resolution".to_string(),
+                value: r as f64,
+                min: 0.0,
+                max: 15.0,
+            });
+        }
+    }
+
     // n_rings limit: max 10
     if req.n_rings > 10 {
         return Err(ValidationError::InvalidValue {
@@ -350,6 +372,33 @@ fn validate_frequency(frequency_mhz: f64, param_name: &str) -> ValidationResult<
 
     if !(MIN_FREQUENCY_MHZ..=MAX_FREQUENCY_MHZ).contains(&frequency_mhz) {
         return Err(ValidationError::FrequencyOutOfRange { frequency_mhz });
+    }
+
+    Ok(())
+}
+
+/// Validate a system temperature (kelvin).
+///
+/// Must be finite and strictly positive (it feeds `log10` in
+/// `pattern::g_over_t_from_gain_db`, so `t <= 0` would produce NaN/`-inf`).
+/// The 10000 K upper bound is spec-sanctioned (S6): the codebase had no prior
+/// temperature bound, and any physical system temperature is far below it.
+fn validate_temperature(t_k: f64, param: &str) -> ValidationResult<()> {
+    if !t_k.is_finite() {
+        return Err(ValidationError::InvalidValue {
+            param: param.to_string(),
+            reason: format!("value is not finite: {}", t_k),
+        });
+    }
+
+    // Strictly > 0 (log10 domain); upper bound 10000 K.
+    if !(0.0 < t_k && t_k <= 10_000.0) {
+        return Err(ValidationError::OutOfRange {
+            param: param.to_string(),
+            value: t_k,
+            min: 0.0,
+            max: 10_000.0,
+        });
     }
 
     Ok(())
@@ -1025,6 +1074,90 @@ mod tests {
         let result = validate_h3_link_budget_request(&req);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("feed_position"));
+    }
+
+    // --- S6: temperature_k, pointing_frequency_mhz, h3_resolution ---
+
+    #[test]
+    fn test_h3_request_temperature_zero_rejected() {
+        // t = 0 must be rejected (log10 domain): strictly > 0.
+        let mut req = valid_h3_request();
+        req.temperature_k = Some(0.0);
+        let result = validate_h3_link_budget_request(&req);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("temperature_k"));
+    }
+
+    #[test]
+    fn test_h3_request_temperature_negative_rejected() {
+        let mut req = valid_h3_request();
+        req.temperature_k = Some(-5.0);
+        let result = validate_h3_link_budget_request(&req);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("temperature_k"));
+    }
+
+    #[test]
+    fn test_h3_request_temperature_nan_rejected() {
+        let mut req = valid_h3_request();
+        req.temperature_k = Some(f64::NAN);
+        let result = validate_h3_link_budget_request(&req);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("temperature_k"), "error: {msg}");
+        assert!(msg.contains("not finite"), "error: {msg}");
+    }
+
+    #[test]
+    fn test_h3_request_temperature_too_high_rejected() {
+        let mut req = valid_h3_request();
+        req.temperature_k = Some(20_000.0);
+        let result = validate_h3_link_budget_request(&req);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("temperature_k"));
+    }
+
+    #[test]
+    fn test_h3_request_pointing_frequency_too_high_rejected() {
+        let mut req = valid_h3_request();
+        req.pointing_frequency_mhz = Some(60_000.0);
+        let result = validate_h3_link_budget_request(&req);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("outside supported range"));
+    }
+
+    #[test]
+    fn test_h3_request_pointing_frequency_too_low_rejected() {
+        let mut req = valid_h3_request();
+        req.pointing_frequency_mhz = Some(50.0);
+        let result = validate_h3_link_budget_request(&req);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("outside supported range"));
+    }
+
+    #[test]
+    fn test_h3_request_h3_resolution_too_high_rejected() {
+        let mut req = valid_h3_request();
+        req.h3_resolution = Some(16);
+        let result = validate_h3_link_budget_request(&req);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("h3_resolution"));
+    }
+
+    #[test]
+    fn test_h3_request_boundary_values_accepted() {
+        // Upper-boundary values for all three S6 fields must validate Ok.
+        let mut req = valid_h3_request();
+        req.temperature_k = Some(10_000.0);
+        req.pointing_frequency_mhz = Some(50_000.0);
+        req.h3_resolution = Some(15);
+        assert!(validate_h3_link_budget_request(&req).is_ok());
     }
 
     // ========================================================================
