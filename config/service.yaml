@@ -48,6 +48,15 @@ performance:
   # Set to false to disable parallelization (useful for debugging)
   enable_parallel_processing: true
 
+  # Per-integration wall-clock budget in milliseconds (roadmap S3).
+  # Bounds a SINGLE aperture integration: if one integral's radial loop runs past
+  # this, it aborts with 504 `computation_budget_exceeded` instead of burning a core
+  # unbounded. Generous by default (30 s is ~9x the ~3.3 s worst-case single
+  # integration) so normal traffic never trips it. This caps one integral only — the
+  # whole-request wall-clock is server.request_timeout_secs (S2); a large heatmap can
+  # still spend budget x points of background CPU. Must be > 0.
+  integration_budget_ms: 30000
+
 cache:
   # Enable LRU caching of gain results for repeated queries (e.g., H3 heatmaps)
   enabled: true

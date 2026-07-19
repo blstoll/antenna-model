@@ -285,7 +285,9 @@ The API uses standard HTTP status codes:
 - **200**: Success
 - **400**: Invalid request parameters (validation error, invalid coordinates/attitude)
 - **404**: Antenna or feed not found
-- **504**: Request timeout (processing exceeded the configured `server.request_timeout_secs`)
+- **504**: A server-side wall-clock budget was exceeded — either the whole request
+  (`request_timeout`, `server.request_timeout_secs`) or a single aperture integration
+  (`computation_budget_exceeded`, `performance.integration_budget_ms`)
 - **413**: Payload too large (request body exceeds the configured maximum size)
 - **500**: Internal server error (computation error, coordinate transform failure)
 - **503**: Service unavailable (startup, shutdown)
@@ -329,11 +331,11 @@ abandoned and the client receives **504 Gateway Timeout** with the standard JSON
 error body.
 
 The lightweight single-evaluation endpoint `/api/v1/gain` runs its computation
-inline (it targets the <100 ms path) and is **not** offloaded, so the timeout
-middleware cannot preempt it — a pathologically slow single evaluation would run
-to completion rather than returning 504. This is an intentional scope boundary:
-the deadline exists to bound the expensive batch/grid endpoints. Enforcing it on
-the inline path (and cancelling in-flight compute generally) is roadmap unit S3.
+inline (it targets the <100 ms path) and is **not** offloaded, so the *request*
+timeout middleware cannot preempt it. As of roadmap unit S3, the inline path is
+instead bounded by the per-integration compute budget below: a pathologically
+slow single evaluation now aborts with **504 `computation_budget_exceeded`** once
+one aperture integration exceeds `performance.integration_budget_ms`.
 
 The status is **504 (a 5xx)**, not 408: the deadline is a *server-side* budget
 (the client sent a valid request; the server exceeded its own processing limit),
@@ -352,11 +354,43 @@ under roadmap S4.)
 ```
 
 **Honest limitation — the response is bounded, the compute is not.** When the
-timeout fires, the server stops waiting and returns 504, but the background
-rayon computation already running on the blocking pool is **not cancelled**: it
-continues to completion, consuming CPU. Dropping the future does not stop the
-pool. Cooperative, wall-clock-bounded compute cancellation (so the work itself
-stops early) is tracked as roadmap unit S3.
+request timeout fires, the server stops waiting and returns 504, but the
+background rayon computation already running on the blocking pool is **not
+cancelled**: it continues to completion, consuming CPU. Dropping the future does
+not stop the pool. Cooperative, wall-clock-bounded compute cancellation at the
+level of a single integration is roadmap unit S3, documented next.
+
+### Per-Integration Compute Budget
+
+The configured `performance.integration_budget_ms` (default **30 000 ms**) bounds
+a **single aperture integration** — the innermost hot loop of the physics model.
+When one integral's radial loop runs past the budget it aborts *cooperatively*
+(the deadline is polled at radial chunk boundaries, never per sample, so results
+are byte-identical when the budget is not hit) with **504 Gateway Timeout** and
+the machine `error` code **`computation_budget_exceeded`** — distinct from the
+request timeout's `request_timeout` so operators can tell "the middleware gave up
+waiting" from "a single integral was aborted."
+
+```json
+{
+  "error": "computation_budget_exceeded",
+  "message": "computation exceeded time budget in azimuthal_mode_field: 31000 ms > 30000 ms budget"
+}
+```
+
+Like the request timeout, the overrun is deterministic in the request payload, so
+504 (not 503 + Retry-After) is used and the remedy is a smaller request.
+
+**Honest limitation — per integration, not per request.** The budget caps *each*
+integral, not the whole request. A single `/api/v1/gain` evaluation runs two
+integrations (the off-axis pattern plus its boresight normalization anchor), each
+getting a fresh budget. A `/api/v1/heatmap` or `/api/v1/gain/batch` fans out to
+many points, each with its own budgeted integrations — an over-budget point fails
+just that point (heatmap) or item (batch) rather than the whole request. So the
+three limits compose but do not subsume one another: `integration_budget_ms`
+caps one integral, `request_timeout_secs` caps the request wall-clock, and
+bounding the total fan-out CPU is roadmap unit S4. A huge heatmap can still spend
+`budget × points` of background CPU after a request-timeout 504.
 
 ## Validation Rules
 

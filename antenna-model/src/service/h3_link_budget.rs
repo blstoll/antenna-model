@@ -19,6 +19,7 @@ use crate::api::schemas::{
 use crate::data::types::AntennaCalibration;
 use crate::error::{AntennaModelError, Result};
 use crate::model::compute_gain_db;
+use crate::model::integration::DEFAULT_INTEGRATION_BUDGET;
 use crate::model::{
     compute_emitter_direction_with_attitude, compute_feed_position_from_pointing, ecef_to_geodetic,
     evaluate_correction, geodetic_to_ecef, squint_corrected_direction, AntennaConfiguration,
@@ -28,6 +29,7 @@ use crate::model::{
 use crate::service::{GainCache, GainCacheKey};
 use rayon::prelude::*;
 use std::collections::HashSet;
+use std::time::Duration;
 
 /// Select H3 resolution from frequency (MHz):
 /// - < 2000 MHz → 6
@@ -296,6 +298,29 @@ pub fn compute_h3_link_budget(
     cache: &GainCache,
     start_time: std::time::Instant,
 ) -> Result<H3LinkBudgetResponse> {
+    // Thin wrapper passing the generous model-layer default; the endpoint calls
+    // `compute_h3_link_budget_with_budget` with the configured value.
+    compute_h3_link_budget_with_budget(
+        request,
+        calibration,
+        cache,
+        start_time,
+        DEFAULT_INTEGRATION_BUDGET,
+    )
+}
+
+/// Compute the H3 link budget, bounding each per-cell aperture integration to `time_budget`
+/// (roadmap S3). The served endpoint threads `performance.integration_budget_ms` here.
+///
+/// Note (honest limitation): the budget caps each per-cell integration, not the whole grid.
+/// The whole-request wall-clock is S2's `RequestTimeout`; total fan-out CPU is S4.
+pub fn compute_h3_link_budget_with_budget(
+    request: &H3LinkBudgetRequest,
+    calibration: &AntennaCalibration,
+    cache: &GainCache,
+    start_time: std::time::Instant,
+    time_budget: Duration,
+) -> Result<H3LinkBudgetResponse> {
     // 1. Resolve H3 resolution
     let resolution = request
         .h3_resolution
@@ -325,6 +350,9 @@ pub fn compute_h3_link_budget(
 
     // 4. Build antenna configuration
     let mut integration_params = IntegrationParams::adaptive();
+    // S3: bound each per-cell aperture integration to the configured wall-clock budget
+    // (carried in IntegrationParams; shared by both compute_gain_db call sites below).
+    integration_params.time_budget = Some(time_budget);
     // Double-counting gate: physical spillover is folded in only when NO correction surface
     // exists (the surface otherwise absorbs it). Whole-antenna gate — never per query. Shared
     // by both `compute_gain_db` call sites below (boresight reference and per-cell), matching

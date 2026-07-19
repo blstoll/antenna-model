@@ -12,7 +12,7 @@ pub mod heatmap;
 pub(crate) mod test_support;
 pub mod validator;
 
-pub use batch::evaluate_batch;
-pub use evaluator::compute_gain_from_request;
-pub use h3_link_budget::compute_h3_link_budget;
-pub use heatmap::generate_heatmap;
+pub use batch::{evaluate_batch, evaluate_batch_with_budget};
+pub use evaluator::{compute_gain_from_request, compute_gain_from_request_with_budget};
+pub use h3_link_budget::{compute_h3_link_budget, compute_h3_link_budget_with_budget};
+pub use heatmap::{generate_heatmap, generate_heatmap_with_budget};

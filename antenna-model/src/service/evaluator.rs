@@ -74,12 +74,13 @@ use crate::api::schemas::{
 use crate::data::repository::CalibrationRepository;
 use crate::data::types::{CalibrationCoverage, CalibrationStatus};
 use crate::error::{AntennaModelError, Result};
+use crate::model::integration::DEFAULT_INTEGRATION_BUDGET;
 use crate::model::{
     compute_emitter_direction_with_attitude, compute_feed_position_from_pointing, compute_gain_db,
     evaluate_correction, squint_corrected_direction, AntennaConfiguration, IntegrationParams,
 };
 use crate::service::validator::coordinate_ambiguity_warnings;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Compute antenna gain from a gain request
 ///
@@ -97,6 +98,22 @@ use std::time::Instant;
 pub fn compute_gain_from_request(
     request: &GainRequest,
     repository: &CalibrationRepository,
+) -> Result<GainResponse> {
+    // Thin wrapper: the served handlers call `_with_budget` with the configured value; this
+    // 2-arg form keeps every existing (mostly test) call-site compiling by passing the
+    // generous model-layer default. See `compute_gain_from_request_with_budget`.
+    compute_gain_from_request_with_budget(request, repository, DEFAULT_INTEGRATION_BUDGET)
+}
+
+/// Compute antenna gain from a request, bounding each aperture integration to `time_budget`
+/// (roadmap S3). Identical to [`compute_gain_from_request`] except the per-integration
+/// wall-clock budget is caller-supplied — the served path threads
+/// `performance.integration_budget_ms` here so the config knob is live. A single over-budget
+/// integration returns `ComputationError::TimeBudgetExceeded` (→ 504).
+pub fn compute_gain_from_request_with_budget(
+    request: &GainRequest,
+    repository: &CalibrationRepository,
+    time_budget: Duration,
 ) -> Result<GainResponse> {
     let start = Instant::now();
     let mut warnings = Vec::new();
@@ -211,6 +228,11 @@ pub fn compute_gain_from_request(
     // from (D/λ, θ), so this satisfies the <100ms target near boresight while remaining
     // numerically correct off-axis (P10).
     let mut integration_params = IntegrationParams::adaptive();
+    // S3: bound each aperture integration to the configured wall-clock budget. Carried in
+    // IntegrationParams so `integrate_aperture`'s signature stays stable; both integrations
+    // behind this gain (off-axis + boresight anchor, and the ideal reference below) each get
+    // a fresh deadline of this duration.
+    integration_params.time_budget = Some(time_budget);
     // Double-counting gate: physical spillover is folded in only when NO correction surface
     // exists (the surface otherwise absorbs it empirically). Whole-antenna gate — never per
     // query — so no discontinuity is introduced between covered and out-of-coverage queries on
