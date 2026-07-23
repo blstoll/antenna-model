@@ -322,6 +322,26 @@ pub enum ComputationError {
     /// Invalid model state
     #[error("invalid model state: {0}")]
     InvalidModelState(String),
+
+    /// A single aperture integration exceeded its configured wall-clock budget (S3).
+    ///
+    /// Raised cooperatively inside the radial integration loop when one integral runs
+    /// past `IntegrationParams::time_budget` (from `performance.integration_budget_ms`).
+    /// The overrun is deterministic in the request payload — the same heavy grid re-costs
+    /// the same — so it maps to `504` (not a transient `503`): the remedy is a smaller
+    /// request, not a retry. This bounds ONE integral; the request wall-clock is S2's
+    /// `RequestTimeout` and concurrency is S4.
+    #[error(
+        "computation exceeded time budget in {operation}: {elapsed_ms:.0} ms > {budget_ms} ms budget"
+    )]
+    TimeBudgetExceeded {
+        /// Name of the integrator that hit the deadline.
+        operation: String,
+        /// Wall-clock time elapsed since the integration started, in milliseconds.
+        elapsed_ms: f64,
+        /// The configured budget that was exceeded, in milliseconds.
+        budget_ms: u64,
+    },
 }
 
 /// Errors related to configuration
@@ -431,7 +451,12 @@ impl From<DataError> for ApiError {
 // Convert ComputationError to ApiError for HTTP responses
 impl From<ComputationError> for ApiError {
     fn from(err: ComputationError) -> Self {
-        ApiError::InternalError(err.to_string())
+        match &err {
+            // A blown wall-clock budget is a server-side processing timeout (504), mirroring
+            // S2's RequestTimeout — deterministic in the payload, so not a transient 503.
+            ComputationError::TimeBudgetExceeded { .. } => ApiError::Timeout(err.to_string()),
+            _ => ApiError::InternalError(err.to_string()),
+        }
     }
 }
 
@@ -690,6 +715,20 @@ mod tests {
         let api_err: ApiError = comp_err.into();
         assert_eq!(api_err.status_code(), 500);
         assert!(matches!(api_err, ApiError::InternalError(_)));
+    }
+
+    #[test]
+    fn test_time_budget_exceeded_maps_to_504() {
+        // S3: a blown per-integration wall-clock budget maps to 504 (server-side timeout),
+        // NOT the blanket 500 every other ComputationError takes.
+        let comp_err = ComputationError::TimeBudgetExceeded {
+            operation: "azimuthal_mode_field".to_string(),
+            elapsed_ms: 31_000.0,
+            budget_ms: 30_000,
+        };
+        let api_err: ApiError = comp_err.into();
+        assert_eq!(api_err.status_code(), 504);
+        assert!(matches!(api_err, ApiError::Timeout(_)));
     }
 
     #[test]

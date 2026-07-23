@@ -8,10 +8,11 @@ use crate::api::schemas::{
 };
 use crate::data::repository::CalibrationRepository;
 use crate::error::{AntennaModelError, Result};
-use crate::service::evaluator::compute_gain_from_request;
+use crate::model::integration::DEFAULT_INTEGRATION_BUDGET;
+use crate::service::evaluator::compute_gain_from_request_with_budget;
 use crate::service::validator::MAX_BATCH_SIZE;
 use rayon::prelude::*;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
 /// Minimum batch size to benefit from parallel processing
@@ -61,6 +62,22 @@ pub fn evaluate_batch(
     request: &BatchGainRequest,
     repository: &CalibrationRepository,
 ) -> Result<BatchGainResponse> {
+    // Thin wrapper passing the generous model-layer default; the endpoint calls
+    // `evaluate_batch_with_budget` with the configured value.
+    evaluate_batch_with_budget(request, repository, DEFAULT_INTEGRATION_BUDGET)
+}
+
+/// Evaluate a batch, bounding each per-item aperture integration to `time_budget`
+/// (roadmap S3). The served endpoint threads `performance.integration_budget_ms` here.
+///
+/// Note (honest limitation): an over-budget item becomes an error result for that item
+/// (like any other per-item failure) — it does not abort the batch. The whole-request
+/// wall-clock is S2's `RequestTimeout`; total fan-out CPU is S4.
+pub fn evaluate_batch_with_budget(
+    request: &BatchGainRequest,
+    repository: &CalibrationRepository,
+    time_budget: Duration,
+) -> Result<BatchGainResponse> {
     let start = Instant::now();
     let num_evaluations = request.evaluations.len();
 
@@ -105,7 +122,7 @@ pub fn evaluate_batch(
             .par_iter()
             .enumerate()
             .map(|(idx, gain_request)| {
-                match compute_gain_from_request(gain_request, repository) {
+                match compute_gain_from_request_with_budget(gain_request, repository, time_budget) {
                     Ok(response) => response,
                     Err(e) => {
                         // Log the error but continue processing other requests
@@ -129,8 +146,8 @@ pub fn evaluate_batch(
             .evaluations
             .iter()
             .enumerate()
-            .map(
-                |(idx, gain_request)| match compute_gain_from_request(gain_request, repository) {
+            .map(|(idx, gain_request)| {
+                match compute_gain_from_request_with_budget(gain_request, repository, time_budget) {
                     Ok(response) => response,
                     Err(e) => {
                         warn!(
@@ -139,8 +156,8 @@ pub fn evaluate_batch(
                         );
                         create_error_response(gain_request, e)
                     }
-                },
-            )
+                }
+            })
             .collect()
     };
 

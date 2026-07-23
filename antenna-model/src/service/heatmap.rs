@@ -9,10 +9,11 @@ use crate::api::schemas::{
 use crate::data::repository::CalibrationRepository;
 use crate::error::{AntennaModelError, Result};
 use crate::model::coordinates_3d::{ecef_to_enu_rotation, ecef_to_geodetic, geodetic_to_ecef};
-use crate::service::evaluator::compute_gain_from_request;
+use crate::model::integration::DEFAULT_INTEGRATION_BUDGET;
+use crate::service::evaluator::compute_gain_from_request_with_budget;
 use rayon::prelude::*;
 use std::collections::HashSet;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// Threshold for parallel evaluation (number of grid points)
 const PARALLEL_THRESHOLD: usize = 100;
@@ -47,6 +48,23 @@ pub fn generate_heatmap(
     request: &HeatmapRequest,
     repository: &CalibrationRepository,
 ) -> Result<HeatmapResponse> {
+    // Thin wrapper passing the generous model-layer default (keeps existing call-sites
+    // compiling); the endpoint calls `generate_heatmap_with_budget` with the configured value.
+    generate_heatmap_with_budget(request, repository, DEFAULT_INTEGRATION_BUDGET)
+}
+
+/// Generate a heatmap, bounding each per-point aperture integration to `time_budget`
+/// (roadmap S3). The served endpoint threads `performance.integration_budget_ms` here.
+///
+/// Note (honest limitation): the budget bounds each INTEGRATION, not the whole heatmap. A
+/// per-point over-budget integration marks only that grid point failed — it does not abort
+/// the fan-out. The whole-request wall-clock is S2's `RequestTimeout`; bounding the total
+/// fan-out CPU is S4.
+pub fn generate_heatmap_with_budget(
+    request: &HeatmapRequest,
+    repository: &CalibrationRepository,
+    time_budget: Duration,
+) -> Result<HeatmapResponse> {
     let start = Instant::now();
 
     // Generate grid points based on configuration
@@ -75,12 +93,12 @@ pub fn generate_heatmap(
         if grid_points.len() >= PARALLEL_THRESHOLD {
             grid_points
                 .par_iter()
-                .map(|(az, el)| evaluate_grid_point(request, repository, *az, *el))
+                .map(|(az, el)| evaluate_grid_point(request, repository, *az, *el, time_budget))
                 .collect()
         } else {
             grid_points
                 .iter()
-                .map(|(az, el)| evaluate_grid_point(request, repository, *az, *el))
+                .map(|(az, el)| evaluate_grid_point(request, repository, *az, *el, time_budget))
                 .collect()
         };
 
@@ -263,6 +281,7 @@ fn evaluate_grid_point(
     repository: &CalibrationRepository,
     azimuth_deg: f64,
     elevation_deg: f64,
+    time_budget: Duration,
 ) -> (f64, f64, f64, Vec<String>, bool) {
     // Convert azimuth/elevation to emitter position using proper ECEF/ENU transformation
     let emitter_position = match compute_emitter_position_from_angles(
@@ -297,7 +316,7 @@ fn evaluate_grid_point(
     };
 
     // Evaluate gain at this point
-    match compute_gain_from_request(&gain_request, repository) {
+    match compute_gain_from_request_with_budget(&gain_request, repository, time_budget) {
         Ok(response) => (
             azimuth_deg,
             elevation_deg,
@@ -824,8 +843,9 @@ mod tests {
             vehicle_attitude: None,
         };
 
-        let gain_response = compute_gain_from_request(&gain_request, &repository)
-            .expect("/gain computation failed for the reconstructed geometry");
+        let gain_response =
+            crate::service::evaluator::compute_gain_from_request(&gain_request, &repository)
+                .expect("/gain computation failed for the reconstructed geometry");
 
         // Sanity: confirm spillover was actually applied on the /gain path, so this
         // comparison is non-vacuous (both endpoints reduce gain, not both skip it).

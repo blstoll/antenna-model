@@ -132,6 +132,17 @@ pub struct PerformanceConfig {
     /// Enable parallel processing for batch requests
     #[serde(default = "default_enable_parallel")]
     pub enable_parallel_processing: bool,
+
+    /// Per-integration wall-clock budget in milliseconds (roadmap S3).
+    ///
+    /// Bounds a SINGLE aperture integration: if one integral's radial loop runs past this,
+    /// it aborts with `504 computation_budget_exceeded` instead of burning a core unbounded.
+    /// Generous by default (30 s ≈ 9× the ~3.3 s worst-case served integration) so normal
+    /// traffic never trips it. This caps one integral only — the whole-request wall-clock is
+    /// `server.request_timeout_secs` (S2) and concurrency is S4; a large heatmap can still
+    /// spend up to `budget × points` of background CPU after S2's 504 fires.
+    #[serde(default = "default_integration_budget_ms")]
+    pub integration_budget_ms: u64,
 }
 
 // Default value functions
@@ -187,6 +198,10 @@ fn default_enable_parallel() -> bool {
     true
 }
 
+fn default_integration_budget_ms() -> u64 {
+    30_000 // 30 s — generous headroom over the ~3.3 s worst-case single integration (S3)
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -224,6 +239,7 @@ impl Default for PerformanceConfig {
             worker_threads: default_worker_threads(),
             max_batch_size: default_max_batch_size(),
             enable_parallel_processing: default_enable_parallel(),
+            integration_budget_ms: default_integration_budget_ms(),
         }
     }
 }
@@ -280,6 +296,10 @@ impl ServiceConfig {
             .set_default(
                 "performance.enable_parallel_processing",
                 default_enable_parallel(),
+            )?
+            .set_default(
+                "performance.integration_budget_ms",
+                default_integration_budget_ms() as i64,
             )?
             // Load from YAML file (optional - won't fail if missing)
             .add_source(
@@ -355,6 +375,13 @@ impl ServiceConfig {
         if self.performance.max_batch_size == 0 {
             return Err(ConfigError::InvalidValue {
                 key: "performance.max_batch_size".to_string(),
+                reason: "must be greater than 0".to_string(),
+            });
+        }
+
+        if self.performance.integration_budget_ms == 0 {
+            return Err(ConfigError::InvalidValue {
+                key: "performance.integration_budget_ms".to_string(),
                 reason: "must be greater than 0".to_string(),
             });
         }
@@ -869,6 +896,18 @@ mod tests {
         assert_eq!(config.server.port, 3000);
         assert_eq!(config.logging.level, "info");
         assert_eq!(config.performance.max_batch_size, 1000);
+        assert_eq!(config.performance.integration_budget_ms, 30_000);
+    }
+
+    #[test]
+    fn test_integration_budget_must_be_nonzero() {
+        let mut config = ServiceConfig::with_defaults();
+        assert!(config.validate().is_ok());
+        config.performance.integration_budget_ms = 0;
+        assert!(
+            config.validate().is_err(),
+            "a zero integration budget must be rejected (S3)"
+        );
     }
 
     #[test]

@@ -289,23 +289,36 @@ paths:
                     message: "Request body of 12000000 bytes exceeds the maximum of 10485760 bytes"
         '504':
           description: |
-            Request processing exceeded the configured timeout (server.request_timeout_secs,
-            default 30 s). This is a server-side wall-clock budget, so a 5xx (504) is used
-            rather than 408; there is no honest Retry-After because the failure is
-            deterministic in the request (the remedy is a smaller request, not waiting).
-            The machine `error` code remains `request_timeout`. Honest limitation: the server
-            stops waiting and responds, but the background compute is NOT cancelled and runs
-            to completion (see roadmap S3).
+            A server-side wall-clock budget was exceeded. Two distinct budgets map here, told
+            apart by the machine `error` code:
+
+            - `request_timeout` — the whole request exceeded `server.request_timeout_secs`
+              (default 30 s, roadmap S2). The server stops waiting and responds, but the
+              background compute is NOT cancelled and runs to completion.
+            - `computation_budget_exceeded` — a SINGLE aperture integration exceeded
+              `performance.integration_budget_ms` (default 30 000 ms, roadmap S3), aborting
+              that integration cooperatively. This caps one integral, not the whole request;
+              a large fan-out (heatmap/batch) can still spend `budget × points` of background
+              CPU after an S2 504.
+
+            504 (a 5xx) is used rather than 408 because the overrun is server-side and
+            deterministic in the request payload — there is no honest Retry-After; the remedy
+            is a smaller request, not waiting.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
               examples:
                 request_timeout:
-                  summary: Request timeout
+                  summary: Whole-request timeout (S2)
                   value:
                     error: "request_timeout"
                     message: "Request processing exceeded the configured timeout of 30000 ms"
+                computation_budget_exceeded:
+                  summary: Single integration over budget (S3)
+                  value:
+                    error: "computation_budget_exceeded"
+                    message: "computation exceeded time budget in azimuthal_mode_field: 31000 ms > 30000 ms budget"
         '500':
           description: Internal server error
           content:
@@ -357,23 +370,36 @@ paths:
                     message: "Request body of 12000000 bytes exceeds the maximum of 10485760 bytes"
         '504':
           description: |
-            Request processing exceeded the configured timeout (server.request_timeout_secs,
-            default 30 s). This is a server-side wall-clock budget, so a 5xx (504) is used
-            rather than 408; there is no honest Retry-After because the failure is
-            deterministic in the request (the remedy is a smaller request, not waiting).
-            The machine `error` code remains `request_timeout`. Honest limitation: the server
-            stops waiting and responds, but the background compute is NOT cancelled and runs
-            to completion (see roadmap S3).
+            A server-side wall-clock budget was exceeded. Two distinct budgets map here, told
+            apart by the machine `error` code:
+
+            - `request_timeout` — the whole request exceeded `server.request_timeout_secs`
+              (default 30 s, roadmap S2). The server stops waiting and responds, but the
+              background compute is NOT cancelled and runs to completion.
+            - `computation_budget_exceeded` — a SINGLE aperture integration exceeded
+              `performance.integration_budget_ms` (default 30 000 ms, roadmap S3), aborting
+              that integration cooperatively. This caps one integral, not the whole request;
+              a large fan-out (heatmap/batch) can still spend `budget × points` of background
+              CPU after an S2 504.
+
+            504 (a 5xx) is used rather than 408 because the overrun is server-side and
+            deterministic in the request payload — there is no honest Retry-After; the remedy
+            is a smaller request, not waiting.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
               examples:
                 request_timeout:
-                  summary: Request timeout
+                  summary: Whole-request timeout (S2)
                   value:
                     error: "request_timeout"
                     message: "Request processing exceeded the configured timeout of 30000 ms"
+                computation_budget_exceeded:
+                  summary: Single integration over budget (S3)
+                  value:
+                    error: "computation_budget_exceeded"
+                    message: "computation exceeded time budget in azimuthal_mode_field: 31000 ms > 30000 ms budget"
 
   /api/v1/heatmap:
     post:
@@ -450,23 +476,36 @@ paths:
                     message: "Request body of 12000000 bytes exceeds the maximum of 10485760 bytes"
         '504':
           description: |
-            Request processing exceeded the configured timeout (server.request_timeout_secs,
-            default 30 s). This is a server-side wall-clock budget, so a 5xx (504) is used
-            rather than 408; there is no honest Retry-After because the failure is
-            deterministic in the request (the remedy is a smaller request, not waiting).
-            The machine `error` code remains `request_timeout`. Honest limitation: the server
-            stops waiting and responds, but the background compute is NOT cancelled and runs
-            to completion (see roadmap S3).
+            A server-side wall-clock budget was exceeded. Two distinct budgets map here, told
+            apart by the machine `error` code:
+
+            - `request_timeout` — the whole request exceeded `server.request_timeout_secs`
+              (default 30 s, roadmap S2). The server stops waiting and responds, but the
+              background compute is NOT cancelled and runs to completion.
+            - `computation_budget_exceeded` — a SINGLE aperture integration exceeded
+              `performance.integration_budget_ms` (default 30 000 ms, roadmap S3), aborting
+              that integration cooperatively. This caps one integral, not the whole request;
+              a large fan-out (heatmap/batch) can still spend `budget × points` of background
+              CPU after an S2 504.
+
+            504 (a 5xx) is used rather than 408 because the overrun is server-side and
+            deterministic in the request payload — there is no honest Retry-After; the remedy
+            is a smaller request, not waiting.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
               examples:
                 request_timeout:
-                  summary: Request timeout
+                  summary: Whole-request timeout (S2)
                   value:
                     error: "request_timeout"
                     message: "Request processing exceeded the configured timeout of 30000 ms"
+                computation_budget_exceeded:
+                  summary: Single integration over budget (S3)
+                  value:
+                    error: "computation_budget_exceeded"
+                    message: "computation exceeded time budget in azimuthal_mode_field: 31000 ms > 30000 ms budget"
 
   /api/v1/antennas:
     get:

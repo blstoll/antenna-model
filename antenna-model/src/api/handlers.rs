@@ -9,7 +9,8 @@ use crate::api::schemas::{
 };
 use crate::api::AppState;
 use crate::service::{
-    compute_gain_from_request, compute_h3_link_budget, evaluate_batch, generate_heatmap, validator,
+    compute_gain_from_request_with_budget, compute_h3_link_budget_with_budget,
+    evaluate_batch_with_budget, generate_heatmap_with_budget, validator,
 };
 use poem::{
     handler,
@@ -18,6 +19,7 @@ use poem::{
     Response,
 };
 use std::sync::Arc;
+use std::time::Duration;
 use tracing::{error, info, warn};
 
 /// GET /health - Liveness probe endpoint
@@ -206,8 +208,10 @@ pub async fn compute_gain(
         ));
     }
 
-    // Compute gain using the service layer
-    match compute_gain_from_request(&request, &state.repository) {
+    // Compute gain using the service layer, bounding each aperture integration to the
+    // configured per-integration wall-clock budget (S3).
+    let budget = Duration::from_millis(state.config.performance.integration_budget_ms);
+    match compute_gain_from_request_with_budget(&request, &state.repository, budget) {
         Ok(response) => {
             info!(
                 antenna_id = %request.antenna_id,
@@ -235,6 +239,9 @@ pub async fn compute_gain(
                 crate::error::AntennaModelError::InvalidCoordinate { .. } => {
                     (StatusCode::BAD_REQUEST, "invalid_coordinate")
                 }
+                crate::error::AntennaModelError::Computation(
+                    crate::error::ComputationError::TimeBudgetExceeded { .. },
+                ) => (StatusCode::GATEWAY_TIMEOUT, "computation_budget_exceeded"),
                 _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
             };
 
@@ -313,19 +320,22 @@ pub async fn compute_gain_batch(
     // pool so the async task yields at the join `.await`, letting the timeout
     // fire. (The rayon work is not cancelled on timeout — see RequestTimeout.)
     let state = state.0.clone();
-    let result = tokio::task::spawn_blocking(move || evaluate_batch(&request, &state.repository))
-        .await
-        .map_err(|join_err| {
-            error!(error = %join_err, "Batch compute task failed to join");
-            let error_response = ErrorResponse::new(
-                "internal_error",
-                format!("Batch computation task failed: {join_err}"),
-            );
-            poem::Error::from_string(
-                serde_json::to_string(&error_response).unwrap_or_default(),
-                StatusCode::INTERNAL_SERVER_ERROR,
-            )
-        })?;
+    let budget = Duration::from_millis(state.config.performance.integration_budget_ms);
+    let result = tokio::task::spawn_blocking(move || {
+        evaluate_batch_with_budget(&request, &state.repository, budget)
+    })
+    .await
+    .map_err(|join_err| {
+        error!(error = %join_err, "Batch compute task failed to join");
+        let error_response = ErrorResponse::new(
+            "internal_error",
+            format!("Batch computation task failed: {join_err}"),
+        );
+        poem::Error::from_string(
+            serde_json::to_string(&error_response).unwrap_or_default(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+    })?;
 
     match result {
         Ok(response) => {
@@ -354,11 +364,15 @@ pub async fn compute_gain_batch(
                 "Batch gain computation failed"
             );
 
-            // Map errors to appropriate HTTP status codes
+            // Map errors to appropriate HTTP status codes. (Per-item over-budget failures
+            // become error results inside the batch; this arm covers any that surface here.)
             let (status_code, error_type) = match &e {
                 crate::error::AntennaModelError::Validation(_) => {
                     (StatusCode::BAD_REQUEST, "validation_error")
                 }
+                crate::error::AntennaModelError::Computation(
+                    crate::error::ComputationError::TimeBudgetExceeded { .. },
+                ) => (StatusCode::GATEWAY_TIMEOUT, "computation_budget_exceeded"),
                 _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
             };
 
@@ -456,22 +470,24 @@ pub async fn generate_heatmap_endpoint(
     // MOVE `request` into the closure — avoids deep-cloning the whole
     // HeatmapRequest (grid config + three 3D positions) on every heavy call.
     let compute_state = state.0.clone();
+    let budget = Duration::from_millis(compute_state.config.performance.integration_budget_ms);
     let antenna_id = request.antenna_id.clone();
     let feed_id = request.feed_id.clone();
-    let result =
-        tokio::task::spawn_blocking(move || generate_heatmap(&request, &compute_state.repository))
-            .await
-            .map_err(|join_err| {
-                error!(error = %join_err, "Heatmap compute task failed to join");
-                let error_response = ErrorResponse::new(
-                    "internal_error",
-                    format!("Heatmap computation task failed: {join_err}"),
-                );
-                poem::Error::from_string(
-                    serde_json::to_string(&error_response).unwrap_or_default(),
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                )
-            })?;
+    let result = tokio::task::spawn_blocking(move || {
+        generate_heatmap_with_budget(&request, &compute_state.repository, budget)
+    })
+    .await
+    .map_err(|join_err| {
+        error!(error = %join_err, "Heatmap compute task failed to join");
+        let error_response = ErrorResponse::new(
+            "internal_error",
+            format!("Heatmap computation task failed: {join_err}"),
+        );
+        poem::Error::from_string(
+            serde_json::to_string(&error_response).unwrap_or_default(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+    })?;
 
     match result {
         Ok(response) => {
@@ -508,6 +524,9 @@ pub async fn generate_heatmap_endpoint(
                 crate::error::AntennaModelError::InvalidCoordinate { .. } => {
                     (StatusCode::BAD_REQUEST, "invalid_coordinate")
                 }
+                crate::error::AntennaModelError::Computation(
+                    crate::error::ComputationError::TimeBudgetExceeded { .. },
+                ) => (StatusCode::GATEWAY_TIMEOUT, "computation_budget_exceeded"),
                 _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
             };
 
@@ -994,10 +1013,17 @@ pub async fn h3_link_budget(
     // the closure — avoids deep-cloning the whole H3LinkBudgetRequest; the
     // looked-up `calibration` (owned) and cache `Arc` move in alongside it.
     let compute_cache = state.cache.clone();
+    let budget = Duration::from_millis(state.config.performance.integration_budget_ms);
     let antenna_id = request.antenna_id.clone();
     let feed_id = request.feed_id.clone();
     let result = tokio::task::spawn_blocking(move || {
-        compute_h3_link_budget(&request, &calibration, &compute_cache, start_time)
+        compute_h3_link_budget_with_budget(
+            &request,
+            &calibration,
+            &compute_cache,
+            start_time,
+            budget,
+        )
     })
     .await
     .map_err(|join_err| {
@@ -1043,6 +1069,9 @@ pub async fn h3_link_budget(
                 crate::error::AntennaModelError::Validation(_) => {
                     (StatusCode::BAD_REQUEST, "validation_error")
                 }
+                crate::error::AntennaModelError::Computation(
+                    crate::error::ComputationError::TimeBudgetExceeded { .. },
+                ) => (StatusCode::GATEWAY_TIMEOUT, "computation_budget_exceeded"),
                 _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
             };
 

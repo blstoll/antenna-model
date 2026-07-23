@@ -28,6 +28,7 @@
 
 use num_complex::Complex64;
 use std::f64::consts::PI;
+use std::time::{Duration, Instant};
 
 use crate::error::{ComputationError, ComputationResult};
 use crate::model::{
@@ -104,6 +105,53 @@ const _: () = assert!(MODE_PHI_MAX > 2 * (MODE_M_MAX as usize + 1));
 /// θ=90° lands near `4·(D/λ) ≈ 5.7·10⁴` (`radial_points_for_gbt_qband_is_tens_of_thousands`),
 /// whose `2·N` self-check leg (~1.1·10⁵) stays under `2×` this cap so it still converges.
 const RADIAL_POINTS_SAFETY_MAX: usize = 65_537; // 2^16 + 1 (odd)
+
+/// Generous default per-integration wall-clock budget (S3, cooperative compute bound).
+///
+/// The slowest known SINGLE served integration is `dsn_34m` Ka at θ=90° ≈ 3.3 s
+/// (`docs/roadmap-2026-07.md`); 30 s leaves ~9× headroom so no existing test — including
+/// the wide-angle `reference_validation` sweeps — can trip the budget. This is only a
+/// fallback: the served path overrides it from `performance.integration_budget_ms` via
+/// `IntegrationParams::time_budget`, so the knob is genuinely config-driven, not decorative.
+pub const DEFAULT_INTEGRATION_BUDGET: Duration = Duration::from_secs(30);
+
+/// Radial-sample stride between wall-clock budget checks in the two hot integrators.
+///
+/// `Instant::now()` is far too expensive to call per radial sample, and CLAUDE.md pitfall
+/// #2 forbids touching sample density, so the deadline is polled only once every this many
+/// radial samples. The check is a pure side-effect: when the deadline is NOT hit the
+/// returned field is byte-identical to a build without the check.
+const BUDGET_CHECK_STRIDE: usize = 1024;
+
+/// Per-integration wall-clock deadline for the cooperative S3 budget.
+///
+/// Carries the absolute `deadline` instant (polled at radial chunk boundaries) plus the
+/// original `budget` so an expiry error can report both the elapsed time and the configured
+/// budget. Constructed once per `integrate_aperture` call from `IntegrationParams::time_budget`
+/// and threaded into the two hot helpers. `None` disables the check entirely.
+#[derive(Clone, Copy)]
+struct IntegrationDeadline {
+    deadline: Instant,
+    budget: Duration,
+}
+
+impl IntegrationDeadline {
+    /// If the wall-clock deadline has passed, build the typed over-budget error naming
+    /// `operation`; otherwise `None`. Elapsed time is reconstructed as
+    /// `budget + (now − deadline)` = time since the integration started.
+    #[inline]
+    fn check(&self, operation: &str) -> ComputationResult<()> {
+        if Instant::now() > self.deadline {
+            let elapsed = self.budget + self.deadline.elapsed();
+            return Err(ComputationError::TimeBudgetExceeded {
+                operation: operation.to_string(),
+                elapsed_ms: elapsed.as_secs_f64() * 1000.0,
+                budget_ms: self.budget.as_millis() as u64,
+            });
+        }
+        Ok(())
+    }
+}
 
 /// Performance ceiling (in radial cycles) on the θ-independent aperture-plane coma
 /// contribution to [`radial_points_for`], applied ONLY in the large-steering regime
@@ -189,6 +237,17 @@ pub struct IntegrationParams {
     /// there is no correction surface). See `pattern::sidelobe_floor_gain` for the
     /// physical model.
     pub apply_sidelobe_floor: bool,
+
+    /// Optional per-integration wall-clock budget (S3, cooperative compute bound).
+    ///
+    /// When `Some(budget)`, `integrate_aperture` computes a deadline at entry and the two
+    /// hot radial integrators abort with `ComputationError::TimeBudgetExceeded` (→ 504)
+    /// if a SINGLE integration's radial loop runs past it, checked at chunk boundaries
+    /// (every `BUDGET_CHECK_STRIDE` samples). `None` disables the check. Every preset sets
+    /// [`DEFAULT_INTEGRATION_BUDGET`]; the served path overrides it from
+    /// `performance.integration_budget_ms`. This caps ONE integral — not the whole request
+    /// (that is S2's `RequestTimeout`) nor the rayon fan-out (S4).
+    pub time_budget: Option<Duration>,
 }
 
 impl Default for IntegrationParams {
@@ -203,6 +262,7 @@ impl Default for IntegrationParams {
             max_iterations: 5,        // Refinement iteration limit
             apply_spillover: false,
             apply_sidelobe_floor: false,
+            time_budget: Some(DEFAULT_INTEGRATION_BUDGET),
         }
     }
 }
@@ -243,6 +303,7 @@ impl IntegrationParams {
             max_iterations: 3,
             apply_spillover: false,
             apply_sidelobe_floor: false,
+            time_budget: Some(DEFAULT_INTEGRATION_BUDGET),
         }
     }
 
@@ -264,6 +325,7 @@ impl IntegrationParams {
             max_iterations: 3,
             apply_spillover: false,
             apply_sidelobe_floor: false,
+            time_budget: Some(DEFAULT_INTEGRATION_BUDGET),
         }
     }
 
@@ -284,6 +346,7 @@ impl IntegrationParams {
             max_iterations: 8,
             apply_spillover: false,
             apply_sidelobe_floor: false,
+            time_budget: Some(DEFAULT_INTEGRATION_BUDGET),
         }
     }
 
@@ -384,6 +447,15 @@ pub fn integrate_aperture(
     let wavelength = wavelength_from_frequency(frequency_hz);
     let k = wavenumber(wavelength);
 
+    // S3 cooperative wall-clock budget: a single over-budget integration aborts with a
+    // typed error (→ 504) instead of burning a core unbounded. The deadline is per-call
+    // (each of the two integrations behind one gain — off-axis + boresight anchor — gets a
+    // fresh one), polled inside the radial loops at chunk boundaries. `None` disables it.
+    let deadline = params.time_budget.map(|budget| IntegrationDeadline {
+        deadline: Instant::now() + budget,
+        budget,
+    });
+
     // P10 Task 1: azimuthally symmetric apertures (no lateral feed offset) reduce EXACTLY
     // to a 1D radial Hankel (J₀) transform. Unlike the retired 2D quadrature, this does
     // NOT alias off-axis for electrically large dishes (the P0 bug). The asymmetric / coma
@@ -400,8 +472,8 @@ pub fn integrate_aperture(
         // ⇒ converged=false with an honest error estimate — never silently returned.
         let n1 = radial_points_for(config, theta, wavelength, params);
         let n2 = radial_check_points(n1);
-        let f1 = hankel_radial_field(config, theta, phi, k, n1);
-        let f2 = hankel_radial_field(config, theta, phi, k, n2);
+        let f1 = hankel_radial_field(config, theta, phi, k, n1, deadline)?;
+        let f2 = hankel_radial_field(config, theta, phi, k, n2, deadline)?;
         let (field, error_estimate, converged) = self_check(f1, f2, params, HANKEL_SELF_CHECK_RTOL);
         return Ok(IntegrationResult {
             field,
@@ -430,7 +502,7 @@ pub fn integrate_aperture(
     // single φ' sweep. `mode_count_for` kept m_max ≤ n_phi/2 − 2, so the probe is alias-free.
     let m_probe = m_max + 1;
     let (field, top_contrib) =
-        azimuthal_mode_field_inner(config, theta, phi, k, n_rho, n_phi, m_probe);
+        azimuthal_mode_field_inner(config, theta, phi, k, n_rho, n_phi, m_probe, deadline)?;
     // I(M) = I(M+1) − (top-mode contribution); the self-check compares I(M) vs I(M+1).
     let f_m = field - top_contrib;
     let (field, error_estimate, converged) = self_check(f_m, field, params, MODE_SELF_CHECK_RTOL);
@@ -901,7 +973,8 @@ fn hankel_radial_field(
     _phi: f64,
     k: f64,
     n_rho: usize,
-) -> Complex64 {
+    deadline: Option<IntegrationDeadline>,
+) -> ComputationResult<Complex64> {
     let f = config.reflector.focal_length;
     let r_max = config.reflector.diameter / 2.0;
     let mesh_spacing = config.mesh.as_ref().map_or(0.0, |m| m.spacing);
@@ -921,6 +994,13 @@ fn hankel_radial_field(
 
     let mut sum = Complex64::new(0.0, 0.0);
     for i in 0..n {
+        // S3 cooperative budget: poll the wall-clock deadline at chunk boundaries only
+        // (never per-sample — Instant::now() is too costly, and sample density is fixed).
+        if i % BUDGET_CHECK_STRIDE == 0 {
+            if let Some(dl) = deadline {
+                dl.check("hankel_radial_field")?;
+            }
+        }
         let rho = i as f64 * h;
         let w = simpson_weight(i, n);
         let amp = illumination_amplitude(rho, 0.0, &config.feed, f);
@@ -946,7 +1026,7 @@ fn hankel_radial_field(
         let phase = chirp + defocus + mesh;
         sum += Complex64::new(0.0, phase).exp() * amp * j0 * rho * w;
     }
-    sum * (h / 3.0) * 2.0 * PI
+    Ok(sum * (h / 3.0) * 2.0 * PI)
 }
 
 /// Config-derived, ρ/φ'-independent constants for the aperture-plane function `g(ρ,φ')`.
@@ -1055,7 +1135,10 @@ fn azimuthal_mode_field(
     n_phi_coeff: usize,
     m_max: u32,
 ) -> Complex64 {
-    azimuthal_mode_field_inner(config, theta, phi, k, n_rho, n_phi_coeff, m_max).0
+    // No deadline in the test oracle path (None never errors); unwrap is test-only.
+    azimuthal_mode_field_inner(config, theta, phi, k, n_rho, n_phi_coeff, m_max, None)
+        .expect("azimuthal_mode_field_inner with no time budget cannot error")
+        .0
 }
 
 /// Azimuthal-mode field, returning `(total, top_contribution)`:
@@ -1065,6 +1148,7 @@ fn azimuthal_mode_field(
 /// This lets the caller obtain BOTH `I(M+1)` (`total`, calling with `m_max = M+1`) and
 /// `I(M) = total − top_contribution` from a SINGLE φ' sweep, so the runtime M-vs-(M+1)
 /// convergence self-check (D-6) costs no extra integration. See [`azimuthal_mode_field`].
+#[allow(clippy::too_many_arguments)]
 fn azimuthal_mode_field_inner(
     config: &AntennaConfiguration,
     theta: f64,
@@ -1073,7 +1157,8 @@ fn azimuthal_mode_field_inner(
     n_rho: usize,
     n_phi_coeff: usize,
     m_max: u32,
-) -> (Complex64, Complex64) {
+    deadline: Option<IntegrationDeadline>,
+) -> ComputationResult<(Complex64, Complex64)> {
     let f = config.reflector.focal_length;
     let r_max = config.reflector.diameter / 2.0;
     // Config-derived constants for g(ρ,φ'), computed once (hoisted out of the hot loop).
@@ -1110,6 +1195,15 @@ fn azimuthal_mode_field_inner(
     let mut gm_neg = vec![Complex64::new(0.0, 0.0); mmax + 1];
 
     for i in 0..n {
+        // S3 cooperative budget: poll the wall-clock deadline at chunk boundaries only
+        // (never per-sample — Instant::now() is too costly, and sample density is fixed).
+        // This is the hot loop for offset-feed Ka (the ~3.3 s worst case), so it is exactly
+        // where a runaway single integration must be able to stop itself.
+        if i % BUDGET_CHECK_STRIDE == 0 {
+            if let Some(dl) = deadline {
+                dl.check("azimuthal_mode_field")?;
+            }
+        }
         let rho = i as f64 * h;
         let w = simpson_weight(i, n);
         // Dish-depth chirp (ρ-only, θ-dependent — the parabola's equiphase term).
@@ -1171,7 +1265,7 @@ fn azimuthal_mode_field_inner(
             top = contrib;
         }
     }
-    (acc * 2.0 * PI, top * 2.0 * PI)
+    Ok((acc * 2.0 * PI, top * 2.0 * PI))
 }
 
 /// Simpson's rule weight for index i in array of n points
@@ -1475,6 +1569,60 @@ mod tests {
         );
     }
 
+    /// S3: an already-expired wall-clock budget must abort a single integration with the
+    /// typed `TimeBudgetExceeded` error rather than run to completion. A 1 ns budget is
+    /// expired at the first radial chunk boundary, so this is deterministic and instant.
+    /// Uses the offset-feed (coma → azimuthal-mode) path — the expensive worst case S3
+    /// exists to bound — at a wide angle.
+    #[test]
+    fn time_budget_exceeded_aborts_single_integration() {
+        let config = offset_feed_test_antenna(3.7, 1.85, 0.05);
+        let f = 8.4e9;
+        let mut params = IntegrationParams::adaptive();
+        params.time_budget = Some(Duration::from_nanos(1));
+        let theta = 45.0_f64.to_radians();
+
+        let result = integrate_aperture(theta, 0.0, &config, f, &params);
+        match result {
+            Err(ComputationError::TimeBudgetExceeded {
+                operation,
+                budget_ms,
+                ..
+            }) => {
+                assert_eq!(budget_ms, 0, "a 1 ns budget rounds to 0 ms");
+                assert!(
+                    operation.contains("azimuthal_mode") || operation.contains("hankel"),
+                    "operation should name the aborting integrator, got {operation}"
+                );
+            }
+            other => panic!("expected TimeBudgetExceeded, got {other:?}"),
+        }
+    }
+
+    /// S3: the generous default budget must never trip on a normal evaluation, and the
+    /// returned field must be byte-identical to a `time_budget: None` build (the check is a
+    /// pure side-effect when the deadline is not hit).
+    #[test]
+    fn time_budget_default_is_transparent() {
+        let config = offset_feed_test_antenna(3.7, 1.85, 0.05);
+        let f = 8.4e9;
+        let theta = 5.0_f64.to_radians();
+
+        let with_default =
+            integrate_aperture(theta, 0.0, &config, f, &IntegrationParams::adaptive())
+                .expect("default budget must not trip");
+
+        let mut no_budget = IntegrationParams::adaptive();
+        no_budget.time_budget = None;
+        let without = integrate_aperture(theta, 0.0, &config, f, &no_budget)
+            .expect("no-budget path must succeed");
+
+        assert_eq!(
+            with_default.field, without.field,
+            "budget check must not perturb the result when the deadline is not hit"
+        );
+    }
+
     /// The azimuthal-mode integrator must reproduce the symmetric Hankel path exactly
     /// when the aperture is symmetric (m=0-only special case) — a consistency self-check
     /// that the ±m assembly and normalisation are correct.
@@ -1485,7 +1633,7 @@ mod tests {
         let k = wavenumber(wavelength_from_frequency(f));
         for deg in [0.0_f64, 1.0, 5.0, 20.0, 90.0] {
             let th = deg.to_radians();
-            let hankel = hankel_radial_field(&config, th, 0.0, k, 4097);
+            let hankel = hankel_radial_field(&config, th, 0.0, k, 4097, None).unwrap();
             let modes = azimuthal_mode_field(&config, th, 0.0, k, 4097, 64, 4);
             let rel = (hankel - modes).norm() / hankel.norm().max(1e-30);
             assert!(rel < 1e-9, "θ={deg}°: Hankel vs modes rel diff {rel:.2e}");
