@@ -290,7 +290,9 @@ The API uses standard HTTP status codes:
   (`computation_budget_exceeded`, `performance.integration_budget_ms`)
 - **413**: Payload too large (request body exceeds the configured maximum size)
 - **500**: Internal server error (computation error, coordinate transform failure)
-- **503**: Service unavailable (startup, shutdown)
+- **503**: Service unavailable — either lifecycle (startup, shutdown) or admission
+  control (`service_overloaded`: too many concurrent heavy requests, carries a
+  `Retry-After` header — see below)
 
 Error responses follow a consistent format:
 
@@ -343,8 +345,8 @@ so the fault belongs on the server side. It is deliberately not **503 +
 Retry-After** — the failure is deterministic in the request payload (the same
 heavy grid re-costs the same), so no honest retry delay exists; the remedy is a
 smaller request. The machine `error` code stays `request_timeout`. (Admission-
-control/overload rejection, which *is* transient, will use 503 + Retry-After
-under roadmap S4.)
+control/overload rejection, which *is* transient, uses 503 + Retry-After — see
+**Admission Control** below.)
 
 ```json
 {
@@ -389,8 +391,42 @@ many points, each with its own budgeted integrations — an over-budget point fa
 just that point (heatmap) or item (batch) rather than the whole request. So the
 three limits compose but do not subsume one another: `integration_budget_ms`
 caps one integral, `request_timeout_secs` caps the request wall-clock, and
-bounding the total fan-out CPU is roadmap unit S4. A huge heatmap can still spend
-`budget × points` of background CPU after a request-timeout 504.
+admission control (below) caps how many heavy requests run at once. A huge
+heatmap can still spend `budget × points` of background CPU after a
+request-timeout 504.
+
+### Admission Control (concurrency limit)
+
+The configured `performance.max_concurrent_heavy_requests` caps how many
+**compute-heavy** requests — `/api/v1/gain/batch`, `/api/v1/heatmap`, and
+`/api/v1/h3-heatmap` — may execute concurrently, sharing **one** budget across all
+three endpoints. When the cap is reached, a further heavy request is **rejected
+immediately** (never queued) with **503 Service Unavailable**, the standard JSON
+error body (`service_overloaded`), and a **`Retry-After`** header
+(`performance.admission_retry_after_secs`, default **5 s**).
+
+```json
+{
+  "error": "service_overloaded",
+  "message": "Server is at its concurrent heavy-request limit (8); retry after 5 s"
+}
+```
+
+Unlike the request timeout and per-integration budget (both **504**, both
+deterministic in the payload, both without `Retry-After`), overload is genuinely
+**transient** — a slot frees the instant an in-flight heavy request finishes — so
+**503 + `Retry-After`** is the honest response, and retrying the *same* request
+after the delay can succeed.
+
+The cheap endpoints — single `/api/v1/gain`, the `/health` / `/ready` / `/status`
+probes, and the antenna/feed listings — are **never** admission-limited.
+
+**Default: disabled.** `max_concurrent_heavy_requests` defaults to **0
+(unlimited)**, so admission control is off unless an operator sets a positive limit
+(a small multiple of `worker_threads` / CPU count is a sane starting point). The
+related `performance.worker_threads` knob (default **0 = auto-detect**) sizes the
+shared rayon pool that all heavy compute runs on; setting it applies the global
+pool once at startup.
 
 ## Validation Rules
 

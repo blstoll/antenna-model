@@ -511,6 +511,152 @@ impl<E: Endpoint> Endpoint for RequestTimeoutImpl<E> {
     }
 }
 
+/// Admission-control middleware: cap concurrently-executing heavy requests (roadmap S4)
+///
+/// Wraps the compute-heavy endpoints (`batch` / `heatmap` / `h3-heatmap`) and gates
+/// entry on a shared [`tokio::sync::Semaphore`]. On entry it attempts a
+/// **non-blocking** `try_acquire` of one permit:
+/// - **permit acquired** → the permit is held for the full duration of handler
+///   execution (including the awaited `spawn_blocking` compute) and released when the
+///   response is produced, freeing a slot for the next request;
+/// - **no permit available** → the request is rejected **immediately** (never queued)
+///   with `503 Service Unavailable`, a `Retry-After` header, and the project's standard
+///   JSON `ErrorResponse` body (`service_overloaded`).
+///
+/// One [`ConcurrencyLimit`] is cloned onto each heavy endpoint, all sharing the same
+/// `Arc<Semaphore>`, so the cap bounds *total* concurrent heavy work, not per-endpoint.
+///
+/// # Why `503 + Retry-After` (and not S2's `504`)
+///
+/// Overload is genuinely **transient** — a slot frees the instant an in-flight heavy
+/// request completes — so, unlike the request-timeout (`504`, deterministic in the
+/// payload, no `Retry-After`; see [`RequestTimeout`]), a positive `Retry-After` backoff
+/// is honest here. `503 Service Unavailable` is the standard transient-overload code.
+///
+/// # Disabled state
+///
+/// When the configured limit is `0` (unlimited — the default), the semaphore is `None`
+/// and the middleware is a transparent pass-through. This keeps the wiring uniform (the
+/// middleware is always applied) while engaging the limiter only when configured.
+///
+/// # Ordering note
+///
+/// This layer sits **innermost** (applied per-endpoint, inside the outer stack incl.
+/// [`RequestTimeout`]). That is deliberate: if an admitted request later times out, the
+/// outer `RequestTimeout` wins its `select`, drops this layer's future, and the held
+/// permit is dropped with it — so a timed-out request does not leak its slot.
+#[derive(Clone)]
+pub struct ConcurrencyLimit {
+    /// Shared permit pool; `None` = unlimited (disabled), a transparent pass-through.
+    semaphore: Option<std::sync::Arc<tokio::sync::Semaphore>>,
+    /// `Retry-After` value (seconds) returned on rejection.
+    retry_after_secs: u64,
+    /// Configured limit, carried only for the rejection message.
+    limit: usize,
+}
+
+impl ConcurrencyLimit {
+    /// Build an admission-control limiter.
+    ///
+    /// `limit == 0` disables it (transparent pass-through); a positive `limit` creates a
+    /// shared semaphore with that many permits. Prefer [`ConcurrencyLimit::shared`] when
+    /// applying the *same* budget to several endpoints.
+    pub fn new(limit: usize, retry_after_secs: u64) -> Self {
+        let semaphore =
+            (limit > 0).then(|| std::sync::Arc::new(tokio::sync::Semaphore::new(limit)));
+        Self {
+            semaphore,
+            retry_after_secs,
+            limit,
+        }
+    }
+
+    /// Build a limiter around an already-constructed shared semaphore, so multiple
+    /// endpoints share one budget. `None` = unlimited (disabled).
+    pub fn shared(
+        semaphore: Option<std::sync::Arc<tokio::sync::Semaphore>>,
+        retry_after_secs: u64,
+        limit: usize,
+    ) -> Self {
+        Self {
+            semaphore,
+            retry_after_secs,
+            limit,
+        }
+    }
+}
+
+impl<E: Endpoint> Middleware<E> for ConcurrencyLimit {
+    type Output = ConcurrencyLimitImpl<E>;
+
+    fn transform(&self, ep: E) -> Self::Output {
+        ConcurrencyLimitImpl {
+            ep,
+            semaphore: self.semaphore.clone(),
+            retry_after_secs: self.retry_after_secs,
+            limit: self.limit,
+        }
+    }
+}
+
+pub struct ConcurrencyLimitImpl<E> {
+    ep: E,
+    semaphore: Option<std::sync::Arc<tokio::sync::Semaphore>>,
+    retry_after_secs: u64,
+    limit: usize,
+}
+
+impl<E: Endpoint> Endpoint for ConcurrencyLimitImpl<E> {
+    type Output = Response;
+
+    async fn call(&self, req: Request) -> Result<Self::Output> {
+        // Unlimited (disabled): transparent pass-through, zero overhead.
+        let Some(semaphore) = self.semaphore.clone() else {
+            return self.ep.call(req).await.map(IntoResponse::into_response);
+        };
+
+        match semaphore.try_acquire_owned() {
+            // Admitted: hold the permit for the whole handler lifetime (the binding
+            // must outlive the `.await`, so it is dropped only after the response is
+            // produced — releasing the slot for the next request).
+            Ok(_permit) => self.ep.call(req).await.map(IntoResponse::into_response),
+            // Saturated: reject immediately with 503 + Retry-After. Built as a
+            // `Response` (not a `poem::Error`) because the error path has no header
+            // channel and we must attach `Retry-After`. Returning `Ok(response)` lets
+            // it flow back out through RequestLogger (logged as a real 503).
+            Err(_) => {
+                let request_id = req
+                    .extensions()
+                    .get::<RequestIdExt>()
+                    .map(|ext| ext.0.clone())
+                    .unwrap_or_else(|| "unknown".to_string());
+                let path = req.uri().path().to_string();
+                warn!(
+                    request_id = %request_id,
+                    path = %path,
+                    limit = self.limit,
+                    retry_after_secs = self.retry_after_secs,
+                    "Heavy-request concurrency limit reached; rejecting with 503"
+                );
+
+                let body = ErrorResponse::new(
+                    "service_overloaded",
+                    format!(
+                        "Server is at its concurrent heavy-request limit ({}); retry after {} s",
+                        self.limit, self.retry_after_secs
+                    ),
+                );
+                let response = Response::builder()
+                    .status(poem::http::StatusCode::SERVICE_UNAVAILABLE)
+                    .header("Retry-After", self.retry_after_secs.to_string())
+                    .header("content-type", "application/json")
+                    .body(serde_json::to_string(&body).unwrap_or_default());
+                Ok(response)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -683,6 +829,103 @@ mod tests {
         let cli = TestClient::new(app);
         let response = cli.get("/fast").send().await;
         response.assert_status_is_ok();
+    }
+
+    #[tokio::test]
+    async fn test_concurrency_limit_rejects_when_saturated() {
+        // Deterministic (no timing race): pre-acquire the sole permit and hold it, so
+        // the semaphore is already saturated when the request arrives. The request must
+        // be rejected with 503 + Retry-After and the standard JSON body.
+        use std::sync::Arc;
+        use tokio::sync::Semaphore;
+
+        let sem = Arc::new(Semaphore::new(1));
+        let _held = sem.clone().try_acquire_owned().unwrap(); // occupy the only slot
+
+        let app = Route::new()
+            .at("/heavy", poem::endpoint::make_sync(|_req: Request| "OK"))
+            .with(ConcurrencyLimit::shared(Some(sem.clone()), 7, 1))
+            .with(RequestId);
+
+        let cli = TestClient::new(app);
+        let response = cli.get("/heavy").send().await;
+        response.assert_status(StatusCode::SERVICE_UNAVAILABLE);
+
+        let retry_after = response
+            .0
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        assert_eq!(
+            retry_after.as_deref(),
+            Some("7"),
+            "the 503 must carry a Retry-After header (the whole point of S4 vs S2's 504)"
+        );
+
+        let content_type = response
+            .0
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+        assert_eq!(content_type.as_deref(), Some("application/json"));
+
+        let body = response.0.into_body().into_string().await.unwrap();
+        let err: ErrorResponse = serde_json::from_str(&body).unwrap();
+        assert_eq!(err.error, "service_overloaded");
+    }
+
+    #[tokio::test]
+    async fn test_concurrency_limit_admits_when_free() {
+        // A free permit lets the request through unchanged.
+        use std::sync::Arc;
+        use tokio::sync::Semaphore;
+
+        let sem = Arc::new(Semaphore::new(1));
+        let app = Route::new()
+            .at("/heavy", poem::endpoint::make_sync(|_req: Request| "OK"))
+            .with(ConcurrencyLimit::shared(Some(sem), 5, 1))
+            .with(RequestId);
+
+        let cli = TestClient::new(app);
+        let response = cli.get("/heavy").send().await;
+        response.assert_status_is_ok();
+    }
+
+    #[tokio::test]
+    async fn test_concurrency_limit_disabled_is_passthrough() {
+        // limit == 0 -> None semaphore -> transparent, even under repeated calls.
+        let app = Route::new()
+            .at("/heavy", poem::endpoint::make_sync(|_req: Request| "OK"))
+            .with(ConcurrencyLimit::new(0, 5))
+            .with(RequestId);
+
+        let cli = TestClient::new(app);
+        for _ in 0..5 {
+            let response = cli.get("/heavy").send().await;
+            response.assert_status_is_ok();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_concurrency_limit_releases_permit_after_response() {
+        // After a request completes, the permit is released and the next request is
+        // admitted (no leak). limit=1, two sequential requests both succeed.
+        use std::sync::Arc;
+        use tokio::sync::Semaphore;
+
+        let sem = Arc::new(Semaphore::new(1));
+        let app = Route::new()
+            .at("/heavy", poem::endpoint::make_sync(|_req: Request| "OK"))
+            .with(ConcurrencyLimit::shared(Some(sem.clone()), 5, 1))
+            .with(RequestId);
+
+        let cli = TestClient::new(app);
+        cli.get("/heavy").send().await.assert_status_is_ok();
+        cli.get("/heavy").send().await.assert_status_is_ok();
+        // Both permits returned: the semaphore is back to full capacity.
+        assert_eq!(sem.available_permits(), 1);
     }
 
     #[tokio::test]

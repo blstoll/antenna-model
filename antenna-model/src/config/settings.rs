@@ -143,6 +143,30 @@ pub struct PerformanceConfig {
     /// spend up to `budget × points` of background CPU after S2's 504 fires.
     #[serde(default = "default_integration_budget_ms")]
     pub integration_budget_ms: u64,
+
+    /// Admission-control cap on concurrently-executing heavy requests (roadmap S4).
+    ///
+    /// Bounds how many `batch` / `heatmap` / `h3-heatmap` requests may run their
+    /// (rayon) compute at once, sharing ONE budget across all three endpoints. When
+    /// the cap is reached a further heavy request is rejected immediately (never
+    /// queued) with `503 service_overloaded` + a `Retry-After` header
+    /// (`admission_retry_after_secs`). Cheap endpoints (single `gain`, health/ready/
+    /// status, listings) are never throttled.
+    ///
+    /// **Default `0` = unlimited** (admission control disabled): a hard,
+    /// request-rejecting limit is off by convention and operators opt in per
+    /// deployment. Set to a positive value to engage the limiter; a sane starting
+    /// point is a small multiple of `worker_threads` (or CPU count).
+    #[serde(default = "default_max_concurrent_heavy_requests")]
+    pub max_concurrent_heavy_requests: usize,
+
+    /// `Retry-After` value (seconds) sent with the S4 `503 service_overloaded`
+    /// admission-control rejection. Unlike S2's deterministic `504` (no
+    /// `Retry-After`), overload IS transient — a slot frees when an in-flight heavy
+    /// request finishes — so a positive backoff is defensible. Default 5 s. Inert
+    /// when `max_concurrent_heavy_requests == 0`.
+    #[serde(default = "default_admission_retry_after_secs")]
+    pub admission_retry_after_secs: u64,
 }
 
 // Default value functions
@@ -202,6 +226,14 @@ fn default_integration_budget_ms() -> u64 {
     30_000 // 30 s — generous headroom over the ~3.3 s worst-case single integration (S3)
 }
 
+fn default_max_concurrent_heavy_requests() -> usize {
+    0 // 0 = unlimited (admission control disabled by default; operators opt in) — S4
+}
+
+fn default_admission_retry_after_secs() -> u64 {
+    5 // seconds — small transient backoff on the S4 503 overload rejection
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -240,6 +272,8 @@ impl Default for PerformanceConfig {
             max_batch_size: default_max_batch_size(),
             enable_parallel_processing: default_enable_parallel(),
             integration_budget_ms: default_integration_budget_ms(),
+            max_concurrent_heavy_requests: default_max_concurrent_heavy_requests(),
+            admission_retry_after_secs: default_admission_retry_after_secs(),
         }
     }
 }
@@ -300,6 +334,14 @@ impl ServiceConfig {
             .set_default(
                 "performance.integration_budget_ms",
                 default_integration_budget_ms() as i64,
+            )?
+            .set_default(
+                "performance.max_concurrent_heavy_requests",
+                default_max_concurrent_heavy_requests() as i64,
+            )?
+            .set_default(
+                "performance.admission_retry_after_secs",
+                default_admission_retry_after_secs() as i64,
             )?
             // Load from YAML file (optional - won't fail if missing)
             .add_source(
@@ -897,6 +939,57 @@ mod tests {
         assert_eq!(config.logging.level, "info");
         assert_eq!(config.performance.max_batch_size, 1000);
         assert_eq!(config.performance.integration_budget_ms, 30_000);
+    }
+
+    #[test]
+    fn test_admission_control_defaults() {
+        // S4: admission control is OFF by default (0 = unlimited), retry-after 5 s.
+        let perf = PerformanceConfig::default();
+        assert_eq!(
+            perf.max_concurrent_heavy_requests, 0,
+            "admission control must default to unlimited (0) so existing behavior is unchanged"
+        );
+        assert_eq!(perf.admission_retry_after_secs, 5);
+    }
+
+    #[test]
+    fn test_admission_control_yaml_override_roundtrips() {
+        let yaml = r#"
+server:
+  host: "127.0.0.1"
+  port: 3000
+calibration:
+  data_directory: "calibration_data"
+  antenna_config_file: "calibration_data/antennas.yaml"
+logging:
+  level: "info"
+performance:
+  max_concurrent_heavy_requests: 8
+  admission_retry_after_secs: 12
+"#;
+        let config: ServiceConfig = serde_yaml::from_str(yaml).expect("parse failed");
+        assert_eq!(config.performance.max_concurrent_heavy_requests, 8);
+        assert_eq!(config.performance.admission_retry_after_secs, 12);
+    }
+
+    #[test]
+    fn test_admission_control_defaults_when_keys_missing() {
+        // Absent keys fall back to defaults (serde default), keeping old configs valid.
+        let yaml = r#"
+server:
+  host: "127.0.0.1"
+  port: 3000
+calibration:
+  data_directory: "calibration_data"
+  antenna_config_file: "calibration_data/antennas.yaml"
+logging:
+  level: "info"
+performance:
+  worker_threads: 4
+"#;
+        let config: ServiceConfig = serde_yaml::from_str(yaml).expect("parse failed");
+        assert_eq!(config.performance.max_concurrent_heavy_requests, 0);
+        assert_eq!(config.performance.admission_retry_after_secs, 5);
     }
 
     #[test]
