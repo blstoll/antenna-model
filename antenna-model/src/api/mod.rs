@@ -21,7 +21,7 @@ use crate::service::GainCache;
 use poem::{listener::TcpListener, Server};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use tokio::signal;
 use tracing::info;
 
@@ -43,8 +43,8 @@ pub struct AppState {
     /// Service configuration
     pub config: Arc<ServiceConfig>,
 
-    /// Readiness state - true when service is ready to accept requests
-    /// This is false during startup and true once initialization is complete
+    /// Readiness state — false until the calibration load completes, true while serving,
+    /// false again once graceful shutdown begins (roadmap S5).
     pub ready: Arc<AtomicBool>,
 
     /// Loaded antenna IDs (will be populated by Task 5.4 - Calibration Repository)
@@ -69,7 +69,12 @@ impl AppState {
             start_time: SystemTime::now(),
             version: env!("CARGO_PKG_VERSION"),
             config: Arc::new(config),
-            ready: Arc::new(AtomicBool::new(true)), // Default to ready for simple deployments
+            // Readiness starts FALSE (roadmap S5): constructing a state is no evidence that
+            // the service can serve anything. The production path earns readiness only by
+            // completing a healthy calibration load (`start_server_with_config`, via
+            // `initialize_repository` + `LoadOutcome::Healthy`) and surrenders it again at
+            // the top of graceful shutdown (`begin_shutdown`).
+            ready: Arc::new(AtomicBool::new(false)),
             antenna_ids: Arc::new(parking_lot::RwLock::new(Vec::new())),
             repository,
             cache,
@@ -171,19 +176,7 @@ pub async fn start_server_with_config(config: ServiceConfig) -> Result<(), std::
         "Loading calibration data"
     );
 
-    let repository = match CalibrationRepository::load_from_config(&config.calibration) {
-        Ok(repo) => {
-            info!("Calibration data loaded successfully");
-            repo
-        }
-        Err(e) => {
-            tracing::warn!(
-                "Failed to load calibration data: {}, starting with empty repository",
-                e
-            );
-            CalibrationRepository::new()
-        }
-    };
+    let (repository, load_outcome) = initialize_repository(&config.calibration)?;
 
     // Apply the configured rayon worker-thread count ONCE at startup (roadmap S4).
     // `0` = auto-detect (leave rayon's global pool to size itself). A positive value
@@ -193,6 +186,26 @@ pub async fn start_server_with_config(config: ServiceConfig) -> Result<(), std::
     apply_worker_threads(config.performance.worker_threads);
 
     let state = Arc::new(AppState::new(config.clone(), repository));
+
+    // Publish the loaded set so /status reports it. Before S5, production never called
+    // set_antenna_ids, so antenna_count/antenna_ids were always omitted from /status.
+    state.set_antenna_ids(state.repository.list_antennas());
+
+    match load_outcome {
+        LoadOutcome::Healthy => {
+            state.mark_ready();
+            info!(
+                antenna_count = state.repository.antenna_count(),
+                "Service marked READY"
+            );
+        }
+        LoadOutcome::Degraded => {
+            tracing::warn!(
+                "Service starting DEGRADED: no calibration data loaded. Readiness stays \
+                 false and /health reports \"degraded\"; gain requests will 404."
+            );
+        }
+    }
 
     info!(
         version = state.version,
@@ -227,17 +240,37 @@ pub async fn start_server_with_config(config: ServiceConfig) -> Result<(), std::
 
     info!("Server ready to accept connections on {}", addr);
 
-    // Start server with graceful shutdown
-    Server::new(TcpListener::bind(&addr))
+    // Graceful shutdown (roadmap S5): flip readiness false and pause so load balancers
+    // stop sending new work, then drain in-flight requests under a bounded timeout, then
+    // run cleanup. Before S5 this future only logged, the drain was unbounded (`None`),
+    // and `shutdown_cleanup` had no caller at all.
+    let readiness_delay = Duration::from_secs(state.config.server.shutdown_readiness_delay_secs);
+    let drain_timeout = Duration::from_secs(state.config.server.shutdown_timeout_secs);
+    let shutdown_state = state.clone();
+
+    info!(
+        readiness_delay_secs = readiness_delay.as_secs(),
+        drain_timeout_secs = drain_timeout.as_secs(),
+        "Graceful shutdown configured"
+    );
+
+    let result = Server::new(TcpListener::bind(&addr))
         .run_with_graceful_shutdown(
             app,
-            async {
+            async move {
                 shutdown_signal().await;
                 info!("Graceful shutdown initiated");
+                begin_shutdown(&shutdown_state, readiness_delay).await;
             },
-            None,
+            Some(drain_timeout),
         )
-        .await
+        .await;
+
+    // Runs on both the clean and the errored path — cleanup is exactly what must not be
+    // skipped when the server came down badly.
+    shutdown_cleanup(&state).await;
+
+    result
 }
 
 /// Start the API server (legacy interface for backward compatibility)
@@ -254,6 +287,71 @@ pub async fn start_server(host: &str, port: u16) -> Result<(), std::io::Error> {
     config.server.port = port;
 
     start_server_with_config(config).await
+}
+
+/// Outcome of the startup calibration load (roadmap S5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoadOutcome {
+    /// At least one calibration loaded — the service can answer gain requests.
+    Healthy,
+    /// Nothing loaded and `calibration.fail_fast` is off. The server starts so that
+    /// `/health` and `/status` can report *why* it is useless, but readiness stays false
+    /// so no load balancer routes real traffic to it.
+    Degraded,
+}
+
+/// Load the calibration repository and classify the outcome (roadmap S5).
+///
+/// This is the seam that makes `calibration.fail_fast` real. Before S5,
+/// `start_server_with_config` caught the load error unconditionally and continued with an
+/// empty repository, so the shipped `fail_fast: true` default was silently ignored.
+///
+/// # Returns
+/// * `Ok((repo, Healthy))` — at least one calibration loaded.
+/// * `Ok((empty, Degraded))` — load failed but `fail_fast` is off; start anyway, not ready.
+/// * `Err(io::Error)` — load failed and `fail_fast` is on. The caller returns this up to
+///   `main`, which logs it and exits nonzero. No `process::exit` inside the API layer.
+pub(crate) fn initialize_repository(
+    config: &crate::config::CalibrationConfig,
+) -> Result<(CalibrationRepository, LoadOutcome), std::io::Error> {
+    match CalibrationRepository::load_from_config(config) {
+        Ok(repo) => {
+            info!(
+                antenna_count = repo.antenna_count(),
+                calibration_count = repo.calibration_count(),
+                "Calibration data loaded successfully"
+            );
+            Ok((repo, LoadOutcome::Healthy))
+        }
+        Err(e) if config.fail_fast => {
+            // Relative calibration paths (the shipped default) resolve against the
+            // process's current directory, which is easy to get wrong when launching from
+            // somewhere other than the workspace root. Naming the CWD here is what turns
+            // "No such file or directory" into an actionable diagnosis instead of a guess.
+            let cwd = std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "<unknown>".to_string());
+            tracing::error!(
+                error = %e,
+                current_dir = %cwd,
+                "Failed to load calibration data and calibration.fail_fast is set; refusing to start"
+            );
+            Err(std::io::Error::other(format!(
+                "calibration load failed and calibration.fail_fast is enabled: {e} \
+                 (current working directory: {cwd}; relative calibration paths in \
+                 config are resolved against this directory)"
+            )))
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "Failed to load calibration data; starting DEGRADED with an empty repository \
+                 (readiness stays false, /health reports degraded). Set calibration.fail_fast \
+                 to abort startup instead."
+            );
+            Ok((CalibrationRepository::new(), LoadOutcome::Degraded))
+        }
+    }
 }
 
 /// Apply the configured rayon worker-thread count to the global pool (roadmap S4).
@@ -327,6 +425,24 @@ async fn shutdown_signal() {
         _ = terminate => {
             info!("Received SIGTERM signal");
         },
+    }
+}
+
+/// First half of graceful shutdown: stop advertising readiness, then pause (roadmap S5).
+///
+/// Runs *inside* the future handed to `run_with_graceful_shutdown`, because poem stops
+/// accepting new connections the moment that future resolves. Flipping readiness and
+/// sleeping here — rather than after — is what gives load balancers a window to route new
+/// traffic elsewhere while this instance is still able to serve it.
+async fn begin_shutdown(state: &AppState, readiness_delay: std::time::Duration) {
+    state.mark_not_ready();
+    info!(
+        readiness_delay_secs = readiness_delay.as_secs(),
+        "Readiness set to false; pausing before draining in-flight requests"
+    );
+
+    if !readiness_delay.is_zero() {
+        tokio::time::sleep(readiness_delay).await;
     }
 }
 
@@ -423,6 +539,120 @@ mod tests {
 
         // Should not panic
         shutdown_cleanup(&state).await;
+    }
+
+    #[test]
+    fn test_app_state_starts_not_ready() {
+        // Readiness is a startup lifecycle signal (roadmap S5): it must be false until
+        // calibration data has actually loaded. A default-constructed state has loaded
+        // nothing, so it must not advertise readiness.
+        let state = AppState::with_defaults();
+        assert!(
+            !state.is_ready(),
+            "AppState must start NOT ready; readiness is set only after the calibration load"
+        );
+
+        state.mark_ready();
+        assert!(state.is_ready());
+        state.mark_not_ready();
+        assert!(!state.is_ready());
+    }
+
+    /// Build a CalibrationConfig pointing at a nonexistent antenna config file.
+    fn broken_calibration_config(fail_fast: bool) -> crate::config::CalibrationConfig {
+        crate::config::CalibrationConfig {
+            data_directory: std::env::temp_dir().join("s5_does_not_exist"),
+            antenna_config_file: std::env::temp_dir().join("s5_does_not_exist/antennas.yaml"),
+            fail_fast,
+        }
+    }
+
+    #[test]
+    fn test_initialize_repository_fail_fast_returns_err() {
+        // calibration.fail_fast = true means "refuse to start on a load failure". Before
+        // S5 this Err was swallowed and the server booted empty (roadmap S5).
+        // Note: can't use `.expect_err(...)` here — it requires the Ok type (which
+        // includes CalibrationRepository) to be Debug, and CalibrationRepository
+        // deliberately does not derive Debug (see Task 2's note).
+        let err = match initialize_repository(&broken_calibration_config(true)) {
+            Ok(_) => panic!("fail_fast must propagate the load failure to the caller"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("fail_fast"),
+            "the startup error must name the knob that caused the abort, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_initialize_repository_without_fail_fast_starts_degraded() {
+        let (repo, outcome) = initialize_repository(&broken_calibration_config(false))
+            .expect("fail_fast=false must start the server anyway");
+        assert_eq!(outcome, LoadOutcome::Degraded);
+        assert_eq!(
+            repo.antenna_count(),
+            0,
+            "a degraded start serves from an empty repository"
+        );
+    }
+
+    #[test]
+    fn test_initialize_repository_healthy_on_real_fixtures() {
+        // test_antennas.yaml's calibration_file entries (e.g.
+        // "tests/fixtures/calibration_data/...") are written relative to the crate root,
+        // not to a `data_directory` of the fixtures dir itself — so data_directory must be
+        // CARGO_MANIFEST_DIR for every entry to resolve. fail_fast: true is the point of
+        // this test: it proves the full fixture set (5 antennas / 7 calibrations) loads
+        // cleanly, not just "at least one antenna survived a partial failure".
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let config = crate::config::CalibrationConfig {
+            data_directory: std::path::PathBuf::from(manifest_dir),
+            antenna_config_file: std::path::PathBuf::from(manifest_dir)
+                .join("tests/fixtures/test_antennas.yaml"),
+            fail_fast: true,
+        };
+
+        let (repo, outcome) = initialize_repository(&config).expect("fixture config must load cleanly under fail_fast: true — all fixture entries resolve from CARGO_MANIFEST_DIR");
+        assert_eq!(outcome, LoadOutcome::Healthy);
+        assert!(
+            repo.antenna_count() > 0,
+            "a healthy load must produce a non-empty repository"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_begin_shutdown_flips_readiness_and_waits() {
+        use std::time::Duration;
+        use tokio::time::Instant;
+
+        let state = AppState::with_defaults();
+        state.mark_ready();
+        assert!(state.is_ready());
+
+        let started = Instant::now();
+        begin_shutdown(&state, Duration::from_secs(5)).await;
+
+        assert!(
+            !state.is_ready(),
+            "shutdown must flip readiness false so load balancers stop routing new traffic"
+        );
+        assert!(
+            started.elapsed() >= Duration::from_secs(5),
+            "the pre-drain delay must actually elapse"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_begin_shutdown_zero_delay_does_not_wait() {
+        use std::time::Duration;
+
+        let state = AppState::with_defaults();
+        state.mark_ready();
+
+        // Default config: no delay. Must still flip readiness, and must not sleep.
+        begin_shutdown(&state, Duration::ZERO).await;
+        assert!(!state.is_ready());
     }
 
     #[test]

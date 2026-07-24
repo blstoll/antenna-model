@@ -45,6 +45,35 @@ pub struct ServerConfig {
     /// Maximum request body size in bytes
     #[serde(default = "default_max_body_size")]
     pub max_body_size_bytes: usize,
+
+    /// Seconds to keep serving after readiness flips false, before the drain begins
+    /// (roadmap S5).
+    ///
+    /// On a shutdown signal the service marks itself not-ready immediately, then waits this
+    /// long before poem stops accepting connections, so load balancers have a window to
+    /// observe the flip and stop routing new traffic.
+    ///
+    /// Default `0` (flip and drain immediately) — keeps local `Ctrl+C` snappy. Recommended
+    /// production value: `5`. Note the shipped chart probes `/ready` every 5 s with
+    /// `failureThreshold: 3`, so a purely probe-driven removal can take up to 15 s; this
+    /// delay covers LB propagation, it does not guarantee probe-observed removal. On real
+    /// pod deletion Kubernetes drops the pod from Endpoints immediately anyway.
+    #[serde(default = "default_shutdown_readiness_delay")]
+    pub shutdown_readiness_delay_secs: u64,
+
+    /// Maximum seconds to wait for in-flight requests to drain during shutdown (roadmap S5).
+    ///
+    /// Before S5 this was unbounded (`None`), so one slow heatmap could outlast the pod's
+    /// grace period and take a `SIGKILL` mid-flight, skipping cleanup. Default `25`, which
+    /// fits the shipped `terminationGracePeriodSeconds: 30` at the **default** delay of `0`
+    /// with 5 s left for cleanup.
+    ///
+    /// `delay + timeout` must stay *strictly* under the grace period, with room for cleanup
+    /// — at the recommended production delay of `5`, keep this at **`20`** (5 + 20 = 25 < 30).
+    /// The default pairing 5 + 25 lands exactly on 30 and leaves cleanup zero headroom
+    /// before `SIGKILL`.
+    #[serde(default = "default_shutdown_timeout")]
+    pub shutdown_timeout_secs: u64,
 }
 
 /// Calibration data configuration
@@ -186,6 +215,14 @@ fn default_max_body_size() -> usize {
     10 * 1024 * 1024 // 10 MB
 }
 
+fn default_shutdown_readiness_delay() -> u64 {
+    0 // flip readiness and drain immediately; operators opt into an LB grace window — S5
+}
+
+fn default_shutdown_timeout() -> u64 {
+    25 // seconds; + a 5 s readiness delay stays under the chart's 30 s grace period — S5
+}
+
 fn default_calibration_dir() -> PathBuf {
     PathBuf::from("calibration_data")
 }
@@ -241,6 +278,8 @@ impl Default for ServerConfig {
             port: default_port(),
             request_timeout_secs: default_request_timeout(),
             max_body_size_bytes: default_max_body_size(),
+            shutdown_readiness_delay_secs: default_shutdown_readiness_delay(),
+            shutdown_timeout_secs: default_shutdown_timeout(),
         }
     }
 }
@@ -307,6 +346,14 @@ impl ServiceConfig {
                 default_request_timeout() as i64,
             )?
             .set_default("server.max_body_size_bytes", default_max_body_size() as i64)?
+            .set_default(
+                "server.shutdown_readiness_delay_secs",
+                default_shutdown_readiness_delay() as i64,
+            )?
+            .set_default(
+                "server.shutdown_timeout_secs",
+                default_shutdown_timeout() as i64,
+            )?
             .set_default(
                 "calibration.data_directory",
                 default_calibration_dir().to_string_lossy().to_string(),
@@ -990,6 +1037,45 @@ performance:
         let config: ServiceConfig = serde_yaml::from_str(yaml).expect("parse failed");
         assert_eq!(config.performance.max_concurrent_heavy_requests, 0);
         assert_eq!(config.performance.admission_retry_after_secs, 5);
+    }
+
+    #[test]
+    fn test_shutdown_defaults() {
+        let server = ServerConfig::default();
+        // 0 = flip readiness and drain immediately. Local Ctrl+C stays snappy; operators
+        // set ~5 in Kubernetes for load-balancer propagation (roadmap S5).
+        assert_eq!(server.shutdown_readiness_delay_secs, 0);
+        // 25 s keeps the DEFAULT pairing (delay 0 + drain 25) inside the chart's
+        // terminationGracePeriodSeconds: 30 with 5 s left for cleanup. Operators who raise
+        // the delay to the recommended 5 must lower this to 20 — 5 + 25 lands exactly on
+        // the grace period and leaves cleanup nothing before SIGKILL.
+        assert_eq!(server.shutdown_timeout_secs, 25);
+    }
+
+    #[test]
+    fn test_shutdown_yaml_override_roundtrips() {
+        let yaml_content = r#"
+server:
+  host: "127.0.0.1"
+  port: 3000
+  shutdown_readiness_delay_secs: 7
+  shutdown_timeout_secs: 12
+
+calibration:
+  data_directory: "calibration_data"
+  antenna_config_file: "calibration_data/antennas.yaml"
+
+logging:
+  level: "info"
+"#;
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(yaml_content.as_bytes()).unwrap();
+        let path = temp_file.path().to_str().unwrap();
+
+        let config = ServiceConfig::from_file(path).unwrap();
+        assert_eq!(config.server.shutdown_readiness_delay_secs, 7);
+        assert_eq!(config.server.shutdown_timeout_secs, 12);
     }
 
     #[test]

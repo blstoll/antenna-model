@@ -32,7 +32,11 @@ use tracing::{error, info, warn};
 ///
 /// # Response
 /// Returns HTTP 200 with JSON body containing:
-/// - status: "healthy" when service is responsive
+/// - status: "healthy" when calibration data is loaded
+/// - status: "degraded" when the service is responsive but has no calibration data loaded
+///
+/// Always returns 200 — a non-200 liveness response would restart the pod, which cannot
+/// fix missing calibration data. Use `/ready` to keep traffic away (roadmap S5).
 ///
 /// # Example Response
 /// ```json
@@ -41,8 +45,14 @@ use tracing::{error, info, warn};
 /// }
 /// ```
 #[handler]
-pub async fn health() -> Json<HealthResponse> {
-    Json(HealthResponse::healthy())
+pub async fn health(state: Data<&Arc<AppState>>) -> Json<HealthResponse> {
+    // Always HTTP 200 — this is the liveness probe (see HealthResponse::degraded). An
+    // empty repository means no antenna can be evaluated, which is degraded but alive.
+    if state.repository.antenna_count() == 0 {
+        Json(HealthResponse::degraded())
+    } else {
+        Json(HealthResponse::healthy())
+    }
 }
 
 /// GET /ready - Readiness probe endpoint
@@ -97,8 +107,8 @@ pub async fn ready(state: Data<&Arc<AppState>>) -> Response {
 /// - status: "ok" when service is operational
 /// - version: Application version from Cargo.toml
 /// - uptime_seconds: Seconds since server started
-/// - antenna_count: Number of loaded antennas (when available)
-/// - antenna_ids: List of loaded antenna IDs (when available)
+/// - antenna_count: Number of loaded antennas (always present, 0 on a degraded start)
+/// - antenna_ids: List of loaded antenna IDs (always present, `[]` on a degraded start)
 /// - memory_bytes: Memory usage in bytes (when available, Linux only)
 ///
 /// # Example Response
@@ -127,12 +137,10 @@ pub async fn status(state: Data<&Arc<AppState>>) -> Json<StatusResponse> {
         "Status endpoint called"
     );
 
-    let mut response = StatusResponse::ok(version, uptime);
-
-    // Add antenna information if any antennas are loaded
-    if !antenna_ids.is_empty() {
-        response = response.with_antennas(antenna_ids);
-    }
+    // Always report antenna_count/antenna_ids, even when empty (roadmap S5): a degraded
+    // start (empty repository) must be visible to monitoring as "0 antennas", not silently
+    // omitted, which would be indistinguishable from "field not implemented".
+    let mut response = StatusResponse::ok(version, uptime).with_antennas(antenna_ids);
 
     // Add memory usage if available
     if let Some(mem) = memory_bytes {
@@ -1123,18 +1131,16 @@ mod tests {
 
     #[test]
     fn test_app_state_readiness() {
+        // The not-ready-by-default invariant is pinned by
+        // `api::tests::test_app_state_starts_not_ready` (roadmap S5). This test covers only
+        // the toggle round-trip.
         let state = AppState::with_defaults();
 
-        // Should be ready by default
-        assert!(state.is_ready());
-
-        // Mark not ready
-        state.mark_not_ready();
-        assert!(!state.is_ready());
-
-        // Mark ready again
         state.mark_ready();
         assert!(state.is_ready());
+
+        state.mark_not_ready();
+        assert!(!state.is_ready());
     }
 
     #[test]

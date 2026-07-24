@@ -51,11 +51,19 @@ paths:
       tags:
         - health
       summary: Health check (liveness probe)
-      description: Returns 200 if the service is responsive. Used for Kubernetes liveness probe.
+      description: |
+        Always returns 200 while the process is responsive. Used for the Kubernetes liveness
+        probe, so it deliberately never returns a failure status: a restart cannot fix
+        missing calibration data.
+
+        The `status` field reports `healthy` when calibration data is loaded, or `degraded`
+        when the service is running with an empty repository (calibration load failed and
+        `calibration.fail_fast` was off). A degraded instance never becomes ready, so it
+        receives no traffic — see `/ready`.
       operationId: getHealth
       responses:
         '200':
-          description: Service is healthy and responsive
+          description: Service is responsive ("healthy", or "degraded" with no data loaded)
           content:
             application/json:
               schema:
@@ -66,21 +74,26 @@ paths:
       tags:
         - health
       summary: Readiness check (readiness probe)
-      description: Returns 200 when ready to serve requests, 503 during startup or if data fails to load.
+      description: |
+        Returns 200 only once the calibration load has completed successfully. Returns 503
+        during startup, when the calibration load failed, and for the whole graceful-shutdown
+        drain window.
       operationId: getReady
       responses:
         '200':
-          description: Service is ready to serve requests
+          description: 'Service is ready to serve requests ({"status": "ready"})'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/HealthResponse'
         '503':
-          description: Service not ready (startup or data loading failure)
+          description: |
+            Not ready — startup, failed calibration load, or shutting down
+            ({"status": "not_ready"}).
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/HealthResponse'
 
   /status:
     get:

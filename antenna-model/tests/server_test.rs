@@ -3,8 +3,42 @@
 //! These tests verify that the server can start, respond to requests,
 //! and shut down gracefully.
 
+use std::path::PathBuf;
 use std::time::Duration;
 use tokio::time::timeout;
+
+/// Build a config pointing at the checked-in test fixtures, on the given port.
+///
+/// `antenna_model::api::start_server` (the plain host/port convenience wrapper these tests
+/// used to call) resolves `ServiceConfig::with_defaults()`'s calibration paths
+/// (`calibration_data/antennas.yaml`) relative to the process CWD, which `cargo test` sets
+/// to the crate directory (`antenna-model/`) — not the workspace root where
+/// `calibration_data/` actually lives. Before roadmap S5 that load failure was silently
+/// swallowed and the server started with an empty repository anyway; now that
+/// `calibration.fail_fast` (default `true`) is honored, that same failure legitimately
+/// aborts startup. So these tests build an explicit config against
+/// `tests/fixtures/test_antennas.yaml` instead.
+///
+/// `data_directory` is `CARGO_MANIFEST_DIR` itself (not the fixtures subdirectory):
+/// `test_antennas.yaml`'s `calibration_file` entries are written as
+/// `tests/fixtures/calibration_data/...`, i.e. relative to the crate root, so that's what
+/// `data_directory` must be for every entry to resolve. `fail_fast` is left at its shipped
+/// default (`true`) deliberately — this is the only test in the suite that drives the real
+/// production startup path (`start_server_with_config`), so it doubles as a regression
+/// guard for the exact knob this roadmap unit exists to honor.
+fn test_config(port: u16) -> antenna_model::config::ServiceConfig {
+    let mut config = antenna_model::config::ServiceConfig::with_defaults();
+    config.server.host = "127.0.0.1".to_string();
+    config.server.port = port;
+
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+    config.calibration.data_directory = PathBuf::from(&manifest_dir);
+    config.calibration.antenna_config_file =
+        PathBuf::from(&manifest_dir).join("tests/fixtures/test_antennas.yaml");
+    // fail_fast left at its shipped default (true) — see doc comment above.
+
+    config
+}
 
 /// Test that the server can start and is accessible
 ///
@@ -16,7 +50,7 @@ use tokio::time::timeout;
 async fn test_server_startup_and_status() {
     // Start the server in a background task
     let server_handle = tokio::spawn(async {
-        antenna_model::api::start_server("127.0.0.1", 3001)
+        antenna_model::api::start_server_with_config(test_config(3001))
             .await
             .expect("Failed to start server");
     });
@@ -53,6 +87,28 @@ async fn test_server_startup_and_status() {
     assert!(json["version"].is_string());
     assert!(json["uptime_seconds"].is_u64());
 
+    // Proves `set_antenna_ids()` ran in `start_server_with_config` on the Healthy path
+    // (roadmap S5): before that wiring, /status never reported a populated antenna_count.
+    assert!(
+        json["antenna_count"].as_u64().unwrap_or(0) > 0,
+        "expected /status to report loaded antennas, got: {json}"
+    );
+
+    // Proves `state.mark_ready()` ran in `start_server_with_config` on the Healthy path
+    // (roadmap S5): readiness starts false and is earned only by a completed healthy load.
+    let ready_response = timeout(
+        Duration::from_secs(5),
+        client.get("http://127.0.0.1:3001/ready").send(),
+    )
+    .await
+    .expect("Ready request timed out")
+    .expect("Ready request failed");
+    assert_eq!(
+        ready_response.status(),
+        200,
+        "expected /ready to be 200 after a healthy calibration load"
+    );
+
     // Abort the server task
     server_handle.abort();
 }
@@ -62,7 +118,7 @@ async fn test_server_startup_and_status() {
 async fn test_status_uptime_increases() {
     // Start the server
     let server_handle = tokio::spawn(async {
-        antenna_model::api::start_server("127.0.0.1", 3002)
+        antenna_model::api::start_server_with_config(test_config(3002))
             .await
             .expect("Failed to start server");
     });
