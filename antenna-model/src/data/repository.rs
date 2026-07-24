@@ -84,6 +84,7 @@ impl CalibrationRepository {
             AntennaConfig::from_file(config.antenna_config_file.to_string_lossy().as_ref())?;
 
         let enabled_antennas = antenna_config.enabled_antennas();
+        let enabled_count = enabled_antennas.len();
         info!(
             "Found {} enabled antenna(s) in configuration",
             enabled_antennas.len()
@@ -116,9 +117,18 @@ impl CalibrationRepository {
         );
 
         if loaded_count == 0 {
-            return Err(DataError::ConfigurationError {
-                reason: "No calibrations loaded".to_string(),
-            });
+            // Distinguish the two zero-calibration cases (roadmap S5): an operator who
+            // enabled nothing, versus enabled entries that all failed to load. Same Err
+            // shape, different message — start_server_with_config logs it verbatim.
+            let reason = if enabled_count == 0 {
+                "No antennas enabled in configuration".to_string()
+            } else {
+                format!(
+                    "All {} enabled antenna(s) failed to load ({} error(s))",
+                    enabled_count, error_count
+                )
+            };
+            return Err(DataError::ConfigurationError { reason });
         }
 
         Ok(repository)
@@ -771,6 +781,80 @@ antennas:
         // Should fail fast on missing file
         let result = CalibrationRepository::load_from_config(&calibration_config);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_from_config_reports_zero_enabled_distinctly() {
+        // A config with no *enabled* antennas is an operator misconfiguration, not a
+        // broken artifact. The error must say so (roadmap S5) — start_server_with_config
+        // surfaces this string in the startup log and, under fail_fast, in the fatal exit.
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path();
+
+        let antenna_config_yaml = r#"
+antennas:
+  - id: "disabled_one"
+    name: "Disabled Antenna"
+    calibration_file: "nope.bin"
+    enabled: false
+"#;
+        let config_path = data_dir.join("antennas.yaml");
+        std::fs::write(&config_path, antenna_config_yaml).unwrap();
+
+        let calibration_config = CalibrationConfig {
+            data_directory: data_dir.to_path_buf(),
+            antenna_config_file: config_path,
+            fail_fast: false,
+        };
+
+        let err = match CalibrationRepository::load_from_config(&calibration_config) {
+            Ok(_) => panic!("zero enabled antennas must be an error"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("No antennas enabled"),
+            "expected the zero-enabled message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_load_from_config_reports_all_failed_distinctly() {
+        // One enabled antenna pointing at a missing artifact, fail_fast off: loading
+        // continues, ends with zero loaded, and the error must distinguish this from the
+        // zero-enabled case above.
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path();
+
+        let antenna_config_yaml = r#"
+antennas:
+  - id: "broken_one"
+    name: "Broken Antenna"
+    calibration_file: "absent.bin"
+    enabled: true
+"#;
+        let config_path = data_dir.join("antennas.yaml");
+        std::fs::write(&config_path, antenna_config_yaml).unwrap();
+
+        let calibration_config = CalibrationConfig {
+            data_directory: data_dir.to_path_buf(),
+            antenna_config_file: config_path,
+            fail_fast: false,
+        };
+
+        let err = match CalibrationRepository::load_from_config(&calibration_config) {
+            Ok(_) => panic!("all-failed must be an error"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("failed to load"),
+            "expected the all-failed message, got: {msg}"
+        );
+        assert!(
+            !msg.contains("No antennas enabled"),
+            "all-failed must not be reported as zero-enabled: {msg}"
+        );
     }
 
     #[test]
