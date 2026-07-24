@@ -38,7 +38,7 @@ G1 ─┬─ G2 ── G3
     │                                 └─ P3 ─┐
     │                             P5 ────────┼─ P6 ─ D8, D5
     │  P1b ─ P7;  P8 (independent) ──────────┤
-    ├─ S1 ─ S2 ─ S3(after Phase 1) ─ S4 ─ S5 │
+    ├─ S1 ─ S2 ─ S3(after Phase 1) ─ S4 ─ S5 │  (Phase 2 DONE 2026-07-23)
     ├─ S6                                    │
     ├─ C3 ─ C4 ─ C2 ─ C8 ─ C7                │
     │  C1(after S6; may fold into C8 stage 4)│
@@ -897,6 +897,74 @@ pointer (now `:911`/`:752`/`:981` post-P10). Docs-only change; no code touched.
 - **Depends on:** S1, S2 (same middleware stack — land sequentially).
 
 ### S5 — Real graceful shutdown, readiness lifecycle, honor `fail_fast` — Effort: M
+
+> **✅ DONE 2026-07-23 — closes Phase 2.** All four exit criteria met; full workspace gate
+> green (`scripts/check.sh`: fmt + `clippy --workspace --all-targets -D warnings` +
+> `cargo test --workspace`; only `cargo audit` finding is the pre-existing allowed `paste`
+> RUSTSEC-2024-0436). Plan: `docs/plan-s5-graceful-shutdown.md`. Six commits
+> (`88d0268`…`4013bda`) on `feat/s5-graceful-shutdown`.
+> - **Readiness lifecycle:** `AppState::new` now starts readiness **false**; the production
+>   path flips it true (`mark_ready()`) only after a healthy calibration load, and
+>   `begin_shutdown` flips it false at the top of graceful shutdown. `/ready` therefore 503s
+>   during startup, on a failed load, and for the whole drain window.
+> - **`fail_fast` honored:** new `initialize_repository()` + `LoadOutcome` seam
+>   (`api/mod.rs`). `calibration.fail_fast: true` (the shipped default) + a failed load →
+>   returns `Err(io::Error)` (naming the knob + the CWD) which flows through
+>   `start_server_with_config`'s existing `?` up to `main.rs`'s existing `exit(1)` — **no new
+>   code in `main.rs`, no `process::exit` inside `api/`**. `fail_fast: false` → starts
+>   **degraded** (empty repository, readiness stays false).
+> - **Degraded state is honest, shapes preserved:** `/health` stays **HTTP 200** always
+>   (it's the k8s *liveness* probe — a non-200 there restart-loops the pod over a data
+>   problem a restart can't fix), reporting `status: "degraded"` when
+>   `repository.antenna_count() == 0`, `"healthy"` otherwise. Derived from the empty
+>   repository, **not** a new `AppState` flag. `/status` now *always* emits `antenna_count`
+>   /`antenna_ids` (`0`/`[]` when degraded) so monitoring can tell "0 antennas" from "field
+>   not implemented" — previously production never called `set_antenna_ids` at all, so both
+>   were always omitted.
+> - **Real graceful shutdown:** `shutdown_cleanup()` (dead since Sprint 5) now has a caller —
+>   invoked unconditionally after the drain, on both the clean and errored server-return
+>   path. The drain is **bounded** (`Some(drain_timeout)`, was `None`). The readiness-flip +
+>   pre-drain pause happen *inside* the future handed to `run_with_graceful_shutdown` (poem
+>   stops accepting the instant that future resolves, so the delay had to be there, not
+>   after).
+> - **Two config fields** (`config/settings.rs`, `config/service.yaml`):
+>   `server.shutdown_readiness_delay_secs` (**default 0** — flip-and-drain immediately, keeps
+>   local Ctrl+C snappy; recommended 5 in k8s for LB propagation) and
+>   `server.shutdown_timeout_secs` (**default 25**, chosen so 5 + 25 ≤ the chart's
+>   `terminationGracePeriodSeconds: 30`, leaving room for cleanup before SIGKILL).
+> - **The zero-calibration load error now distinguishes** "No antennas enabled in
+>   configuration" from "All N enabled antenna(s) failed to load (M error(s))" — same `Err`
+>   shape, different message (`data/repository.rs`), verified by two independent branch
+>   mutations.
+> - **Tests:** readiness-starts-false pin; two `initialize_repository` outcome tests
+>   (fail_fast→Err naming the knob, degraded→`Ok((empty, Degraded))`) + a healthy-fixtures
+>   test; `HealthResponse::degraded` shape pin; `begin_shutdown` paused-clock delay test
+>   (mutation-verified — deleting the sleep fails it) + zero-delay test; config default +
+>   YAML round-trip tests; `/status`-degraded and `/health`-healthy route tests; and
+>   `server_test.rs` extended to assert `/ready`→200 + `antenna_count>0` on the real startup
+>   path (this caught that `TestServer` never populated `antenna_ids` — fixed in
+>   `helpers.rs`, mirroring production).
+> - **Docs/spec:** `openapi.yaml` `/health` documents `healthy`+`degraded`/always-200, and
+>   the pre-existing `/ready` **503 schema drift is fixed** (referenced `ErrorResponse`; the
+>   handler returns `{"status":"not_ready"}` = `HealthResponse`). `docs/api-documentation.md`
+>   gained a Service Lifecycle section (startup/shutdown/fail_fast + both knobs).
+>
+> **Discovered debt (found while implementing S5, none in scope — filed for follow-up):**
+> - **`test_startup_with_corrupted_calibration_binary` tests nothing.** Its fixture
+>   (`tests/integration/error_tests.rs:120-128`) uses field names (`antenna_id`, top-level
+>   `feeds:`, `feed_id`) that don't match `AntennaConfigEntry`'s serde shape (`id`, `name`,
+>   `calibration_file`, `enabled`; `feeds` only nests under `design_specs`, keyed by `id`),
+>   so it fails to deserialize and the test ends in `let _ = result;`. Pre-existing.
+> - **`tests/fixtures/test_antennas.yaml` `calibration_file` paths are crate-root-relative,
+>   not `data_directory`-relative,** so the intuitive `data_directory = tests/fixtures`
+>   doubles the prefix and two antennas silently fail to load. Fixture-based tests paper over
+>   it with `fail_fast: false`; now that S5 makes `fail_fast` real, that workaround silently
+>   weakens any healthy-load assertion. Fix the fixture paths or document the convention.
+> - **The `fail_fast` fatal error names the CWD but not the failing antenna IDs** (the
+>   per-antenna `warn!` at `repository.rs:105` has them; the fatal line doesn't).
+> - **Startup concerns are accumulating in `api/mod.rs`** — `apply_worker_threads` (S4) +
+>   `initialize_repository`/`begin_shutdown` (S5). A third justifies extracting
+>   `api/startup.rs` / `api/shutdown.rs`.
 
 - **Entrance / read first:** `api/mod.rs:72` (readiness defaults `true` at construction),
   `:178-186` (total calibration-load failure → warn + empty repository + healthy server,
