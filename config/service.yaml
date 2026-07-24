@@ -14,6 +14,15 @@ server:
   # Maximum request body size in bytes (10 MB)
   max_body_size_bytes: 10485760
 
+  # Graceful shutdown (roadmap S5).
+  # On SIGTERM/SIGINT the service marks itself not-ready, waits
+  # `shutdown_readiness_delay_secs` so load balancers observe the flip, then drains
+  # in-flight requests for at most `shutdown_timeout_secs` before running cleanup.
+  # Keep delay + timeout below the pod's terminationGracePeriodSeconds (30 in the shipped
+  # Helm chart) or the drain gets SIGKILLed and cleanup never runs.
+  shutdown_readiness_delay_secs: 0   # default 0; recommended 5 in Kubernetes
+  shutdown_timeout_secs: 25          # default 25
+
 calibration:
   # Directory containing calibration binary artifacts
   data_directory: "calibration_data"

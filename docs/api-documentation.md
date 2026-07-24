@@ -77,6 +77,46 @@ docker run -p 8080:8080 \
 - `GET /api/v1/antennas/{id}/feeds` - List feeds for specific antenna
 - `GET /api/v1/antennas/{id}/feeds/{feed_id}` - Get detailed feed configuration
 
+## Service Lifecycle (roadmap S5)
+
+### Startup
+
+1. Configuration loads, logging initializes.
+2. The calibration repository loads from `calibration.antenna_config_file`.
+3. On success: `/status` is populated with the loaded antenna IDs and readiness flips to
+   **true**.
+4. On failure, behavior depends on `calibration.fail_fast`:
+   - `true` (the shipped default): the process logs the error and **exits nonzero**. It does
+     not start a useless server.
+   - `false`: the server starts **degraded** — readiness stays false, `/health` reports
+     `"degraded"`, `/status` reports `antenna_count: 0` with an empty `antenna_ids`, and gain
+     requests return 404.
+
+Readiness is false from process start until step 3 completes, so a readiness probe never
+routes traffic to an instance that cannot serve it.
+
+### Shutdown
+
+On `SIGTERM` or `SIGINT`:
+
+1. Readiness flips to **false** immediately — `/ready` returns 503.
+2. The service keeps serving for `server.shutdown_readiness_delay_secs`, giving load
+   balancers a window to observe the flip and stop sending new requests.
+3. New connections stop being accepted; in-flight requests drain for at most
+   `server.shutdown_timeout_secs`.
+4. Cleanup runs (final status log, resource release).
+
+`/health` stays 200 throughout the drain — the instance is alive, just no longer accepting
+new work.
+
+### Configuration
+
+| Knob | Default | Notes |
+|---|---|---|
+| `calibration.fail_fast` | `true` | Abort startup if the calibration load fails. |
+| `server.shutdown_readiness_delay_secs` | `0` | Grace window after the readiness flip. Recommended `5` in Kubernetes. |
+| `server.shutdown_timeout_secs` | `25` | Bounded drain. Keep `delay + timeout` under the pod's `terminationGracePeriodSeconds` (30 in the shipped chart) or the drain is SIGKILLed and cleanup is skipped. |
+
 ## Key Features
 
 ### Calibration Status Support

@@ -988,6 +988,19 @@ impl HealthResponse {
             status: "healthy".to_string(),
         }
     }
+
+    /// Create a degraded response.
+    ///
+    /// The service is alive and responding, but has no calibration data loaded, so it
+    /// cannot answer gain requests. Deliberately still served with HTTP 200: `/health` is
+    /// the Kubernetes **liveness** probe, and a restart does not fix missing calibration
+    /// data — returning non-200 here would produce an endless CrashLoopBackOff. Readiness
+    /// (`/ready`) is the signal that keeps traffic away. See roadmap S5.
+    pub fn degraded() -> Self {
+        Self {
+            status: "degraded".to_string(),
+        }
+    }
 }
 
 /// Status endpoint response (readiness probe).
@@ -1452,6 +1465,22 @@ mod tests {
         let response = HealthResponse::healthy();
         let json = serde_json::to_string(&response).unwrap();
         assert!(json.contains("\"status\":\"healthy\""));
+    }
+
+    #[test]
+    fn test_health_response_degraded() {
+        // Shape is unchanged (one `status` field) — only the value differs. S5 explicitly
+        // requires keeping the /health response shape.
+        let response = HealthResponse::degraded();
+        assert_eq!(response.status, "degraded");
+
+        let json = serde_json::to_value(&response).expect("serialize");
+        assert_eq!(json["status"], "degraded");
+        assert_eq!(
+            json.as_object().map(|o| o.len()),
+            Some(1),
+            "HealthResponse must stay a single-field object"
+        );
     }
 
     // ========================================================================
