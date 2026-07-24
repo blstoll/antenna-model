@@ -41,6 +41,10 @@ uuid = { version = "1.24.0", features = ["v4", "serde"] }
 criterion = { version = "0.8.2", features = ["html_reports"] }
 reqwest = { version = "0.13.4", features = ["json"] }
 tempfile = "3.27.0"
+# test-util enables tokio's paused/mocked clock for `#[tokio::test(start_paused = true)]`
+# (roadmap S5 shutdown-delay test). Dev-only: it must never affect production runtime
+# behavior, so it is not added to the main `tokio` dependency's features.
+tokio = { version = "1.53.0", features = ["test-util"] }
 
 [[bench]]
 name = "computation_modes"

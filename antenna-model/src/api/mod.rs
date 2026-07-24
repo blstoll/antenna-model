@@ -21,7 +21,7 @@ use crate::service::GainCache;
 use poem::{listener::TcpListener, Server};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 use tokio::signal;
 use tracing::info;
 
@@ -44,7 +44,7 @@ pub struct AppState {
     pub config: Arc<ServiceConfig>,
 
     /// Readiness state — false until the calibration load completes, true while serving,
-    /// false again once graceful shutdown begins (roadmap S5, shutdown flip wired in Task 4).
+    /// false again once graceful shutdown begins (roadmap S5).
     pub ready: Arc<AtomicBool>,
 
     /// Loaded antenna IDs (will be populated by Task 5.4 - Calibration Repository)
@@ -73,7 +73,7 @@ impl AppState {
             // the service can serve anything. The production path earns readiness only by
             // completing a healthy calibration load (`start_server_with_config`, via
             // `initialize_repository` + `LoadOutcome::Healthy`) and surrenders it again at
-            // the top of graceful shutdown — wired in Task 4.
+            // the top of graceful shutdown (`begin_shutdown`).
             ready: Arc::new(AtomicBool::new(false)),
             antenna_ids: Arc::new(parking_lot::RwLock::new(Vec::new())),
             repository,
@@ -240,17 +240,37 @@ pub async fn start_server_with_config(config: ServiceConfig) -> Result<(), std::
 
     info!("Server ready to accept connections on {}", addr);
 
-    // Start server with graceful shutdown
-    Server::new(TcpListener::bind(&addr))
+    // Graceful shutdown (roadmap S5): flip readiness false and pause so load balancers
+    // stop sending new work, then drain in-flight requests under a bounded timeout, then
+    // run cleanup. Before S5 this future only logged, the drain was unbounded (`None`),
+    // and `shutdown_cleanup` had no caller at all.
+    let readiness_delay = Duration::from_secs(state.config.server.shutdown_readiness_delay_secs);
+    let drain_timeout = Duration::from_secs(state.config.server.shutdown_timeout_secs);
+    let shutdown_state = state.clone();
+
+    info!(
+        readiness_delay_secs = readiness_delay.as_secs(),
+        drain_timeout_secs = drain_timeout.as_secs(),
+        "Graceful shutdown configured"
+    );
+
+    let result = Server::new(TcpListener::bind(&addr))
         .run_with_graceful_shutdown(
             app,
-            async {
+            async move {
                 shutdown_signal().await;
                 info!("Graceful shutdown initiated");
+                begin_shutdown(&shutdown_state, readiness_delay).await;
             },
-            None,
+            Some(drain_timeout),
         )
-        .await
+        .await;
+
+    // Runs on both the clean and the errored path — cleanup is exactly what must not be
+    // skipped when the server came down badly.
+    shutdown_cleanup(&state).await;
+
+    result
 }
 
 /// Start the API server (legacy interface for backward compatibility)
@@ -405,6 +425,24 @@ async fn shutdown_signal() {
         _ = terminate => {
             info!("Received SIGTERM signal");
         },
+    }
+}
+
+/// First half of graceful shutdown: stop advertising readiness, then pause (roadmap S5).
+///
+/// Runs *inside* the future handed to `run_with_graceful_shutdown`, because poem stops
+/// accepting new connections the moment that future resolves. Flipping readiness and
+/// sleeping here — rather than after — is what gives load balancers a window to route new
+/// traffic elsewhere while this instance is still able to serve it.
+async fn begin_shutdown(state: &AppState, readiness_delay: std::time::Duration) {
+    state.mark_not_ready();
+    info!(
+        readiness_delay_secs = readiness_delay.as_secs(),
+        "Readiness set to false; pausing before draining in-flight requests"
+    );
+
+    if !readiness_delay.is_zero() {
+        tokio::time::sleep(readiness_delay).await;
     }
 }
 
@@ -581,6 +619,40 @@ mod tests {
             repo.antenna_count() > 0,
             "a healthy load must produce a non-empty repository"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_begin_shutdown_flips_readiness_and_waits() {
+        use std::time::Duration;
+        use tokio::time::Instant;
+
+        let state = AppState::with_defaults();
+        state.mark_ready();
+        assert!(state.is_ready());
+
+        let started = Instant::now();
+        begin_shutdown(&state, Duration::from_secs(5)).await;
+
+        assert!(
+            !state.is_ready(),
+            "shutdown must flip readiness false so load balancers stop routing new traffic"
+        );
+        assert!(
+            started.elapsed() >= Duration::from_secs(5),
+            "the pre-drain delay must actually elapse"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_begin_shutdown_zero_delay_does_not_wait() {
+        use std::time::Duration;
+
+        let state = AppState::with_defaults();
+        state.mark_ready();
+
+        // Default config: no delay. Must still flip readiness, and must not sleep.
+        begin_shutdown(&state, Duration::ZERO).await;
+        assert!(!state.is_ready());
     }
 
     #[test]
