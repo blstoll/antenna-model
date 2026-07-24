@@ -568,6 +568,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_status_route_reports_zero_antennas_when_degraded() {
+        // A degraded start (empty repository, roadmap S5) must still surface
+        // antenna_count/antenna_ids in /status, not omit them — omission is
+        // indistinguishable from "field not implemented" to a monitoring system.
+        let state = Arc::new(AppState::with_defaults());
+        let app = create_routes(state);
+        let cli = TestClient::new(app);
+
+        let response = cli.get("/status").send().await;
+        response.assert_status_is_ok();
+
+        let body = response.json().await;
+        let json_value = body.value();
+
+        assert_eq!(json_value.object().get("antenna_count").i64(), 0);
+        let ids = json_value.object().get("antenna_ids").array();
+        assert_eq!(ids.len(), 0);
+    }
+
+    #[tokio::test]
     async fn test_health_route_always_succeeds() {
         let state = Arc::new(AppState::with_defaults());
         // Even if not ready, health should succeed (liveness check)

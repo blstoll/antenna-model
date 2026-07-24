@@ -271,7 +271,7 @@ pub async fn start_server(host: &str, port: u16) -> Result<(), std::io::Error> {
 
 /// Outcome of the startup calibration load (roadmap S5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LoadOutcome {
+pub(crate) enum LoadOutcome {
     /// At least one calibration loaded — the service can answer gain requests.
     Healthy,
     /// Nothing loaded and `calibration.fail_fast` is off. The server starts so that
@@ -291,7 +291,7 @@ pub enum LoadOutcome {
 /// * `Ok((empty, Degraded))` — load failed but `fail_fast` is off; start anyway, not ready.
 /// * `Err(io::Error)` — load failed and `fail_fast` is on. The caller returns this up to
 ///   `main`, which logs it and exits nonzero. No `process::exit` inside the API layer.
-pub fn initialize_repository(
+pub(crate) fn initialize_repository(
     config: &crate::config::CalibrationConfig,
 ) -> Result<(CalibrationRepository, LoadOutcome), std::io::Error> {
     match CalibrationRepository::load_from_config(config) {
@@ -304,12 +304,22 @@ pub fn initialize_repository(
             Ok((repo, LoadOutcome::Healthy))
         }
         Err(e) if config.fail_fast => {
+            // Relative calibration paths (the shipped default) resolve against the
+            // process's current directory, which is easy to get wrong when launching from
+            // somewhere other than the workspace root. Naming the CWD here is what turns
+            // "No such file or directory" into an actionable diagnosis instead of a guess.
+            let cwd = std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "<unknown>".to_string());
             tracing::error!(
                 error = %e,
+                current_dir = %cwd,
                 "Failed to load calibration data and calibration.fail_fast is set; refusing to start"
             );
             Err(std::io::Error::other(format!(
-                "calibration load failed and calibration.fail_fast is enabled: {e}"
+                "calibration load failed and calibration.fail_fast is enabled: {e} \
+                 (current working directory: {cwd}; relative calibration paths in \
+                 config are resolved against this directory)"
             )))
         }
         Err(e) => {
@@ -539,10 +549,8 @@ mod tests {
 
     #[test]
     fn test_initialize_repository_without_fail_fast_starts_degraded() {
-        let (repo, outcome) = match initialize_repository(&broken_calibration_config(false)) {
-            Ok(v) => v,
-            Err(e) => panic!("fail_fast=false must start the server anyway: {e}"),
-        };
+        let (repo, outcome) = initialize_repository(&broken_calibration_config(false))
+            .expect("fail_fast=false must start the server anyway");
         assert_eq!(outcome, LoadOutcome::Degraded);
         assert_eq!(
             repo.antenna_count(),
@@ -553,28 +561,21 @@ mod tests {
 
     #[test]
     fn test_initialize_repository_healthy_on_real_fixtures() {
-        // The checked-in fixtures load uncalibrated design-spec antennas.
-        //
-        // fail_fast is false here, matching every fixture-based integration test in
-        // tests/integration/*.rs: test_antennas.yaml's two calibration_file entries are
-        // written relative to the crate root (`tests/fixtures/calibration_data/...`), not
-        // relative to `data_directory` (which every caller, this one included, sets to
-        // the fixtures dir itself) — so those two individually fail to resolve. That's a
-        // pre-existing fixture-data quirk outside this task's scope; fail_fast:false lets
-        // the three uncalibrated design-spec antennas load anyway, which is all this test
-        // needs to prove a healthy load.
+        // test_antennas.yaml's calibration_file entries (e.g.
+        // "tests/fixtures/calibration_data/...") are written relative to the crate root,
+        // not to a `data_directory` of the fixtures dir itself — so data_directory must be
+        // CARGO_MANIFEST_DIR for every entry to resolve. fail_fast: true is the point of
+        // this test: it proves the full fixture set (5 antennas / 7 calibrations) loads
+        // cleanly, not just "at least one antenna survived a partial failure".
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let fixtures = std::path::PathBuf::from(manifest_dir).join("tests/fixtures");
         let config = crate::config::CalibrationConfig {
-            data_directory: fixtures.clone(),
-            antenna_config_file: fixtures.join("test_antennas.yaml"),
-            fail_fast: false,
+            data_directory: std::path::PathBuf::from(manifest_dir),
+            antenna_config_file: std::path::PathBuf::from(manifest_dir)
+                .join("tests/fixtures/test_antennas.yaml"),
+            fail_fast: true,
         };
 
-        let (repo, outcome) = match initialize_repository(&config) {
-            Ok(v) => v,
-            Err(e) => panic!("fixture config must load cleanly: {e}"),
-        };
+        let (repo, outcome) = initialize_repository(&config).expect("fixture config must load cleanly under fail_fast: true — all fixture entries resolve from CARGO_MANIFEST_DIR");
         assert_eq!(outcome, LoadOutcome::Healthy);
         assert!(
             repo.antenna_count() > 0,

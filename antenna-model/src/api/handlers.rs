@@ -107,8 +107,8 @@ pub async fn ready(state: Data<&Arc<AppState>>) -> Response {
 /// - status: "ok" when service is operational
 /// - version: Application version from Cargo.toml
 /// - uptime_seconds: Seconds since server started
-/// - antenna_count: Number of loaded antennas (when available)
-/// - antenna_ids: List of loaded antenna IDs (when available)
+/// - antenna_count: Number of loaded antennas (always present, 0 on a degraded start)
+/// - antenna_ids: List of loaded antenna IDs (always present, `[]` on a degraded start)
 /// - memory_bytes: Memory usage in bytes (when available, Linux only)
 ///
 /// # Example Response
@@ -137,12 +137,10 @@ pub async fn status(state: Data<&Arc<AppState>>) -> Json<StatusResponse> {
         "Status endpoint called"
     );
 
-    let mut response = StatusResponse::ok(version, uptime);
-
-    // Add antenna information if any antennas are loaded
-    if !antenna_ids.is_empty() {
-        response = response.with_antennas(antenna_ids);
-    }
+    // Always report antenna_count/antenna_ids, even when empty (roadmap S5): a degraded
+    // start (empty repository) must be visible to monitoring as "0 antennas", not silently
+    // omitted, which would be indistinguishable from "field not implemented".
+    let mut response = StatusResponse::ok(version, uptime).with_antennas(antenna_ids);
 
     // Add memory usage if available
     if let Some(mem) = memory_bytes {
