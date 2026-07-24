@@ -10,16 +10,26 @@
 //! 3. **RequestLogger** - Comprehensive structured logging with timing
 //! 4. **ErrorHandler** - Consistent error response formatting
 //! 5. **RequestSizeTracker** - Enforce/track request & response body sizes (413)
-//! 6. **RequestTimeout** - Enforce the per-request processing deadline (504, innermost)
+//! 6. **RequestTimeout** - Enforce the per-request processing deadline (504, innermost
+//!    of the *shared* stack)
+//!
+//! In addition, the three compute-heavy endpoints (`gain/batch`, `heatmap`,
+//! `h3-heatmap`) carry a **per-endpoint** [`ConcurrencyLimit`] layer (roadmap S4)
+//! applied *inside* the shared stack (nearest the handler), sharing one semaphore so
+//! the cap bounds total concurrent heavy work. Over-limit requests are rejected with
+//! `503 service_overloaded` + `Retry-After`. It is a no-op when
+//! `performance.max_concurrent_heavy_requests == 0` (the default).
 //!
 //! This order ensures:
 //! - `RequestId` populates the request-id extension **before** any other layer
-//!   reads it, so every log line and every error path (incl. the 413 and 504
+//!   reads it, so every log line and every error path (incl. the 413, 504, and 503
 //!   rejections) carries the real id rather than `"unknown"`.
 //! - `RequestLogger` times and logs completion for **every** outcome, including a
-//!   timeout — because the 504 error propagates back out through it.
+//!   timeout or an admission rejection — because those propagate back out through it.
 //! - Body-size (413) rejection sits **outside** the timeout window (instant), and
-//!   the timeout wraps only handler execution (innermost).
+//!   the timeout wraps only handler execution.
+//! - `ConcurrencyLimit` sits inside `RequestTimeout`, so a timed-out admitted request
+//!   drops its permit with the abandoned future (no slot leak).
 //!
 //! ## poem ordering caveat (why the `.with(...)` chain is written in reverse)
 //!
@@ -32,16 +42,27 @@
 
 use crate::api::handlers;
 use crate::api::middleware::{
-    ErrorHandler, RequestId, RequestLogger, RequestSizeTracker, RequestTimeout,
+    ConcurrencyLimit, ErrorHandler, RequestId, RequestLogger, RequestSizeTracker, RequestTimeout,
 };
 use crate::api::AppState;
 use poem::{get, middleware::Tracing, post, Endpoint, EndpointExt, Route};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Semaphore;
 
 /// Default soft warn thresholds for request / response body sizes (bytes).
 const DEFAULT_WARN_REQUEST_SIZE: usize = 1_000_000;
 const DEFAULT_WARN_RESPONSE_SIZE: usize = 10_000_000;
+
+/// Build the shared admission-control semaphore for the heavy endpoints (roadmap S4).
+///
+/// `limit == 0` → `None` (admission control disabled; the `ConcurrencyLimit` layer is
+/// still applied but is a transparent pass-through, keeping the endpoint types uniform).
+/// A positive `limit` → one semaphore with that many permits, shared across all three
+/// heavy endpoints so the cap bounds *total* concurrent heavy work.
+fn heavy_semaphore(limit: usize) -> Option<Arc<Semaphore>> {
+    (limit > 0).then(|| Arc::new(Semaphore::new(limit)))
+}
 
 /// Assemble the full route table and production middleware stack.
 ///
@@ -50,25 +71,56 @@ const DEFAULT_WARN_RESPONSE_SIZE: usize = 10_000_000;
 /// the poem `.with(...)` ordering caveat: the chain below is written
 /// handler-inward-first on purpose (the **last** `.with` is the **outermost**
 /// layer). Do not reorder it into declaration order.
+// Private single-assembly point for the whole middleware stack; its parameters are the
+// union of every knob the public builders expose, so a longish list is inherent rather
+// than a design smell. Grouping them into a struct would only move the same fields around.
+#[allow(clippy::too_many_arguments)]
 fn build_app(
     state: Arc<AppState>,
     max_request_size: usize,
     warn_request_size: usize,
     warn_response_size: usize,
     timeout: Duration,
+    heavy_semaphore: Option<Arc<Semaphore>>,
+    heavy_limit: usize,
+    admission_retry_after_secs: u64,
 ) -> impl Endpoint {
+    // Apply the shared S4 admission-control limiter to each heavy endpoint. The semaphore
+    // is passed in (built by `heavy_semaphore(limit)` in production; injected already
+    // exhausted by the wiring unit test) so this function stays a pure assembler. `None`
+    // = disabled → transparent pass-through. `heavy_limit` is carried only for the
+    // rejection message.
+    let heavy = |ep| {
+        EndpointExt::with(
+            ep,
+            ConcurrencyLimit::shared(
+                heavy_semaphore.clone(),
+                admission_retry_after_secs,
+                heavy_limit,
+            ),
+        )
+    };
+
     Route::new()
         // Health and status endpoints (Sprint 5, Task 5.3)
         .at("/health", get(handlers::health)) // Liveness probe
         .at("/ready", get(handlers::ready)) // Readiness probe
         .at("/status", get(handlers::status)) // Detailed status
         // Gain computation endpoints (Sprint 5, Task 5.5; Sprint 6, Task 6.1)
+        // Single gain is on the cheap path — deliberately NOT admission-limited.
         .at("/api/v1/gain", post(handlers::compute_gain))
-        .at("/api/v1/gain/batch", post(handlers::compute_gain_batch))
+        // Heavy endpoints carry the shared S4 admission-control limiter.
+        .at(
+            "/api/v1/gain/batch",
+            heavy(post(handlers::compute_gain_batch)),
+        )
         // Heatmap endpoint (Sprint 6, Task 6.2)
-        .at("/api/v1/heatmap", post(handlers::generate_heatmap_endpoint))
+        .at(
+            "/api/v1/heatmap",
+            heavy(post(handlers::generate_heatmap_endpoint)),
+        )
         // H3 link budget endpoint (Sprint 6, Task 6.x)
-        .at("/api/v1/h3-heatmap", post(handlers::h3_link_budget))
+        .at("/api/v1/h3-heatmap", heavy(post(handlers::h3_link_budget)))
         // Antenna listing and details endpoints (Sprint 6, Task 6.3)
         .at("/api/v1/antennas", get(handlers::list_antennas))
         .at("/api/v1/antennas/:id", get(handlers::get_antenna_details))
@@ -105,12 +157,17 @@ fn build_app(
 pub fn create_routes(state: Arc<AppState>) -> impl Endpoint {
     let max_body = state.config.server.max_body_size_bytes;
     let timeout = Duration::from_secs(state.config.server.request_timeout_secs);
+    let heavy_limit = state.config.performance.max_concurrent_heavy_requests;
+    let retry_after = state.config.performance.admission_retry_after_secs;
     build_app(
         state,
         max_body,
         DEFAULT_WARN_REQUEST_SIZE,
         DEFAULT_WARN_RESPONSE_SIZE,
         timeout,
+        heavy_semaphore(heavy_limit),
+        heavy_limit,
+        retry_after,
     )
 }
 
@@ -130,12 +187,17 @@ pub fn create_routes_with_size_limits(
     warn_response_size: usize,
 ) -> impl Endpoint {
     let timeout = Duration::from_secs(state.config.server.request_timeout_secs);
+    let heavy_limit = state.config.performance.max_concurrent_heavy_requests;
+    let retry_after = state.config.performance.admission_retry_after_secs;
     build_app(
         state,
         max_request_size,
         warn_request_size,
         warn_response_size,
         timeout,
+        heavy_semaphore(heavy_limit),
+        heavy_limit,
+        retry_after,
     )
 }
 
@@ -148,12 +210,17 @@ pub fn create_routes_with_size_limits(
 /// limit still comes from config.
 pub fn create_routes_with_timeout(state: Arc<AppState>, timeout: Duration) -> impl Endpoint {
     let max_body = state.config.server.max_body_size_bytes;
+    let heavy_limit = state.config.performance.max_concurrent_heavy_requests;
+    let retry_after = state.config.performance.admission_retry_after_secs;
     build_app(
         state,
         max_body,
         DEFAULT_WARN_REQUEST_SIZE,
         DEFAULT_WARN_RESPONSE_SIZE,
         timeout,
+        heavy_semaphore(heavy_limit),
+        heavy_limit,
+        retry_after,
     )
 }
 
@@ -310,6 +377,89 @@ mod tests {
 
         let response = cli.get("/status").send().await;
         response.assert_status_is_ok();
+    }
+
+    /// Admission control (roadmap S4) is wired to the three heavy endpoints and NOT to
+    /// the cheap ones. Proven **deterministically**: `build_app` is given a semaphore
+    /// whose only permit is already held, so every `try_acquire` fails *immediately,
+    /// before the handler runs*. A heavy endpoint therefore returns 503 with zero
+    /// computation; a cheap endpoint is untouched. No `sleep`, no real heatmap/batch
+    /// compute, no dependence on core count or machine load. (The limiter's runtime
+    /// behavior — reject/admit/release/passthrough — is covered separately by the
+    /// deterministic middleware unit tests in `api::middleware`.)
+    #[tokio::test]
+    async fn test_admission_control_wired_to_heavy_endpoints_only() {
+        use crate::api::schemas::ErrorResponse;
+        use poem::http::StatusCode;
+        use tokio::sync::Semaphore;
+
+        // Exhaust the sole permit up front: the semaphore is saturated for the whole test.
+        let sem = Arc::new(Semaphore::new(1));
+        let _held = sem.clone().try_acquire_owned().unwrap();
+
+        let state = Arc::new(AppState::with_defaults());
+        let app = build_app(
+            state,
+            10_485_760, // max request size
+            DEFAULT_WARN_REQUEST_SIZE,
+            DEFAULT_WARN_RESPONSE_SIZE,
+            Duration::from_secs(30),
+            Some(sem), // already exhausted -> heavy endpoints reject instantly
+            1,         // limit (for the rejection message)
+            9,         // retry_after_secs (distinctive value to assert)
+        );
+        let cli = TestClient::new(app);
+
+        // Every heavy endpoint is admission-limited: rejected with 503 + Retry-After +
+        // the standard JSON body, before the handler (or body parse) ever runs — so an
+        // empty body is fine.
+        for path in [
+            "/api/v1/gain/batch",
+            "/api/v1/heatmap",
+            "/api/v1/h3-heatmap",
+        ] {
+            let response = cli
+                .post(path)
+                .body_json(&serde_json::json!({}))
+                .send()
+                .await;
+            response.assert_status(StatusCode::SERVICE_UNAVAILABLE);
+
+            let retry_after = response
+                .0
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_string);
+            assert_eq!(
+                retry_after.as_deref(),
+                Some("9"),
+                "{path} must carry the Retry-After header on its 503"
+            );
+
+            let body = response.0.into_body().into_string().await.unwrap();
+            let err: ErrorResponse = serde_json::from_str(&body).unwrap();
+            assert_eq!(
+                err.error, "service_overloaded",
+                "{path} must return the standard service_overloaded body"
+            );
+        }
+
+        // Cheap endpoints are NOT admission-limited: never 503 even while the semaphore is
+        // saturated. Single gain (empty body) fails validation (4xx) but must not be 503;
+        // health/status are 200.
+        let gain = cli
+            .post("/api/v1/gain")
+            .body_json(&serde_json::json!({}))
+            .send()
+            .await;
+        assert_ne!(
+            gain.0.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "single /gain is on the cheap path and must not be admission-limited"
+        );
+        cli.get("/health").send().await.assert_status_is_ok();
+        cli.get("/status").send().await.assert_status_is_ok();
     }
 
     #[tokio::test]

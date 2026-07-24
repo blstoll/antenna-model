@@ -832,6 +832,49 @@ pointer (now `:911`/`:752`/`:981` post-P10). Docs-only change; no code touched.
 
 ### S4 — Admission control + resolve dead `worker_threads` config — Effort: M
 
+> **✅ DONE 2026-07-22 (pending commit).** Both halves landed; full workspace green.
+> Plan: `docs/plan-s4-admission-control.md`.
+> - **`worker_threads` wired:** `api::apply_worker_threads` calls
+>   `rayon::ThreadPoolBuilder::build_global` once at startup (`api/mod.rs`), guarded — a
+>   positive value sizes the global pool, `0` = auto, and an already-initialized pool
+>   logs-and-continues (never panics). The "Performance configuration" startup log now
+>   reports `worker_threads_effective = rayon::current_num_threads()` alongside the
+>   configured value and the admission limit.
+> - **Admission control:** new `ConcurrencyLimit` middleware (`api/middleware.rs`) holding
+>   a shared `Arc<tokio::sync::Semaphore>`, applied per-endpoint to the three heavy routes
+>   (`gain/batch`, `heatmap`, `h3-heatmap`) in `routes.rs` so one budget caps *total*
+>   concurrent heavy work. Non-blocking `try_acquire_owned`; on saturation returns
+>   **`503 service_overloaded` + `Retry-After`** built as an `Ok(Response)` (the
+>   `poem::Error::from_string` path used by 413/504 has no header channel — this is the
+>   load-bearing implementation detail, pinned by test). Cheap endpoints (single gain,
+>   health/ready/status, listings) are never wrapped.
+> - **Two config fields** (`config/settings.rs`, `config/service.yaml`):
+>   `max_concurrent_heavy_requests` (**default 0 = unlimited/disabled** — maintainer chose
+>   off-by-default 2026-07-22, the plan's recommended option) and
+>   `admission_retry_after_secs` (default 5). Limit `0` makes the middleware a transparent
+>   pass-through, so every existing test (incl. `concurrent_tests.rs`) stays green unchanged.
+> - **Tests (all deterministic — no `sleep`, no real compute, no core/load dependence):**
+>   4 middleware unit tests (reject-saturated w/ header+content-type+body, admit-free,
+>   disabled-passthrough, permit-release) cover the *mechanism*; 1 `routes.rs` wiring test
+>   (`build_app` given an already-exhausted semaphore ⇒ each heavy endpoint 503s *before its
+>   handler runs*, cheap endpoints untouched) covers *which endpoints are limited*; plus 3
+>   config-default tests and an `apply_worker_threads` graceful-Err test (warms the rayon pool
+>   first, then asserts the already-initialized path doesn't panic). **An earlier draft used a
+>   reqwest/`sleep` e2e file racing a real heavy heatmap against the permit; it was deleted** —
+>   it starved unrelated batch tests in the full-suite run (CPU contention) and was
+>   environment-dependent. `try_acquire` on an exhausted semaphore rejects instantly with zero
+>   compute, so the injected-semaphore unit test proves the wiring deterministically and the
+>   real-server round-trip added no coverage the middleware stack didn't already exercise.
+> - **Docs/spec:** `openapi.yaml` gained a `503` (+ `Retry-After` header) on the two
+>   *documented* heavy endpoints (`gain/batch`, `heatmap`); `/h3-heatmap` is absent from
+>   openapi entirely (its documentation is unit **C1**) so its 503 will be added when C1 lands.
+>   `docs/api-documentation.md` gained an "Admission Control" section.
+>
+> **Note — the S2 status-code note said "429 or 503"; chose 503 + Retry-After** per the
+> transient-vs-deterministic rationale below (429 would misclassify overload as a
+> client-rate-limit fault). `Retry-After` is a small fixed config-driven backoff, not a
+> per-request service-time estimate.
+
 - **Entrance / read first:** `settings.rs` performance section; `service/batch.rs`,
   `service/heatmap.rs`, `service/h3_link_budget.rs` all use rayon's **global** pool; no
   concurrency-limit middleware anywhere.

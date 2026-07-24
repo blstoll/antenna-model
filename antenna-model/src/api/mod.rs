@@ -185,6 +185,13 @@ pub async fn start_server_with_config(config: ServiceConfig) -> Result<(), std::
         }
     };
 
+    // Apply the configured rayon worker-thread count ONCE at startup (roadmap S4).
+    // `0` = auto-detect (leave rayon's global pool to size itself). A positive value
+    // builds the global pool with that many threads. `build_global` can only succeed
+    // once per process and errors if a pool already exists — in that case we log and
+    // continue on the existing pool (never panic: repo rule).
+    apply_worker_threads(config.performance.worker_threads);
+
     let state = Arc::new(AppState::new(config.clone(), repository));
 
     info!(
@@ -204,9 +211,12 @@ pub async fn start_server_with_config(config: ServiceConfig) -> Result<(), std::
     );
 
     info!(
-        worker_threads = state.config.performance.worker_threads,
+        worker_threads_configured = state.config.performance.worker_threads,
+        worker_threads_effective = rayon::current_num_threads(),
         max_batch_size = state.config.performance.max_batch_size,
         parallel_processing = state.config.performance.enable_parallel_processing,
+        max_concurrent_heavy_requests = state.config.performance.max_concurrent_heavy_requests,
+        admission_retry_after_secs = state.config.performance.admission_retry_after_secs,
         "Performance configuration"
     );
 
@@ -244,6 +254,40 @@ pub async fn start_server(host: &str, port: u16) -> Result<(), std::io::Error> {
     config.server.port = port;
 
     start_server_with_config(config).await
+}
+
+/// Apply the configured rayon worker-thread count to the global pool (roadmap S4).
+///
+/// `worker_threads == 0` is a no-op (rayon auto-detects from CPU count — the sane
+/// default). A positive value calls [`rayon::ThreadPoolBuilder::build_global`], which
+/// succeeds at most **once per process**. If a global pool already exists (e.g. a prior
+/// call, or a test harness that touched rayon), `build_global` returns `Err`; we log a
+/// warning and continue on the existing pool rather than failing startup. This never
+/// panics (repo rule: no `unwrap`/`expect`/`panic` on the production path).
+fn apply_worker_threads(worker_threads: usize) {
+    if worker_threads == 0 {
+        return; // auto-detect
+    }
+    match rayon::ThreadPoolBuilder::new()
+        .num_threads(worker_threads)
+        .build_global()
+    {
+        Ok(()) => {
+            info!(
+                worker_threads,
+                "Configured the global rayon thread pool from performance.worker_threads"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                requested = worker_threads,
+                effective = rayon::current_num_threads(),
+                error = %e,
+                "performance.worker_threads requested but a global rayon pool already \
+                 exists; continuing on the existing pool"
+            );
+        }
+    }
 }
 
 /// Wait for shutdown signal (SIGTERM or SIGINT)
@@ -379,5 +423,20 @@ mod tests {
 
         // Should not panic
         shutdown_cleanup(&state).await;
+    }
+
+    #[test]
+    fn test_apply_worker_threads_never_panics() {
+        // Force the global rayon pool to exist first (a trivial parallel op initializes
+        // it at its default size), so the subsequent positive-value call deterministically
+        // takes `build_global`'s already-initialized `Err` branch — which must log and
+        // continue, never panic. Doing it this way also avoids pinning the shared test
+        // process's pool to a small thread count. The `0` call is the no-op path.
+        use rayon::prelude::*;
+        let _warm: i32 = (0..8).into_par_iter().sum();
+
+        apply_worker_threads(0); // auto-detect: no-op
+        apply_worker_threads(4); // pool already exists -> graceful Err path, no panic
+        assert!(rayon::current_num_threads() >= 1);
     }
 }
