@@ -545,6 +545,20 @@ impl<E: Endpoint> Endpoint for RequestTimeoutImpl<E> {
 /// [`RequestTimeout`]). That is deliberate: if an admitted request later times out, the
 /// outer `RequestTimeout` wins its `select`, drops this layer's future, and the held
 /// permit is dropped with it — so a timed-out request does not leak its slot.
+///
+/// # Known limitation: permit release on timeout can oversubscribe compute
+///
+/// Releasing the permit on timeout is the right trade for *slot* accounting, but it is not
+/// the same as stopping the work. Dropping the future does not abort the `spawn_blocking`
+/// task or the rayon work it has already submitted (same caveat as [`RequestTimeout`]), so
+/// under **sustained** timeouts the freed permit admits a new request while the abandoned
+/// compute is still burning cores. The semaphore therefore bounds *admitted* heavy
+/// requests, not *running* heavy compute, and the two diverge exactly when the service is
+/// already overloaded. The compute-side bound that actually stops this work is S3's
+/// `performance.integration_budget_ms`; size it below `server.request_timeout_secs` if
+/// oversubscription matters for your deployment. Holding the permit until the compute
+/// truly finishes would require an abort-aware handle and is deliberately out of S4's
+/// scope.
 #[derive(Clone)]
 pub struct ConcurrencyLimit {
     /// Shared permit pool; `None` = unlimited (disabled), a transparent pass-through.

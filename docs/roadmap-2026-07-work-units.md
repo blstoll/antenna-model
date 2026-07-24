@@ -38,7 +38,8 @@ G1 ─┬─ G2 ── G3
     │                                 └─ P3 ─┐
     │                             P5 ────────┼─ P6 ─ D8, D5
     │  P1b ─ P7;  P8 (independent) ──────────┤
-    ├─ S1 ─ S2 ─ S3(after Phase 1) ─ S4 ─ S5 │  (Phase 2 DONE 2026-07-23)
+    ├─ S1 ─ S2 ─ S3(after Phase 1) ─ S4 ─ S5 │  (Phase 2 DONE 2026-07-23,
+    │  S1b, S2b (Phase 2 review follow-ups)   │   S1b+S2b open — see below)
     ├─ S6                                    │
     ├─ C3 ─ C4 ─ C2 ─ C8 ─ C7                │
     │  C1(after S6; may fold into C8 stage 4)│
@@ -787,6 +788,18 @@ pointer (now `:911`/`:752`/`:981` post-P10). Docs-only change; no code touched.
 
 ### S1 — Enforce the configured body-size limit — Effort: S/M (top of phase)
 
+> **🔴 OPEN gap — found by the Phase 2 review 2026-07-24, tracked as S1b.** The 413 is
+> gated entirely on a parseable `content-length` header (`api/middleware.rs:348-385`) with
+> **no `else` arm**, so a `Transfer-Encoding: chunked` POST bypasses it and poem's `Json`
+> extractor buffers the body unbounded. The docstring at `api/middleware.rs:265-268` claims
+> this matches "the framework-blessed level" of `poem::middleware::SizeLimit` — it does not:
+> poem's `SizeLimit` returns **411 Length Required** when the header is absent, it does not
+> fall through. Fix in S1b: an `else` arm that bounds the body with
+> `req.take_body().into_bytes_limit(max)` → `set_body(bytes)` (caps memory at `max + 4096`,
+> keeps chunked clients working, returns the same 413 body). A blanket 411 is wrong here —
+> the middleware also wraps every GET. **S1's exit criteria are met only for
+> content-length-bearing requests until S1b lands.**
+
 - **Entrance / read first:** `config/settings.rs:46-48` (`max_body_size_bytes`),
   `api/mod.rs:193` (limit only logged), `api/middleware.rs:320-333` (`RequestSizeTracker`
   warns, never rejects). Find the existing test:
@@ -802,6 +815,16 @@ pointer (now `:911`/`:752`/`:981` post-P10). Docs-only change; no code touched.
 - **Depends on:** G1.
 
 ### S2 — Enforce the configured request timeout — Effort: S
+
+> **🔴 OPEN gap — found by the Phase 2 review 2026-07-24, tracked as S2b.**
+> `request_timeout_secs` is **unenforceable on `POST /api/v1/gain`**. `RequestTimeout` is a
+> `tokio::time::timeout` around the endpoint future; `compute_gain` (`api/handlers.rs:222`)
+> runs the synchronous physics call directly on the async task, so the future never yields
+> and the timeout can never preempt it. It is the only heavy-compute handler that does not
+> `spawn_blocking` — `compute_gain_batch` (`:332`), `generate_heatmap_endpoint` (`:484`) and
+> `h3_link_budget` (`:1027`) all do. Consequence: **S3's `integration_budget_ms` is the only
+> live bound on single-gain latency, and that is nowhere documented.** Fix in S2b: wrap the
+> compute in `spawn_blocking`, matching the other three handlers.
 
 - **Entrance / read first:** `settings.rs:42-44`, `api/routes.rs` middleware stack (no
   timeout of any kind), `api/mod.rs:194` (log-only).
@@ -898,11 +921,15 @@ pointer (now `:911`/`:752`/`:981` post-P10). Docs-only change; no code touched.
 
 ### S5 — Real graceful shutdown, readiness lifecycle, honor `fail_fast` — Effort: M
 
-> **✅ DONE 2026-07-23 — closes Phase 2.** All four exit criteria met; full workspace gate
+> **✅ DONE 2026-07-23 — last *planned* Phase 2 unit.** (It did **not** close Phase 2
+> outright: the 2026-07-24 Phase 2 review, which ran in parallel with S5 and so was not
+> reflected in this closeout, found two open gaps in S1 and S2 — now filed as **S1b** and
+> **S2b** at the end of this phase. Phase 2 flips to unqualified DONE when those land.)
+> All four S5 exit criteria met; full workspace gate
 > green (`scripts/check.sh`: fmt + `clippy --workspace --all-targets -D warnings` +
 > `cargo test --workspace`; only `cargo audit` finding is the pre-existing allowed `paste`
-> RUSTSEC-2024-0436). Plan: `docs/plan-s5-graceful-shutdown.md`. Six commits
-> (`88d0268`…`4013bda`) on `feat/s5-graceful-shutdown`.
+> RUSTSEC-2024-0436). Plan: `docs/plan-s5-graceful-shutdown.md`. Seven commits
+> (`88d0268`…`4013bda`) on `feat/s5-graceful-shutdown`, plus this closeout commit.
 > - **Readiness lifecycle:** `AppState::new` now starts readiness **false**; the production
 >   path flips it true (`mark_ready()`) only after a healthy calibration load, and
 >   `begin_shutdown` flips it false at the top of graceful shutdown. `/ready` therefore 503s
@@ -930,8 +957,11 @@ pointer (now `:911`/`:752`/`:981` post-P10). Docs-only change; no code touched.
 > - **Two config fields** (`config/settings.rs`, `config/service.yaml`):
 >   `server.shutdown_readiness_delay_secs` (**default 0** — flip-and-drain immediately, keeps
 >   local Ctrl+C snappy; recommended 5 in k8s for LB propagation) and
->   `server.shutdown_timeout_secs` (**default 25**, chosen so 5 + 25 ≤ the chart's
->   `terminationGracePeriodSeconds: 30`, leaving room for cleanup before SIGKILL).
+>   `server.shutdown_timeout_secs` (**default 25**, so the *default* pairing 0 + 25 leaves
+>   5 s of the chart's `terminationGracePeriodSeconds: 30` for cleanup before SIGKILL;
+>   operators running the recommended delay of 5 must lower the timeout to **20** — 5 + 25
+>   lands exactly on 30 and leaves cleanup nothing. Corrected 2026-07-24 after review;
+>   the original note claimed 5 + 25 fit).
 > - **The zero-calibration load error now distinguishes** "No antennas enabled in
 >   configuration" from "All N enabled antenna(s) failed to load (M error(s))" — same `Err`
 >   shape, different message (`data/repository.rs`), verified by two independent branch
@@ -1019,6 +1049,57 @@ assumed off-limits. With pre-production confirmed, C8 stage 2 makes `coordinate_
 implement this unit. The stale threshold comments this unit would have fixed
 (`schemas.rs:9` says 1000 km, constant is 6400 km; `validator.rs:266` says 10,000 km,
 constant is 400,000 km) move into C8 stage 2.
+
+### S1b — Close the chunked-encoding bypass of the 413 — Effort: S
+
+**🔴 OPEN — filed 2026-07-24 by the Phase 2 review.** Blocks the unqualified Phase 2 DONE
+banner (see `docs/roadmap-2026-07.md` §4).
+
+- **Entrance / read first:** `api/middleware.rs:338-409` (`RequestSizeTrackerImpl::call`) —
+  the whole 413 lives inside `if let Some(size) = headers().get("content-length")…`; and
+  the docstring at `:259-268`, whose "framework-blessed level, matching
+  `poem::middleware::SizeLimit`" claim is **false on the header-absent branch** (poem
+  returns 411 there; we fall through). Read poem 3.1.12's
+  `Body::into_bytes_limit` (`src/body.rs:213`) — it caps the buffer at `limit + 4096` and
+  returns `ReadBodyError::PayloadTooLarge`.
+- **Exit criteria:**
+  1. A `Transfer-Encoding: chunked` POST whose body exceeds `max_body_size_bytes` gets
+     **413** with the project's standard JSON body — the same body as the header path.
+  2. A chunked POST *under* the limit still succeeds (no regression for chunked clients).
+  3. GET requests, which never carry `content-length`, are unaffected.
+  4. The `:259-268` docstring corrected to describe what the code actually does.
+- **Gotchas:** do **not** mirror poem's blanket 411 — this middleware wraps every route
+  including the GETs. The else arm must `req.take_body().into_bytes_limit(max)` and
+  `set_body` the result back, or the handler gets an empty body. Peak memory becomes
+  `max + 4096` on the chunked path, which is what the `Json` extractor would have consumed
+  anyway — this bounds it rather than adding cost.
+- **Depends on:** S1.
+
+### S2b — Make the request timeout enforceable on `POST /api/v1/gain` — Effort: S
+
+**🔴 OPEN — filed 2026-07-24 by the Phase 2 review.** Blocks the unqualified Phase 2 DONE
+banner (see `docs/roadmap-2026-07.md` §4).
+
+- **Entrance / read first:** `api/handlers.rs:222` — `compute_gain` calls
+  `compute_gain_from_request_with_budget` inline on the async task. Compare
+  `compute_gain_batch` (`:332`), `generate_heatmap_endpoint` (`:484`), `h3_link_budget`
+  (`:1027`), which all wrap their compute in `tokio::task::spawn_blocking`. `RequestTimeout`
+  (`api/middleware.rs`) is a `tokio::time::timeout` around the endpoint future, so a future
+  that never yields is never preempted.
+- **Exit criteria:**
+  1. `compute_gain` runs its compute under `spawn_blocking`, matching the other three
+     handlers (including their `JoinError` handling).
+  2. A test with a sub-second `create_routes_with_timeout` proves a slow single-gain request
+     returns **504**, not a late 200.
+  3. `docs/api-documentation.md` states which bound applies to single gain — today S3's
+     `performance.integration_budget_ms` is the *only* live bound on that route and that is
+     documented nowhere.
+- **Gotchas:** the poem-layer timeout still does not *cancel* the rayon work (S2's standing
+  caveat, and see the oversubscription note on `ConcurrencyLimit`); it only stops the client
+  from waiting. Don't overclaim in the docs. `/api/v1/gain` is deliberately **not**
+  admission-limited (`routes.rs:110-111`) — leave that as is; this unit is about
+  preemptability, not admission.
+- **Depends on:** S2.
 
 ---
 

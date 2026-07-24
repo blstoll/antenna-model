@@ -64,9 +64,14 @@ pub struct ServerConfig {
     /// Maximum seconds to wait for in-flight requests to drain during shutdown (roadmap S5).
     ///
     /// Before S5 this was unbounded (`None`), so one slow heatmap could outlast the pod's
-    /// grace period and take a `SIGKILL` mid-flight, skipping cleanup. Default `25`, chosen
-    /// so `shutdown_readiness_delay_secs` (5, recommended) + 25 stays inside the chart's
-    /// `terminationGracePeriodSeconds: 30`.
+    /// grace period and take a `SIGKILL` mid-flight, skipping cleanup. Default `25`, which
+    /// fits the shipped `terminationGracePeriodSeconds: 30` at the **default** delay of `0`
+    /// with 5 s left for cleanup.
+    ///
+    /// `delay + timeout` must stay *strictly* under the grace period, with room for cleanup
+    /// — at the recommended production delay of `5`, keep this at **`20`** (5 + 20 = 25 < 30).
+    /// The default pairing 5 + 25 lands exactly on 30 and leaves cleanup zero headroom
+    /// before `SIGKILL`.
     #[serde(default = "default_shutdown_timeout")]
     pub shutdown_timeout_secs: u64,
 }
@@ -1040,8 +1045,10 @@ performance:
         // 0 = flip readiness and drain immediately. Local Ctrl+C stays snappy; operators
         // set ~5 in Kubernetes for load-balancer propagation (roadmap S5).
         assert_eq!(server.shutdown_readiness_delay_secs, 0);
-        // 25 s keeps delay + drain inside the chart's terminationGracePeriodSeconds: 30,
-        // leaving room for cleanup before SIGKILL.
+        // 25 s keeps the DEFAULT pairing (delay 0 + drain 25) inside the chart's
+        // terminationGracePeriodSeconds: 30 with 5 s left for cleanup. Operators who raise
+        // the delay to the recommended 5 must lower this to 20 — 5 + 25 lands exactly on
+        // the grace period and leaves cleanup nothing before SIGKILL.
         assert_eq!(server.shutdown_timeout_secs, 25);
     }
 

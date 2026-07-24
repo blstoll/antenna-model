@@ -37,10 +37,10 @@
     {
       "id": 6,
       "subject": "Task 6: Full gate, roadmap closeout, PR",
-      "status": "pending",
+      "status": "completed",
       "blockedBy": [5],
       "description": "**Goal:** The workspace gate is green, S5 and Phase 2 are marked done in the roadmap, and the PR is open.\n\n**Files:**\n- Modify: `docs/roadmap-2026-07-work-units.md` (S5 entry ~line 899, Phase 2 header ~line 786)\n- Modify: `docs/roadmap-2026-07.md` if it carries a phase-status line\n- Add: `docs/plan-s5-graceful-shutdown.md`\n\n**Acceptance Criteria:**\n- [ ] `./scripts/check.sh` exits 0\n- [ ] `concurrent_tests.rs`, `resilience_tests.rs`, `error_tests.rs` green\n- [ ] Roadmap marks S5 done with the commit SHA, matching the S1-S4/S6 format\n- [ ] Roadmap records Phase 2 closed (S1-S6 done; S7 superseded by C8)\n- [ ] PR opened against `main`\n\n**Verify:** `./scripts/check.sh` -> `All gate checks passed.`\n\nLead the PR body with the fail_fast behavior change. Full commands in `docs/plan-s5-graceful-shutdown.md` -> Task 6.\n\n```json:metadata\n{\"files\": [\"docs/roadmap-2026-07-work-units.md\", \"docs/roadmap-2026-07.md\", \"docs/plan-s5-graceful-shutdown.md\"], \"verifyCommand\": \"./scripts/check.sh\", \"acceptanceCriteria\": [\"scripts/check.sh exits 0\", \"concurrent_tests, resilience_tests, error_tests green\", \"roadmap marks S5 done with SHA\", \"roadmap records Phase 2 closed\", \"PR opened against main\"], \"modelTier\": \"standard\", \"planPath\": \"docs/plan-s5-graceful-shutdown.md\"}\n```"
     }
   ],
-  "lastUpdated": "2026-07-23"
+  "lastUpdated": "2026-07-23T22:00:00Z"
 }

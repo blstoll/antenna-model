@@ -19,9 +19,11 @@ server:
   # `shutdown_readiness_delay_secs` so load balancers observe the flip, then drains
   # in-flight requests for at most `shutdown_timeout_secs` before running cleanup.
   # Keep delay + timeout below the pod's terminationGracePeriodSeconds (30 in the shipped
-  # Helm chart) or the drain gets SIGKILLed and cleanup never runs.
+  # Helm chart) or the drain gets SIGKILLed and cleanup never runs. The defaults below
+  # (0 + 25) leave 5 s of headroom; raising the delay to the recommended Kubernetes value
+  # of 5 means lowering the timeout to 20, since 5 + 25 lands exactly on the grace period.
   shutdown_readiness_delay_secs: 0   # default 0; recommended 5 in Kubernetes
-  shutdown_timeout_secs: 25          # default 25
+  shutdown_timeout_secs: 25          # default 25; use 20 when the delay is 5
 
 calibration:
   # Directory containing calibration binary artifacts

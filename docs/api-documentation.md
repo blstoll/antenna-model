@@ -115,7 +115,14 @@ new work.
 |---|---|---|
 | `calibration.fail_fast` | `true` | Abort startup if the calibration load fails. |
 | `server.shutdown_readiness_delay_secs` | `0` | Grace window after the readiness flip. Recommended `5` in Kubernetes. |
-| `server.shutdown_timeout_secs` | `25` | Bounded drain. Keep `delay + timeout` under the pod's `terminationGracePeriodSeconds` (30 in the shipped chart) or the drain is SIGKILLed and cleanup is skipped. |
+| `server.shutdown_timeout_secs` | `25` | Bounded drain. Keep `delay + timeout` **strictly** under the pod's `terminationGracePeriodSeconds` (30 in the shipped chart) or the drain is SIGKILLed and cleanup is skipped. |
+
+`delay + timeout` is the worst-case time from `SIGTERM` to the start of cleanup, so it must
+leave the grace period room for cleanup to finish. The shipped defaults (`0` + `25`) leave
+5 s. The recommended Kubernetes pairing is **`shutdown_readiness_delay_secs: 5` with
+`shutdown_timeout_secs: 20`** (5 + 20 = 25 < 30); pairing the recommended delay with the
+default timeout gives 5 + 25 = 30, which lands exactly on the grace period and leaves
+cleanup no headroom before `SIGKILL`.
 
 ## Key Features
 
