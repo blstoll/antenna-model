@@ -44,7 +44,7 @@ pub struct AppState {
     pub config: Arc<ServiceConfig>,
 
     /// Readiness state — false until the calibration load completes, true while serving,
-    /// false again once graceful shutdown begins (roadmap S5, wired in Tasks 3 and 4).
+    /// false again once graceful shutdown begins (roadmap S5, shutdown flip wired in Task 4).
     pub ready: Arc<AtomicBool>,
 
     /// Loaded antenna IDs (will be populated by Task 5.4 - Calibration Repository)
@@ -71,8 +71,9 @@ impl AppState {
             config: Arc::new(config),
             // Readiness starts FALSE (roadmap S5): constructing a state is no evidence that
             // the service can serve anything. The production path earns readiness only by
-            // completing a healthy calibration load — wired in Task 3 of this branch — and
-            // surrenders it again at the top of graceful shutdown, wired in Task 4.
+            // completing a healthy calibration load (`start_server_with_config`, via
+            // `initialize_repository` + `LoadOutcome::Healthy`) and surrenders it again at
+            // the top of graceful shutdown — wired in Task 4.
             ready: Arc::new(AtomicBool::new(false)),
             antenna_ids: Arc::new(parking_lot::RwLock::new(Vec::new())),
             repository,
@@ -175,19 +176,7 @@ pub async fn start_server_with_config(config: ServiceConfig) -> Result<(), std::
         "Loading calibration data"
     );
 
-    let repository = match CalibrationRepository::load_from_config(&config.calibration) {
-        Ok(repo) => {
-            info!("Calibration data loaded successfully");
-            repo
-        }
-        Err(e) => {
-            tracing::warn!(
-                "Failed to load calibration data: {}, starting with empty repository",
-                e
-            );
-            CalibrationRepository::new()
-        }
-    };
+    let (repository, load_outcome) = initialize_repository(&config.calibration)?;
 
     // Apply the configured rayon worker-thread count ONCE at startup (roadmap S4).
     // `0` = auto-detect (leave rayon's global pool to size itself). A positive value
@@ -197,6 +186,26 @@ pub async fn start_server_with_config(config: ServiceConfig) -> Result<(), std::
     apply_worker_threads(config.performance.worker_threads);
 
     let state = Arc::new(AppState::new(config.clone(), repository));
+
+    // Publish the loaded set so /status reports it. Before S5, production never called
+    // set_antenna_ids, so antenna_count/antenna_ids were always omitted from /status.
+    state.set_antenna_ids(state.repository.list_antennas());
+
+    match load_outcome {
+        LoadOutcome::Healthy => {
+            state.mark_ready();
+            info!(
+                antenna_count = state.repository.antenna_count(),
+                "Service marked READY"
+            );
+        }
+        LoadOutcome::Degraded => {
+            tracing::warn!(
+                "Service starting DEGRADED: no calibration data loaded. Readiness stays \
+                 false and /health reports \"degraded\"; gain requests will 404."
+            );
+        }
+    }
 
     info!(
         version = state.version,
@@ -258,6 +267,61 @@ pub async fn start_server(host: &str, port: u16) -> Result<(), std::io::Error> {
     config.server.port = port;
 
     start_server_with_config(config).await
+}
+
+/// Outcome of the startup calibration load (roadmap S5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadOutcome {
+    /// At least one calibration loaded — the service can answer gain requests.
+    Healthy,
+    /// Nothing loaded and `calibration.fail_fast` is off. The server starts so that
+    /// `/health` and `/status` can report *why* it is useless, but readiness stays false
+    /// so no load balancer routes real traffic to it.
+    Degraded,
+}
+
+/// Load the calibration repository and classify the outcome (roadmap S5).
+///
+/// This is the seam that makes `calibration.fail_fast` real. Before S5,
+/// `start_server_with_config` caught the load error unconditionally and continued with an
+/// empty repository, so the shipped `fail_fast: true` default was silently ignored.
+///
+/// # Returns
+/// * `Ok((repo, Healthy))` — at least one calibration loaded.
+/// * `Ok((empty, Degraded))` — load failed but `fail_fast` is off; start anyway, not ready.
+/// * `Err(io::Error)` — load failed and `fail_fast` is on. The caller returns this up to
+///   `main`, which logs it and exits nonzero. No `process::exit` inside the API layer.
+pub fn initialize_repository(
+    config: &crate::config::CalibrationConfig,
+) -> Result<(CalibrationRepository, LoadOutcome), std::io::Error> {
+    match CalibrationRepository::load_from_config(config) {
+        Ok(repo) => {
+            info!(
+                antenna_count = repo.antenna_count(),
+                calibration_count = repo.calibration_count(),
+                "Calibration data loaded successfully"
+            );
+            Ok((repo, LoadOutcome::Healthy))
+        }
+        Err(e) if config.fail_fast => {
+            tracing::error!(
+                error = %e,
+                "Failed to load calibration data and calibration.fail_fast is set; refusing to start"
+            );
+            Err(std::io::Error::other(format!(
+                "calibration load failed and calibration.fail_fast is enabled: {e}"
+            )))
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "Failed to load calibration data; starting DEGRADED with an empty repository \
+                 (readiness stays false, /health reports degraded). Set calibration.fail_fast \
+                 to abort startup instead."
+            );
+            Ok((CalibrationRepository::new(), LoadOutcome::Degraded))
+        }
+    }
 }
 
 /// Apply the configured rayon worker-thread count to the global pool (roadmap S4).
@@ -444,6 +508,78 @@ mod tests {
         assert!(state.is_ready());
         state.mark_not_ready();
         assert!(!state.is_ready());
+    }
+
+    /// Build a CalibrationConfig pointing at a nonexistent antenna config file.
+    fn broken_calibration_config(fail_fast: bool) -> crate::config::CalibrationConfig {
+        crate::config::CalibrationConfig {
+            data_directory: std::env::temp_dir().join("s5_does_not_exist"),
+            antenna_config_file: std::env::temp_dir().join("s5_does_not_exist/antennas.yaml"),
+            fail_fast,
+        }
+    }
+
+    #[test]
+    fn test_initialize_repository_fail_fast_returns_err() {
+        // calibration.fail_fast = true means "refuse to start on a load failure". Before
+        // S5 this Err was swallowed and the server booted empty (roadmap S5).
+        // Note: can't use `.expect_err(...)` here — it requires the Ok type (which
+        // includes CalibrationRepository) to be Debug, and CalibrationRepository
+        // deliberately does not derive Debug (see Task 2's note).
+        let err = match initialize_repository(&broken_calibration_config(true)) {
+            Ok(_) => panic!("fail_fast must propagate the load failure to the caller"),
+            Err(e) => e,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("fail_fast"),
+            "the startup error must name the knob that caused the abort, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_initialize_repository_without_fail_fast_starts_degraded() {
+        let (repo, outcome) = match initialize_repository(&broken_calibration_config(false)) {
+            Ok(v) => v,
+            Err(e) => panic!("fail_fast=false must start the server anyway: {e}"),
+        };
+        assert_eq!(outcome, LoadOutcome::Degraded);
+        assert_eq!(
+            repo.antenna_count(),
+            0,
+            "a degraded start serves from an empty repository"
+        );
+    }
+
+    #[test]
+    fn test_initialize_repository_healthy_on_real_fixtures() {
+        // The checked-in fixtures load uncalibrated design-spec antennas.
+        //
+        // fail_fast is false here, matching every fixture-based integration test in
+        // tests/integration/*.rs: test_antennas.yaml's two calibration_file entries are
+        // written relative to the crate root (`tests/fixtures/calibration_data/...`), not
+        // relative to `data_directory` (which every caller, this one included, sets to
+        // the fixtures dir itself) — so those two individually fail to resolve. That's a
+        // pre-existing fixture-data quirk outside this task's scope; fail_fast:false lets
+        // the three uncalibrated design-spec antennas load anyway, which is all this test
+        // needs to prove a healthy load.
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let fixtures = std::path::PathBuf::from(manifest_dir).join("tests/fixtures");
+        let config = crate::config::CalibrationConfig {
+            data_directory: fixtures.clone(),
+            antenna_config_file: fixtures.join("test_antennas.yaml"),
+            fail_fast: false,
+        };
+
+        let (repo, outcome) = match initialize_repository(&config) {
+            Ok(v) => v,
+            Err(e) => panic!("fixture config must load cleanly: {e}"),
+        };
+        assert_eq!(outcome, LoadOutcome::Healthy);
+        assert!(
+            repo.antenna_count() > 0,
+            "a healthy load must produce a non-empty repository"
+        );
     }
 
     #[test]

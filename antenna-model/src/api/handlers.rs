@@ -32,7 +32,11 @@ use tracing::{error, info, warn};
 ///
 /// # Response
 /// Returns HTTP 200 with JSON body containing:
-/// - status: "healthy" when service is responsive
+/// - status: "healthy" when calibration data is loaded
+/// - status: "degraded" when the service is responsive but has no calibration data loaded
+///
+/// Always returns 200 — a non-200 liveness response would restart the pod, which cannot
+/// fix missing calibration data. Use `/ready` to keep traffic away (roadmap S5).
 ///
 /// # Example Response
 /// ```json
@@ -41,8 +45,14 @@ use tracing::{error, info, warn};
 /// }
 /// ```
 #[handler]
-pub async fn health() -> Json<HealthResponse> {
-    Json(HealthResponse::healthy())
+pub async fn health(state: Data<&Arc<AppState>>) -> Json<HealthResponse> {
+    // Always HTTP 200 — this is the liveness probe (see HealthResponse::degraded). An
+    // empty repository means no antenna can be evaluated, which is degraded but alive.
+    if state.repository.antenna_count() == 0 {
+        Json(HealthResponse::degraded())
+    } else {
+        Json(HealthResponse::healthy())
+    }
 }
 
 /// GET /ready - Readiness probe endpoint

@@ -480,6 +480,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_health_route() {
+        // with_defaults() has an EMPTY repository (roadmap S5), so /health reports
+        // "degraded". See test_health_route_reports_healthy_with_loaded_antennas for the
+        // healthy branch.
         let state = Arc::new(AppState::with_defaults());
         let app = create_routes(state);
         let cli = TestClient::new(app);
@@ -487,6 +490,21 @@ mod tests {
         let response = cli.get("/health").send().await;
         response.assert_status_is_ok();
         response.assert_content_type("application/json; charset=utf-8");
+
+        let body = response.json().await;
+        let json_value = body.value();
+        assert_eq!(json_value.object().get("status").string(), "degraded");
+    }
+
+    #[tokio::test]
+    async fn test_health_route_reports_healthy_with_loaded_antennas() {
+        let config = crate::config::ServiceConfig::with_defaults();
+        let state = Arc::new(AppState::new(config, create_test_repository()));
+        let app = create_routes(state);
+        let cli = TestClient::new(app);
+
+        let response = cli.get("/health").send().await;
+        response.assert_status_is_ok();
 
         let body = response.json().await;
         let json_value = body.value();
