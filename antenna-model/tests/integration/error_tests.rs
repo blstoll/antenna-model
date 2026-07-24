@@ -431,6 +431,113 @@ async fn test_request_body_under_limit_control() {
     server.shutdown().await;
 }
 
+/// Send a raw HTTP/1.1 `POST` with a genuine `Transfer-Encoding: chunked` body and
+/// return the response text. Raw TCP is the only way to produce a real chunked request
+/// here — reqwest needs its `stream` feature plus a futures dependency to omit
+/// `content-length`, and this test's whole point is the *wire* shape, not a synthetic
+/// header-less `Request`.
+///
+/// The body goes out as one chunk so the write completes into the socket buffer even if
+/// the server has already stopped reading and is preparing its rejection.
+async fn post_chunked(base_url: &str, path: &str, body: &[u8]) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let addr = base_url.trim_start_matches("http://");
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+
+    let head = format!(
+        "POST {path} HTTP/1.1\r\n\
+         Host: {addr}\r\n\
+         Content-Type: application/json\r\n\
+         Transfer-Encoding: chunked\r\n\
+         Connection: close\r\n\r\n"
+    );
+    stream.write_all(head.as_bytes()).await.unwrap();
+
+    // One chunk: <hex-len> CRLF <data> CRLF, then the terminating 0-length chunk.
+    let mut framed = format!("{:x}\r\n", body.len()).into_bytes();
+    framed.extend_from_slice(body);
+    framed.extend_from_slice(b"\r\n0\r\n\r\n");
+    // Ignore write errors: a server that rejects mid-stream may close the connection
+    // before we finish, which is a legitimate outcome — the response still matters.
+    let _ = stream.write_all(&framed).await;
+    let _ = stream.flush().await;
+
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.unwrap();
+    String::from_utf8_lossy(&response).into_owned()
+}
+
+/// Roadmap S1b, end-to-end: a real `Transfer-Encoding: chunked` POST whose body exceeds
+/// `max_body_size_bytes` must get **413**, exactly as the `content-length` path does.
+///
+/// This is the wire-level counterpart to the deterministic unit tests in
+/// `api::middleware` — it pins the assumption those rest on, that hyper hands poem a
+/// chunked request with no `content-length` header, so the middleware's header-less arm
+/// is what actually runs. Before S1b this returned 400 (the handler's JSON parse failing
+/// on a garbage payload) after buffering the whole body — the same wrong-reason pass the
+/// original S1 unit called out.
+#[tokio::test]
+async fn test_chunked_request_over_limit_returns_413() {
+    let mut config = ServiceConfig::with_defaults();
+    config.server.host = "127.0.0.1".to_string();
+    config.server.port = 0;
+    config.server.max_body_size_bytes = 256;
+    config.server.request_timeout_secs = 30;
+
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+    let fixtures_dir = PathBuf::from(&manifest_dir).join("tests/fixtures");
+    config.calibration.data_directory = fixtures_dir.clone();
+    config.calibration.antenna_config_file = fixtures_dir.join("test_antennas.yaml");
+    config.calibration.fail_fast = false;
+
+    let server = TestServer::start_with_config(Some(config)).await.unwrap();
+
+    // A *well-formed* gain request, well over the 256-byte limit — so a 413 can only come
+    // from the size limiter, never from a JSON parse failure.
+    let request = builders::simple_gain_request_ecef();
+    let body = serde_json::to_vec(&request).unwrap();
+    assert!(
+        body.len() > 256,
+        "test precondition: a valid gain request ({} bytes) must exceed the 256-byte limit",
+        body.len()
+    );
+
+    let response = post_chunked(&server.base_url, "/api/v1/gain", &body).await;
+
+    assert!(
+        response.starts_with("HTTP/1.1 413"),
+        "an oversized chunked body must be rejected with 413, got:\n{response}"
+    );
+    assert!(
+        response.contains("payload_too_large"),
+        "the chunked 413 must carry the standard JSON error body, got:\n{response}"
+    );
+
+    server.shutdown().await;
+}
+
+/// Roadmap S1b control: an under-limit chunked POST must still be served normally. The
+/// fix reads the body inside the middleware to bound it, so it has to put the bytes back
+/// — dropping them would break every chunked client, not just the oversized ones.
+#[tokio::test]
+async fn test_chunked_request_under_limit_is_served() {
+    let server = TestServer::start().await.unwrap();
+
+    let request = builders::simple_gain_request_ecef();
+    let body = serde_json::to_vec(&request).unwrap();
+
+    let response = post_chunked(&server.base_url, "/api/v1/gain", &body).await;
+
+    assert!(
+        response.starts_with("HTTP/1.1 200"),
+        "an under-limit chunked gain request must be served normally (the handler must \
+         receive the body intact), got:\n{response}"
+    );
+
+    server.shutdown().await;
+}
+
 #[tokio::test]
 async fn test_max_batch_fits_under_default_body_limit() {
     // Gotcha guard: the default body-size limit must comfortably exceed a

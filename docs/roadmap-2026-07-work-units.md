@@ -38,8 +38,8 @@ G1 ─┬─ G2 ── G3
     │                                 └─ P3 ─┐
     │                             P5 ────────┼─ P6 ─ D8, D5
     │  P1b ─ P7;  P8 (independent) ──────────┤
-    ├─ S1 ─ S2 ─ S3(after Phase 1) ─ S4 ─ S5 │  (Phase 2 DONE 2026-07-23,
-    │  S1b, S2b (Phase 2 review follow-ups)   │   S1b+S2b open — see below)
+    ├─ S1 ─ S2 ─ S3(after Phase 1) ─ S4 ─ S5 │  (Phase 2 DONE 2026-07-24;
+    │  S1b, S2b (Phase 2 review follow-ups)   │   S5 2026-07-23, S1b+S2b 07-24)
     ├─ S6                                    │
     ├─ C3 ─ C4 ─ C2 ─ C8 ─ C7                │
     │  C1(after S6; may fold into C8 stage 4)│
@@ -788,7 +788,8 @@ pointer (now `:911`/`:752`/`:981` post-P10). Docs-only change; no code touched.
 
 ### S1 — Enforce the configured body-size limit — Effort: S/M (top of phase)
 
-> **🔴 OPEN gap — found by the Phase 2 review 2026-07-24, tracked as S1b.** The 413 is
+> **⚠️ Gap found by the Phase 2 review 2026-07-24, closed the same day by S1b** (below).
+> Kept here because the entrance notes above are what led to the wrong shape. The 413 is
 > gated entirely on a parseable `content-length` header (`api/middleware.rs:348-385`) with
 > **no `else` arm**, so a `Transfer-Encoding: chunked` POST bypasses it and poem's `Json`
 > extractor buffers the body unbounded. The docstring at `api/middleware.rs:265-268` claims
@@ -797,8 +798,7 @@ pointer (now `:911`/`:752`/`:981` post-P10). Docs-only change; no code touched.
 > fall through. Fix in S1b: an `else` arm that bounds the body with
 > `req.take_body().into_bytes_limit(max)` → `set_body(bytes)` (caps memory at `max + 4096`,
 > keeps chunked clients working, returns the same 413 body). A blanket 411 is wrong here —
-> the middleware also wraps every GET. **S1's exit criteria are met only for
-> content-length-bearing requests until S1b lands.**
+> the middleware also wraps every GET.
 
 - **Entrance / read first:** `config/settings.rs:46-48` (`max_body_size_bytes`),
   `api/mod.rs:193` (limit only logged), `api/middleware.rs:320-333` (`RequestSizeTracker`
@@ -816,15 +816,17 @@ pointer (now `:911`/`:752`/`:981` post-P10). Docs-only change; no code touched.
 
 ### S2 — Enforce the configured request timeout — Effort: S
 
-> **🔴 OPEN gap — found by the Phase 2 review 2026-07-24, tracked as S2b.**
+> **⚠️ Gap found by the Phase 2 review 2026-07-24, closed the same day by S2b** (below).
+> Kept here because the entrance notes above are what led to the wrong shape.
 > `request_timeout_secs` is **unenforceable on `POST /api/v1/gain`**. `RequestTimeout` is a
 > `tokio::time::timeout` around the endpoint future; `compute_gain` (`api/handlers.rs:222`)
 > runs the synchronous physics call directly on the async task, so the future never yields
 > and the timeout can never preempt it. It is the only heavy-compute handler that does not
 > `spawn_blocking` — `compute_gain_batch` (`:332`), `generate_heatmap_endpoint` (`:484`) and
 > `h3_link_budget` (`:1027`) all do. Consequence: **S3's `integration_budget_ms` is the only
-> live bound on single-gain latency, and that is nowhere documented.** Fix in S2b: wrap the
-> compute in `spawn_blocking`, matching the other three handlers.
+> live bound on single-gain latency.** (`api-documentation.md` did describe the inline
+> behavior — as a deliberate "<100 ms path" choice whose premise measurement disproves.)
+> Fix in S2b: wrap the compute in `spawn_blocking`, matching the other three handlers.
 
 - **Entrance / read first:** `settings.rs:42-44`, `api/routes.rs` middleware stack (no
   timeout of any kind), `api/mod.rs:194` (log-only).
@@ -923,8 +925,8 @@ pointer (now `:911`/`:752`/`:981` post-P10). Docs-only change; no code touched.
 
 > **✅ DONE 2026-07-23 — last *planned* Phase 2 unit.** (It did **not** close Phase 2
 > outright: the 2026-07-24 Phase 2 review, which ran in parallel with S5 and so was not
-> reflected in this closeout, found two open gaps in S1 and S2 — now filed as **S1b** and
-> **S2b** at the end of this phase. Phase 2 flips to unqualified DONE when those land.)
+> reflected in this closeout, found two gaps in S1 and S2 — filed as **S1b** and **S2b**
+> at the end of this phase and closed 2026-07-24. Phase 2 closed with those.)
 > All four S5 exit criteria met; full workspace gate
 > green (`scripts/check.sh`: fmt + `clippy --workspace --all-targets -D warnings` +
 > `cargo test --workspace`; only `cargo audit` finding is the pre-existing allowed `paste`
@@ -1052,8 +1054,29 @@ constant is 400,000 km) move into C8 stage 2.
 
 ### S1b — Close the chunked-encoding bypass of the 413 — Effort: S
 
-**🔴 OPEN — filed 2026-07-24 by the Phase 2 review.** Blocks the unqualified Phase 2 DONE
-banner (see `docs/roadmap-2026-07.md` §4).
+> **✅ DONE 2026-07-24** — branch `feat/s1b-s2b-phase2-review-followups`. All four exit
+> criteria met; full workspace gate green.
+> - `RequestSizeTrackerImpl::call` gained the missing `else` arm: with no parseable
+>   `content-length` the body is read through `Body::into_bytes_limit(max_request_size)`
+>   (caps the buffer at the limit + one 4 KiB read block) and put back with `set_body`, so
+>   the handler's extractor sees an ordinary body. `ReadBodyError::PayloadTooLarge` → the
+>   same 413 + standard JSON body as the header path; any other read error is handed to
+>   poem's own mapping rather than dressed up as a size problem.
+> - **Deliberately not poem's 411.** `poem::middleware::SizeLimit` answers
+>   `411 Length Required` whenever the header is absent; this middleware wraps the whole
+>   route table including every bodyless `GET`, so a blanket 411 would reject ordinary
+>   reads. The corrected docstring says so.
+> - **Tests:** three deterministic unit tests in `api::middleware` (oversized header-less
+>   body → 413; under-limit header-less body reaches the handler *with all its bytes*;
+>   bodyless GET untouched) plus two wire-level tests in `error_tests.rs` that speak raw
+>   HTTP/1.1 `Transfer-Encoding: chunked` over a `TcpStream` — the only way to send a
+>   genuine chunked request without adding a futures dependency for `reqwest`'s `stream`
+>   feature. The e2e pair pins the assumption the unit tests rest on: that hyper hands poem
+>   a chunked request with no `content-length`, so the header-less arm is what runs.
+> - **Mutation-verified:** widening the cap to `usize::MAX` makes the oversized chunked
+>   request return **200 fully served** (4× over the limit) — the reviewer's finding,
+>   reproduced, and both the unit and e2e tests fail on it.
+> - `docs/api-documentation.md` now documents both enforcement paths.
 
 - **Entrance / read first:** `api/middleware.rs:338-409` (`RequestSizeTrackerImpl::call`) —
   the whole 413 lives inside `if let Some(size) = headers().get("content-length")…`; and
@@ -1077,8 +1100,31 @@ banner (see `docs/roadmap-2026-07.md` §4).
 
 ### S2b — Make the request timeout enforceable on `POST /api/v1/gain` — Effort: S
 
-**🔴 OPEN — filed 2026-07-24 by the Phase 2 review.** Blocks the unqualified Phase 2 DONE
-banner (see `docs/roadmap-2026-07.md` §4).
+> **✅ DONE 2026-07-24** — branch `feat/s1b-s2b-phase2-review-followups`. All three exit
+> criteria met; full workspace gate green.
+> - `compute_gain` now runs its physics under `tokio::task::spawn_blocking` with the same
+>   `JoinError` → `500 internal_error` mapping as the other three handlers, so the async
+>   task yields at a real `.await` and `RequestTimeout` can preempt it.
+> - **The old design premise was false, not just undocumented.** `api-documentation.md`
+>   *did* state the inline behavior, justified as "it targets the <100 ms path". Measured
+>   on the fixtures, a wide-angle Ka single gain on the 13 m offset-feed antenna costs
+>   **0.9–2.4 s** (the P10-perf hot case) — an order of magnitude past the default 30 s
+>   only in aggregate, but far past any sub-second deadline. The doc now says the timeout
+>   applies uniformly to all four compute endpoints.
+> - **Test discriminates the implementations, not the wall clock.** `tokio::time::timeout`
+>   polls its inner future *first*, so an inline compute returns **200 regardless of
+>   elapsed time**; only a handler that yields can produce the 504. The test uses a 50 ms
+>   deadline against ~0.9 s of real compute (~18× margin) via the existing `Duration` seam.
+>   Two geometry details are load-bearing and documented at the fixture: `feed_position` is
+>   a *pointing target* (aim it at a nearby ground point and the >0.5f offset routes to the
+>   cheap ray-tracing stub), and the emitter must be **in front of** the dish (past 90°
+>   elevation lands on the rear sidelobe floor, which returns in ~3 ms without integrating).
+>   Either mistake yields a cheap 200 and a silently useless test.
+> - **Mutation-verified:** reverting the handler to an inline compute fails the test with
+>   200-vs-504. A control test pins that the `spawn_blocking` success path still returns a
+>   finite gain.
+> - Still true, and still stated: the timeout does not *cancel* the rayon work. It bounds
+>   the response; `performance.integration_budget_ms` (S3) is what stops the compute.
 
 - **Entrance / read first:** `api/handlers.rs:222` — `compute_gain` calls
   `compute_gain_from_request_with_budget` inline on the async task. Compare

@@ -218,12 +218,39 @@ pub async fn compute_gain(
 
     // Compute gain using the service layer, bounding each aperture integration to the
     // configured per-integration wall-clock budget (S3).
+    //
+    // The compute is synchronous and CPU-bound. Running it inline would block the async
+    // worker thread through to completion, and `tokio::time::timeout` polls its inner
+    // future before checking the deadline — so an inline compute returns 200 no matter
+    // how long it took, making `server.request_timeout_secs` unenforceable on this route
+    // (roadmap S2b). Offloading to the blocking pool gives the async task a real `.await`
+    // to yield at, matching the batch/heatmap/h3 handlers. (The compute is still not
+    // *cancelled* on timeout — see RequestTimeout; that bound is S3's budget.)
+    let state = state.0.clone();
     let budget = Duration::from_millis(state.config.performance.integration_budget_ms);
-    match compute_gain_from_request_with_budget(&request, &state.repository, budget) {
+    let antenna_id = request.antenna_id.clone();
+    let feed_id = request.feed_id.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        compute_gain_from_request_with_budget(&request, &state.repository, budget)
+    })
+    .await
+    .map_err(|join_err| {
+        error!(error = %join_err, "Gain compute task failed to join");
+        let error_response = ErrorResponse::new(
+            "internal_error",
+            format!("Gain computation task failed: {join_err}"),
+        );
+        poem::Error::from_string(
+            serde_json::to_string(&error_response).unwrap_or_default(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+    })?;
+
+    match result {
         Ok(response) => {
             info!(
-                antenna_id = %request.antenna_id,
-                feed_id = %request.feed_id,
+                antenna_id = %antenna_id,
+                feed_id = %feed_id,
                 gain_db = response.gain_db,
                 computation_time_ms = response.metadata.computation_time_ms,
                 warnings_count = response.warnings.len(),
@@ -233,8 +260,8 @@ pub async fn compute_gain(
         }
         Err(e) => {
             error!(
-                antenna_id = %request.antenna_id,
-                feed_id = %request.feed_id,
+                antenna_id = %antenna_id,
+                feed_id = %feed_id,
                 error = %e,
                 "Gain computation failed"
             );

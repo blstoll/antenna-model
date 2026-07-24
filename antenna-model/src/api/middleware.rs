@@ -262,10 +262,26 @@ impl<E: Endpoint> Endpoint for ErrorHandlerImpl<E> {
 /// requests whose `content-length` exceeds the configured hard limit with a
 /// `413 Payload Too Large` and the project's standard JSON error body.
 ///
-/// Enforcement is keyed on the `content-length` header (the framework-blessed
-/// level, matching `poem::middleware::SizeLimit`): if the header is present and
-/// exceeds `max_request_size`, the request is rejected before body handling.
-/// Requests without a `content-length` header fall through unchanged.
+/// # Two enforcement paths (roadmap S1, closed by S1b)
+///
+/// - **`content-length` present** — the declared size is compared against
+///   `max_request_size` and an oversized request is rejected *before* any body
+///   handling. Nothing is read; the rejection is free.
+/// - **`content-length` absent** — the shape a `Transfer-Encoding: chunked`
+///   request arrives in. There is no declared size to check, so the body is read
+///   through [`poem::Body::into_bytes_limit`], which caps the buffer at
+///   `max_request_size` (+ one 4 KiB read block) and fails past it. The bytes are
+///   put back on the request, so under-limit chunked clients are unaffected.
+///
+/// Before S1b the second case had no arm at all: a chunked POST skipped the check
+/// entirely and poem's `Json` extractor then buffered it **unbounded** — the very
+/// thing `max_body_size_bytes` exists to prevent.
+///
+/// Note this deliberately does **not** match `poem::middleware::SizeLimit`, which
+/// answers `411 Length Required` whenever the header is absent. This middleware
+/// wraps the entire route table, including every bodyless `GET`, so a blanket 411
+/// would reject ordinary reads. Bounding the body keeps chunked clients working and
+/// still returns the same `413` + standard JSON body on the oversized path.
 pub struct RequestSizeTracker {
     /// Reject if request size exceeds this hard limit (bytes)
     pub max_request_size: usize,
@@ -335,7 +351,7 @@ pub struct RequestSizeTrackerImpl<E> {
 impl<E: Endpoint> Endpoint for RequestSizeTrackerImpl<E> {
     type Output = Response;
 
-    async fn call(&self, req: Request) -> Result<Self::Output> {
+    async fn call(&self, mut req: Request) -> Result<Self::Output> {
         let request_id = req
             .extensions()
             .get::<RequestIdExt>()
@@ -344,13 +360,14 @@ impl<E: Endpoint> Endpoint for RequestSizeTrackerImpl<E> {
 
         let path = req.uri().path().to_string();
 
-        // Check request size (enforce the hard limit before body handling)
-        if let Some(size) = req
+        let declared_size = req
             .headers()
             .get("content-length")
             .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse::<usize>().ok())
-        {
+            .and_then(|s| s.parse::<usize>().ok());
+
+        // Check request size (enforce the hard limit before body handling)
+        if let Some(size) = declared_size {
             if size > self.warn_request_size {
                 warn!(
                     request_id = %request_id,
@@ -381,6 +398,55 @@ impl<E: Endpoint> Endpoint for RequestSizeTrackerImpl<E> {
                     serde_json::to_string(&body).unwrap_or_default(),
                     poem::http::StatusCode::PAYLOAD_TOO_LARGE,
                 ));
+            }
+        } else {
+            // No declared size — a chunked/streaming body (roadmap S1b). There is nothing
+            // to compare, so bound the read itself: `into_bytes_limit` caps the buffer at
+            // the limit and fails past it, then the bytes go back on the request so the
+            // handler's extractor sees an ordinary body. Without this arm the request
+            // skipped the check entirely and the `Json` extractor buffered it unbounded.
+            match req
+                .take_body()
+                .into_bytes_limit(self.max_request_size)
+                .await
+            {
+                Ok(bytes) => {
+                    if bytes.len() > self.warn_request_size {
+                        warn!(
+                            request_id = %request_id,
+                            path = %path,
+                            size_bytes = bytes.len(),
+                            threshold_bytes = self.warn_request_size,
+                            "Large request body detected (no content-length)"
+                        );
+                    }
+                    req.set_body(bytes);
+                }
+                Err(poem::error::ReadBodyError::PayloadTooLarge) => {
+                    warn!(
+                        request_id = %request_id,
+                        path = %path,
+                        limit_bytes = self.max_request_size,
+                        "Request body without content-length exceeds the maximum allowed \
+                         size; rejecting with 413"
+                    );
+
+                    let body = ErrorResponse::new(
+                        "payload_too_large",
+                        format!(
+                            "Request body exceeds the maximum of {} bytes",
+                            self.max_request_size
+                        ),
+                    );
+                    return Err(poem::Error::from_string(
+                        serde_json::to_string(&body).unwrap_or_default(),
+                        poem::http::StatusCode::PAYLOAD_TOO_LARGE,
+                    ));
+                }
+                // Anything else is a genuine read failure (client disconnect, a body
+                // already taken); hand it to poem's own mapping rather than dressing it
+                // up as a size problem.
+                Err(err) => return Err(err.into()),
             }
         }
 
@@ -783,6 +849,102 @@ mod tests {
         let cli = TestClient::new(app);
         let response = cli.get("/test").send().await;
         response.assert_status_is_ok();
+    }
+
+    /// Build a streaming request body with **no `content-length` header** — the wire
+    /// shape a `Transfer-Encoding: chunked` request arrives in. `TestClient` builds the
+    /// `Request` directly, so a body constructed from a reader carries no length, exactly
+    /// as the chunked path does after hyper decodes it.
+    fn streaming_body(bytes: Vec<u8>) -> poem::Body {
+        poem::Body::from_async_read(std::io::Cursor::new(bytes))
+    }
+
+    /// Roadmap S1b: the 413 must not be bypassable by omitting `content-length`.
+    ///
+    /// Before the fix the whole size check sat inside `if let Some(content-length)` with
+    /// no `else`, so a chunked POST fell straight through to the handler and poem's `Json`
+    /// extractor buffered it unbounded. The endpoint below drains the body, so a
+    /// regression shows up as a 200 carrying the full oversized payload length.
+    #[tokio::test]
+    async fn test_size_limit_rejects_oversized_body_without_content_length() {
+        let app = Route::new()
+            .at(
+                "/test",
+                poem::post(poem::endpoint::make(|mut req: Request| async move {
+                    req.take_body()
+                        .into_bytes()
+                        .await
+                        .map(|b| b.len().to_string())
+                })),
+            )
+            .with(RequestId)
+            .with(RequestSizeTracker::with_limits(100, 50, 1000));
+
+        let cli = TestClient::new(app);
+        let response = cli
+            .post("/test")
+            .body(streaming_body(vec![b'x'; 4096]))
+            .send()
+            .await;
+
+        response.assert_status(StatusCode::PAYLOAD_TOO_LARGE);
+
+        let body = response.0.into_body().into_string().await.unwrap();
+        let err: ErrorResponse = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            err.error, "payload_too_large",
+            "the header-less path must return the same standard error body as the \
+             content-length path"
+        );
+    }
+
+    /// Roadmap S1b control: a header-less body *under* the limit still reaches the
+    /// handler **intact**. The fix reads the body in the middleware to bound it, so it
+    /// must put the bytes back — dropping them would silently break every chunked client
+    /// instead of only the oversized ones.
+    #[tokio::test]
+    async fn test_size_limit_passes_small_body_without_content_length_intact() {
+        let app = Route::new()
+            .at(
+                "/test",
+                poem::post(poem::endpoint::make(|mut req: Request| async move {
+                    req.take_body()
+                        .into_bytes()
+                        .await
+                        .map(|b| b.len().to_string())
+                })),
+            )
+            .with(RequestId)
+            .with(RequestSizeTracker::with_limits(100, 50, 1000));
+
+        let cli = TestClient::new(app);
+        let response = cli
+            .post("/test")
+            .body(streaming_body(vec![b'x'; 64]))
+            .send()
+            .await;
+
+        response.assert_status_is_ok();
+        let body = response.0.into_body().into_string().await.unwrap();
+        assert_eq!(
+            body, "64",
+            "an under-limit header-less body must reach the handler with all its bytes"
+        );
+    }
+
+    /// Roadmap S1b: GET requests carry no `content-length` and no body. They must not be
+    /// caught by the header-less arm — a blanket `411 Length Required` (what poem's own
+    /// `SizeLimit` does) would break every read endpoint, since this middleware wraps the
+    /// whole route table, not just the POSTs.
+    #[tokio::test]
+    async fn test_size_limit_leaves_bodyless_get_alone() {
+        let app = Route::new()
+            .at("/test", poem::endpoint::make_sync(|_req: Request| "OK"))
+            .with(RequestId)
+            .with(RequestSizeTracker::with_limits(100, 50, 1000));
+
+        let cli = TestClient::new(app);
+        cli.get("/test").send().await.assert_status_is_ok();
     }
 
     #[tokio::test]

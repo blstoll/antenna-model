@@ -356,11 +356,19 @@ Error responses follow a consistent format:
 ### Request Body Size Limit
 
 Every request body is capped by the configured `server.max_body_size_bytes`
-(default **10 MB**). The limit is enforced on the request's `content-length`
-header: a request whose declared size exceeds the limit is rejected up front
-with **413 Payload Too Large** and the standard JSON error body, before the body
-is parsed. The default comfortably accommodates a maximum-size (1000-item) batch
-request (~0.6 MB). Operators can raise or lower the cap via configuration.
+(default **10 MB**), on both wire shapes:
+
+- **With `content-length`** — a request whose declared size exceeds the limit is
+  rejected up front with **413 Payload Too Large** and the standard JSON error
+  body, before the body is read at all.
+- **Without `content-length`** (`Transfer-Encoding: chunked`) — there is no
+  declared size to check, so the body is read under a hard cap and the same 413
+  is returned once it exceeds the limit. Chunked requests *under* the limit are
+  served normally. Roadmap unit **S1b** closed this path; before it, a chunked
+  body skipped the check entirely and was buffered without bound.
+
+The default comfortably accommodates a maximum-size (1000-item) batch request
+(~0.6 MB). Operators can raise or lower the cap via configuration.
 
 ```json
 {
@@ -371,20 +379,27 @@ request (~0.6 MB). Operators can raise or lower the cap via configuration.
 
 ### Request Timeout
 
-The configured `server.request_timeout_secs` (default **30 s**) bounds the
-**compute-heavy endpoints** — `/api/v1/gain/batch`, `/api/v1/heatmap`, and
+The configured `server.request_timeout_secs` (default **30 s**) bounds **every
+compute endpoint** — `/api/v1/gain`, `/api/v1/gain/batch`, `/api/v1/heatmap`, and
 `/api/v1/h3-heatmap`. Their synchronous rayon work is offloaded to a blocking
 thread pool so the async task yields and the timeout can fire promptly instead
 of blocking a server worker thread; if the deadline is exceeded the request is
 abandoned and the client receives **504 Gateway Timeout** with the standard JSON
 error body.
 
-The lightweight single-evaluation endpoint `/api/v1/gain` runs its computation
-inline (it targets the <100 ms path) and is **not** offloaded, so the *request*
-timeout middleware cannot preempt it. As of roadmap unit S3, the inline path is
-instead bounded by the per-integration compute budget below: a pathologically
-slow single evaluation now aborts with **504 `computation_budget_exceeded`** once
-one aperture integration exceeds `performance.integration_budget_ms`.
+Single gain (`/api/v1/gain`) used to be the exception: it ran its computation
+inline on the assumption that it was always the fast (<100 ms) path, which meant
+the timeout middleware could never preempt it — a `tokio::time::timeout` polls
+the inner future first, so an inline compute returns **200 no matter how long it
+took**, and `request_timeout_secs` was decorative on that route. The assumption
+does not hold: a wide-angle Ka evaluation on a large offset-feed dish measures
+close to a second (the case roadmap P10-perf tracks). Roadmap unit **S2b** moved
+it onto `spawn_blocking` like the other three, so the configured timeout now
+applies uniformly.
+
+That does **not** make the request timeout the only bound on a single gain: the
+per-integration compute budget below still applies, and it is the one that
+actually *stops* the work (see the honest limitation at the end of this section).
 
 The status is **504 (a 5xx)**, not 408: the deadline is a *server-side* budget
 (the client sent a valid request; the server exceeded its own processing limit),
