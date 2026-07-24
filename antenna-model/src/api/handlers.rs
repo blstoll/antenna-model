@@ -1123,16 +1123,14 @@ mod tests {
 
     #[test]
     fn test_app_state_readiness() {
+        // The not-ready-by-default invariant is pinned by
+        // `api::tests::test_app_state_starts_not_ready` (roadmap S5). This test covers only
+        // the toggle round-trip.
         let state = AppState::with_defaults();
 
-        // Starts NOT ready (roadmap S5) — readiness is earned by a successful load.
-        assert!(!state.is_ready());
-
-        // Mark ready
         state.mark_ready();
         assert!(state.is_ready());
 
-        // Mark not ready
         state.mark_not_ready();
         assert!(!state.is_ready());
     }

@@ -44,7 +44,7 @@ pub struct AppState {
     pub config: Arc<ServiceConfig>,
 
     /// Readiness state — false until the calibration load completes, true while serving,
-    /// false again once graceful shutdown begins (roadmap S5).
+    /// false again once graceful shutdown begins (roadmap S5, wired in Tasks 3 and 4).
     pub ready: Arc<AtomicBool>,
 
     /// Loaded antenna IDs (will be populated by Task 5.4 - Calibration Repository)
@@ -69,10 +69,10 @@ impl AppState {
             start_time: SystemTime::now(),
             version: env!("CARGO_PKG_VERSION"),
             config: Arc::new(config),
-            // Readiness starts FALSE (roadmap S5). It flips true only after
-            // `start_server_with_config` completes a healthy calibration load, and flips
-            // back to false at the top of graceful shutdown. Constructing a state is not
-            // evidence that the service can serve anything.
+            // Readiness starts FALSE (roadmap S5): constructing a state is no evidence that
+            // the service can serve anything. The production path earns readiness only by
+            // completing a healthy calibration load — wired in Task 3 of this branch — and
+            // surrenders it again at the top of graceful shutdown, wired in Task 4.
             ready: Arc::new(AtomicBool::new(false)),
             antenna_ids: Arc::new(parking_lot::RwLock::new(Vec::new())),
             repository,
