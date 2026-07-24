@@ -565,6 +565,7 @@ mod tests {
     #[tokio::test]
     async fn test_all_endpoints_present() {
         let state = Arc::new(AppState::with_defaults());
+        state.mark_ready(); // S5: readiness starts false; this test asserts /ready == 200
         let app = create_routes(state);
         let cli = TestClient::new(app);
 

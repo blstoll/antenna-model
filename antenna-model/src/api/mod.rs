@@ -43,8 +43,8 @@ pub struct AppState {
     /// Service configuration
     pub config: Arc<ServiceConfig>,
 
-    /// Readiness state - true when service is ready to accept requests
-    /// This is false during startup and true once initialization is complete
+    /// Readiness state — false until the calibration load completes, true while serving,
+    /// false again once graceful shutdown begins (roadmap S5).
     pub ready: Arc<AtomicBool>,
 
     /// Loaded antenna IDs (will be populated by Task 5.4 - Calibration Repository)
@@ -69,7 +69,11 @@ impl AppState {
             start_time: SystemTime::now(),
             version: env!("CARGO_PKG_VERSION"),
             config: Arc::new(config),
-            ready: Arc::new(AtomicBool::new(true)), // Default to ready for simple deployments
+            // Readiness starts FALSE (roadmap S5). It flips true only after
+            // `start_server_with_config` completes a healthy calibration load, and flips
+            // back to false at the top of graceful shutdown. Constructing a state is not
+            // evidence that the service can serve anything.
+            ready: Arc::new(AtomicBool::new(false)),
             antenna_ids: Arc::new(parking_lot::RwLock::new(Vec::new())),
             repository,
             cache,
@@ -423,6 +427,23 @@ mod tests {
 
         // Should not panic
         shutdown_cleanup(&state).await;
+    }
+
+    #[test]
+    fn test_app_state_starts_not_ready() {
+        // Readiness is a startup lifecycle signal (roadmap S5): it must be false until
+        // calibration data has actually loaded. A default-constructed state has loaded
+        // nothing, so it must not advertise readiness.
+        let state = AppState::with_defaults();
+        assert!(
+            !state.is_ready(),
+            "AppState must start NOT ready; readiness is set only after the calibration load"
+        );
+
+        state.mark_ready();
+        assert!(state.is_ready());
+        state.mark_not_ready();
+        assert!(!state.is_ready());
     }
 
     #[test]

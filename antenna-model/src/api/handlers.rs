@@ -1125,16 +1125,16 @@ mod tests {
     fn test_app_state_readiness() {
         let state = AppState::with_defaults();
 
-        // Should be ready by default
+        // Starts NOT ready (roadmap S5) — readiness is earned by a successful load.
+        assert!(!state.is_ready());
+
+        // Mark ready
+        state.mark_ready();
         assert!(state.is_ready());
 
         // Mark not ready
         state.mark_not_ready();
         assert!(!state.is_ready());
-
-        // Mark ready again
-        state.mark_ready();
-        assert!(state.is_ready());
     }
 
     #[test]

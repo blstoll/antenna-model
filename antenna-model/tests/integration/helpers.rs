@@ -94,6 +94,11 @@ impl TestServer {
 
         let state = Arc::new(AppState::new(config.clone(), repository));
 
+        // Mirror the production startup sequence (roadmap S5): the repository above loaded
+        // successfully, so the service is ready. Without this, /ready would 503 for the
+        // whole test run.
+        state.mark_ready();
+
         // Build routes with the resolved timeout (create_routes is exactly this
         // with timeout = from_secs(config.request_timeout_secs)).
         let app = antenna_model::api::routes::create_routes_with_timeout(state, timeout);
