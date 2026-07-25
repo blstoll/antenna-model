@@ -1222,21 +1222,68 @@ C1 can run in parallel with C3–C2. C5 and C6 are superseded by C8.
 - **Depends on:** C3.
 
 ### C2 `[DECISION]` — Unify validation status codes — Effort: M
+**[DECIDED 2026-07-24 — all three calls at the recommended option; see the register row for the full rationale]**
 
-- **Question:** validation failures return 422 from the pre-check path
-  (`handlers.rs:205,428,905`) but 400 when the same class of error surfaces from the
-  service layer (`handlers.rs:341,463,976`); batch=400 vs single=422 for equivalent inputs.
-  Changing codes is a behavioral API change.
-- **Recommended default:** **400 = malformed/undeserializable body; 422 = well-formed but
-  semantically invalid** — both layers, all endpoints. Treat as bug-fix-grade in v1 (no
-  client can have relied on the inconsistency), with a changelog note.
-- **Exit criteria:** register row Decided; an integration test matrix
-  (endpoint × {malformed, invalid}) **written first**, then codes fixed until it passes;
-  openapi.yaml responses updated for every endpoint; api-documentation.md error section
-  updated.
-- **Gotchas:** grep handlers.rs for every `StatusCode`/`from_status` site (~6); the matrix
-  test is the net that catches a missed one. Don't touch error *bodies* here (C3/C4 own
-  those).
+- **Question:** validation failures return 422 from the pre-check path but 400 when the
+  same class of error surfaces from the service layer; batch differs again. Changing codes
+  is a behavioral API change.
+
+**Measured current state (verified against the code 2026-07-24 — the question above
+understated it):**
+
+| Case | `/gain` | `/gain/batch` | `/heatmap` | `/h3-heatmap` |
+|---|---|---|---|---|
+| Malformed / unreadable body | 400 | 400 | 400 | 400 |
+| Well-formed, semantically invalid | 422 | **200**, `gain_db: null` | 422 | 422 |
+| Unknown `antenna_id` / `feed_id` | 422 | **200** + null item | 422 | **404** |
+| Batch-level (empty, >1000) | — | **400** | — | — |
+| `Validation(_)` from the service layer | **500** ⚠️ | 400 | 400 | 400 |
+| `InvalidCoordinate` from the service | 400 | per-item | 400 | 400 |
+
+**Decided policy:**
+
+- **(A) 400 = body that cannot be parsed; 422 = parses but is semantically invalid** — at
+  *both* the pre-check and service layers, on all four compute endpoints. Service-layer
+  `InvalidCoordinate` therefore moves 400 → **422**.
+- **(B) Unknown `antenna_id`/`feed_id` referenced in a request body → 404 everywhere**,
+  with the existing `antenna_not_found` / `feed_not_found` codes. Reserve 422 for
+  parameters that are wrong rather than absent.
+- **(C) `/gain/batch` pre-validates every item and rejects the whole batch 422**, naming
+  the failing item index. Per-item degradation survives only for *compute*-class failures
+  (time-budget exceeded, non-convergence).
+
+**Two defects in scope, both found while scoping this unit:**
+
+1. `/gain`'s service-error match (`handlers.rs:268-278`) has **no `Validation(_)` arm** —
+   it falls through `_ => INTERNAL_SERVER_ERROR`. Any validation error the pre-check does
+   not catch is served as a **500**.
+2. The 404 arms on `/gain` and `/heatmap` are **dead code today**:
+   `validate_gain_request` / `validate_heatmap_request` take the repository and reject
+   unknown antenna/feed as `InvalidAntennaId` / `InvalidValue` (`validator.rs:432-451`)
+   → 422, so `FeedNotFound → 404` is unreachable. `validate_h3_link_budget_request` does
+   *not* take the repository, so `/h3-heatmap` reaches the lookup and returns a real 404.
+   Same input, two answers. Call (B) makes all four agree on 404.
+
+- **Exit criteria:** an integration test matrix (endpoint ×
+  {malformed, semantically-invalid, unknown-antenna, unknown-feed}) **written first**,
+  then codes fixed until it passes; the `/gain` 500-fallthrough covered by a test that
+  fails before the fix; a batch test asserting 422-with-item-index (and that no response
+  ever carries `gain_db: null` for a validation-class failure); openapi.yaml responses
+  updated for every endpoint; api-documentation.md error section updated. Treat as
+  bug-fix-grade in v1 (no client can have relied on the inconsistency), with a changelog
+  note.
+- **Implementation note for (B):** the existence failures must leave the validation error
+  class so handlers can map them — `ValidationError::InvalidAntennaId` and the
+  feed-not-found `InvalidValue` arm at `validator.rs:441-450` become a distinct
+  not-found variant (or the validators stop performing existence checks and the handlers
+  do the lookup, as `/h3-heatmap` already does). Pick one shape and apply it to all four
+  endpoints; the second option is closer to how `/h3-heatmap` works today.
+- **Gotchas:** grep handlers.rs for every `StatusCode` site (~20 including the
+  non-validation ones); the matrix test is the net that catches a missed one. Don't touch
+  error *bodies* here (C3/C4 own those). The per-item batch *shape* — an explicit
+  `{code, message}` instead of `NaN` + a warning string (`batch.rs:199-227`) — is a
+  response-shape break and belongs to **C8 stage 3**, not here; C2 only stops
+  validation-class failures from reaching that path.
 - **Depends on:** C3, C4 (land after, to avoid triple-editing the same lines).
 
 ### C5 — `/heatmap` H3 grid-type stub — **SUPERSEDED by C8 (decided 2026-07-08)**
