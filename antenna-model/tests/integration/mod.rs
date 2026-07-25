@@ -70,6 +70,13 @@
 //! - Concurrent error conditions
 //! - Resource cleanup verification
 //!
+//! ### Status Code Matrix Tests (`status_code_matrix_tests.rs`)
+//! - One validation-failure status policy across all four compute endpoints
+//!   (roadmap C2): 400 = unparseable body, 422 = semantically invalid,
+//!   404 = named antenna/feed absent
+//! - Batch rejects the whole request and names the failing item index
+//! - No response carries `gain_db: null` for a validation-class failure
+//!
 //! ### H3 Link Budget Tests (`h3_link_budget_tests.rs`)
 //! - Cell count for n_rings values (0 = 1 cell, 2 = 19 cells)
 //! - Center cell minimum loss (approximately 0.0 dB at boresight)
@@ -91,4 +98,5 @@ pub mod off_axis_warning_tests;
 pub mod partial_calibration_tests;
 pub mod ray_trace_stub_warning_tests;
 pub mod resilience_tests;
+pub mod status_code_matrix_tests;
 pub mod timeout_tests;

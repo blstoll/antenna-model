@@ -245,26 +245,49 @@ paths:
                       correction_applied: false
                       parameters_source: "design_specifications"
         '400':
-          description: Invalid request parameters
+          description: |
+            The request body could not be parsed. This is the only condition that
+            returns 400 (roadmap C2) — a body that parses but is invalid returns 422.
+
+            Note that a non-finite number lands here rather than in 422: JSON cannot
+            encode `NaN` or `Infinity`, so serializers emit `null`, which does not
+            deserialize into the numeric fields this schema declares.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                unparseable_body:
+                  summary: Malformed JSON
+                  value:
+                    error: "invalid_request_body"
+                    message: "parse error: expected value at line 1 column 3"
+        '422':
+          description: |
+            The body parsed but is semantically invalid. Applies whether the failure is
+            caught by the request pre-check or surfaces from the service layer — the
+            client cannot tell, and should not have to.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
               examples:
                 invalid_frequency:
-                  summary: Invalid frequency
+                  summary: Frequency out of range
                   value:
                     error: "validation_error"
-                    message: "Frequency out of valid range [100, 50000] MHz"
+                    message: "frequency 0 MHz is outside supported range [100, 50000] MHz"
                     field: "frequency_mhz"
-                invalid_coordinates:
-                  summary: Invalid coordinates
+                degenerate_geometry:
+                  summary: Boresight coincident with vehicle position
                   value:
                     error: "invalid_coordinate"
-                    message: "Coordinates exceed Earth radius (|pos| > 10000 km)"
-                    field: "vehicle_position"
+                    message: "invalid coordinate for 'reflector_boresight': Boresight position too close to vehicle position (< 1mm separation)"
         '404':
-          description: Antenna or feed not found
+          description: |
+            The request names an antenna or feed that does not exist. Absence is not
+            invalidity: no change to the body will make a missing antenna appear, so
+            this is a 404 rather than a 422 (roadmap C2).
           content:
             application/json:
               schema:
@@ -360,17 +383,79 @@ paths:
               $ref: '#/components/schemas/BatchGainRequest'
       responses:
         '200':
-          description: Batch computation successful (may include partial failures)
+          description: |
+            Batch computation successful.
+
+            May still include per-item failures, but only *compute*-class ones — an
+            integration over budget, or one that did not converge — which cannot be
+            predicted before running the integral. Such an item carries a `null`
+            `gain_db` (a NaN, as JSON has no NaN literal) and the reason in its
+            `warnings`. Validation-class failures never reach this response: they reject
+            the whole batch (roadmap C2).
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/BatchGainResponse'
         '400':
-          description: Invalid batch request (e.g., exceeds size limit)
+          description: |
+            The request body could not be parsed. See `/api/v1/gain` for the full
+            400-vs-422 rule.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                unparseable_body:
+                  summary: Malformed JSON
+                  value:
+                    error: "invalid_request_body"
+                    message: "parse error: expected value at line 1 column 3"
+        '422':
+          description: |
+            The batch parsed but is semantically invalid — empty, over the 1000-item
+            limit, or containing an invalid evaluation.
+
+            Every item is validated before any physics runs, and the first failure
+            rejects the whole request. `field` carries the offending item's path
+            (`evaluations[3]`) so a client can locate it without parsing the message.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                empty_batch:
+                  summary: Empty evaluations array
+                  value:
+                    error: "validation_error"
+                    message: "invalid value for parameter 'evaluations': batch must contain at least one evaluation"
+                    field: "evaluations"
+                size_limit:
+                  summary: Over the batch size limit
+                  value:
+                    error: "validation_error"
+                    message: "batch size 1001 exceeds limit of 1000"
+                    field: "evaluations"
+                invalid_item:
+                  summary: One evaluation is invalid
+                  value:
+                    error: "validation_error"
+                    message: "evaluations[3]: frequency 0 MHz is outside supported range [100, 50000] MHz"
+                    field: "evaluations[3]"
+        '404':
+          description: |
+            An evaluation names an antenna or feed that does not exist. Rejects the whole
+            batch, with the offending item's path in `field`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                antenna_not_found:
+                  summary: Unknown antenna in one item
+                  value:
+                    error: "antenna_not_found"
+                    message: "evaluations[3]: antenna 'invalid_antenna' not found"
+                    field: "evaluations[3]"
         '413':
           description: |
             Request body exceeds the configured maximum size
@@ -505,11 +590,52 @@ paths:
               schema:
                 $ref: '#/components/schemas/HeatmapResponse'
         '400':
-          description: Invalid heatmap request
+          description: |
+            The request body could not be parsed. See `/api/v1/gain` for the full
+            400-vs-422 rule.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                unparseable_body:
+                  summary: Malformed JSON
+                  value:
+                    error: "invalid_request_body"
+                    message: "parse error: expected value at line 1 column 3"
+        '422':
+          description: |
+            The body parsed but is semantically invalid — an out-of-range value, a
+            degenerate geometry, a grid exceeding 100,000 points, or the unimplemented
+            H3 grid type (`not_implemented`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalid_grid:
+                  summary: Grid too large
+                  value:
+                    error: "validation_error"
+                    message: "invalid grid specification for rectangular: total grid points 324000 exceeds maximum 100000 (1800x180 grid)"
+                not_implemented:
+                  summary: H3 grid type on /heatmap
+                  value:
+                    error: "not_implemented"
+                    message: "feature not implemented: H3 grid heatmap"
+        '404':
+          description: |
+            The request names an antenna or feed that does not exist (roadmap C2).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                antenna_not_found:
+                  summary: Antenna not found
+                  value:
+                    error: "antenna_not_found"
+                    message: "antenna 'invalid_antenna' not found"
         '413':
           description: |
             Request body exceeds the configured maximum size
@@ -1475,11 +1601,9 @@ components:
             enumerated values — the service emits no other code. Defined once in code
             (`api/schemas.rs`, `mod error_codes`) and referenced by every emission site.
 
-            Note: the HTTP status accompanying `validation_error` is currently
-            inconsistent (422 from the pre-check path, 400 from the service layer, and
-            unknown antennas/feeds are 422 on `/api/v1/gain` and `/api/v1/heatmap` but 404
-            on `/api/v1/h3-heatmap`). Roadmap unit C2 unifies the statuses; these codes do
-            not change with it. Prefer this field over the status.
+            Each code maps to exactly one status, uniformly across endpoints (roadmap
+            C2): 400 = unparseable body, 422 = parsed but semantically invalid,
+            404 = the named antenna or feed does not exist.
           enum:
             - antenna_not_found
             - feed_not_found

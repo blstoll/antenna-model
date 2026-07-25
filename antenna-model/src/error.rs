@@ -202,6 +202,19 @@ impl ApiError {
 ///
 /// These errors occur when request parameters fail validation checks
 /// (range validation, type validation, etc.)
+///
+/// # Two classes, two statuses (roadmap unit C2)
+///
+/// Most variants mean *a parameter is wrong* and map to `422`. Two —
+/// [`ValidationError::AntennaNotFound`] and [`ValidationError::FeedNotFound`] —
+/// mean *the thing you named does not exist* and map to `404`. The split matters
+/// because they are actionable in different ways: a 422 says fix the value, a 404
+/// says the resource is absent from this deployment.
+///
+/// The mapping itself lives in exactly one place,
+/// `crate::api::error_response::validation_status`. Adding a variant here without
+/// a deliberate decision there gets the `422` default, which is the safe answer
+/// for anything parameter-shaped.
 #[derive(Error, Debug)]
 pub enum ValidationError {
     /// Parameter out of valid range
@@ -245,6 +258,71 @@ pub enum ValidationError {
         min: f64,
         max: f64,
     },
+
+    /// The request names an antenna the repository has not loaded (roadmap C2 → 404).
+    ///
+    /// Distinct from [`ValidationError::InvalidAntennaId`], which covers an ID that
+    /// is malformed (empty) rather than merely absent.
+    #[error("antenna '{antenna_id}' not found")]
+    AntennaNotFound { antenna_id: String },
+
+    /// The antenna exists but has no such feed (roadmap C2 → 404).
+    ///
+    /// `available` is listed in the message because a feed ID is rarely guessable —
+    /// it is the difference between an error a client can act on and one it can only
+    /// report.
+    #[error(
+        "feed '{feed_id}' not found for antenna '{antenna_id}'. Available feeds: {available:?}"
+    )]
+    FeedNotFound {
+        antenna_id: String,
+        feed_id: String,
+        available: Vec<String>,
+    },
+}
+
+/// A batch request rejected before any item was computed (roadmap unit C2, call C).
+///
+/// Batch pre-validation has to report two things the flat [`ValidationError`] cannot
+/// carry together: *which* item failed, and *what class* of failure it was, so the
+/// API layer can still choose 404 vs 422. Flattening the item error into a
+/// `ValidationError::InvalidValue { param: "evaluations[3]" }` — what the validator
+/// did before C2 — preserved the index but erased the class, making every item
+/// failure look like a 422.
+#[derive(Error, Debug)]
+pub enum BatchValidationError {
+    /// A whole-batch constraint failed: empty, or over the size limit. No item index.
+    #[error("{0}")]
+    Batch(ValidationError),
+
+    /// Item `index` failed validation. The inner error keeps its class.
+    #[error("evaluations[{index}]: {source}")]
+    Item {
+        index: usize,
+        #[source]
+        source: ValidationError,
+    },
+}
+
+impl BatchValidationError {
+    /// The underlying validation failure, whatever level it came from.
+    ///
+    /// The API layer classifies on this, so an unknown antenna named inside
+    /// `evaluations[3]` gets the same 404 it would get on `/api/v1/gain`.
+    pub fn inner(&self) -> &ValidationError {
+        match self {
+            BatchValidationError::Batch(err) => err,
+            BatchValidationError::Item { source, .. } => source,
+        }
+    }
+
+    /// JSON path of the offending request member, for `ErrorResponse.field`.
+    pub fn field(&self) -> String {
+        match self {
+            BatchValidationError::Batch(_) => "evaluations".to_string(),
+            BatchValidationError::Item { index, .. } => format!("evaluations[{index}]"),
+        }
+    }
 }
 
 /// Errors related to model computation
@@ -426,10 +504,21 @@ impl From<ConfigError> for DataError {
     }
 }
 
-// Convert ValidationError to ApiError for HTTP responses
+// Convert ValidationError to ApiError for HTTP responses.
+//
+// The two not-found variants become `NotFound` (404), matching the served mapping in
+// `api::error_response::validation_status` (roadmap C2). Keeping the two in agreement
+// matters even though the served path does not route through `ApiError`: this impl is
+// public API, and a caller that trusted it would otherwise be told 422 for a resource
+// the service reports as 404.
 impl From<ValidationError> for ApiError {
     fn from(err: ValidationError) -> Self {
-        ApiError::UnprocessableEntity(err.to_string())
+        match &err {
+            ValidationError::AntennaNotFound { .. } | ValidationError::FeedNotFound { .. } => {
+                ApiError::NotFound(err.to_string())
+            }
+            _ => ApiError::UnprocessableEntity(err.to_string()),
+        }
     }
 }
 

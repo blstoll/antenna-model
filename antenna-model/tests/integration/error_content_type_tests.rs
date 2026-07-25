@@ -61,13 +61,13 @@ async fn assert_json_error(response: reqwest::Response, expected_code: &str) -> 
 }
 
 /// Handler pre-check path: `validator::validate_gain_request` rejects before any
-/// physics runs, and the handler builds the 422 itself.
+/// physics runs, and the handler builds the rejection itself.
 #[tokio::test]
 async fn validation_failure_422_is_json() {
     let server = TestServer::start().await.unwrap();
 
     let mut request = builders::simple_gain_request_ecef();
-    request.antenna_id = "no_such_antenna".to_string();
+    request.frequency_mhz = 0.0;
 
     let response = server
         .client
@@ -80,22 +80,22 @@ async fn validation_failure_422_is_json() {
     assert_eq!(response.status(), 422);
     let body = assert_json_error(response, "validation_error").await;
     assert!(
-        body.message.contains("no_such_antenna"),
-        "message should name the offending antenna, got {:?}",
+        body.message.contains("frequency"),
+        "message should name the offending parameter, got {:?}",
         body.message
     );
 
     server.shutdown().await;
 }
 
-/// Handler-maps-service-error path: the batch endpoint has no pre-check, so the
-/// size-limit rejection surfaces from `evaluate_batch` as an
-/// `AntennaModelError::Validation` and is mapped to 400 in the handler.
+/// Batch pre-check path: the size-limit rejection is built by the handler from a
+/// `BatchValidationError`, which is a different construction site from the
+/// single-request path above.
 ///
-/// (That 400-vs-422 split is exactly what roadmap unit C2 unifies; this test
-/// pins the *media type*, and deliberately does not bless the status.)
+/// The status was 400 before roadmap C2 and is 422 now; the media type and body shape
+/// this file guards did not change with it.
 #[tokio::test]
-async fn service_layer_400_is_json() {
+async fn batch_validation_failure_is_json() {
     let server = TestServer::start().await.unwrap();
 
     let oversized = BatchGainRequest {
@@ -110,7 +110,7 @@ async fn service_layer_400_is_json() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), 400);
+    assert_eq!(response.status(), 422);
     assert_json_error(response, "validation_error").await;
 
     server.shutdown().await;
@@ -167,37 +167,16 @@ async fn malformed_body_400_is_normalized_to_json() {
     server.shutdown().await;
 }
 
-/// The normalization above must not touch errors the service built itself.
-///
-/// `service_layer_400_is_json` is the live guard — it asserts a handler-built 400
-/// still reports `validation_error`, which would read `invalid_request_body` if
-/// the `is_from_response` discriminator ever stopped working. This test states
-/// the invariant explicitly so the coupling is not accidental.
-#[tokio::test]
-async fn normalization_does_not_rewrite_our_own_400() {
-    let server = TestServer::start().await.unwrap();
-
-    let oversized = BatchGainRequest {
-        evaluations: vec![builders::simple_gain_request_ecef(); 1001],
-    };
-
-    let response = server
-        .client
-        .post(format!("{}/api/v1/gain/batch", server.base_url))
-        .json(&oversized)
-        .send()
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), 400);
-    let body: ErrorResponse = response.json().await.unwrap();
-    assert_eq!(
-        body.error, "validation_error",
-        "a handler-built 400 must keep its own code, not be rewritten as a body-parse failure"
-    );
-
-    server.shutdown().await;
-}
+// The guard that the normalization above does not rewrite a 400 the service built
+// itself lives in `api::middleware`'s unit tests
+// (`error_handler_does_not_rewrite_our_own_400`), not here.
+//
+// It used to be an integration test driven by the oversized-batch rejection, which
+// answered 400 before roadmap C2. Under C2 no typed service error maps to 400 at all —
+// the status now means only "unparseable body", which is decided by the `Json`
+// extractor before a handler runs — so there is no endpoint left that can produce the
+// input this guard needs. A synthetic endpoint returning `json_error(400, …)` tests the
+// discriminator directly and does not depend on a status policy that may change again.
 
 /// Middleware path: `RequestSizeTracker` rejects before any handler runs, so it
 /// builds its own error. It has to go through the same helper — this is the

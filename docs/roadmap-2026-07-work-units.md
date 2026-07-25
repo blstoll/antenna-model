@@ -1282,6 +1282,67 @@ tests were verified to fail against the pre-C4 helper.
 ### C2 `[DECISION]` — Unify validation status codes — Effort: M
 **[DECIDED 2026-07-24 — all three calls at the recommended option; see the register row for the full rationale]**
 
+**[✅ DONE 2026-07-24 — branch `feat/c3-error-code-vocabulary`]**
+
+Shipped as decided, all three calls. What is worth knowing beyond the decision record:
+
+- **The fix is structural, not four edits.** `api::error_response::validation_status` and
+  `service_status` are now the only two functions that pick a status; the four handlers
+  call them. The bug the unit describes — `/gain`'s missing `Validation(_)` arm — was a
+  symptom of four hand-maintained `match` blocks over the same error type, so patching the
+  arm would have left the cause in place. Adding an error variant is now one edit.
+- **Shape choice for call (B): the *first* option, not the second.** The unit suggested the
+  validators-stop-checking-existence option as "closer to how `/h3-heatmap` works today"
+  and the smaller diff. It is the wrong fit once call (C) is in scope: batch pre-validation
+  has to classify per-item existence failures, and moving lookups into handlers would make
+  the batch handler re-implement 1000 lookups the validator already does. Existence
+  failures instead left the validation *class*, as
+  `ValidationError::{AntennaNotFound, FeedNotFound}`. `/h3-heatmap` moved the *other* way —
+  it now calls the shared `validate_antenna_feed_exists` instead of hand-building its own
+  404, which is what made it disagree with its siblings in the first place.
+- **Batch needed a new error type.** `BatchValidationError` carries the item index *and*
+  preserves the inner failure class. The pre-C2 validator flattened item errors into
+  `InvalidValue { param: "evaluations[i]" }` — index kept, class erased, so every item
+  failure would have been a 422 including absent antennas. Index reaches the wire as
+  `field: "evaluations[3]"` and is also prefixed onto `message`.
+- **Defect (1) was latent, not reachable.** Nothing in the single-gain evaluator raises
+  `AntennaModelError::Validation(_)` — the geometry builders return `ValidationError`, but
+  the evaluator wraps every one as `Generic` (correctly: bad calibration data is a
+  server-side fault). So the 500 fallthrough could not be triggered over HTTP, and no
+  integration test can fail-before-fix on it. It is covered instead by
+  `service_status_policy_table`, a unit test enumerating every rejection class with its
+  required (status, code) — which does fail when the arm is removed.
+- **Two behavior changes beyond the three calls**, both intentional:
+  1. An **empty** batch was 200-with-zero-results (indistinguishable from a successful
+     no-op) and is now 422, like any other batch-level constraint violation.
+  2. A **non-finite** number in a request is a **400**, not a 422. JSON has no `NaN` or
+     `Infinity` literal; serializers emit `null`, which will not deserialize into a
+     declared `f64`, so the body really is unparseable. Consequence worth recording: the
+     validator's own non-finite checks are **unreachable over HTTP** and guard only the
+     in-process service API. Pinned by `non_finite_request_value_is_a_parse_failure`.
+- **The service now emits no 400 from any typed error.** `the_service_never_answers_400_from_a_typed_error`
+  asserts it. That removed the only endpoint capable of producing the input for C4's
+  `normalization_does_not_rewrite_our_own_400` guard, which moved from an integration test
+  to `middleware::tests::error_handler_does_not_rewrite_our_own_400` with a synthetic
+  endpoint — better-scoped anyway, since the invariant is about error construction rather
+  than any endpoint. Fixing that test's middleware ordering (`ErrorHandler` must be applied
+  *before* `RequestId` to sit inside it) also revealed that the pre-existing
+  `test_error_handler` had the same inversion and was vacuous; corrected.
+- **Verification.** All 7 pre-fix failures in the new matrix were observed before any
+  implementation. Afterwards, three regressions were injected and confirmed caught:
+  `InvalidCoordinate → 400` (3 tests), `AntennaNotFound → 422` (3 tests), and removing the
+  batch pre-check (5 tests). C3's fix also missed two `"feed_not_found"` / `"antenna_not_found"`
+  string literals in `get_feed_details`; converted to constants here.
+- **Scope limitation.** The exit criteria call for openapi.yaml updated "for every
+  endpoint". `/api/v1/h3-heatmap` **is not in openapi.yaml at all** — adding it is unit
+  **C1**. The three documented compute endpoints gained `422` and `404` blocks with examples
+  and had their `400` descriptions corrected; `ErrorResponse.error`'s status caveat was
+  replaced with the settled rule. api-documentation.md and architecture.md §6.3 likewise.
+- **Untouched, as scoped:** the per-item batch response *shape* (`gain_db: null` + a
+  warning string for compute-class failures) remains C8 stage 3. Routing-level 404/405/415
+  remain framework-shaped `text/plain` — that needs new error codes, which is C8's call, so
+  the "a 404 can arrive in either shape" caveat C4 documented still stands.
+
 - **Question:** validation failures return 422 from the pre-check path but 400 when the
   same class of error surfaces from the service layer; batch differs again. Changing codes
   is a behavioral API change.

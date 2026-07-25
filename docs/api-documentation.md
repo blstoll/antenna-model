@@ -330,10 +330,10 @@ Example response:
 The API uses standard HTTP status codes:
 
 - **200**: Success
-- **400**: The request body could not be read or parsed, or a coordinate/attitude value
-  was rejected by the service layer
-- **404**: Antenna or feed not found
-- **422**: The request parsed but failed validation
+- **400**: The request body could not be read or parsed. Nothing else returns 400
+- **404**: The request names an antenna or feed that does not exist
+- **422**: The body parsed but is semantically invalid — a value out of range, a
+  degenerate geometry, a batch that is empty or oversized
 - **504**: A server-side wall-clock budget was exceeded — either the whole request
   (`request_timeout`, `server.request_timeout_secs`) or a single aperture integration
   (`computation_budget_exceeded`, `performance.integration_budget_ms`)
@@ -362,7 +362,7 @@ fails to parse is included: the framework's bare rejection is normalized to
 — `404` for a path that matches no route, `405` for a wrong method, `415` for an
 unsupported `Content-Type` — are still served as framework-shaped `text/plain` with no
 error code. Giving them JSON bodies requires error codes that do not exist yet, which is a
-contract decision (roadmap units C2/C8) rather than a formatting one. Note this means a
+contract decision (roadmap unit C8) rather than a formatting one. Note this means a
 `404` can arrive in either shape: `antenna_not_found` as JSON from the service, or bare
 text from the router.
 
@@ -380,8 +380,8 @@ emission site, so a code cannot be introduced by a typo.
 |---|---|---|
 | `antenna_not_found` | 404 | The named antenna does not exist in the calibration repository. |
 | `feed_not_found` | 404 | The antenna exists but the named feed does not. |
-| `validation_error` | 422 / 400 | The request parsed but is semantically invalid. See the status caveat below. |
-| `invalid_coordinate` | 400 | A position or coordinate value is out of range or could not be transformed. |
+| `validation_error` | 422 | The request parsed but is semantically invalid. |
+| `invalid_coordinate` | 422 | A position or coordinate value is out of range, or the positions are geometrically degenerate. |
 | `invalid_request_body` | 400 | The request body could not be read or parsed. |
 | `not_implemented` | 422 | A recognized but unimplemented option — currently only `/heatmap`'s H3 grid type. |
 | `payload_too_large` | 413 | The body exceeds `server.max_body_size_bytes`. |
@@ -390,16 +390,40 @@ emission site, so a code cannot be introduced by a typo.
 | `service_overloaded` | 503 | Admission control rejected the request; a `Retry-After` header accompanies it. |
 | `internal_error` | 500 | An unexpected server-side failure. |
 
-**Status caveat (being fixed).** The status accompanying `validation_error` is currently
-inconsistent: **422** when the request is rejected by the pre-check, but **400** when the
-same class of error surfaces from the service layer, and `/api/v1/gain/batch` does not
-reject invalid items at all — it returns **200** with `"gain_db": null` and an explanatory
-string in that item's `warnings`. Unknown antennas and feeds are likewise **422** on
-`/api/v1/gain` and `/api/v1/heatmap` but **404** on `/api/v1/h3-heatmap`. Roadmap unit C2
-unifies all of this (400 = unparseable body, 422 = semantically invalid, 404 = the named
-antenna or feed does not exist, on every endpoint); the codes in the table above do not
-change with it. Until C2 lands, treat the status as advisory and the `error` code as
-authoritative.
+### Status policy
+
+One rule, applied identically on `/api/v1/gain`, `/api/v1/gain/batch`,
+`/api/v1/heatmap`, and `/api/v1/h3-heatmap`:
+
+| The request… | Status |
+|---|---|
+| could not be parsed | **400** |
+| parsed, but a value is unusable | **422** |
+| names an antenna or feed that does not exist | **404** |
+
+It does not matter which layer notices. A geometry that only the coordinate transform
+can reject — a `reflector_boresight` coincident with `vehicle_position`, say — is still
+a **422**, not a 400: the body was perfectly readable.
+
+Two consequences worth stating outright:
+
+- **A non-finite number in a request is a 400, not a 422.** JSON cannot encode `NaN`
+  or `Infinity`; most serializers emit `null` instead, which does not deserialize into
+  the numeric fields the schema declares. The request is genuinely unparseable.
+- **`/api/v1/gain/batch` rejects the whole batch.** Every item is validated before any
+  physics runs, and the first failure rejects the request with the offending index in
+  `field` (for example `"evaluations[3]"`). Per-item degradation survives only for
+  *compute*-class failures — an integration over budget, or one that does not converge —
+  which cannot be predicted in advance.
+
+**Changed in this release (roadmap unit C2).** Previously the same input could get
+different answers from different endpoints: an unknown antenna was **422** on `/gain`
+and `/heatmap` but **404** on `/h3-heatmap`; a service-layer `invalid_coordinate` was
+**400**; a batch-level violation was **400**; and `/gain/batch` rejected nothing at all,
+returning **200** with `"gain_db": null` per bad item and the reason in that item's
+`warnings` — so a client checking the status code saw success. An empty `evaluations`
+array likewise returned **200** with zero results and is now **422**. The `error` codes
+themselves did not change.
 
 ### Request Body Size Limit
 

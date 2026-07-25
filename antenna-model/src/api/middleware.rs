@@ -241,7 +241,13 @@ impl<E: Endpoint> Endpoint for RequestLoggerImpl<E> {
 ///   `404` for an unrouted path, `405`, `415` — are left framework-shaped,
 ///   because giving them JSON bodies means adding error codes that do not exist
 ///   in the vocabulary yet, and that is a contract decision belonging to roadmap
-///   units C2/C8, not a transport fix.
+///   unit C8, not a transport fix.
+///
+/// After roadmap C2, `400` is the *only* status the framework and the service could
+/// both produce, and the service no longer produces it from any typed error — the
+/// status now means exactly "unparseable body". The `is_from_response` guard is kept
+/// regardless, since it is what makes the narrowness structural rather than incidental;
+/// `error_handler_does_not_rewrite_our_own_400` pins it.
 pub struct ErrorHandler;
 
 impl<E: Endpoint> Middleware<E> for ErrorHandler {
@@ -868,12 +874,92 @@ mod tests {
                     ))
                 }),
             )
-            .with(RequestId)
-            .with(ErrorHandler);
+            // Order matters: the last `.with` is outermost, so `ErrorHandler` must be
+            // applied FIRST to sit inside `RequestId` — as it does in `routes.rs`.
+            // Inverted, `RequestId` folds the handler's `Err` into a response and
+            // `ErrorHandler` never sees an error at all, which makes the test vacuous.
+            .with(ErrorHandler)
+            .with(RequestId);
 
         let cli = TestClient::new(app);
         let response = cli.get("/test").send().await;
         response.assert_status(StatusCode::BAD_REQUEST);
+    }
+
+    /// A framework-generated 400 gets the standard JSON body (roadmap C4).
+    #[tokio::test]
+    async fn error_handler_normalizes_a_framework_400() {
+        let app = Route::new()
+            .at(
+                "/test",
+                poem::endpoint::make_sync(|_req: Request| {
+                    // `from_string` is how poem's own `Json` extractor rejects an
+                    // unparseable body: not built from a response, no error code.
+                    Err::<String, _>(poem::Error::from_string(
+                        "parse error: expected value at line 1 column 3",
+                        StatusCode::BAD_REQUEST,
+                    ))
+                }),
+            )
+            // See `test_error_handler` on why ErrorHandler is applied first.
+            .with(ErrorHandler)
+            .with(RequestId);
+
+        let cli = TestClient::new(app);
+        let response = cli.get("/test").send().await;
+        response.assert_status(StatusCode::BAD_REQUEST);
+
+        let body = response.0.into_body().into_string().await.unwrap();
+        let err: ErrorResponse = serde_json::from_str(&body)
+            .unwrap_or_else(|e| panic!("expected a JSON error body ({e}), got {body:?}"));
+        assert_eq!(err.error, error_codes::INVALID_REQUEST_BODY);
+        assert!(
+            err.message.contains("line 1 column 3"),
+            "the parse location must survive normalization, got {:?}",
+            err.message
+        );
+    }
+
+    /// ...but a 400 the service built itself must pass through untouched.
+    ///
+    /// The discriminator is `Error::is_from_response()`, false only for
+    /// framework-generated errors — everything of ours goes through `json_error`,
+    /// which builds from a response. If that ever stopped holding, every error we
+    /// emit at 400 would be relabelled `invalid_request_body`.
+    ///
+    /// This was an integration test until roadmap C2, driven by the oversized-batch
+    /// rejection that used to answer 400. C2 leaves no endpoint that answers 400 from
+    /// a typed error, so the input is synthesized here instead — which is also the
+    /// honest scope, since the invariant is about error construction, not any endpoint.
+    #[tokio::test]
+    async fn error_handler_does_not_rewrite_our_own_400() {
+        let app = Route::new()
+            .at(
+                "/test",
+                poem::endpoint::make_sync(|_req: Request| {
+                    let body = ErrorResponse::new(
+                        error_codes::PAYLOAD_TOO_LARGE,
+                        "a service-built 400 with a code of its own",
+                    );
+                    Err::<String, _>(json_error(StatusCode::BAD_REQUEST, &body))
+                }),
+            )
+            // See `test_error_handler` on why ErrorHandler is applied first.
+            .with(ErrorHandler)
+            .with(RequestId);
+
+        let cli = TestClient::new(app);
+        let response = cli.get("/test").send().await;
+        response.assert_status(StatusCode::BAD_REQUEST);
+
+        let body = response.0.into_body().into_string().await.unwrap();
+        let err: ErrorResponse = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            err.error,
+            error_codes::PAYLOAD_TOO_LARGE,
+            "a service-built 400 must keep its own code, not be rewritten as a \
+             body-parse failure"
+        );
     }
 
     #[tokio::test]

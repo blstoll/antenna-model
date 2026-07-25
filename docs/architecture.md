@@ -1101,18 +1101,24 @@ those onto the wire codes; the two vocabularies are deliberately separate.
 
 **HTTP status mappings:**
 - 200: Success
-- 400: Unparseable request body; coordinate/attitude rejected at the service layer
-- 404: Antenna or feed not found (on `/api/v1/h3-heatmap`; see the caveat)
-- 422: Request parsed but failed validation
+- 400: Unparseable request body — and nothing else
+- 404: The request names an antenna or feed that does not exist
+- 422: Body parsed but semantically invalid (out-of-range value, degenerate geometry,
+  empty/oversized batch), whichever layer notices
 - 413: Body exceeds `server.max_body_size_bytes`
 - 500: Internal computation/system error (including coordinate transform failures)
 - 503: Service unavailable (startup, shutdown) or admission control
 - 504: Request timeout or per-integration compute budget exceeded
 
-**Status caveat:** the 400/422/404 split is currently inconsistent between the pre-check
-and service-layer paths, and `/api/v1/gain/batch` degrades invalid items to a 200 response
-rather than rejecting. Roadmap unit C2 unifies it; the codes are unaffected. See the
-error-code table in `api-documentation.md` for the full current picture.
+**Where the decision lives.** `api::error_response::validation_status` and
+`service_status` are the only two functions that pick a status. Roadmap unit C2 created
+them by collapsing four hand-written `match` blocks — one per compute handler — that had
+drifted apart: `/gain`'s had no `Validation(_)` arm and fell through to 500, `/heatmap`'s
+and `/h3-heatmap`'s answered 400 for the same class, and unknown antennas were 422 on
+`/gain` and `/heatmap` but 404 on `/h3-heatmap`. `/api/v1/gain/batch` validated nothing at
+all and degraded invalid items into a 200 response with `"gain_db": null`. The
+(endpoint × failure-class) matrix in
+`tests/integration/status_code_matrix_tests.rs` is what keeps the four in agreement.
 
 ### 6.4 Performance Targets
 

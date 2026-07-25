@@ -1078,6 +1078,10 @@ impl StatusResponse {
 /// Codes are `snake_case`. An earlier `PascalCase` set existed only as unused
 /// `ErrorResponse` convenience constructors and never reached the wire; it was
 /// deleted in C3.
+///
+/// The status noted on each code is the one it always carries. Which status a given
+/// *error* gets is decided in `api::error_response`
+/// (`validation_status` / `service_status`), not here — this module owns the names.
 pub mod error_codes {
     /// The named antenna does not exist in the calibration repository (404).
     pub const ANTENNA_NOT_FOUND: &str = "antenna_not_found";
@@ -1085,13 +1089,11 @@ pub mod error_codes {
     /// The antenna exists but the named feed does not (404).
     pub const FEED_NOT_FOUND: &str = "feed_not_found";
 
-    /// The request deserialized but is semantically invalid (422 from the
-    /// pre-check path, 400 when it surfaces from the service layer — the
-    /// inconsistency is roadmap unit C2's to resolve).
+    /// The request deserialized but is semantically invalid (422, from either the
+    /// pre-check or the service layer — roadmap C2 made the two agree).
     pub const VALIDATION_ERROR: &str = "validation_error";
 
-    /// A position or coordinate value is out of range or untransformable (400;
-    /// C2 moves this to 422).
+    /// A position or coordinate value is out of range or untransformable (422).
     pub const INVALID_COORDINATE: &str = "invalid_coordinate";
 
     /// The request body could not be read or parsed (400).
