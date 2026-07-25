@@ -1198,6 +1198,28 @@ C1 can run in parallel with C3–C2. C5 and C6 are superseded by C8.
 - **Depends on:** G3, S6 (new validation constraints must appear in the spec).
 
 ### C3 — Single error-code vocabulary; delete dead PascalCase constructors — Effort: S
+**[✅ DONE 2026-07-24 — branch `feat/c3-error-code-vocabulary`]**
+
+Delivered: all seven PascalCase `ErrorResponse` constructors deleted (grep-confirmed zero
+callers — they only ever appeared in their own definitions and unit tests, so the
+PascalCase codes never reached the wire); `api::schemas::error_codes` added as the single
+source of truth for the **11** live codes, with every emission site in `handlers.rs` and
+`middleware.rs` referencing the constants instead of a string literal, so a typo is now a
+compile error. Docs re-trued: `openapi.yaml`'s `ErrorResponse` schema gained the code
+`enum` and the missing `field` property (and `details` was corrected from `object` to
+`string` — the Rust type is `Option<String>`, so the old spec could not describe any real
+body), `docs/api-documentation.md` gained the error-code table, and
+`docs/architecture.md` §6.3 lost a fabricated variant-per-error `enum ApiError` with
+bespoke per-error fields that was never built. `examples/api_requests.json` advertised two
+codes the service cannot emit (`InvalidAttitude`, `CoordinateTransformError`); corrected to
+`validation_error` and `internal_error`. Drift guard: `tests/error_code_vocabulary.rs`
+(3 tests) pins the spec enum and the docs table against `error_codes::ALL` and fails on any
+PascalCase code reappearing in the published contract — each verified to fail on injected
+drift before being accepted.
+
+Deliberately **not** done here (C2 owns it): the spec still files `validation_error` under
+its current `400` response block, and the status inconsistencies are documented as a
+caveat rather than fixed.
 
 - **Entrance / read first:** `api/schemas.rs:~1085-1110` — `ErrorResponse` convenience
   constructors emitting PascalCase codes (`"AntennaNotFound"`, `"FeedNotFound"`,

@@ -3,9 +3,9 @@
 //! This module implements HTTP request handlers for all API endpoints.
 
 use crate::api::schemas::{
-    BatchGainRequest, BatchGainResponse, CalibrationStatusInfo, ErrorResponse, GainRequest,
-    GainResponse, H3LinkBudgetRequest, H3LinkBudgetResponse, HealthResponse, HeatmapRequest,
-    HeatmapResponse, StatusResponse,
+    error_codes, BatchGainRequest, BatchGainResponse, CalibrationStatusInfo, ErrorResponse,
+    GainRequest, GainResponse, H3LinkBudgetRequest, H3LinkBudgetResponse, HealthResponse,
+    HeatmapRequest, HeatmapResponse, StatusResponse,
 };
 use crate::api::AppState;
 use crate::service::{
@@ -209,7 +209,8 @@ pub async fn compute_gain(
             error = %validation_err,
             "Request validation failed"
         );
-        let error_response = ErrorResponse::new("validation_error", validation_err.to_string());
+        let error_response =
+            ErrorResponse::new(error_codes::VALIDATION_ERROR, validation_err.to_string());
         return Err(poem::Error::from_string(
             serde_json::to_string(&error_response).unwrap_or_default(),
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -235,7 +236,7 @@ pub async fn compute_gain(
     .map_err(|join_err| {
         error!(error = %join_err, "Gain compute task failed to join");
         let error_response = ErrorResponse::new(
-            "internal_error",
+            error_codes::INTERNAL_ERROR,
             format!("Gain computation task failed: {join_err}"),
         );
         poem::Error::from_string(
@@ -267,15 +268,21 @@ pub async fn compute_gain(
             // Map errors to appropriate HTTP status codes and create error response
             let (status_code, error_type) = match &e {
                 crate::error::AntennaModelError::FeedNotFound { .. } => {
-                    (StatusCode::NOT_FOUND, "feed_not_found")
+                    (StatusCode::NOT_FOUND, error_codes::FEED_NOT_FOUND)
                 }
                 crate::error::AntennaModelError::InvalidCoordinate { .. } => {
-                    (StatusCode::BAD_REQUEST, "invalid_coordinate")
+                    (StatusCode::BAD_REQUEST, error_codes::INVALID_COORDINATE)
                 }
                 crate::error::AntennaModelError::Computation(
                     crate::error::ComputationError::TimeBudgetExceeded { .. },
-                ) => (StatusCode::GATEWAY_TIMEOUT, "computation_budget_exceeded"),
-                _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+                ) => (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    error_codes::COMPUTATION_BUDGET_EXCEEDED,
+                ),
+                _ => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    error_codes::INTERNAL_ERROR,
+                ),
             };
 
             let error_response = ErrorResponse::new(error_type, e.to_string());
@@ -361,7 +368,7 @@ pub async fn compute_gain_batch(
     .map_err(|join_err| {
         error!(error = %join_err, "Batch compute task failed to join");
         let error_response = ErrorResponse::new(
-            "internal_error",
+            error_codes::INTERNAL_ERROR,
             format!("Batch computation task failed: {join_err}"),
         );
         poem::Error::from_string(
@@ -401,12 +408,18 @@ pub async fn compute_gain_batch(
             // become error results inside the batch; this arm covers any that surface here.)
             let (status_code, error_type) = match &e {
                 crate::error::AntennaModelError::Validation(_) => {
-                    (StatusCode::BAD_REQUEST, "validation_error")
+                    (StatusCode::BAD_REQUEST, error_codes::VALIDATION_ERROR)
                 }
                 crate::error::AntennaModelError::Computation(
                     crate::error::ComputationError::TimeBudgetExceeded { .. },
-                ) => (StatusCode::GATEWAY_TIMEOUT, "computation_budget_exceeded"),
-                _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+                ) => (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    error_codes::COMPUTATION_BUDGET_EXCEEDED,
+                ),
+                _ => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    error_codes::INTERNAL_ERROR,
+                ),
             };
 
             let error_response = ErrorResponse::new(error_type, e.to_string());
@@ -488,7 +501,8 @@ pub async fn generate_heatmap_endpoint(
             error = %validation_err,
             "Heatmap request validation failed"
         );
-        let error_response = ErrorResponse::new("validation_error", validation_err.to_string());
+        let error_response =
+            ErrorResponse::new(error_codes::VALIDATION_ERROR, validation_err.to_string());
         return Err(poem::Error::from_string(
             serde_json::to_string(&error_response).unwrap_or_default(),
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -513,7 +527,7 @@ pub async fn generate_heatmap_endpoint(
     .map_err(|join_err| {
         error!(error = %join_err, "Heatmap compute task failed to join");
         let error_response = ErrorResponse::new(
-            "internal_error",
+            error_codes::INTERNAL_ERROR,
             format!("Heatmap computation task failed: {join_err}"),
         );
         poem::Error::from_string(
@@ -546,21 +560,28 @@ pub async fn generate_heatmap_endpoint(
             // Map errors to appropriate HTTP status codes
             let (status_code, error_type) = match &e {
                 crate::error::AntennaModelError::FeedNotFound { .. } => {
-                    (StatusCode::NOT_FOUND, "feed_not_found")
+                    (StatusCode::NOT_FOUND, error_codes::FEED_NOT_FOUND)
                 }
-                crate::error::AntennaModelError::NotImplemented { .. } => {
-                    (StatusCode::UNPROCESSABLE_ENTITY, "not_implemented")
-                }
+                crate::error::AntennaModelError::NotImplemented { .. } => (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    error_codes::NOT_IMPLEMENTED,
+                ),
                 crate::error::AntennaModelError::Validation(_) => {
-                    (StatusCode::BAD_REQUEST, "validation_error")
+                    (StatusCode::BAD_REQUEST, error_codes::VALIDATION_ERROR)
                 }
                 crate::error::AntennaModelError::InvalidCoordinate { .. } => {
-                    (StatusCode::BAD_REQUEST, "invalid_coordinate")
+                    (StatusCode::BAD_REQUEST, error_codes::INVALID_COORDINATE)
                 }
                 crate::error::AntennaModelError::Computation(
                     crate::error::ComputationError::TimeBudgetExceeded { .. },
-                ) => (StatusCode::GATEWAY_TIMEOUT, "computation_budget_exceeded"),
-                _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+                ) => (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    error_codes::COMPUTATION_BUDGET_EXCEEDED,
+                ),
+                _ => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    error_codes::INTERNAL_ERROR,
+                ),
             };
 
             let error_response = ErrorResponse::new(error_type, e.to_string());
@@ -679,7 +700,7 @@ pub async fn get_antenna_details(
     if feed_ids.is_empty() {
         warn!(antenna_id = %antenna_id, "Antenna not found");
         let error_response = ErrorResponse::new(
-            "antenna_not_found",
+            error_codes::ANTENNA_NOT_FOUND,
             format!("Antenna '{}' not found", antenna_id),
         );
         return Err(poem::Error::from_string(
@@ -820,7 +841,7 @@ pub async fn list_antenna_feeds(
     if feed_ids.is_empty() {
         warn!(antenna_id = %antenna_id, "Antenna not found");
         let error_response = ErrorResponse::new(
-            "antenna_not_found",
+            error_codes::ANTENNA_NOT_FOUND,
             format!("Antenna '{}' not found", antenna_id),
         );
         return Err(poem::Error::from_string(
@@ -994,7 +1015,8 @@ pub async fn h3_link_budget(
             error = %validation_err,
             "H3 link budget request validation failed"
         );
-        let error_response = ErrorResponse::new("validation_error", validation_err.to_string());
+        let error_response =
+            ErrorResponse::new(error_codes::VALIDATION_ERROR, validation_err.to_string());
         return Err(poem::Error::from_string(
             serde_json::to_string(&error_response).unwrap_or_default(),
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -1062,7 +1084,7 @@ pub async fn h3_link_budget(
     .map_err(|join_err| {
         error!(error = %join_err, "H3 link budget compute task failed to join");
         let error_response = ErrorResponse::new(
-            "internal_error",
+            error_codes::INTERNAL_ERROR,
             format!("H3 link budget computation task failed: {join_err}"),
         );
         poem::Error::from_string(
@@ -1094,18 +1116,24 @@ pub async fn h3_link_budget(
 
             let (status_code, error_type) = match &e {
                 crate::error::AntennaModelError::FeedNotFound { .. } => {
-                    (StatusCode::NOT_FOUND, "feed_not_found")
+                    (StatusCode::NOT_FOUND, error_codes::FEED_NOT_FOUND)
                 }
                 crate::error::AntennaModelError::InvalidCoordinate { .. } => {
-                    (StatusCode::BAD_REQUEST, "invalid_coordinate")
+                    (StatusCode::BAD_REQUEST, error_codes::INVALID_COORDINATE)
                 }
                 crate::error::AntennaModelError::Validation(_) => {
-                    (StatusCode::BAD_REQUEST, "validation_error")
+                    (StatusCode::BAD_REQUEST, error_codes::VALIDATION_ERROR)
                 }
                 crate::error::AntennaModelError::Computation(
                     crate::error::ComputationError::TimeBudgetExceeded { .. },
-                ) => (StatusCode::GATEWAY_TIMEOUT, "computation_budget_exceeded"),
-                _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+                ) => (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    error_codes::COMPUTATION_BUDGET_EXCEEDED,
+                ),
+                _ => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    error_codes::INTERNAL_ERROR,
+                ),
             };
 
             let error_response = ErrorResponse::new(error_type, e.to_string());

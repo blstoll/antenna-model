@@ -10,7 +10,7 @@
 //! - **ErrorHandler**: Consistent error response formatting
 //! - **RequestSizeTracker**: Tracks request and response body sizes
 
-use crate::api::schemas::ErrorResponse;
+use crate::api::schemas::{error_codes, ErrorResponse};
 use poem::{Endpoint, IntoResponse, Middleware, Request, Response, Result};
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
@@ -351,7 +351,7 @@ impl<E> RequestSizeTrackerImpl<E> {
     /// arms, so a chunked client and a `content-length` client see the same
     /// error code and body shape.
     fn too_large_error(&self, message: String) -> poem::Error {
-        let body = ErrorResponse::new("payload_too_large", message);
+        let body = ErrorResponse::new(error_codes::PAYLOAD_TOO_LARGE, message);
         poem::Error::from_string(
             serde_json::to_string(&body).unwrap_or_default(),
             poem::http::StatusCode::PAYLOAD_TOO_LARGE,
@@ -445,7 +445,7 @@ impl<E: Endpoint> Endpoint for RequestSizeTrackerImpl<E> {
                     );
 
                     let body = ErrorResponse::new(
-                        "invalid_request_body",
+                        error_codes::INVALID_REQUEST_BODY,
                         format!("Failed to read request body: {read_err}"),
                     );
                     return Err(poem::Error::from_string(
@@ -573,7 +573,7 @@ impl<E: Endpoint> Endpoint for RequestTimeoutImpl<E> {
                     "Request exceeded the configured timeout; responding with 504"
                 );
                 let body = ErrorResponse::new(
-                    "request_timeout",
+                    error_codes::REQUEST_TIMEOUT,
                     format!(
                         "Request processing exceeded the configured timeout of {} ms",
                         self.timeout.as_millis()
@@ -731,7 +731,7 @@ impl<E: Endpoint> Endpoint for ConcurrencyLimitImpl<E> {
                 );
 
                 let body = ErrorResponse::new(
-                    "service_overloaded",
+                    error_codes::SERVICE_OVERLOADED,
                     format!(
                         "Server is at its concurrent heavy-request limit ({}); retry after {} s",
                         self.limit, self.retry_after_secs

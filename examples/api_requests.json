@@ -414,38 +414,40 @@
     "error_response_antenna_not_found": {
       "description": "Error response for antenna not found",
       "response": {
-        "error": "AntennaNotFound",
-        "message": "Antenna 'invalid_antenna' not found"
+        "error": "antenna_not_found",
+        "message": "Antenna 'invalid_antenna' not found",
+        "field": "antenna_id"
       }
     },
     "error_response_feed_not_found": {
       "description": "Error response for feed not found",
       "response": {
-        "error": "FeedNotFound",
-        "message": "Feed 'invalid_feed' not found for antenna 'antenna_1'"
+        "error": "feed_not_found",
+        "message": "Feed 'invalid_feed' not found for antenna 'antenna_1'",
+        "field": "feed_id"
       }
     },
     "error_response_invalid_coordinate": {
       "description": "Error response for invalid coordinate",
       "response": {
-        "error": "InvalidCoordinate",
+        "error": "invalid_coordinate",
         "message": "Coordinates exceed Earth radius (|pos| > 10000 km)",
         "field": "vehicle_position"
       }
     },
     "error_response_invalid_attitude": {
-      "description": "Error response for invalid attitude",
+      "description": "Error response for an attitude quaternion that is not unit-normalised. Attitude has no dedicated code — it is an ordinary validation failure.",
       "response": {
-        "error": "InvalidAttitude",
-        "message": "Quaternion not normalized (|q| = 1.15)"
+        "error": "validation_error",
+        "message": "quaternion norm is 1.150000 (expected 1.0 ± 1e-3); supply a unit quaternion",
+        "field": "vehicle_attitude"
       }
     },
-    "error_response_coordinate_transform": {
-      "description": "Error response for coordinate transformation failure",
+    "error_response_internal_error": {
+      "description": "Error response for an unexpected server-side failure, e.g. a coordinate transformation that could not complete",
       "response": {
-        "error": "CoordinateTransformError",
-        "message": "Coordinate transformation failed",
-        "details": "Gimbal lock at zenith (elevation = 90 degrees)"
+        "error": "internal_error",
+        "message": "coordinate transformation failed: gimbal lock at zenith (elevation = 90 degrees)"
       }
     }
   }

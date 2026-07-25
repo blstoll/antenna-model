@@ -254,18 +254,15 @@ paths:
                 invalid_frequency:
                   summary: Invalid frequency
                   value:
-                    error: "ValidationError"
+                    error: "validation_error"
                     message: "Frequency out of valid range [100, 50000] MHz"
-                    details:
-                      field: "frequency_mhz"
-                      value: 100000.0
+                    field: "frequency_mhz"
                 invalid_coordinates:
                   summary: Invalid coordinates
                   value:
-                    error: "InvalidCoordinate"
+                    error: "invalid_coordinate"
                     message: "Coordinates exceed Earth radius (|pos| > 10000 km)"
-                    details:
-                      param: "vehicle_position"
+                    field: "vehicle_position"
         '404':
           description: Antenna or feed not found
           content:
@@ -276,18 +273,15 @@ paths:
                 antenna_not_found:
                   summary: Antenna not found
                   value:
-                    error: "AntennaNotFound"
+                    error: "antenna_not_found"
                     message: "Antenna 'invalid_antenna' not found"
-                    details:
-                      antenna_id: "invalid_antenna"
+                    field: "antenna_id"
                 feed_not_found:
                   summary: Feed not found
                   value:
-                    error: "FeedNotFound"
+                    error: "feed_not_found"
                     message: "Feed 'invalid_feed' not found for antenna 'antenna_1'"
-                    details:
-                      antenna_id: "antenna_1"
-                      feed_id: "invalid_feed"
+                    field: "feed_id"
         '413':
           description: |
             Request body exceeds the configured maximum size
@@ -1476,11 +1470,37 @@ components:
       properties:
         error:
           type: string
-          description: Error type identifier
+          description: |
+            Stable machine-readable error code. Always snake_case, and always one of the
+            enumerated values — the service emits no other code. Defined once in code
+            (`api/schemas.rs`, `mod error_codes`) and referenced by every emission site.
+
+            Note: the HTTP status accompanying `validation_error` is currently
+            inconsistent (422 from the pre-check path, 400 from the service layer, and
+            unknown antennas/feeds are 422 on `/api/v1/gain` and `/api/v1/heatmap` but 404
+            on `/api/v1/h3-heatmap`). Roadmap unit C2 unifies the statuses; these codes do
+            not change with it. Prefer this field over the status.
+          enum:
+            - antenna_not_found
+            - feed_not_found
+            - validation_error
+            - invalid_coordinate
+            - invalid_request_body
+            - not_implemented
+            - payload_too_large
+            - request_timeout
+            - computation_budget_exceeded
+            - service_overloaded
+            - internal_error
         message:
           type: string
-          description: Human-readable error message
+          description: |
+            Human-readable explanation. Not stable across releases — do not parse it.
+        field:
+          type: string
+          description: |
+            The request field that caused the error, when the service can attribute it to
+            one. Omitted otherwise.
         details:
-          type: object
-          description: Additional error details
-          additionalProperties: true
+          type: string
+          description: Additional context, when available. Omitted otherwise.

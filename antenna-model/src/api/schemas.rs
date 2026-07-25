@@ -1062,9 +1062,83 @@ impl StatusResponse {
 // Error Response
 // ============================================================================
 
+/// The canonical error-code vocabulary served in `ErrorResponse.error`.
+///
+/// Every error body the service emits carries one of these codes, and nothing
+/// else. Emission sites reference these constants rather than repeating string
+/// literals, so a typo is a compile error instead of a new undocumented code on
+/// the wire (roadmap unit C3).
+///
+/// The set is mirrored in two places that are **not** compiler-checked — keep
+/// them in step when adding a code:
+///
+/// - `openapi.yaml` (the `ErrorResponse` schema's `error` enum), and
+/// - `docs/api-documentation.md` (the error-code table).
+///
+/// Codes are `snake_case`. An earlier `PascalCase` set existed only as unused
+/// `ErrorResponse` convenience constructors and never reached the wire; it was
+/// deleted in C3.
+pub mod error_codes {
+    /// The named antenna does not exist in the calibration repository (404).
+    pub const ANTENNA_NOT_FOUND: &str = "antenna_not_found";
+
+    /// The antenna exists but the named feed does not (404).
+    pub const FEED_NOT_FOUND: &str = "feed_not_found";
+
+    /// The request deserialized but is semantically invalid (422 from the
+    /// pre-check path, 400 when it surfaces from the service layer — the
+    /// inconsistency is roadmap unit C2's to resolve).
+    pub const VALIDATION_ERROR: &str = "validation_error";
+
+    /// A position or coordinate value is out of range or untransformable (400;
+    /// C2 moves this to 422).
+    pub const INVALID_COORDINATE: &str = "invalid_coordinate";
+
+    /// The request body could not be read or parsed (400).
+    pub const INVALID_REQUEST_BODY: &str = "invalid_request_body";
+
+    /// A requested option is recognized but unimplemented — currently only the
+    /// `/heatmap` H3 grid-type stub, which C8 stage 4 removes (422).
+    pub const NOT_IMPLEMENTED: &str = "not_implemented";
+
+    /// The request body exceeds `server.max_body_size_bytes` (413).
+    pub const PAYLOAD_TOO_LARGE: &str = "payload_too_large";
+
+    /// The request exceeded `server.request_timeout_secs` (504).
+    pub const REQUEST_TIMEOUT: &str = "request_timeout";
+
+    /// A single aperture integration exceeded
+    /// `performance.integration_budget_ms` (504).
+    pub const COMPUTATION_BUDGET_EXCEEDED: &str = "computation_budget_exceeded";
+
+    /// Admission control rejected the request; a `Retry-After` header
+    /// accompanies it (503).
+    pub const SERVICE_OVERLOADED: &str = "service_overloaded";
+
+    /// An unexpected server-side failure (500).
+    pub const INTERNAL_ERROR: &str = "internal_error";
+
+    /// Every code above, in the order documented. Used by the drift test and
+    /// available to consumers that need to enumerate the vocabulary.
+    pub const ALL: &[&str] = &[
+        ANTENNA_NOT_FOUND,
+        FEED_NOT_FOUND,
+        VALIDATION_ERROR,
+        INVALID_COORDINATE,
+        INVALID_REQUEST_BODY,
+        NOT_IMPLEMENTED,
+        PAYLOAD_TOO_LARGE,
+        REQUEST_TIMEOUT,
+        COMPUTATION_BUDGET_EXCEEDED,
+        SERVICE_OVERLOADED,
+        INTERNAL_ERROR,
+    ];
+}
+
 /// Standardized error response.
 ///
 /// Returned for all error conditions with appropriate HTTP status codes.
+/// The `error` field always carries one of [`error_codes::ALL`].
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ErrorResponse {
     /// Error type/category
@@ -1103,56 +1177,6 @@ impl ErrorResponse {
     pub fn with_details(mut self, details: impl Into<String>) -> Self {
         self.details = Some(details.into());
         self
-    }
-
-    /// Create antenna not found error
-    pub fn antenna_not_found(antenna_id: impl Into<String>) -> Self {
-        Self::new(
-            "AntennaNotFound",
-            format!("Antenna '{}' not found", antenna_id.into()),
-        )
-    }
-
-    /// Create feed not found error
-    pub fn feed_not_found(antenna_id: impl Into<String>, feed_id: impl Into<String>) -> Self {
-        Self::new(
-            "FeedNotFound",
-            format!(
-                "Feed '{}' not found for antenna '{}'",
-                feed_id.into(),
-                antenna_id.into()
-            ),
-        )
-    }
-
-    /// Create invalid parameter error
-    pub fn invalid_parameter(param: impl Into<String>, reason: impl Into<String>) -> Self {
-        Self::new("InvalidParameter", reason.into()).with_field(param.into())
-    }
-
-    /// Create invalid coordinate error
-    pub fn invalid_coordinate(param: impl Into<String>, reason: impl Into<String>) -> Self {
-        Self::new("InvalidCoordinate", reason.into()).with_field(param.into())
-    }
-
-    /// Create coordinate transform error
-    pub fn coordinate_transform_error(details: impl Into<String>) -> Self {
-        Self::new(
-            "CoordinateTransformError",
-            "Coordinate transformation failed",
-        )
-        .with_details(details.into())
-    }
-
-    /// Create computation error
-    pub fn computation_error(details: impl Into<String>) -> Self {
-        Self::new("ComputationError", "Antenna gain computation failed")
-            .with_details(details.into())
-    }
-
-    /// Create internal error
-    pub fn internal_error(details: impl Into<String>) -> Self {
-        Self::new("InternalError", "Internal server error").with_details(details.into())
     }
 }
 
@@ -1508,26 +1532,29 @@ mod tests {
         assert_eq!(error.details, Some("More info".to_string()));
     }
 
+    /// The vocabulary is `snake_case`, unique, and non-empty.
+    ///
+    /// The PascalCase constructors this replaced (`ErrorResponse::antenna_not_found`
+    /// and friends, emitting `"AntennaNotFound"`) were deleted in C3 — they had zero
+    /// callers, so the PascalCase codes they document never reached the wire.
     #[test]
-    fn test_error_response_antenna_not_found() {
-        let error = ErrorResponse::antenna_not_found("antenna_1");
-        assert_eq!(error.error, "AntennaNotFound");
-        assert!(error.message.contains("antenna_1"));
-    }
+    fn error_code_vocabulary_is_snake_case_and_unique() {
+        use std::collections::HashSet;
 
-    #[test]
-    fn test_error_response_feed_not_found() {
-        let error = ErrorResponse::feed_not_found("antenna_1", "feed_1");
-        assert_eq!(error.error, "FeedNotFound");
-        assert!(error.message.contains("antenna_1"));
-        assert!(error.message.contains("feed_1"));
-    }
+        for code in error_codes::ALL {
+            assert!(!code.is_empty(), "error code must not be empty");
+            assert!(
+                code.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "error code {code:?} is not snake_case"
+            );
+        }
 
-    #[test]
-    fn test_error_response_invalid_parameter() {
-        let error = ErrorResponse::invalid_parameter("frequency", "must be positive");
-        assert_eq!(error.error, "InvalidParameter");
-        assert_eq!(error.field, Some("frequency".to_string()));
+        let unique: HashSet<_> = error_codes::ALL.iter().collect();
+        assert_eq!(
+            unique.len(),
+            error_codes::ALL.len(),
+            "error_codes::ALL contains a duplicate"
+        );
     }
 
     #[test]

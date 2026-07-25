@@ -330,8 +330,10 @@ Example response:
 The API uses standard HTTP status codes:
 
 - **200**: Success
-- **400**: Invalid request parameters (validation error, invalid coordinates/attitude)
+- **400**: The request body could not be read or parsed, or a coordinate/attitude value
+  was rejected by the service layer
 - **404**: Antenna or feed not found
+- **422**: The request parsed but failed validation
 - **504**: A server-side wall-clock budget was exceeded — either the whole request
   (`request_timeout`, `server.request_timeout_secs`) or a single aperture integration
   (`computation_budget_exceeded`, `performance.integration_budget_ms`)
@@ -345,13 +347,46 @@ Error responses follow a consistent format:
 
 ```json
 {
-  "error": "AntennaNotFound",
+  "error": "antenna_not_found",
   "message": "Antenna 'invalid_antenna' not found",
-  "details": {
-    "antenna_id": "invalid_antenna"
-  }
+  "field": "antenna_id"
 }
 ```
+
+`error` is a stable machine-readable code — always `snake_case`, always drawn from the
+table below. `message` is human-readable and **not** stable; do not parse it. `field` and
+`details` are optional strings, omitted when absent.
+
+### Error codes
+
+This is the complete vocabulary. The service emits no other value in `error`. The set is
+defined once in code (`api/schemas.rs`, `mod error_codes`) and referenced by every
+emission site, so a code cannot be introduced by a typo.
+
+| Code | Status | Meaning |
+|---|---|---|
+| `antenna_not_found` | 404 | The named antenna does not exist in the calibration repository. |
+| `feed_not_found` | 404 | The antenna exists but the named feed does not. |
+| `validation_error` | 422 / 400 | The request parsed but is semantically invalid. See the status caveat below. |
+| `invalid_coordinate` | 400 | A position or coordinate value is out of range or could not be transformed. |
+| `invalid_request_body` | 400 | The request body could not be read or parsed. |
+| `not_implemented` | 422 | A recognized but unimplemented option — currently only `/heatmap`'s H3 grid type. |
+| `payload_too_large` | 413 | The body exceeds `server.max_body_size_bytes`. |
+| `request_timeout` | 504 | The request exceeded `server.request_timeout_secs`. |
+| `computation_budget_exceeded` | 504 | One aperture integration exceeded `performance.integration_budget_ms`. |
+| `service_overloaded` | 503 | Admission control rejected the request; a `Retry-After` header accompanies it. |
+| `internal_error` | 500 | An unexpected server-side failure. |
+
+**Status caveat (being fixed).** The status accompanying `validation_error` is currently
+inconsistent: **422** when the request is rejected by the pre-check, but **400** when the
+same class of error surfaces from the service layer, and `/api/v1/gain/batch` does not
+reject invalid items at all — it returns **200** with `"gain_db": null` and an explanatory
+string in that item's `warnings`. Unknown antennas and feeds are likewise **422** on
+`/api/v1/gain` and `/api/v1/heatmap` but **404** on `/api/v1/h3-heatmap`. Roadmap unit C2
+unifies all of this (400 = unparseable body, 422 = semantically invalid, 404 = the named
+antenna or feed does not exist, on every endpoint); the codes in the table above do not
+change with it. Until C2 lands, treat the status as advisory and the `error` code as
+authoritative.
 
 ### Request Body Size Limit
 
