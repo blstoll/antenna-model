@@ -404,6 +404,121 @@ async fn test_request_body_size_limit() {
     server.shutdown().await;
 }
 
+/// Build a fixture-backed config with a deliberately small body-size limit, so a
+/// normal gain request (a few hundred bytes) exceeds it.
+fn small_body_limit_config(max_body_size_bytes: usize) -> ServiceConfig {
+    let mut config = ServiceConfig::with_defaults();
+    config.server.host = "127.0.0.1".to_string();
+    config.server.port = 0;
+    config.server.max_body_size_bytes = max_body_size_bytes;
+    config.server.request_timeout_secs = 30;
+
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string());
+    let fixtures_dir = PathBuf::from(&manifest_dir).join("tests/fixtures");
+    config.calibration.data_directory = fixtures_dir.clone();
+    config.calibration.antenna_config_file = fixtures_dir.join("test_antennas.yaml");
+    config.calibration.fail_fast = false;
+    config.performance.worker_threads = 2;
+    config.performance.max_batch_size = 1000;
+    config.performance.enable_parallel_processing = true;
+
+    config
+}
+
+/// Roadmap S1b: a body sent with `Transfer-Encoding: chunked` carries no
+/// `content-length`, so the declared-size fast path cannot fire. Before S1b such
+/// a request bypassed the limit entirely; it must now be rejected with the same
+/// 413 + `payload_too_large` contract as the header path.
+#[tokio::test]
+async fn test_chunked_request_body_size_limit() {
+    let server = TestServer::start_with_config(Some(small_body_limit_config(256)))
+        .await
+        .unwrap();
+
+    let request = builders::simple_gain_request_ecef();
+    let body = serde_json::to_string(&request).unwrap();
+    assert!(
+        body.len() > 256,
+        "test precondition: a valid gain request ({} bytes) must exceed the 256-byte limit",
+        body.len()
+    );
+
+    let custom_id = "chunked-payload-too-large-id";
+    let response = raw_http::post_chunked(&server.base_url, "/api/v1/gain", &body, custom_id)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status, 413,
+        "an oversized chunked body must return 413 Payload Too Large, not bypass the limit"
+    );
+
+    // Same error contract as the content-length path.
+    let err: ErrorResponse = response.json();
+    assert_eq!(err.error, "payload_too_large");
+
+    server.shutdown().await;
+}
+
+/// Control for S1b: chunked clients under the limit must still work. The
+/// buffered body has to be handed back to the handler — dropping it would turn
+/// every chunked request into a body-deserialization failure.
+#[tokio::test]
+async fn test_chunked_request_under_limit_succeeds() {
+    // Default 10 MB limit: a normal gain request is comfortably under it.
+    let server = TestServer::start().await.unwrap();
+
+    let request = builders::simple_gain_request_ecef();
+    let body = serde_json::to_string(&request).unwrap();
+
+    let response = raw_http::post_chunked(
+        &server.base_url,
+        "/api/v1/gain",
+        &body,
+        "chunked-under-limit-id",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        response.status, 200,
+        "a chunked request under the limit must be served normally (body: {})",
+        response.body
+    );
+
+    // The handler really saw the body, not an empty one.
+    let gain: GainResponse = response.json();
+    assert!(
+        gain.gain_db.is_finite(),
+        "chunked request should produce a real gain value"
+    );
+
+    server.shutdown().await;
+}
+
+/// Control for S1b: `GET` requests carry no `content-length` either, so they take
+/// the same undeclared-length branch. They must not be rejected — in particular
+/// this middleware must not adopt poem's blanket `411 Length Required`, since it
+/// wraps every route including the bodyless GETs.
+#[tokio::test]
+async fn test_bodyless_get_unaffected_by_size_limit() {
+    // A 1-byte limit: anything the GET branch mistakenly measured would trip it.
+    let server = TestServer::start_with_config(Some(small_body_limit_config(1)))
+        .await
+        .unwrap();
+
+    for path in ["/health", "/api/v1/antennas"] {
+        let response = raw_http::get(&server.base_url, path).await.unwrap();
+        assert_eq!(
+            response.status, 200,
+            "bodyless GET {path} must be unaffected by the body-size limit (got {})",
+            response.status
+        );
+    }
+
+    server.shutdown().await;
+}
+
 #[tokio::test]
 async fn test_request_body_under_limit_control() {
     // Control: with the default (10 MB) limit, a normal valid gain request is

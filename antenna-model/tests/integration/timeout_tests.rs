@@ -4,16 +4,22 @@
 //! whose processing exceeds the configured timeout returns `504 Gateway Timeout`
 //! with the project's standard JSON `ErrorResponse` body.
 //!
-//! The heavy compute path (heatmap/batch/h3) runs rayon synchronously; the
+//! The compute paths (gain/heatmap/batch/h3) run rayon synchronously; the
 //! handlers offload it to `tokio::task::spawn_blocking` so the async task yields
 //! at a real `.await`, letting the timeout middleware fire. Note (honest
 //! limitation): the timeout bounds the *response*, not the background compute —
 //! the rayon work is not cancelled and runs to completion (see S3).
+//!
+//! The single-gain case (roadmap S2b) is pinned on a **paused clock** and asserts
+//! no wall-clock threshold at all; see `test_heavy_single_gain_times_out_with_504`
+//! for why that works here and why it has to run in process rather than over a
+//! socket.
 
 use crate::integration::helpers::*;
 use antenna_model::api::schemas::*;
 use antenna_model::config::ServiceConfig;
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// Build a ServiceConfig pointed at the integration test fixtures. The request
 /// timeout is supplied separately via `start_with_config_and_timeout`, so it is
@@ -61,6 +67,170 @@ fn heavy_heatmap_request() -> HeatmapRequest {
         },
     };
     req
+}
+
+/// A *single* gain evaluation expensive enough to still be running when the
+/// paused-clock test advances the deadline: the 13 m Ka-band offset-feed antenna
+/// (highest D/lambda in the fixtures, and the lateral feed offset forces the
+/// expensive asymmetric azimuthal-mode path rather than the cheap symmetric J0
+/// one), with the emitter off the boresight target.
+///
+/// Its cost (~2.7 s in debug, ~140 ms in release) is a **race margin, not a
+/// threshold**: the test advances the clock microseconds after the handler
+/// offloads, so any compute above that is sufficient and the margin is ~5 orders
+/// of magnitude. Nothing asserts on this duration.
+fn heavy_gain_request() -> GainRequest {
+    use antenna_model::model::coordinates_3d::geodetic_to_ecef;
+
+    let (veh_x, veh_y, veh_z) = geodetic_to_ecef(-118.1234, 34.5678, 100.0).unwrap();
+    // Boresight aimed at one satellite...
+    let (bore_x, bore_y, bore_z) = geodetic_to_ecef(-117.0, 35.0, 400_000.0).unwrap();
+    // ...while the emitter sits at another, tens of degrees away (same construction
+    // as the off-axis warning tests).
+    let (emit_x, emit_y, emit_z) = geodetic_to_ecef(-125.0, 28.0, 400_000.0).unwrap();
+
+    GainRequest {
+        antenna_id: "test_large".to_string(),
+        feed_id: "ka_band".to_string(),
+        vehicle_position: Position3D {
+            x: veh_x,
+            y: veh_y,
+            z: veh_z,
+            coordinate_system: Some(CoordinateSystem::ECEF),
+        },
+        reflector_boresight: Position3D {
+            x: bore_x,
+            y: bore_y,
+            z: bore_z,
+            coordinate_system: Some(CoordinateSystem::ECEF),
+        },
+        feed_position: Position3D {
+            x: bore_x,
+            y: bore_y,
+            z: bore_z,
+            coordinate_system: Some(CoordinateSystem::ECEF),
+        },
+        emitter_position: Position3D {
+            x: emit_x,
+            y: emit_y,
+            z: emit_z,
+            coordinate_system: Some(CoordinateSystem::ECEF),
+        },
+        frequency_mhz: 26_000.0,
+        pointing_frequency_mhz: None,
+        include_reference: false,
+        vehicle_attitude: None,
+    }
+}
+
+/// Roadmap S2b: `POST /api/v1/gain` must be *preemptable* by the request
+/// timeout. It used to run its physics inline on the async task; `RequestTimeout`
+/// is a `tokio::time::timeout` around the endpoint future, and a future that
+/// never yields is never preempted — so a slow single gain returned a late 200
+/// instead of a 504, and `server.request_timeout_secs` was unenforceable on the
+/// service's primary endpoint. The handler now offloads to `spawn_blocking` like
+/// batch/heatmap/h3.
+///
+/// **No wall-clock threshold.** The assertion does not depend on how long the
+/// physics takes, only on *whether the handler releases the executor at all*. It
+/// runs on a **paused clock**, where mocked time advances only while the runtime
+/// is idle — and "the executor is not idle" is precisely the bug:
+///
+/// - **Fixed:** the handler offloads and parks at the `spawn_blocking` join. The
+///   runtime goes idle, the `advance` past the deadline takes effect, the timer
+///   fires → **504 `request_timeout`**.
+/// - **Broken (inline):** the task computes without ever yielding, so the runtime
+///   never goes idle, mocked time cannot move, and `tokio::time::timeout` polls an
+///   already-ready inner future. The request timeout can never fire, whatever the
+///   deadline and however long the compute runs. Verified against the pre-S2b
+///   handler: 2.68 s of real compute, mocked time advanced 31 s, still no
+///   `request_timeout`.
+///
+/// So the 504 must carry `request_timeout` **specifically**, and that is the load-
+/// bearing assertion — a status-only check would be satisfied by S3's
+/// `computation_budget_exceeded`, which is a different mechanism. (With the
+/// deliberately small `integration_budget_ms` below, the pre-S2b handler fails this
+/// test on exactly that code rather than on the status; in production, with the
+/// 30 s default budget, its symptom was the late 200 described above.)
+///
+/// # Why in-process, not over a socket
+///
+/// This drives the app through `Endpoint::call` rather than `TestServer` + a real
+/// TCP client. Over a socket the request reaching the handler depends on real
+/// loopback I/O, which the mocked clock cannot order: measured on this harness, a
+/// 35 s mocked sleep completed in **320 µs of real time**, i.e. the deadline
+/// elapsed before the request arrived, the timer registered *after* the jump, and
+/// the request then returned a late 200. In process, the request reaches the
+/// handler within the first poll of the spawned task, so `yield_now` is a
+/// sufficient and deterministic ordering barrier. Nothing about the middleware
+/// stack is bypassed — `create_routes_with_timeout` builds the same one the server
+/// binds to a port.
+#[tokio::test(start_paused = true)]
+async fn test_heavy_single_gain_times_out_with_504() {
+    let timeout = Duration::from_secs(30);
+
+    // The 504 is produced in mocked time, microseconds in, but the offloaded rayon
+    // work is NOT cancelled by it (S2's standing limitation) and the runtime waits
+    // for the blocking task at drop — so the *test* would otherwise pay the full
+    // ~2.7 s compute. Bound it with S3's real per-integration budget, which is what
+    // that budget is for. This cannot change the assertion: the request timeout
+    // fires in mocked time long before 250 ms of real time elapse, so the response
+    // is always `request_timeout`, never `computation_budget_exceeded`.
+    let mut config = fixture_config();
+    config.performance.integration_budget_ms = 250;
+
+    let app = build_in_process_app(config, timeout).expect("in-process app must build");
+
+    let request = heavy_gain_request();
+    let handle = tokio::spawn(async move {
+        let app = app;
+        call_json(&app, "/api/v1/gain", &request).await
+    });
+
+    // Let the request reach the handler and register the timeout, then jump past
+    // the deadline and let the 504 propagate.
+    tokio::task::yield_now().await;
+    tokio::time::advance(timeout + Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+
+    let (status, body) = handle.await.expect("request task must not panic");
+
+    assert_eq!(
+        status,
+        504,
+        "a single gain that occupies the executor must return 504, not a late 200 — body: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let err: ErrorResponse = serde_json::from_slice(&body).expect("standard JSON error body");
+    assert_eq!(
+        err.error, "request_timeout",
+        "the 504 must come from the request-timeout middleware, not S3's per-integration budget"
+    );
+}
+
+/// Control for S2b: moving the compute to the blocking pool must not change the
+/// served answer. A normal single-gain request under a generous deadline still
+/// returns 200 with a real gain value.
+#[tokio::test]
+async fn test_single_gain_under_timeout_still_succeeds() {
+    let timeout = Duration::from_secs(30);
+    let server = TestServer::start_with_config_and_timeout(fixture_config(), timeout)
+        .await
+        .unwrap();
+
+    let response: GainResponse = server
+        .post("/api/v1/gain", &builders::simple_gain_request_ecef())
+        .await
+        .expect("a normal single-gain request must still succeed");
+
+    assert!(
+        response.gain_db.is_finite(),
+        "gain must be a real value, got {}",
+        response.gain_db
+    );
+
+    server.shutdown().await;
 }
 
 /// The compute-heavy heatmap endpoint must honor the request timeout: when
