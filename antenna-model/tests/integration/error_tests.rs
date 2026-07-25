@@ -406,7 +406,7 @@ async fn test_request_body_size_limit() {
 
 /// Build a fixture-backed config with a deliberately small body-size limit, so a
 /// normal gain request (a few hundred bytes) exceeds it.
-fn small_body_limit_config(max_body_size_bytes: usize) -> ServiceConfig {
+pub(crate) fn small_body_limit_config(max_body_size_bytes: usize) -> ServiceConfig {
     let mut config = ServiceConfig::with_defaults();
     config.server.host = "127.0.0.1".to_string();
     config.server.port = 0;

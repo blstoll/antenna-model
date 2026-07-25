@@ -1234,6 +1234,42 @@ caveat rather than fixed.
 - **Depends on:** G1.
 
 ### C4 — Error bodies as `application/json` — Effort: S
+**[✅ DONE 2026-07-24 — branch `feat/c3-error-code-vocabulary`]**
+
+Delivered: `api::error_response::json_error` is now the only place in the crate that turns
+an `ErrorResponse` into a `poem::Error`, and all **19** production sites (16 in
+`handlers.rs`, 3 in `middleware.rs`) go through it. Bodies are byte-identical — pinned by
+`assert_json_error`, which re-serializes the parsed body and asserts equality with the raw
+bytes.
+
+**The diagnosis in this unit was optimistic.** `poem::Error::from_string` does not serve
+`text/plain`; it sets **no `Content-Type` header at all**. Verified by reverting the helper
+and watching all four original tests report `got "<missing>"`.
+
+Two things found while executing, both fixed here:
+
+1. **One error site carried no code at all.** The antenna-details handler's
+   feed-lookup failure used `from_string` with a bare `format!` string, so that 404 had no
+   `error` field — it was not an `ErrorResponse` in any sense. Now emits `feed_not_found`.
+2. **Malformed request bodies never reached our error path.** poem's `Json` extractor
+   rejects an unparseable body before the handler runs, returning its own `400` +
+   `text/plain` + no code. `ErrorHandler` now normalizes that one case to
+   `invalid_request_body`, preserving poem's parse-location message. The rewrite is gated
+   on `Error::is_from_response()` (false only for framework-generated errors, since every
+   error of ours is built from a response) **and** `status == 400`, so a handler's own 400
+   is never touched — pinned by `normalization_does_not_rewrite_our_own_400`.
+
+**Known remaining exception, deliberately left for C2/C8:** routing-level rejections poem
+raises on its own — `404` for an unrouted path, `405`, `415` — are still framework-shaped
+`text/plain`. Normalizing them requires error codes that do not exist in the vocabulary
+(there is no `route_not_found` / `method_not_allowed` / `unsupported_media_type`), and
+minting them is a contract decision, not a transport fix. Consequence worth knowing: a
+`404` can arrive in either shape today. Documented in `api-documentation.md`.
+
+Tests: `tests/integration/error_content_type_tests.rs` (6 tests) covers the four distinct
+construction paths — handler pre-check (422), handler-maps-service-error (400), GET handler
+(404), middleware (413) — plus the framework normalization and its guard. All four original
+tests were verified to fail against the pre-C4 helper.
 
 - **Entrance / read first:** the `poem::Error::from_string(serde_json::to_string(…))`
   pattern (e.g. `handlers.rs:203-206`) — poem serves these as `text/plain`. **Find all

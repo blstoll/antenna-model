@@ -84,6 +84,7 @@ pub mod helpers;
 pub mod api_tests;
 pub mod budget_tests;
 pub mod concurrent_tests;
+pub mod error_content_type_tests;
 pub mod error_tests;
 pub mod h3_link_budget_tests;
 pub mod off_axis_warning_tests;

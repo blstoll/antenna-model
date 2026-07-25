@@ -2,6 +2,7 @@
 //!
 //! This module implements HTTP request handlers for all API endpoints.
 
+use crate::api::error_response::json_error;
 use crate::api::schemas::{
     error_codes, BatchGainRequest, BatchGainResponse, CalibrationStatusInfo, ErrorResponse,
     GainRequest, GainResponse, H3LinkBudgetRequest, H3LinkBudgetResponse, HealthResponse,
@@ -211,9 +212,9 @@ pub async fn compute_gain(
         );
         let error_response =
             ErrorResponse::new(error_codes::VALIDATION_ERROR, validation_err.to_string());
-        return Err(poem::Error::from_string(
-            serde_json::to_string(&error_response).unwrap_or_default(),
+        return Err(json_error(
             StatusCode::UNPROCESSABLE_ENTITY,
+            &error_response,
         ));
     }
 
@@ -239,10 +240,7 @@ pub async fn compute_gain(
             error_codes::INTERNAL_ERROR,
             format!("Gain computation task failed: {join_err}"),
         );
-        poem::Error::from_string(
-            serde_json::to_string(&error_response).unwrap_or_default(),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )
+        json_error(StatusCode::INTERNAL_SERVER_ERROR, &error_response)
     })?;
 
     match result {
@@ -287,10 +285,7 @@ pub async fn compute_gain(
 
             let error_response = ErrorResponse::new(error_type, e.to_string());
 
-            Err(poem::Error::from_string(
-                serde_json::to_string(&error_response).unwrap_or_default(),
-                status_code,
-            ))
+            Err(json_error(status_code, &error_response))
         }
     }
 }
@@ -371,10 +366,7 @@ pub async fn compute_gain_batch(
             error_codes::INTERNAL_ERROR,
             format!("Batch computation task failed: {join_err}"),
         );
-        poem::Error::from_string(
-            serde_json::to_string(&error_response).unwrap_or_default(),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )
+        json_error(StatusCode::INTERNAL_SERVER_ERROR, &error_response)
     })?;
 
     match result {
@@ -424,10 +416,7 @@ pub async fn compute_gain_batch(
 
             let error_response = ErrorResponse::new(error_type, e.to_string());
 
-            Err(poem::Error::from_string(
-                serde_json::to_string(&error_response).unwrap_or_default(),
-                status_code,
-            ))
+            Err(json_error(status_code, &error_response))
         }
     }
 }
@@ -503,9 +492,9 @@ pub async fn generate_heatmap_endpoint(
         );
         let error_response =
             ErrorResponse::new(error_codes::VALIDATION_ERROR, validation_err.to_string());
-        return Err(poem::Error::from_string(
-            serde_json::to_string(&error_response).unwrap_or_default(),
+        return Err(json_error(
             StatusCode::UNPROCESSABLE_ENTITY,
+            &error_response,
         ));
     }
 
@@ -530,10 +519,7 @@ pub async fn generate_heatmap_endpoint(
             error_codes::INTERNAL_ERROR,
             format!("Heatmap computation task failed: {join_err}"),
         );
-        poem::Error::from_string(
-            serde_json::to_string(&error_response).unwrap_or_default(),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )
+        json_error(StatusCode::INTERNAL_SERVER_ERROR, &error_response)
     })?;
 
     match result {
@@ -586,10 +572,7 @@ pub async fn generate_heatmap_endpoint(
 
             let error_response = ErrorResponse::new(error_type, e.to_string());
 
-            Err(poem::Error::from_string(
-                serde_json::to_string(&error_response).unwrap_or_default(),
-                status_code,
-            ))
+            Err(json_error(status_code, &error_response))
         }
     }
 }
@@ -703,10 +686,7 @@ pub async fn get_antenna_details(
             error_codes::ANTENNA_NOT_FOUND,
             format!("Antenna '{}' not found", antenna_id),
         );
-        return Err(poem::Error::from_string(
-            serde_json::to_string(&error_response).unwrap_or_default(),
-            StatusCode::NOT_FOUND,
-        ));
+        return Err(json_error(StatusCode::NOT_FOUND, &error_response));
     }
 
     // Use first feed to get antenna-level information
@@ -715,9 +695,22 @@ pub async fn get_antenna_details(
         .repository
         .get_calibration(&antenna_id, first_feed_id)
         .ok_or_else(|| {
-            poem::Error::from_string(
-                format!("Antenna {}/{} not found", antenna_id, first_feed_id),
+            // Reachable only if the repository lists a feed it cannot then resolve.
+            // Before C4 this site returned a bare string body with no error code at
+            // all — the one error path in the service that carried nothing
+            // machine-readable.
+            error!(
+                antenna_id = %antenna_id,
+                feed_id = %first_feed_id,
+                "Repository listed a feed with no retrievable calibration"
+            );
+            json_error(
                 StatusCode::NOT_FOUND,
+                &ErrorResponse::new(
+                    error_codes::FEED_NOT_FOUND,
+                    format!("Feed '{first_feed_id}' not found for antenna '{antenna_id}'"),
+                )
+                .with_field("feed_id"),
             )
         })?;
 
@@ -844,10 +837,7 @@ pub async fn list_antenna_feeds(
             error_codes::ANTENNA_NOT_FOUND,
             format!("Antenna '{}' not found", antenna_id),
         );
-        return Err(poem::Error::from_string(
-            serde_json::to_string(&error_response).unwrap_or_default(),
-            StatusCode::NOT_FOUND,
-        ));
+        return Err(json_error(StatusCode::NOT_FOUND, &error_response));
     }
 
     // Build feed information
@@ -958,10 +948,7 @@ pub async fn get_feed_details(
             );
 
             let error_response = ErrorResponse::new(error_type, error_msg);
-            Err(poem::Error::from_string(
-                serde_json::to_string(&error_response).unwrap_or_default(),
-                StatusCode::NOT_FOUND,
-            ))
+            Err(json_error(StatusCode::NOT_FOUND, &error_response))
         }
     }
 }
@@ -1017,9 +1004,9 @@ pub async fn h3_link_budget(
         );
         let error_response =
             ErrorResponse::new(error_codes::VALIDATION_ERROR, validation_err.to_string());
-        return Err(poem::Error::from_string(
-            serde_json::to_string(&error_response).unwrap_or_default(),
+        return Err(json_error(
             StatusCode::UNPROCESSABLE_ENTITY,
+            &error_response,
         ));
     }
 
@@ -1053,10 +1040,7 @@ pub async fn h3_link_budget(
                 "H3 link budget antenna/feed lookup failed"
             );
             let error_response = ErrorResponse::new(error_type, error_msg);
-            return Err(poem::Error::from_string(
-                serde_json::to_string(&error_response).unwrap_or_default(),
-                StatusCode::NOT_FOUND,
-            ));
+            return Err(json_error(StatusCode::NOT_FOUND, &error_response));
         }
     };
 
@@ -1087,10 +1071,7 @@ pub async fn h3_link_budget(
             error_codes::INTERNAL_ERROR,
             format!("H3 link budget computation task failed: {join_err}"),
         );
-        poem::Error::from_string(
-            serde_json::to_string(&error_response).unwrap_or_default(),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )
+        json_error(StatusCode::INTERNAL_SERVER_ERROR, &error_response)
     })?;
 
     match result {
@@ -1137,10 +1118,7 @@ pub async fn h3_link_budget(
             };
 
             let error_response = ErrorResponse::new(error_type, e.to_string());
-            Err(poem::Error::from_string(
-                serde_json::to_string(&error_response).unwrap_or_default(),
-                status_code,
-            ))
+            Err(json_error(status_code, &error_response))
         }
     }
 }

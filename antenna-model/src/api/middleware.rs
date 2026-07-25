@@ -10,6 +10,7 @@
 //! - **ErrorHandler**: Consistent error response formatting
 //! - **RequestSizeTracker**: Tracks request and response body sizes
 
+use crate::api::error_response::json_error;
 use crate::api::schemas::{error_codes, ErrorResponse};
 use poem::{Endpoint, IntoResponse, Middleware, Request, Response, Result};
 use std::time::{Duration, Instant};
@@ -215,6 +216,32 @@ impl<E: Endpoint> Endpoint for RequestLoggerImpl<E> {
 /// Ensures all errors are formatted consistently and logged appropriately.
 /// This middleware catches any errors that weren't already handled by
 /// endpoint-specific error handlers.
+///
+/// # Normalizing framework-generated body-parse failures (roadmap C4)
+///
+/// Handlers and middleware build their errors through
+/// [`crate::api::error_response::json_error`], so those always carry a JSON
+/// `ErrorResponse`. One error path is **not** ours: when a request body fails to
+/// deserialize, poem's `Json` extractor rejects it before the handler runs, with
+/// its own `400` and a bare `text/plain` message —
+/// `"parse error: key must be a string at line 1 column 3"` — carrying no
+/// machine-readable code at all.
+///
+/// This middleware converts that specific case into the standard JSON body with
+/// the `invalid_request_body` code, preserving poem's message (which is the
+/// genuinely useful part: it names the offending line and column).
+///
+/// The rewrite is deliberately narrow:
+///
+/// - It fires only for errors **not** built from a response
+///   (`Error::is_from_response`), which is exactly the set the framework
+///   produced — every error of ours goes through `json_error`, which builds from
+///   a response. A handler's own 400 is therefore never touched.
+/// - It fires only on `400`. Routing-level rejections poem raises on its own —
+///   `404` for an unrouted path, `405`, `415` — are left framework-shaped,
+///   because giving them JSON bodies means adding error codes that do not exist
+///   in the vocabulary yet, and that is a contract decision belonging to roadmap
+///   units C2/C8, not a transport fix.
 pub struct ErrorHandler;
 
 impl<E: Endpoint> Middleware<E> for ErrorHandler {
@@ -249,7 +276,15 @@ impl<E: Endpoint> Endpoint for ErrorHandlerImpl<E> {
                     "Request error caught by error handler"
                 );
 
-                // Return the error response (poem handles error to response conversion)
+                // Give a framework-generated body-parse rejection the project's
+                // standard JSON shape; see the type-level docs for why this is
+                // scoped to 400-and-not-ours.
+                if !err.is_from_response() && err.status() == poem::http::StatusCode::BAD_REQUEST {
+                    let body =
+                        ErrorResponse::new(error_codes::INVALID_REQUEST_BODY, err.to_string());
+                    return Err(json_error(poem::http::StatusCode::BAD_REQUEST, &body));
+                }
+
                 Err(err)
             }
         }
@@ -352,10 +387,7 @@ impl<E> RequestSizeTrackerImpl<E> {
     /// error code and body shape.
     fn too_large_error(&self, message: String) -> poem::Error {
         let body = ErrorResponse::new(error_codes::PAYLOAD_TOO_LARGE, message);
-        poem::Error::from_string(
-            serde_json::to_string(&body).unwrap_or_default(),
-            poem::http::StatusCode::PAYLOAD_TOO_LARGE,
-        )
+        json_error(poem::http::StatusCode::PAYLOAD_TOO_LARGE, &body)
     }
 }
 
@@ -448,10 +480,7 @@ impl<E: Endpoint> Endpoint for RequestSizeTrackerImpl<E> {
                         error_codes::INVALID_REQUEST_BODY,
                         format!("Failed to read request body: {read_err}"),
                     );
-                    return Err(poem::Error::from_string(
-                        serde_json::to_string(&body).unwrap_or_default(),
-                        poem::http::StatusCode::BAD_REQUEST,
-                    ));
+                    return Err(json_error(poem::http::StatusCode::BAD_REQUEST, &body));
                 }
             }
         }
@@ -579,10 +608,7 @@ impl<E: Endpoint> Endpoint for RequestTimeoutImpl<E> {
                         self.timeout.as_millis()
                     ),
                 );
-                Err(poem::Error::from_string(
-                    serde_json::to_string(&body).unwrap_or_default(),
-                    poem::http::StatusCode::GATEWAY_TIMEOUT,
-                ))
+                Err(json_error(poem::http::StatusCode::GATEWAY_TIMEOUT, &body))
             }
         }
     }

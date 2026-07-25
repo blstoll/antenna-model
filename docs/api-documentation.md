@@ -353,6 +353,19 @@ Error responses follow a consistent format:
 }
 ```
 
+Every error the service itself produces — from handlers and from middleware alike — is
+served with `Content-Type: application/json` and the body shape above. A request body that
+fails to parse is included: the framework's bare rejection is normalized to
+`invalid_request_body`, preserving the parse location in `message`.
+
+**One exception:** rejections the web framework raises before routing reaches the service
+— `404` for a path that matches no route, `405` for a wrong method, `415` for an
+unsupported `Content-Type` — are still served as framework-shaped `text/plain` with no
+error code. Giving them JSON bodies requires error codes that do not exist yet, which is a
+contract decision (roadmap units C2/C8) rather than a formatting one. Note this means a
+`404` can arrive in either shape: `antenna_not_found` as JSON from the service, or bare
+text from the router.
+
 `error` is a stable machine-readable code — always `snake_case`, always drawn from the
 table below. `message` is human-readable and **not** stable; do not parse it. `field` and
 `details` are optional strings, omitted when absent.
