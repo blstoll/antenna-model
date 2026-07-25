@@ -1052,8 +1052,31 @@ constant is 400,000 km) move into C8 stage 2.
 
 ### S1b — Close the chunked-encoding bypass of the 413 — Effort: S
 
-**🔴 OPEN — filed 2026-07-24 by the Phase 2 review.** Blocks the unqualified Phase 2 DONE
-banner (see `docs/roadmap-2026-07.md` §4).
+**✅ DONE 2026-07-24** (filed the same day by the Phase 2 review). All four exit criteria met;
+Phase 2 banner flipped to unqualified DONE.
+
+- **What landed:** `RequestSizeTrackerImpl::call` gained an else arm for the
+  undeclared-length case: `req.take_body().into_bytes_limit(max)`, then `set_body` the
+  buffered bytes back so downstream extractors still see them. `ReadBodyError::PayloadTooLarge`
+  maps to the same `413` + `payload_too_large` JSON as the header path (shared
+  `too_large_error` constructor, so the two arms cannot drift); other read errors map to
+  `400 invalid_request_body` rather than handing a truncated body downstream. The soft
+  `warn_request_size` log fires on this arm too, keyed on bytes actually read.
+- **Regression proof (measured, not assumed):** with the else arm disabled, an oversized
+  chunked POST returned **200** — the bypass, reproduced. With it, **413**.
+- **Tests:** `integration::error_tests::test_chunked_request_body_size_limit` (over limit →
+  413 + `payload_too_large`), `…::test_chunked_request_under_limit_succeeds` (under limit →
+  200 with a real gain, proving the body is handed back), `…::test_bodyless_get_unaffected_by_size_limit`
+  (GET `/health` and `/api/v1/antennas` under a 1-byte limit → 200, pinning that we do *not*
+  adopt poem's blanket 411). A `helpers::raw_http` module speaks HTTP/1.1 over `TcpStream`,
+  because `reqwest` will not emit chunked bodies without its optional `stream` feature and the
+  wire framing is the whole point.
+- **Docs:** the false "matching `poem::middleware::SizeLimit`" docstring is replaced with a
+  two-arm description that states the 411 divergence and why (this middleware wraps the GETs);
+  `docs/api-documentation.md` "Request Body Size Limit" and all three `413` blocks in
+  `openapi.yaml` now describe both framings.
+
+*Original unit follows.*
 
 - **Entrance / read first:** `api/middleware.rs:338-409` (`RequestSizeTrackerImpl::call`) —
   the whole 413 lives inside `if let Some(size) = headers().get("content-length")…`; and
@@ -1077,8 +1100,56 @@ banner (see `docs/roadmap-2026-07.md` §4).
 
 ### S2b — Make the request timeout enforceable on `POST /api/v1/gain` — Effort: S
 
-**🔴 OPEN — filed 2026-07-24 by the Phase 2 review.** Blocks the unqualified Phase 2 DONE
-banner (see `docs/roadmap-2026-07.md` §4).
+**✅ DONE 2026-07-24** (filed the same day by the Phase 2 review). All three exit criteria met;
+Phase 2 banner flipped to unqualified DONE.
+
+- **What landed:** `compute_gain` now runs `compute_gain_from_request_with_budget` inside
+  `tokio::task::spawn_blocking`, with the same `JoinError` → `500 internal_error` handling as
+  `compute_gain_batch`. All four compute handlers are structurally identical on this point now.
+- **Regression proof (measured, not assumed):** with the handler reverted to the inline call, a
+  gain request taking **2.62 s** against a **10 ms** deadline returned **200** — a late success,
+  the timeout structurally unable to fire. With `spawn_blocking`, **504**. Re-confirmed against
+  the final paused-clock test: **2.68 s** of real compute with mocked time advanced **31 s**
+  still produced no `request_timeout`.
+- **Tests:** `integration::timeout_tests::test_heavy_single_gain_times_out_with_504`, which
+  asserts **no wall-clock threshold**. It runs on a paused clock (`start_paused`), where mocked
+  time advances only while the runtime is idle — and "the executor is not idle" *is* the bug, so
+  the property under test becomes the thing that gates the clock. Fixed: the handler parks at the
+  `spawn_blocking` join, the runtime idles, `advance` past the deadline takes effect → 504
+  `request_timeout`. Broken: the task never yields, mocked time cannot move, and the timeout
+  polls an already-ready future → it can never fire, whatever the deadline.
+  `…::test_single_gain_under_timeout_still_succeeds` is the end-to-end control over real HTTP.
+- **Test-design notes (each was measured, not assumed):**
+  - **In process, not over a socket.** The test drives the app via `Endpoint::call`
+    (`helpers::build_in_process_app` / `call_json`) rather than `TestServer` + reqwest. Over a
+    socket the mocked clock cannot order the request against the deadline: a 35 s mocked sleep
+    completed in **320 µs of real time**, so the deadline elapsed before the request crossed
+    loopback, the timer registered after the jump, and the request returned a late 200.
+    `start_paused` with `TestServer` is worse still — the health-check retry loop auto-advances
+    through all 50 attempts instantly and the server never boots. No middleware is bypassed:
+    `create_routes_with_timeout` builds the same stack the server binds to a port.
+  - **The load-bearing assertion is the `error` code, not the status.** S3's
+    `computation_budget_exceeded` is also a 504, so a status-only check could pass for the wrong
+    reason.
+  - **`integration_budget_ms: 250`** in this test bounds the *un-cancellable* background rayon
+    (S2's standing limitation), which the runtime otherwise waits for at drop: **2.71 s → 0.52 s**.
+    It cannot affect the assertion — the 504 is produced in mocked time microseconds in, long
+    before 250 ms of real time elapse. It does change how the pre-S2b handler *fails* this test
+    (wrong `error` code rather than a 200); the production symptom, with the 30 s default budget,
+    was the late 200.
+  - The request's ~2.7 s debug cost is a **race margin, not a threshold** — the clock is advanced
+    microseconds after the offload, so the margin is ~5 orders of magnitude and nothing asserts
+    on the duration.
+- **Docs:** `docs/api-documentation.md` "Request Timeout" previously stated that `/api/v1/gain`
+  is *not* offloaded and that S3's per-integration budget is its only bound — now corrected to
+  name all four endpoints and to state that both bounds apply to single gain and fire
+  independently. Note `openapi.yaml`'s `/api/v1/gain` `504` block already listed
+  `request_timeout`; that claim was aspirational before this unit and is now true.
+- **Unchanged, deliberately:** the poem-layer timeout still does not *cancel* the rayon work
+  (S2's standing caveat) — it bounds the client's wait, not the CPU. `/api/v1/gain` remains
+  **not** admission-limited (`routes.rs`), per the unit's gotcha.
+
+*Original unit follows.*
 
 - **Entrance / read first:** `api/handlers.rs:222` — `compute_gain` calls
   `compute_gain_from_request_with_budget` inline on the async task. Compare

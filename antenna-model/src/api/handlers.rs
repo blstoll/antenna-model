@@ -218,8 +218,33 @@ pub async fn compute_gain(
 
     // Compute gain using the service layer, bounding each aperture integration to the
     // configured per-integration wall-clock budget (S3).
+    //
+    // The physics runs synchronously and CPU-bound, which would otherwise block the
+    // async worker thread and defeat the RequestTimeout middleware — a future that
+    // never yields is never preempted. Offload it to the blocking pool so the async
+    // task yields at the join `.await`, letting the timeout fire (roadmap S2b, matching
+    // the batch/heatmap/h3 handlers). The compute itself is not cancelled on timeout;
+    // `performance.integration_budget_ms` is what bounds the work.
+    let compute_state = state.0.clone();
+    let compute_request = request.clone();
     let budget = Duration::from_millis(state.config.performance.integration_budget_ms);
-    match compute_gain_from_request_with_budget(&request, &state.repository, budget) {
+    let result = tokio::task::spawn_blocking(move || {
+        compute_gain_from_request_with_budget(&compute_request, &compute_state.repository, budget)
+    })
+    .await
+    .map_err(|join_err| {
+        error!(error = %join_err, "Gain compute task failed to join");
+        let error_response = ErrorResponse::new(
+            "internal_error",
+            format!("Gain computation task failed: {join_err}"),
+        );
+        poem::Error::from_string(
+            serde_json::to_string(&error_response).unwrap_or_default(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+        )
+    })?;
+
+    match result {
         Ok(response) => {
             info!(
                 antenna_id = %request.antenna_id,

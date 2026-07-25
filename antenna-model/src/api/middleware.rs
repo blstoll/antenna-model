@@ -259,13 +259,27 @@ impl<E: Endpoint> Endpoint for ErrorHandlerImpl<E> {
 /// Request size tracking and enforcement middleware
 ///
 /// Tracks and logs the sizes of request and response bodies, and **rejects**
-/// requests whose `content-length` exceeds the configured hard limit with a
+/// requests whose body exceeds the configured hard limit with a
 /// `413 Payload Too Large` and the project's standard JSON error body.
 ///
-/// Enforcement is keyed on the `content-length` header (the framework-blessed
-/// level, matching `poem::middleware::SizeLimit`): if the header is present and
-/// exceeds `max_request_size`, the request is rejected before body handling.
-/// Requests without a `content-length` header fall through unchanged.
+/// Enforcement has two arms, because a declared size is not always available:
+///
+/// - **`content-length` present** (the common case): if the declared size
+///   exceeds `max_request_size` the request is rejected immediately, before the
+///   body is read at all.
+/// - **`content-length` absent** (`Transfer-Encoding: chunked`, and every
+///   bodyless GET): the size is not knowable up front, so the body is read
+///   through `Body::into_bytes_limit`, which aborts as soon as the accumulated
+///   bytes exceed the limit. The buffered body is put back on the request so
+///   downstream extractors still see it. Peak buffering on this arm is
+///   `max_request_size + 4096` bytes — what the `Json` extractor would have
+///   consumed anyway, now bounded.
+///
+/// Both arms produce the same `413` + `payload_too_large` JSON error. Note that
+/// this deliberately does *not* mirror `poem::middleware::SizeLimit`, which
+/// answers `411 Length Required` when the header is missing: this middleware
+/// wraps every route, including the GETs that legitimately carry no
+/// `content-length`.
 pub struct RequestSizeTracker {
     /// Reject if request size exceeds this hard limit (bytes)
     pub max_request_size: usize,
@@ -332,10 +346,23 @@ pub struct RequestSizeTrackerImpl<E> {
     warn_response_size: usize,
 }
 
+impl<E> RequestSizeTrackerImpl<E> {
+    /// Build the `413 Payload Too Large` rejection shared by both enforcement
+    /// arms, so a chunked client and a `content-length` client see the same
+    /// error code and body shape.
+    fn too_large_error(&self, message: String) -> poem::Error {
+        let body = ErrorResponse::new("payload_too_large", message);
+        poem::Error::from_string(
+            serde_json::to_string(&body).unwrap_or_default(),
+            poem::http::StatusCode::PAYLOAD_TOO_LARGE,
+        )
+    }
+}
+
 impl<E: Endpoint> Endpoint for RequestSizeTrackerImpl<E> {
     type Output = Response;
 
-    async fn call(&self, req: Request) -> Result<Self::Output> {
+    async fn call(&self, mut req: Request) -> Result<Self::Output> {
         let request_id = req
             .extensions()
             .get::<RequestIdExt>()
@@ -344,13 +371,14 @@ impl<E: Endpoint> Endpoint for RequestSizeTrackerImpl<E> {
 
         let path = req.uri().path().to_string();
 
-        // Check request size (enforce the hard limit before body handling)
-        if let Some(size) = req
+        let declared_size = req
             .headers()
             .get("content-length")
             .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse::<usize>().ok())
-        {
+            .and_then(|s| s.parse::<usize>().ok());
+
+        // Check request size (enforce the hard limit before body handling)
+        if let Some(size) = declared_size {
             if size > self.warn_request_size {
                 warn!(
                     request_id = %request_id,
@@ -370,17 +398,61 @@ impl<E: Endpoint> Endpoint for RequestSizeTrackerImpl<E> {
                     "Request body exceeds the maximum allowed size; rejecting with 413"
                 );
 
-                let body = ErrorResponse::new(
-                    "payload_too_large",
-                    format!(
-                        "Request body of {size} bytes exceeds the maximum of {} bytes",
+                return Err(self.too_large_error(format!(
+                    "Request body of {size} bytes exceeds the maximum of {} bytes",
+                    self.max_request_size
+                )));
+            }
+        } else {
+            // No declared size (`Transfer-Encoding: chunked`, or no body at all).
+            // The fast path above cannot fire, so bound the body while reading it,
+            // then hand the buffered bytes back to the downstream extractors.
+            let body = req.take_body();
+            match body.into_bytes_limit(self.max_request_size).await {
+                Ok(bytes) => {
+                    if bytes.len() > self.warn_request_size {
+                        warn!(
+                            request_id = %request_id,
+                            path = %path,
+                            size_bytes = bytes.len(),
+                            threshold_bytes = self.warn_request_size,
+                            "Large request body detected"
+                        );
+                    }
+                    req.set_body(bytes);
+                }
+                Err(poem::error::ReadBodyError::PayloadTooLarge) => {
+                    warn!(
+                        request_id = %request_id,
+                        path = %path,
+                        limit_bytes = self.max_request_size,
+                        "Undeclared-length request body exceeds the maximum allowed size; rejecting with 413"
+                    );
+
+                    return Err(self.too_large_error(format!(
+                        "Request body exceeds the maximum of {} bytes",
                         self.max_request_size
-                    ),
-                );
-                return Err(poem::Error::from_string(
-                    serde_json::to_string(&body).unwrap_or_default(),
-                    poem::http::StatusCode::PAYLOAD_TOO_LARGE,
-                ));
+                    )));
+                }
+                Err(read_err) => {
+                    // Transport-level failure mid-body: the body is unrecoverable, so
+                    // fail here rather than handing a truncated payload downstream.
+                    warn!(
+                        request_id = %request_id,
+                        path = %path,
+                        error = %read_err,
+                        "Failed to read request body"
+                    );
+
+                    let body = ErrorResponse::new(
+                        "invalid_request_body",
+                        format!("Failed to read request body: {read_err}"),
+                    );
+                    return Err(poem::Error::from_string(
+                        serde_json::to_string(&body).unwrap_or_default(),
+                        poem::http::StatusCode::BAD_REQUEST,
+                    ));
+                }
             }
         }
 
@@ -435,10 +507,15 @@ impl<E: Endpoint> Endpoint for RequestSizeTrackerImpl<E> {
 ///
 /// # Important limitation — background compute is NOT cancelled
 ///
-/// `tokio::time::timeout` only fires while the wrapped future is `Pending`. The
-/// heavy handlers (batch / heatmap / h3) therefore offload their synchronous
-/// rayon compute onto `tokio::task::spawn_blocking` so the async task yields at a
-/// real `.await`, letting this timeout fire. When the timeout fires we stop
+/// `tokio::time::timeout` only fires while the wrapped future is `Pending`. All
+/// four compute handlers (gain / batch / heatmap / h3) therefore offload their
+/// synchronous rayon compute onto `tokio::task::spawn_blocking` so the async task
+/// yields at a real `.await`, letting this timeout fire. A handler that computed
+/// inline would be structurally exempt from this deadline — it would return a
+/// late success instead of a 504 (that was the `/api/v1/gain` bug fixed by
+/// roadmap unit S2b; pinned by
+/// `integration::timeout_tests::test_heavy_single_gain_times_out_with_504`).
+/// When the timeout fires we stop
 /// awaiting and return a response to the client, but **the rayon work already
 /// running on the blocking pool is not aborted** — dropping the join handle does
 /// not stop the pool. It runs to completion (wasting CPU) until it finishes.

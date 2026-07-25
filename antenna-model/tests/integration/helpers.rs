@@ -211,6 +211,66 @@ impl Drop for TestServer {
     }
 }
 
+/// Build the full middleware-wrapped app **in process** — no TCP listener, no
+/// background server task, no HTTP client.
+///
+/// Call it with `poem::Endpoint::call`, which drives the identical middleware
+/// stack (`RequestId` → `RequestTimeout` → … → handler) that `TestServer` serves
+/// over a socket.
+///
+/// This exists for tests that need to control *scheduling order*. Over a socket,
+/// the request reaching the handler depends on real loopback I/O, which no amount
+/// of `tokio::time` control can order — under a paused clock the mocked time jumps
+/// past the deadline in microseconds of real time, before the request has arrived,
+/// so the timeout registers after the jump and never fires. In process, the
+/// request reaches the handler synchronously within the first poll of the task,
+/// which makes the ordering deterministic.
+pub fn build_in_process_app(
+    config: ServiceConfig,
+    timeout: Duration,
+) -> Result<impl poem::Endpoint, Box<dyn std::error::Error>> {
+    let repository = CalibrationRepository::load_from_config(&config.calibration)?;
+    let state = Arc::new(AppState::new(config, repository));
+
+    // Mirror the production startup sequence (roadmap S5), as `TestServer` does.
+    state.set_antenna_ids(state.repository.list_antennas());
+    state.mark_ready();
+
+    Ok(antenna_model::api::routes::create_routes_with_timeout(
+        state, timeout,
+    ))
+}
+
+/// POST `body` as JSON to `path` on an in-process app, returning
+/// `(status, body_bytes)`.
+///
+/// Uses `Endpoint::get_response`, which folds both the `Ok` and `Err` arms into a
+/// response — so a middleware rejection (413 / 504 / 503) is observed the way a
+/// client would observe it rather than surfacing as a bare `poem::Error`.
+pub async fn call_json<E: poem::Endpoint, B: serde::Serialize>(
+    app: &E,
+    path: &str,
+    body: &B,
+) -> (poem::http::StatusCode, Vec<u8>) {
+    let request = poem::Request::builder()
+        .method(poem::http::Method::POST)
+        .uri(path.parse().expect("valid test URI"))
+        .header("content-type", "application/json")
+        .body(serde_json::to_vec(body).expect("serializable request body"));
+
+    let response = app.get_response(request).await;
+
+    let status = response.status();
+    let bytes = response
+        .into_body()
+        .into_bytes()
+        .await
+        .expect("readable response body")
+        .to_vec();
+
+    (status, bytes)
+}
+
 /// Test data builders for creating realistic API requests
 pub mod builders {
     use super::*;
@@ -463,5 +523,136 @@ pub mod validators {
             }
             None => Err("Calibration status missing".to_string()),
         }
+    }
+}
+
+/// Raw HTTP/1.1 client for wire-level cases `reqwest` will not produce.
+///
+/// Specifically: sending a request body with `Transfer-Encoding: chunked` and
+/// **no** `content-length` header (roadmap S1b). `reqwest` only emits chunked
+/// bodies via its optional `stream` feature, and the point of these tests is the
+/// exact wire framing, so we speak HTTP directly instead of adding a dev-dep.
+pub mod raw_http {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpStream;
+
+    /// A parsed raw HTTP response.
+    pub struct RawResponse {
+        pub status: u16,
+        /// Response body with any `Transfer-Encoding: chunked` framing removed.
+        pub body: String,
+    }
+
+    impl RawResponse {
+        /// Deserialize the body as JSON.
+        pub fn json<T: serde::de::DeserializeOwned>(&self) -> T {
+            serde_json::from_str(&self.body)
+                .unwrap_or_else(|e| panic!("response body is not valid JSON ({e}): {}", self.body))
+        }
+    }
+
+    /// POST `body` to `base_url + path` framed as `Transfer-Encoding: chunked`,
+    /// deliberately omitting `content-length`.
+    ///
+    /// The body is sent as a single chunk. Keep test bodies small (a few KB): the
+    /// server may reject and stop draining before we finish writing, and a body
+    /// larger than the socket buffers would then deadlock the write.
+    pub async fn post_chunked(
+        base_url: &str,
+        path: &str,
+        body: &str,
+        request_id: &str,
+    ) -> Result<RawResponse, Box<dyn std::error::Error>> {
+        let authority = base_url.trim_start_matches("http://");
+        let mut stream = TcpStream::connect(authority).await?;
+
+        let head = format!(
+            "POST {path} HTTP/1.1\r\n\
+             Host: {authority}\r\n\
+             Content-Type: application/json\r\n\
+             Transfer-Encoding: chunked\r\n\
+             x-request-id: {request_id}\r\n\
+             Connection: close\r\n\
+             \r\n"
+        );
+        // Single chunk: <hex-length> CRLF <data> CRLF, then the zero-length terminator.
+        let framed = format!("{head}{:x}\r\n{body}\r\n0\r\n\r\n", body.len());
+
+        // Ignore write errors: on the over-limit path the server answers and closes
+        // mid-write, which is the behavior under test, not a failure.
+        let _ = stream.write_all(framed.as_bytes()).await;
+        let _ = stream.flush().await;
+
+        read_response(&mut stream).await
+    }
+
+    /// Send a bodyless `GET` (no `content-length`, no `transfer-encoding`).
+    pub async fn get(
+        base_url: &str,
+        path: &str,
+    ) -> Result<RawResponse, Box<dyn std::error::Error>> {
+        let authority = base_url.trim_start_matches("http://");
+        let mut stream = TcpStream::connect(authority).await?;
+
+        let req = format!("GET {path} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n");
+        stream.write_all(req.as_bytes()).await?;
+        stream.flush().await?;
+
+        read_response(&mut stream).await
+    }
+
+    /// Read to EOF (we always send `Connection: close`), then split head from body
+    /// and undo chunked framing if the server used it.
+    async fn read_response(
+        stream: &mut TcpStream,
+    ) -> Result<RawResponse, Box<dyn std::error::Error>> {
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await?;
+        let text = String::from_utf8_lossy(&raw).to_string();
+
+        let (head, body) = text
+            .split_once("\r\n\r\n")
+            .ok_or("malformed HTTP response: no header/body separator")?;
+
+        let status: u16 = head
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .ok_or("malformed HTTP response: no status line")?
+            .parse()?;
+
+        let chunked = head.lines().skip(1).any(|l| {
+            l.to_ascii_lowercase().starts_with("transfer-encoding:") && l.contains("chunked")
+        });
+
+        let body = if chunked {
+            decode_chunked(body)
+        } else {
+            body.to_string()
+        };
+
+        Ok(RawResponse { status, body })
+    }
+
+    /// Minimal chunked-transfer decoder: `<hex-len> CRLF <data> CRLF …  0 CRLF CRLF`.
+    fn decode_chunked(body: &str) -> String {
+        let mut out = String::new();
+        let mut rest = body;
+
+        while let Some((size_line, after)) = rest.split_once("\r\n") {
+            // Chunk extensions (`;ext=val`) are legal after the size; ignore them.
+            let size_hex = size_line.split(';').next().unwrap_or("").trim();
+            let size = match usize::from_str_radix(size_hex, 16) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            if after.len() < size {
+                break;
+            }
+            out.push_str(&after[..size]);
+            rest = after[size..].trim_start_matches("\r\n");
+        }
+
+        out
     }
 }
