@@ -243,18 +243,28 @@ service derives one from `frequency_mhz`:
 Either way, the resolution actually used is echoed back as `h3_resolution` in the
 response.
 
-**Reading the per-cell numbers.** Two fields have references that are easy to assume
-wrongly:
+**Reading the per-cell numbers.** Two fields have references worth reading before use:
 
-- **`loss_db` is relative to the grid centre cell, not to the beam peak.** It is
-  `gain(centre cell) − gain(this cell)`, where the centre cell is merely the one nearest
-  `feed_position`. The true peak generally lies in a slightly different direction, so a
-  cell closer to the peak than the centre cell returns a **negative** `loss_db`. The
-  worked example below shows this. `metadata.peak_gain_db` reports the highest gain over
-  the cells actually evaluated, which is the number to compare against if you want a
-  peak-referenced figure.
-- **`total_path_loss_db` is `free_space_path_loss_db + loss_db`**, so it inherits the same
-  centre-cell reference and can fall *below* the free-space value.
+- **`loss_db` is relative to the grid peak**, not to the grid centre cell. It is
+  `metadata.peak_gain_db − gain_db`, where `peak_gain_db` is the highest gain over the
+  cells actually evaluated — the same rule `/api/v1/heatmap` applies, so the field means
+  one thing on both heatmap endpoints. It is therefore never negative, is exactly `0.0` at
+  the peak cell, and can be re-derived from the response's own numbers.
+
+  The peak of the *grid* is not necessarily the peak of the *beam*: the grid is centred on
+  `feed_position`, and if the beam peak falls outside the rings you requested, every cell's
+  loss is understated by the difference. Widen `n_rings` if you need the true peak in view.
+  (`/api/v1/heatmap` carries the same caveat.)
+
+  The reference is one of the cells, so both sides of the subtraction share a basis by
+  construction. A grid can still straddle two bases where it leaves calibration coverage —
+  in-coverage cells corrected, out-of-coverage cells physics-only — as on `/api/v1/heatmap`.
+- **`total_path_loss_db` is `free_space_path_loss_db + loss_db`**. Because `loss_db` is
+  peak-referenced and non-negative, this never falls below the free-space value.
+
+If *no* cell evaluates successfully, `cells` is empty, `metadata.failed_points` equals
+`metadata.points_evaluated`, and `metadata.peak_gain_db` reports the sentinel `-999999.0` —
+there is no peak to reference, and the field is never `null`.
 
 `g_over_t_db` is `gain_db − 10·log₁₀(temperature_k)` and appears only when the request
 supplies `temperature_k`. That temperature is a pure passthrough — the service models no
@@ -317,8 +327,9 @@ curl -X POST http://localhost:3000/api/v1/h3-heatmap \
   }'
 ```
 
-Response (19 cells; the first two are shown, and the second is the one that illustrates a
-negative `loss_db` — it sits closer to the beam peak than the grid centre cell does):
+Response (19 cells; the first two are shown. Note that the grid **centre** cell is not the
+peak — the second cell shown is, at `loss_db: 0.0`, and the centre cell is 5.43 dB down
+from it. `loss_db` is referenced to that peak, so it is non-negative everywhere):
 
 <!-- api-example: H3LinkBudgetResponse -->
 ```json
@@ -337,9 +348,9 @@ negative `loss_db` — it sits closer to the beam peak than the grid centre cell
       "elevation_deg": 1.8951310668765187,
       "distance_km": 40.36081496141387,
       "gain_db": 29.176592765956944,
-      "loss_db": 0.0,
+      "loss_db": 5.431935877144003,
       "free_space_path_loss_db": 131.41543537598358,
-      "total_path_loss_db": 131.41543537598358,
+      "total_path_loss_db": 136.8473712531276,
       "g_over_t_db": 7.41568017540013
     },
     {
@@ -350,16 +361,16 @@ negative `loss_db` — it sits closer to the beam peak than the grid centre cell
       "elevation_deg": 1.084785862275493,
       "distance_km": 42.60000836115257,
       "gain_db": 34.60852864310095,
-      "loss_db": -5.431935877144003,
+      "loss_db": 0.0,
       "free_space_path_loss_db": 131.88443052517158,
-      "total_path_loss_db": 126.45249464802758,
+      "total_path_loss_db": 131.88443052517158,
       "g_over_t_db": 12.847616052544133
     }
   ],
   "warnings": ["Estimated spillover 21.2% may reduce aperture efficiency."],
   "metadata": {
     "points_evaluated": 19,
-    "computation_time_ms": 3.789584,
+    "computation_time_ms": 1.214708,
     "peak_gain_db": 34.60852864310095,
     "failed_points": 0
   },

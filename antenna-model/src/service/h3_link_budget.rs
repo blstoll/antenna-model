@@ -9,8 +9,11 @@
 //! 2. Find center H3 cell from feed position lat/lon
 //! 3. Generate grid disk of N rings around center cell
 //! 4. Build antenna configuration from calibration data
-//! 5. For each cell (parallel): compute az/el, look up gain via cache, compute FSPL and path loss
-//! 6. Return H3LinkBudgetResponse with per-cell results and metadata
+//! 5. For each cell (parallel): compute az/el, look up gain via cache, compute FSPL
+//! 6. Take the peak gain over the cells actually evaluated, then fill each cell's
+//!    `loss_db` / `total_path_loss_db` relative to it (roadmap C9 — the same rule
+//!    `service::heatmap` applies)
+//! 7. Return H3LinkBudgetResponse with per-cell results and metadata
 
 use crate::api::schemas::{
     CalibrationStatusInfo, CoordinateSystem, H3CellResult, H3LinkBudgetRequest,
@@ -415,147 +418,59 @@ pub fn compute_h3_link_budget_with_budget(
     // 5. Compute vehicle ECEF for distance calculations
     let (vehicle_ex, vehicle_ey, vehicle_ez) = pos_to_ecef(&request.vehicle_position)?;
 
-    // 6. Compute boresight gain (center cell) as reference peak for loss_db.
-    //    The correction surface is applied here so that loss_db = boresight_gain_db - cell_gain_db
-    //    is computed on a consistent basis (both corrected, or both physics-only).
-    let center_latlng_cell = h3o::LatLng::from(center_cell);
-    let center_lat = center_latlng_cell.lat();
-    let center_lon = center_latlng_cell.lng();
-    let (center_ex, center_ey, center_ez) = geodetic_to_ecef(center_lon, center_lat, 0.0)?;
-
-    let boresight_gain_db = {
-        // Earth-surface ECEF values are ~2–6 Mm, below the 6400 km auto-detect
-        // threshold; set explicit ECEF to prevent misclassification as Geodetic.
-        let mut cell_pos = Position3D::new(center_ex, center_ey, center_ez);
-        cell_pos.coordinate_system = Some(CoordinateSystem::ECEF);
-        let (az_deg, el_deg) = compute_emitter_direction_with_attitude(
-            &cell_pos,
-            &request.vehicle_position,
-            &request.reflector_boresight,
-            request.vehicle_attitude,
-        )?;
-
-        // Apply beam squint (honors pointing_frequency_mhz). Corrected angles are used for
-        // BOTH the cache key and the gain evaluation so cached values match the angle used.
-        let (az_deg, el_deg, _squint_deg) = squint_corrected_direction(
-            az_deg,
-            el_deg,
-            request.frequency_mhz,
-            pointing_freq,
-            feed_x,
-            feed_y,
-            focal_length_m,
-        );
-
-        let cache_key = GainCacheKey::new(
-            az_deg,
-            el_deg,
-            request.frequency_mhz,
-            feed_x,
-            feed_y,
-            feed_z,
-        );
-        let theta_rad = el_deg.to_radians();
-        let phi_rad = az_deg.to_radians();
-        // Cache stores physics-only gain; correction is applied below. This reference
-        // point's warnings are deliberately discarded: every warning it could raise is
-        // either configuration-derived (emitted once per request below) or geometry-
-        // derived at an angle some cell also covers, and a non-convergence here would
-        // be reported by the centre cell, which evaluates the same direction.
-        let physics_gain = cache
-            .get_or_compute(&request.antenna_id, &request.feed_id, cache_key, || {
-                let result = compute_gain_db(
-                    theta_rad,
-                    phi_rad,
-                    &antenna_config,
-                    frequency_hz,
-                    &integration_params,
-                )?;
-                Ok(CachedGain::new(
-                    result.gain,
-                    !result
-                        .warnings
-                        .iter()
-                        .any(|w| w == INTEGRATION_NONCONVERGENCE_WARNING),
-                ))
-            })?
-            .value;
-        // Apply correction surface to boresight reference for consistent loss_db.
-        if let Some(ref surface) = calibration.correction_surface {
-            if crate::service::evaluator::is_in_coverage(
-                &calibration.calibration_coverage,
-                az_deg,
-                el_deg,
-                request.frequency_mhz,
-            ) {
-                let corr = evaluate_correction(
-                    surface,
-                    az_deg,
-                    el_deg,
-                    request.frequency_mhz,
-                    calibration.validity_ranges.temperature_const,
-                )?;
-                physics_gain + corr.correction_db
-            } else {
-                physics_gain
-            }
-        } else {
-            physics_gain
-        }
-    };
-
-    // 7. Process each cell in parallel
+    // 6. Process each cell in parallel.
+    //    Pass 1 computes everything that does not need the grid peak: az/el, gain, distance,
+    //    FSPL, G/T. `loss_db` / `total_path_loss_db` are filled in pass 2 (step 8), once the
+    //    peak over the evaluated cells is known (roadmap C9). There is deliberately no
+    //    separate boresight reference evaluation any more: the reference is one of the cells.
     const PARALLEL_THRESHOLD: usize = 20;
 
-    let results: Vec<Result<(H3CellResult, Vec<String>, bool)>> =
-        if cells.len() >= PARALLEL_THRESHOLD {
-            cells
-                .par_iter()
-                .map(|&cell| {
-                    compute_cell_result(
-                        cell,
-                        request,
-                        calibration,
-                        &antenna_config,
-                        feed_x,
-                        feed_y,
-                        feed_z,
-                        cache,
-                        &integration_params,
-                        frequency_hz,
-                        vehicle_ex,
-                        vehicle_ey,
-                        vehicle_ez,
-                        boresight_gain_db,
-                    )
-                })
-                .collect()
-        } else {
-            cells
-                .iter()
-                .map(|&cell| {
-                    compute_cell_result(
-                        cell,
-                        request,
-                        calibration,
-                        &antenna_config,
-                        feed_x,
-                        feed_y,
-                        feed_z,
-                        cache,
-                        &integration_params,
-                        frequency_hz,
-                        vehicle_ex,
-                        vehicle_ey,
-                        vehicle_ez,
-                        boresight_gain_db,
-                    )
-                })
-                .collect()
-        };
+    let results: Vec<Result<(CellGain, Vec<String>, bool)>> = if cells.len() >= PARALLEL_THRESHOLD {
+        cells
+            .par_iter()
+            .map(|&cell| {
+                compute_cell_result(
+                    cell,
+                    request,
+                    calibration,
+                    &antenna_config,
+                    feed_x,
+                    feed_y,
+                    feed_z,
+                    cache,
+                    &integration_params,
+                    frequency_hz,
+                    vehicle_ex,
+                    vehicle_ey,
+                    vehicle_ez,
+                )
+            })
+            .collect()
+    } else {
+        cells
+            .iter()
+            .map(|&cell| {
+                compute_cell_result(
+                    cell,
+                    request,
+                    calibration,
+                    &antenna_config,
+                    feed_x,
+                    feed_y,
+                    feed_z,
+                    cache,
+                    &integration_params,
+                    frequency_hz,
+                    vehicle_ex,
+                    vehicle_ey,
+                    vehicle_ez,
+                )
+            })
+            .collect()
+    };
 
-    // 8. Separate successes and failures; track whether correction was applied to any cell.
-    let mut cell_results: Vec<H3CellResult> = Vec::with_capacity(cells.len());
+    // 7. Separate successes and failures; track whether correction was applied to any cell.
+    let mut cell_gains: Vec<CellGain> = Vec::with_capacity(cells.len());
     let mut warnings_set: HashSet<String> = HashSet::new();
     let mut failed_count = 0usize;
     let mut any_correction_applied = false;
@@ -573,8 +488,8 @@ pub fn compute_h3_link_budget_with_budget(
 
     for result in results {
         match result {
-            Ok((cell_result, cell_warnings, correction_applied)) => {
-                cell_results.push(cell_result);
+            Ok((cell_gain, cell_warnings, correction_applied)) => {
+                cell_gains.push(cell_gain);
                 for w in cell_warnings {
                     warnings_set.insert(w);
                 }
@@ -587,18 +502,56 @@ pub fn compute_h3_link_budget_with_budget(
         }
     }
 
-    // Compute peak gain across all cells
-    let peak_gain_db = cell_results
+    // 8. Pass 2 (roadmap C9): the loss reference is the peak gain over the cells actually
+    //    evaluated — the rule `service::heatmap` already applies, so the two heatmap
+    //    endpoints give `loss_db` one meaning. Every cell's loss is therefore ≥ 0, the peak
+    //    cell's is exactly 0, and the response is internally re-derivable
+    //    (`loss_db == metadata.peak_gain_db − gain_db`).
+    //
+    //    Basis note: the reference is one of the cells, so both sides of the subtraction
+    //    share a basis by construction. A grid can still straddle two bases — cells outside
+    //    calibration coverage are uncorrected while in-coverage cells are corrected —
+    //    exactly as `/heatmap` already does.
+    let peak_gain_db = cell_gains
         .iter()
         .map(|c| c.gain_db)
         .filter(|g| g.is_finite())
         .fold(f64::NEG_INFINITY, f64::max);
 
+    // No cell yielded a finite gain (every cell failed, or every gain was non-finite):
+    // there is no peak to reference. Report the finite sentinel rather than -inf, which
+    // would serialize to `null` for a field the schema declares as a number.
     let peak_gain_db = if peak_gain_db.is_finite() {
         peak_gain_db
     } else {
-        boresight_gain_db
+        crate::service::heatmap::NO_PEAK_GAIN_DB
     };
+
+    let cell_results: Vec<H3CellResult> = cell_gains
+        .into_iter()
+        .map(|c| {
+            // A non-finite cell gain has no meaningful loss; use the same sentinel
+            // `/heatmap` reports for a failed grid point rather than emitting NaN/-inf.
+            let loss_db = if c.gain_db.is_finite() && peak_gain_db.is_finite() {
+                peak_gain_db - c.gain_db
+            } else {
+                crate::service::heatmap::FAILED_POINT_LOSS_DB
+            };
+            H3CellResult {
+                cell_id: c.cell_id,
+                center_lon: c.center_lon,
+                center_lat: c.center_lat,
+                azimuth_deg: c.azimuth_deg,
+                elevation_deg: c.elevation_deg,
+                distance_km: c.distance_km,
+                gain_db: c.gain_db,
+                loss_db,
+                free_space_path_loss_db: c.free_space_path_loss_db,
+                total_path_loss_db: loss_db + c.free_space_path_loss_db,
+                g_over_t_db: c.g_over_t_db,
+            }
+        })
+        .collect();
 
     let mut warnings: Vec<String> = warnings_set.into_iter().collect();
     warnings.sort();
@@ -635,7 +588,25 @@ pub fn compute_h3_link_budget_with_budget(
     })
 }
 
-/// Compute the link budget result for a single H3 cell.
+/// A cell's per-cell quantities, computed before the grid peak is known.
+///
+/// `loss_db` and `total_path_loss_db` are deliberately absent: since roadmap C9 they are
+/// referenced to the peak gain over the whole grid, which cannot be known until every cell
+/// has been evaluated. Keeping them out of this struct makes the second pass mandatory —
+/// `H3CellResult` is constructed only there, so a cell cannot escape with an unfilled loss.
+struct CellGain {
+    cell_id: String,
+    center_lon: f64,
+    center_lat: f64,
+    azimuth_deg: f64,
+    elevation_deg: f64,
+    distance_km: f64,
+    gain_db: f64,
+    free_space_path_loss_db: f64,
+    g_over_t_db: Option<f64>,
+}
+
+/// Compute the peak-independent link budget quantities for a single H3 cell.
 #[allow(clippy::too_many_arguments)]
 fn compute_cell_result(
     cell: h3o::CellIndex,
@@ -651,8 +622,7 @@ fn compute_cell_result(
     vehicle_ex: f64,
     vehicle_ey: f64,
     vehicle_ez: f64,
-    boresight_gain_db: f64,
-) -> Result<(H3CellResult, Vec<String>, bool)> {
+) -> Result<(CellGain, Vec<String>, bool)> {
     // Get cell center lat/lon
     let latlng = h3o::LatLng::from(cell);
     let lat_deg = latlng.lat();
@@ -685,14 +655,9 @@ fn compute_cell_result(
             frequency_hz,
         )?;
 
-    // Compute losses.
-    // loss_db = boresight_gain_db - gain_db, where both values are on the same
-    // basis (both physics+correction, or both physics-only). The boresight reference
-    // computed in step 6 of `compute_h3_link_budget` uses the same correction gating,
-    // so loss_db is a consistent relative measure.
-    let loss_db = boresight_gain_db - gain_db;
+    // Free-space path loss is peak-independent, so it is computed here. `loss_db` and
+    // `total_path_loss_db` are filled by the caller's second pass, against the grid peak.
     let fspl = free_space_path_loss_db(distance_m, frequency_hz);
-    let total_path_loss_db = loss_db + fspl;
 
     // G/T computation (if temperature provided) — shared formula, see
     // `pattern::g_over_t_from_gain_db`. T is a user-supplied passthrough (F4).
@@ -701,7 +666,7 @@ fn compute_cell_result(
         .map(|t| crate::model::pattern::g_over_t_from_gain_db(gain_db, t));
 
     Ok((
-        H3CellResult {
+        CellGain {
             cell_id: format!("{}", cell),
             center_lon: lon_deg,
             center_lat: lat_deg,
@@ -709,9 +674,7 @@ fn compute_cell_result(
             elevation_deg,
             distance_km,
             gain_db,
-            loss_db,
             free_space_path_loss_db: fspl,
-            total_path_loss_db,
             g_over_t_db,
         },
         cell_warnings,
@@ -1236,8 +1199,7 @@ mod tests {
     /// as the `/gain` endpoint for the identical geometry.
     ///
     /// `make_h3_test_request` uses `n_rings: 0`, so `compute_h3_link_budget` yields
-    /// exactly one cell (the center cell) and its `azimuth_deg`/`elevation_deg` are
-    /// derived from that same center cell used as the boresight reference — so
+    /// exactly one cell (the center cell), which is therefore also the grid peak — so
     /// `loss_db` is 0 and `gain_db` is the raw (spillover-gated) physics+correction
     /// gain for that single point. We reconstruct the identical emitter geometry
     /// (feed lat/lon -> H3 center cell -> ECEF at alt 0, same resolution-selection
@@ -1322,6 +1284,125 @@ mod tests {
              geometry (both spillover-gated identically for an uncalibrated antenna)",
             cell.gain_db,
             gain_response.gain_db
+        );
+    }
+
+    /// C9 regression: `loss_db` is referenced to the **grid peak**, not the grid centre.
+    ///
+    /// The design feed is displaced laterally by 0.3 m on a 10 m / f=5 m dish (0.06·f), which
+    /// steers the beam well off the pointing target, so the peak cell is emphatically *not*
+    /// the centre cell. Under the pre-C9 centre-cell reference this geometry produced
+    /// `loss_db == 0` at the centre and **negative** losses at the stronger cells; the
+    /// assertions below fail outright on that code.
+    #[test]
+    fn h3_loss_is_referenced_to_the_grid_peak_not_the_centre_cell() {
+        let mut calibration = make_h3_test_calibration();
+        // Lateral design-feed displacement → steered beam → peak away from grid centre.
+        calibration.physical_config.feed.position = (0.3, 0.0, 0.0);
+
+        let mut request = make_h3_test_request();
+        request.n_rings = 2; // 19 cells
+
+        let cache = GainCache::new(false, 1);
+        let response =
+            compute_h3_link_budget(&request, &calibration, &cache, std::time::Instant::now())
+                .expect("h3 link budget computation failed");
+        assert_eq!(response.cells.len(), 19, "n_rings=2 must yield 19 cells");
+        assert_eq!(response.metadata.failed_points, 0, "no cell should fail");
+
+        // Non-vacuous: the steered beam must actually put the peak off the centre cell,
+        // otherwise this test would pass under the old rule too.
+        let centre = response
+            .cells
+            .iter()
+            .find(|c| c.cell_id == response.center_cell_id)
+            .expect("centre cell must be present");
+        assert!(
+            centre.gain_db < response.metadata.peak_gain_db - 0.5,
+            "test geometry is vacuous: centre cell gain {:.3} dB is (near) the grid peak \
+             {:.3} dB — the steered beam should have moved the peak off centre",
+            centre.gain_db,
+            response.metadata.peak_gain_db
+        );
+        assert!(
+            centre.loss_db > 0.5,
+            "the centre cell is no longer the reference, so its loss must be positive; got {}",
+            centre.loss_db
+        );
+
+        let mut zero_loss_cells = 0usize;
+        for cell in &response.cells {
+            assert!(
+                cell.loss_db >= 0.0,
+                "cell {}: loss_db must never be negative under a peak reference, got {}",
+                cell.cell_id,
+                cell.loss_db
+            );
+            // Internally re-derivable from the values the response itself reports.
+            assert!(
+                (cell.loss_db - (response.metadata.peak_gain_db - cell.gain_db)).abs() < 1e-9,
+                "cell {}: loss_db {} != peak_gain_db {} - gain_db {}",
+                cell.cell_id,
+                cell.loss_db,
+                response.metadata.peak_gain_db,
+                cell.gain_db
+            );
+            assert!(
+                cell.total_path_loss_db >= cell.free_space_path_loss_db,
+                "cell {}: total_path_loss_db {} must not fall below free-space {}",
+                cell.cell_id,
+                cell.total_path_loss_db,
+                cell.free_space_path_loss_db
+            );
+            if cell.loss_db == 0.0 {
+                zero_loss_cells += 1;
+                assert!(
+                    (cell.gain_db - response.metadata.peak_gain_db).abs() < 1e-12,
+                    "the zero-loss cell must be the peak cell"
+                );
+            }
+        }
+        assert_eq!(
+            zero_loss_cells, 1,
+            "exactly one cell (the peak) should have loss_db == 0.0"
+        );
+    }
+
+    /// C9 degenerate case: when *no* cell yields a finite gain there is no peak to
+    /// reference. The pre-C9 code fell back to the separate boresight evaluation, which no
+    /// longer exists. Assert the response stays finite and self-describing rather than
+    /// serializing `peak_gain_db` as JSON `null`.
+    #[test]
+    fn h3_all_cells_failed_reports_a_finite_peak_sentinel() {
+        let calibration = make_h3_test_calibration();
+        let mut request = make_h3_test_request();
+        request.n_rings = 1; // 7 cells
+
+        let cache = GainCache::new(false, 1);
+        // A zero wall-clock budget makes every per-cell aperture integration abort (S3).
+        let response = compute_h3_link_budget_with_budget(
+            &request,
+            &calibration,
+            &cache,
+            std::time::Instant::now(),
+            Duration::ZERO,
+        )
+        .expect("the request itself must still succeed when every cell fails");
+
+        assert!(response.cells.is_empty(), "every cell should have failed");
+        assert_eq!(response.metadata.failed_points, 7);
+        assert_eq!(
+            response.metadata.points_evaluated, 7,
+            "failed_points == points_evaluated is how a client detects the degenerate case"
+        );
+        assert!(
+            response.metadata.peak_gain_db.is_finite(),
+            "peak_gain_db must stay finite (serde emits null for -inf), got {}",
+            response.metadata.peak_gain_db
+        );
+        assert_eq!(
+            response.metadata.peak_gain_db,
+            crate::service::heatmap::NO_PEAK_GAIN_DB
         );
     }
 }

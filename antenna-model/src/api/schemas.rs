@@ -558,10 +558,17 @@ pub struct HeatmapMetadata {
     /// Total computation time in milliseconds
     pub computation_time_ms: f64,
 
-    /// Peak gain in dB (reference for loss calculation)
+    /// Highest gain in dB over the grid points (or H3 cells) that evaluated successfully.
+    /// This is the reference every `loss_db` in the response is measured against.
+    ///
+    /// When *no* point evaluated successfully there is no peak, and the sentinel
+    /// `-999999.0` is reported (never `null`); `failed_points` then equals
+    /// `points_evaluated`.
     pub peak_gain_db: f64,
 
-    /// Number of grid points that failed to compute (gain replaced with sentinel 999999.0)
+    /// Number of grid points that failed to compute (loss replaced with sentinel 999999.0).
+    /// On `/api/v1/h3-heatmap` a failed cell is omitted from `cells` entirely, so this is
+    /// the only place it is reported.
     pub failed_points: usize,
 }
 
@@ -655,18 +662,28 @@ pub struct H3CellResult {
     /// Antenna gain toward cell center in dB
     pub gain_db: f64,
 
-    /// Gain relative to the grid-center cell (feed ground target), in dB.
-    /// Computed as `boresight_gain_db - gain_db`, where `boresight_gain_db` is the
-    /// gain toward the center H3 cell (the cell nearest the feed pointing location),
-    /// not the true beam peak (which may lie at a slightly different direction).
-    /// Both `boresight_gain_db` and `gain_db` are on the same basis (physics +
-    /// correction surface, if applicable), so loss_db is internally consistent.
+    /// Gain relative to the grid peak, in dB — always ≥ 0, and exactly 0 at the peak cell.
+    ///
+    /// Computed as `metadata.peak_gain_db - gain_db`, where `peak_gain_db` is the highest
+    /// gain over the cells **actually evaluated** (roadmap C9). This is the same rule
+    /// `/api/v1/heatmap` applies, so the field means one thing on both heatmap endpoints,
+    /// and the response is internally re-derivable from the values it reports.
+    ///
+    /// The peak of the *grid* is not necessarily the peak of the *beam*: a grid that does
+    /// not contain the beam peak understates loss for every cell in it.
+    ///
+    /// Both gains are on the same basis by construction — the reference *is* one of the
+    /// cells. A grid can still straddle two bases where it leaves calibration coverage
+    /// (in-coverage cells corrected, out-of-coverage cells physics-only), as on
+    /// `/api/v1/heatmap`.
     pub loss_db: f64,
 
     /// Free-space path loss in dB
     pub free_space_path_loss_db: f64,
 
-    /// Total path loss (free-space + other losses) in dB
+    /// Total path loss in dB: `free_space_path_loss_db + loss_db`. Since `loss_db` is
+    /// referenced to the grid peak it is never negative, so this is never below the
+    /// free-space path loss.
     pub total_path_loss_db: f64,
 
     /// G/T (Gain-over-Temperature) in dB/K (present only when temperature_k was provided)
