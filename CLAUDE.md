@@ -65,6 +65,12 @@ cargo audit
 
 # Generate docs
 cargo doc --open
+
+# Run all checks exactly as CI does (fmt --check, clippy --workspace
+# --all-targets -D warnings, full workspace tests, cargo audit) — single
+# entrypoint. Sets RUST_MIN_STACK to match CI; the ad-hoc one-liners above
+# do not, and calibrate's 3D→4D round-trip overflows the default stack.
+./scripts/check.sh
 ```
 
 ## Architecture
