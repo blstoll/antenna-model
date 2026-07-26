@@ -31,7 +31,13 @@ use num_complex::Complex64;
 /// iteration budget without meeting the convergence criterion.  Extracted as a
 /// constant so the text stays consistent across all four gain-computation helpers
 /// and the existing test can rely on `.contains("did not converge")`.
-const INTEGRATION_NONCONVERGENCE_WARNING: &str =
+///
+/// `pub` since roadmap unit C10: `/h3-heatmap` re-emits this string from the
+/// convergence flag carried on its cached gain values
+/// ([`crate::service::CachedGain`]), because the cache hit that serves a
+/// non-converged value is exactly the path that never runs the integration that
+/// would raise the warning here.
+pub const INTEGRATION_NONCONVERGENCE_WARNING: &str =
     "aperture integration did not converge; gain accuracy may be degraded";
 
 /// Warning message emitted when a feed offset exceeds the severe threshold

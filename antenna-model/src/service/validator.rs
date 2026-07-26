@@ -23,7 +23,7 @@ use crate::api::schemas::{
     HeatmapRequest, Position3D, RangeConfig,
 };
 use crate::data::repository::CalibrationRepository;
-use crate::error::{ValidationError, ValidationResult};
+use crate::error::{BatchValidationError, ValidationError, ValidationResult};
 
 // ============================================================================
 // Constants
@@ -109,6 +109,24 @@ pub fn validate_gain_request(
 ///
 /// Validates the batch size and each individual gain request.
 ///
+/// # Whole-batch rejection (roadmap unit C2, call C)
+///
+/// This runs as a **pre-check** in the `/api/v1/gain/batch` handler, before any
+/// physics. A single invalid item rejects the whole request. That is a deliberate
+/// change from the pre-C2 behavior, where nothing validated items at all: a bad item
+/// reached the evaluator, failed there, and came back inside an **HTTP 200** as
+/// `"gain_db": null` (a `f64::NAN` that `serde_json` renders as `null`) with the
+/// reason in a per-item `warnings` string. A client checking the status code saw
+/// success.
+///
+/// Per-item degradation still exists, but only for *compute*-class failures —
+/// over-budget, non-convergence — which cannot be predicted before running the
+/// integral.
+///
+/// The returned error carries the failing item's index *and* its failure class, so
+/// the handler can answer 404 for an absent antenna and 422 for a bad parameter; see
+/// [`BatchValidationError`].
+///
 /// # Arguments
 ///
 /// * `request` - The batch request to validate
@@ -116,35 +134,33 @@ pub fn validate_gain_request(
 ///
 /// # Errors
 ///
-/// Returns `ValidationError` if batch size exceeds limit or any
-/// individual request is invalid.
+/// Returns `BatchValidationError` if the batch is empty, exceeds the size limit, or
+/// any individual request is invalid.
 pub fn validate_batch_gain_request(
     request: &BatchGainRequest,
     repository: &CalibrationRepository,
-) -> ValidationResult<()> {
+) -> std::result::Result<(), BatchValidationError> {
     // Check batch size limit
     if request.evaluations.len() > MAX_BATCH_SIZE {
-        return Err(ValidationError::BatchSizeLimitExceeded {
-            size: request.evaluations.len(),
-            limit: MAX_BATCH_SIZE,
-        });
+        return Err(BatchValidationError::Batch(
+            ValidationError::BatchSizeLimitExceeded {
+                size: request.evaluations.len(),
+                limit: MAX_BATCH_SIZE,
+            },
+        ));
     }
 
     if request.evaluations.is_empty() {
-        return Err(ValidationError::InvalidValue {
+        return Err(BatchValidationError::Batch(ValidationError::InvalidValue {
             param: "evaluations".to_string(),
             reason: "batch must contain at least one evaluation".to_string(),
-        });
+        }));
     }
 
-    // Validate each request in the batch
-    for (i, gain_request) in request.evaluations.iter().enumerate() {
-        validate_gain_request(gain_request, repository).map_err(|e| {
-            ValidationError::InvalidValue {
-                param: format!("evaluations[{}]", i),
-                reason: e.to_string(),
-            }
-        })?;
+    // Validate each request in the batch, reporting the first failure with its index.
+    for (index, gain_request) in request.evaluations.iter().enumerate() {
+        validate_gain_request(gain_request, repository)
+            .map_err(|source| BatchValidationError::Item { index, source })?;
     }
 
     Ok(())
@@ -409,7 +425,12 @@ fn validate_temperature(t_k: f64, param: &str) -> ValidationResult<()> {
 // ============================================================================
 
 /// Validate that antenna and feed exist in repository.
-fn validate_antenna_feed_exists(
+///
+/// Public because the `/api/v1/h3-heatmap` handler needs it directly: its request
+/// validator does not take the repository (it looks the calibration up itself), and
+/// before C2 it hand-built a parallel not-found rejection. Calling this instead keeps
+/// all four endpoints on one construction path and one wire shape.
+pub fn validate_antenna_feed_exists(
     antenna_id: &str,
     feed_id: &str,
     repository: &CalibrationRepository,
@@ -429,25 +450,25 @@ fn validate_antenna_feed_exists(
         });
     }
 
-    // Check if antenna and feed exist in repository
+    // Check if antenna and feed exist in repository.
+    //
+    // Absence is reported as the dedicated not-found variants, NOT as
+    // `InvalidAntennaId` / `InvalidValue` (roadmap C2): those map to 422, and before
+    // C2 that is exactly what happened — `/gain` and `/heatmap` answered 422 for an
+    // unknown antenna while `/h3-heatmap`, which reaches its own lookup instead,
+    // answered 404 for the identical input.
     if !repository.has_calibration(antenna_id, feed_id) {
-        // Determine if antenna exists at all
-        if repository.list_feeds(antenna_id).is_empty() {
-            return Err(ValidationError::InvalidAntennaId {
+        let available = repository.list_feeds(antenna_id);
+        if available.is_empty() {
+            return Err(ValidationError::AntennaNotFound {
                 antenna_id: antenna_id.to_string(),
-                reason: "antenna not found in calibration repository".to_string(),
-            });
-        } else {
-            // Antenna exists but feed doesn't
-            let available_feeds = repository.list_feeds(antenna_id);
-            return Err(ValidationError::InvalidValue {
-                param: "feed_id".to_string(),
-                reason: format!(
-                    "feed '{}' not found for antenna '{}'. Available feeds: {:?}",
-                    feed_id, antenna_id, available_feeds
-                ),
             });
         }
+        return Err(ValidationError::FeedNotFound {
+            antenna_id: antenna_id.to_string(),
+            feed_id: feed_id.to_string(),
+            available,
+        });
     }
 
     Ok(())

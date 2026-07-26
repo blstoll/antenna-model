@@ -8,7 +8,45 @@ use lru::LruCache;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
-type FeedCache = Mutex<LruCache<GainCacheKey, f64>>;
+type FeedCache = Mutex<LruCache<GainCacheKey, CachedGain>>;
+
+/// A cached physics-gain value together with the one piece of its provenance that
+/// cannot be re-derived without redoing the integration a cache hit exists to skip.
+///
+/// The cache deliberately stores **only** what is specific to the cached
+/// `(az, el, freq, feed)` point. Warnings that are a pure function of the antenna
+/// configuration — spillover, the feed-offset band, the ray-tracing stub — are
+/// re-derived by the caller on every request, hit or miss, so a warm cache cannot
+/// swallow them (`analyze_edge_cases` ignores `(theta, phi)` outright, so they are
+/// identical at every point anyway).
+///
+/// Convergence is the exception that forces this type to exist: it describes *this*
+/// number, produced by *this* integration, and it is exactly what a cache hit skips
+/// recomputing — so it has to ride along with the value. Before roadmap unit C10 it
+/// did not, and a warm `/h3-heatmap` served non-converged gains with no warning at
+/// all, silently breaking the "never silent" guarantee the P10 self-check exists to
+/// provide.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CachedGain {
+    /// Physics-only gain (dB) at the cached point.
+    pub value: f64,
+    /// `false` when the integrator's self-check did not converge at this point.
+    pub converged: bool,
+}
+
+impl CachedGain {
+    /// A value whose integration converged — the ordinary case.
+    pub fn converged(value: f64) -> Self {
+        Self {
+            value,
+            converged: true,
+        }
+    }
+
+    pub fn new(value: f64, converged: bool) -> Self {
+        Self { value, converged }
+    }
+}
 
 /// Quantized cache key for a gain lookup.
 /// All floats are rounded to integers to make them hashable.
@@ -67,15 +105,20 @@ impl GainCache {
 
     /// Get a cached gain value, or compute and cache it.
     /// If cache is disabled, always calls compute.
+    ///
+    /// The closure returns a [`CachedGain`] rather than a bare `f64` so that
+    /// convergence — which only the computation knows and only the *miss* path runs
+    /// — survives into every later hit. See [`CachedGain`] for why nothing else about
+    /// the computation belongs in here.
     pub fn get_or_compute<F>(
         &self,
         antenna_id: &str,
         feed_id: &str,
         key: GainCacheKey,
         compute: F,
-    ) -> crate::error::Result<f64>
+    ) -> crate::error::Result<CachedGain>
     where
-        F: FnOnce() -> crate::error::Result<f64>,
+        F: FnOnce() -> crate::error::Result<CachedGain>,
     {
         if !self.enabled {
             return compute();
@@ -148,13 +191,13 @@ mod tests {
         let call_count = Arc::new(AtomicUsize::new(0));
         let cc = call_count.clone();
 
-        let result: crate::error::Result<f64> =
+        let result: crate::error::Result<CachedGain> =
             cache.get_or_compute("ant1", "feed1", test_key(45.0), || {
                 cc.fetch_add(1, Ordering::SeqCst);
-                Ok(12.5)
+                Ok(CachedGain::converged(12.5))
             });
 
-        assert_eq!(result.unwrap(), 12.5);
+        assert_eq!(result.unwrap().value, 12.5);
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
     }
 
@@ -165,21 +208,21 @@ mod tests {
 
         // Prime the cache
         let cc = call_count.clone();
-        let _: crate::error::Result<f64> =
+        let _: crate::error::Result<CachedGain> =
             cache.get_or_compute("ant1", "feed1", test_key(45.0), || {
                 cc.fetch_add(1, Ordering::SeqCst);
-                Ok(12.5)
+                Ok(CachedGain::converged(12.5))
             });
 
         // Second call should hit cache
         let cc = call_count.clone();
-        let result: crate::error::Result<f64> =
+        let result: crate::error::Result<CachedGain> =
             cache.get_or_compute("ant1", "feed1", test_key(45.0), || {
                 cc.fetch_add(1, Ordering::SeqCst);
-                Ok(99.0)
+                Ok(CachedGain::converged(99.0))
             });
 
-        assert_eq!(result.unwrap(), 12.5); // got cached value, not 99.0
+        assert_eq!(result.unwrap().value, 12.5); // got cached value, not 99.0
         assert_eq!(call_count.load(Ordering::SeqCst), 1); // compute only called once
     }
 
@@ -187,20 +230,26 @@ mod tests {
     fn test_lru_eviction() {
         let cache = GainCache::new(true, 2); // max 2 entries
 
-        let _: crate::error::Result<f64> =
-            cache.get_or_compute("ant1", "feed1", test_key(1.0), || Ok(1.0));
-        let _: crate::error::Result<f64> =
-            cache.get_or_compute("ant1", "feed1", test_key(2.0), || Ok(2.0));
-        let _: crate::error::Result<f64> =
-            cache.get_or_compute("ant1", "feed1", test_key(3.0), || Ok(3.0)); // evicts key(1.0)
+        let _: crate::error::Result<CachedGain> =
+            cache.get_or_compute("ant1", "feed1", test_key(1.0), || {
+                Ok(CachedGain::converged(1.0))
+            });
+        let _: crate::error::Result<CachedGain> =
+            cache.get_or_compute("ant1", "feed1", test_key(2.0), || {
+                Ok(CachedGain::converged(2.0))
+            });
+        let _: crate::error::Result<CachedGain> =
+            cache.get_or_compute("ant1", "feed1", test_key(3.0), || {
+                Ok(CachedGain::converged(3.0))
+            }); // evicts key(1.0)
 
         let call_count = Arc::new(AtomicUsize::new(0));
         // key(1.0) should be evicted — compute should be called again
         let cc = call_count.clone();
-        let _: crate::error::Result<f64> =
+        let _: crate::error::Result<CachedGain> =
             cache.get_or_compute("ant1", "feed1", test_key(1.0), || {
                 cc.fetch_add(1, Ordering::SeqCst);
-                Ok(1.0)
+                Ok(CachedGain::converged(1.0))
             });
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
     }
@@ -212,28 +261,28 @@ mod tests {
 
         // 45.0000 and 45.0004 are within 0.0005° → same quantized key (both round to 45000 millideg)
         let cc = call_count.clone();
-        let _: crate::error::Result<f64> = cache.get_or_compute(
+        let _: crate::error::Result<CachedGain> = cache.get_or_compute(
             "ant1",
             "feed1",
             GainCacheKey::new(45.0000, 10.0, 12000.0, 0.0, 0.0, 0.0),
             || {
                 cc.fetch_add(1, Ordering::SeqCst);
-                Ok(5.0)
+                Ok(CachedGain::converged(5.0))
             },
         );
 
         let cc = call_count.clone();
-        let result: crate::error::Result<f64> = cache.get_or_compute(
+        let result: crate::error::Result<CachedGain> = cache.get_or_compute(
             "ant1",
             "feed1",
             GainCacheKey::new(45.0004, 10.0, 12000.0, 0.0, 0.0, 0.0),
             || {
                 cc.fetch_add(1, Ordering::SeqCst);
-                Ok(9.0)
+                Ok(CachedGain::converged(9.0))
             },
         );
 
-        assert_eq!(result.unwrap(), 5.0); // cache hit, same bucket
+        assert_eq!(result.unwrap().value, 5.0); // cache hit, same bucket
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
     }
 
@@ -242,19 +291,21 @@ mod tests {
         let cache = GainCache::new(true, 100);
         let key = test_key(45.0);
 
-        let _: crate::error::Result<f64> =
-            cache.get_or_compute("ant1", "feed1", key.clone(), || Ok(10.0));
+        let _: crate::error::Result<CachedGain> =
+            cache.get_or_compute("ant1", "feed1", key.clone(), || {
+                Ok(CachedGain::converged(10.0))
+            });
 
         let call_count = Arc::new(AtomicUsize::new(0));
         let cc = call_count.clone();
         // Different feed_id — should be a miss
-        let result: crate::error::Result<f64> =
+        let result: crate::error::Result<CachedGain> =
             cache.get_or_compute("ant1", "feed2", key.clone(), || {
                 cc.fetch_add(1, Ordering::SeqCst);
-                Ok(20.0)
+                Ok(CachedGain::converged(20.0))
             });
 
-        assert_eq!(result.unwrap(), 20.0);
+        assert_eq!(result.unwrap().value, 20.0);
         assert_eq!(call_count.load(Ordering::SeqCst), 1);
     }
 
@@ -262,16 +313,18 @@ mod tests {
     fn test_invalidate_clears_feed() {
         let cache = GainCache::new(true, 100);
 
-        let _: crate::error::Result<f64> =
-            cache.get_or_compute("ant1", "feed1", test_key(45.0), || Ok(7.0));
+        let _: crate::error::Result<CachedGain> =
+            cache.get_or_compute("ant1", "feed1", test_key(45.0), || {
+                Ok(CachedGain::converged(7.0))
+            });
         cache.invalidate("ant1", "feed1");
 
         let call_count = Arc::new(AtomicUsize::new(0));
         let cc = call_count.clone();
-        let _: crate::error::Result<f64> =
+        let _: crate::error::Result<CachedGain> =
             cache.get_or_compute("ant1", "feed1", test_key(45.0), || {
                 cc.fetch_add(1, Ordering::SeqCst);
-                Ok(7.0)
+                Ok(CachedGain::converged(7.0))
             });
 
         assert_eq!(call_count.load(Ordering::SeqCst), 1); // had to recompute
@@ -282,23 +335,63 @@ mod tests {
         let cache = GainCache::new(true, 100);
         let key = test_key(45.0);
 
-        let _: crate::error::Result<f64> =
-            cache.get_or_compute("ant1", "feed1", key.clone(), || Ok(1.0));
-        let _: crate::error::Result<f64> =
-            cache.get_or_compute("ant1", "feed2", key.clone(), || Ok(2.0));
+        let _: crate::error::Result<CachedGain> =
+            cache.get_or_compute("ant1", "feed1", key.clone(), || {
+                Ok(CachedGain::converged(1.0))
+            });
+        let _: crate::error::Result<CachedGain> =
+            cache.get_or_compute("ant1", "feed2", key.clone(), || {
+                Ok(CachedGain::converged(2.0))
+            });
 
         cache.invalidate("ant1", "feed1"); // only clear feed1
 
         let call_count = Arc::new(AtomicUsize::new(0));
         let cc = call_count.clone();
         // feed2 should still be in cache
-        let result: crate::error::Result<f64> =
+        let result: crate::error::Result<CachedGain> =
             cache.get_or_compute("ant1", "feed2", key.clone(), || {
                 cc.fetch_add(1, Ordering::SeqCst);
-                Ok(99.0)
+                Ok(CachedGain::converged(99.0))
             });
-        assert_eq!(result.unwrap(), 2.0);
+        assert_eq!(result.unwrap().value, 2.0);
         assert_eq!(call_count.load(Ordering::SeqCst), 0);
+    }
+
+    /// The convergence flag must survive a cache hit (roadmap C10).
+    ///
+    /// This is the property the whole [`CachedGain`] type exists for: a hit skips the
+    /// integration, so if the flag did not ride along with the value there would be no
+    /// way to know the served number came from a non-converged integral. Asserting the
+    /// hit's `value` alone would pass even with the flag dropped, which is precisely how
+    /// the pre-C10 bug survived.
+    #[test]
+    fn test_nonconvergence_flag_survives_cache_hit() {
+        let cache = GainCache::new(true, 100);
+
+        // Prime with a NON-converged value.
+        let primed: crate::error::Result<CachedGain> =
+            cache.get_or_compute("ant1", "feed1", test_key(45.0), || {
+                Ok(CachedGain::new(12.5, false))
+            });
+        assert!(!primed.unwrap().converged);
+
+        // Hit: the closure must not run, and the flag must come back false.
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let cc = call_count.clone();
+        let hit: crate::error::Result<CachedGain> =
+            cache.get_or_compute("ant1", "feed1", test_key(45.0), || {
+                cc.fetch_add(1, Ordering::SeqCst);
+                Ok(CachedGain::converged(99.0))
+            });
+
+        let hit = hit.unwrap();
+        assert_eq!(call_count.load(Ordering::SeqCst), 0, "expected a cache hit");
+        assert_eq!(hit.value, 12.5);
+        assert!(
+            !hit.converged,
+            "a cache hit must report the stored convergence flag, not assume convergence"
+        );
     }
 
     #[test]
@@ -308,10 +401,10 @@ mod tests {
 
         for _ in 0..3 {
             let cc = call_count.clone();
-            let _: crate::error::Result<f64> =
+            let _: crate::error::Result<CachedGain> =
                 cache.get_or_compute("ant1", "feed1", test_key(45.0), || {
                     cc.fetch_add(1, Ordering::SeqCst);
-                    Ok(5.0)
+                    Ok(CachedGain::converged(5.0))
                 });
         }
 

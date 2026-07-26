@@ -2,10 +2,13 @@
 //!
 //! This module implements HTTP request handlers for all API endpoints.
 
+use crate::api::error_response::{
+    batch_validation_error, json_error, service_error, validation_error,
+};
 use crate::api::schemas::{
-    BatchGainRequest, BatchGainResponse, CalibrationStatusInfo, ErrorResponse, GainRequest,
-    GainResponse, H3LinkBudgetRequest, H3LinkBudgetResponse, HealthResponse, HeatmapRequest,
-    HeatmapResponse, StatusResponse,
+    error_codes, BatchGainRequest, BatchGainResponse, CalibrationStatusInfo, ErrorResponse,
+    GainRequest, GainResponse, H3LinkBudgetRequest, H3LinkBudgetResponse, HealthResponse,
+    HeatmapRequest, HeatmapResponse, StatusResponse,
 };
 use crate::api::AppState;
 use crate::service::{
@@ -174,7 +177,8 @@ pub async fn status(state: Data<&Arc<AppState>>) -> Json<StatusResponse> {
 /// - warnings: Any warnings generated during computation
 /// - metadata: Computation timing metadata
 ///
-/// Returns HTTP 400 for invalid input or HTTP 404 if antenna/feed not found
+/// Returns HTTP 422 if the body parsed but is semantically invalid, HTTP 404 if the
+/// named antenna/feed does not exist, HTTP 400 only if the body could not be parsed.
 ///
 /// # Example Request
 /// ```json
@@ -201,7 +205,8 @@ pub async fn compute_gain(
         "Gain computation request received"
     );
 
-    // Validate the request
+    // Validate the request. The status is chosen centrally (roadmap C2): 404 when the
+    // named antenna/feed does not exist, 422 for anything else.
     if let Err(validation_err) = validator::validate_gain_request(&request, &state.repository) {
         warn!(
             antenna_id = %request.antenna_id,
@@ -209,11 +214,7 @@ pub async fn compute_gain(
             error = %validation_err,
             "Request validation failed"
         );
-        let error_response = ErrorResponse::new("validation_error", validation_err.to_string());
-        return Err(poem::Error::from_string(
-            serde_json::to_string(&error_response).unwrap_or_default(),
-            StatusCode::UNPROCESSABLE_ENTITY,
-        ));
+        return Err(validation_error(&validation_err, None));
     }
 
     // Compute gain using the service layer, bounding each aperture integration to the
@@ -235,13 +236,10 @@ pub async fn compute_gain(
     .map_err(|join_err| {
         error!(error = %join_err, "Gain compute task failed to join");
         let error_response = ErrorResponse::new(
-            "internal_error",
+            error_codes::INTERNAL_ERROR,
             format!("Gain computation task failed: {join_err}"),
         );
-        poem::Error::from_string(
-            serde_json::to_string(&error_response).unwrap_or_default(),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )
+        json_error(StatusCode::INTERNAL_SERVER_ERROR, &error_response)
     })?;
 
     match result {
@@ -264,26 +262,10 @@ pub async fn compute_gain(
                 "Gain computation failed"
             );
 
-            // Map errors to appropriate HTTP status codes and create error response
-            let (status_code, error_type) = match &e {
-                crate::error::AntennaModelError::FeedNotFound { .. } => {
-                    (StatusCode::NOT_FOUND, "feed_not_found")
-                }
-                crate::error::AntennaModelError::InvalidCoordinate { .. } => {
-                    (StatusCode::BAD_REQUEST, "invalid_coordinate")
-                }
-                crate::error::AntennaModelError::Computation(
-                    crate::error::ComputationError::TimeBudgetExceeded { .. },
-                ) => (StatusCode::GATEWAY_TIMEOUT, "computation_budget_exceeded"),
-                _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
-            };
-
-            let error_response = ErrorResponse::new(error_type, e.to_string());
-
-            Err(poem::Error::from_string(
-                serde_json::to_string(&error_response).unwrap_or_default(),
-                status_code,
-            ))
+            // Status and code come from the shared policy (roadmap C2). This handler's
+            // own `match` had no `Validation(_)` arm, so that class fell through to a
+            // 500; it also served `InvalidCoordinate` as 400 for a body that parsed.
+            Err(service_error(&e))
         }
     }
 }
@@ -303,11 +285,17 @@ pub async fn compute_gain(
 /// - results: Array of GainResponse objects (one per request)
 /// - metadata: Aggregate metadata (total time, count)
 ///
-/// Returns HTTP 400 if batch size exceeds limit
+/// Returns HTTP 422 if the batch is empty, exceeds the size limit, or contains an
+/// invalid evaluation; HTTP 404 if an evaluation names a missing antenna/feed.
 ///
 /// # Error Handling
-/// Individual request failures do not prevent other requests from being processed.
-/// Failed requests will have NaN gain_db and error message in warnings field.
+/// Every item is validated before any physics runs, and the first failure rejects the
+/// whole batch — 404 for an antenna or feed that does not exist, 422 otherwise — with
+/// the offending index in `field` (roadmap C2).
+///
+/// Per-item degradation survives only for *compute*-class failures, which cannot be
+/// predicted in advance: such an item carries a NaN `gain_db` (rendered as JSON `null`)
+/// and the reason in its `warnings`, and does not stop the other items.
 ///
 /// # Performance
 /// - Small batches (<5 requests): Processed sequentially
@@ -344,8 +332,26 @@ pub async fn compute_gain_batch(
         "Batch gain computation request received"
     );
 
-    // Note: Individual request validation is performed within evaluate_batch
-    // Batch-level validation (size limit) is also handled there
+    // Pre-validate the whole batch before any physics runs (roadmap C2, call C).
+    //
+    // Before C2 nothing validated items: a bad item reached the evaluator, failed
+    // there, and came back inside an HTTP 200 as `"gain_db": null` — a `f64::NAN`
+    // that `serde_json` renders as `null` — with the reason in that item's
+    // `warnings`. A client checking the status code saw success, and one
+    // deserializing `gain_db` into a non-optional float got a parse error instead of
+    // an error response.
+    //
+    // The rejection names the failing item (`field: "evaluations[3]"`) and keeps its
+    // class, so an absent antenna is 404 here exactly as it is on `/api/v1/gain`.
+    if let Err(batch_err) = validator::validate_batch_gain_request(&request, &state.repository) {
+        warn!(
+            num_evaluations = num_evaluations,
+            field = %batch_err.field(),
+            error = %batch_err,
+            "Batch request validation failed"
+        );
+        return Err(batch_validation_error(&batch_err));
+    }
 
     // Process the batch using the service layer. The service runs rayon
     // synchronously (CPU-bound), which would otherwise block the async worker
@@ -361,13 +367,10 @@ pub async fn compute_gain_batch(
     .map_err(|join_err| {
         error!(error = %join_err, "Batch compute task failed to join");
         let error_response = ErrorResponse::new(
-            "internal_error",
+            error_codes::INTERNAL_ERROR,
             format!("Batch computation task failed: {join_err}"),
         );
-        poem::Error::from_string(
-            serde_json::to_string(&error_response).unwrap_or_default(),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )
+        json_error(StatusCode::INTERNAL_SERVER_ERROR, &error_response)
     })?;
 
     match result {
@@ -397,24 +400,10 @@ pub async fn compute_gain_batch(
                 "Batch gain computation failed"
             );
 
-            // Map errors to appropriate HTTP status codes. (Per-item over-budget failures
-            // become error results inside the batch; this arm covers any that surface here.)
-            let (status_code, error_type) = match &e {
-                crate::error::AntennaModelError::Validation(_) => {
-                    (StatusCode::BAD_REQUEST, "validation_error")
-                }
-                crate::error::AntennaModelError::Computation(
-                    crate::error::ComputationError::TimeBudgetExceeded { .. },
-                ) => (StatusCode::GATEWAY_TIMEOUT, "computation_budget_exceeded"),
-                _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
-            };
-
-            let error_response = ErrorResponse::new(error_type, e.to_string());
-
-            Err(poem::Error::from_string(
-                serde_json::to_string(&error_response).unwrap_or_default(),
-                status_code,
-            ))
+            // Shared status policy (roadmap C2). Per-item over-budget failures become
+            // error results inside the batch; this arm covers whole-batch failures,
+            // which after the pre-check above should only be compute-class.
+            Err(service_error(&e))
         }
     }
 }
@@ -444,9 +433,9 @@ pub async fn compute_gain_batch(
 /// - warnings: List of warnings (e.g., extrapolation)
 /// - metadata: Computation metadata (points evaluated, time, peak gain)
 ///
-/// Returns HTTP 400 for invalid requests
-/// Returns HTTP 404 if antenna or feed not found
-/// Returns HTTP 422 if grid configuration is invalid or feature not implemented
+/// Returns HTTP 422 if the request is semantically invalid (bad grid configuration,
+/// out-of-range value, or the unimplemented H3 grid type), HTTP 404 if the named
+/// antenna/feed does not exist, HTTP 400 only if the body could not be parsed.
 ///
 /// # Performance
 /// - 72x46 rectangular grid (~3312 points): Target <2 seconds
@@ -488,11 +477,7 @@ pub async fn generate_heatmap_endpoint(
             error = %validation_err,
             "Heatmap request validation failed"
         );
-        let error_response = ErrorResponse::new("validation_error", validation_err.to_string());
-        return Err(poem::Error::from_string(
-            serde_json::to_string(&error_response).unwrap_or_default(),
-            StatusCode::UNPROCESSABLE_ENTITY,
-        ));
+        return Err(validation_error(&validation_err, None));
     }
 
     // Generate heatmap using the service layer. The service runs rayon
@@ -513,13 +498,10 @@ pub async fn generate_heatmap_endpoint(
     .map_err(|join_err| {
         error!(error = %join_err, "Heatmap compute task failed to join");
         let error_response = ErrorResponse::new(
-            "internal_error",
+            error_codes::INTERNAL_ERROR,
             format!("Heatmap computation task failed: {join_err}"),
         );
-        poem::Error::from_string(
-            serde_json::to_string(&error_response).unwrap_or_default(),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )
+        json_error(StatusCode::INTERNAL_SERVER_ERROR, &error_response)
     })?;
 
     match result {
@@ -543,32 +525,8 @@ pub async fn generate_heatmap_endpoint(
                 "Heatmap generation failed"
             );
 
-            // Map errors to appropriate HTTP status codes
-            let (status_code, error_type) = match &e {
-                crate::error::AntennaModelError::FeedNotFound { .. } => {
-                    (StatusCode::NOT_FOUND, "feed_not_found")
-                }
-                crate::error::AntennaModelError::NotImplemented { .. } => {
-                    (StatusCode::UNPROCESSABLE_ENTITY, "not_implemented")
-                }
-                crate::error::AntennaModelError::Validation(_) => {
-                    (StatusCode::BAD_REQUEST, "validation_error")
-                }
-                crate::error::AntennaModelError::InvalidCoordinate { .. } => {
-                    (StatusCode::BAD_REQUEST, "invalid_coordinate")
-                }
-                crate::error::AntennaModelError::Computation(
-                    crate::error::ComputationError::TimeBudgetExceeded { .. },
-                ) => (StatusCode::GATEWAY_TIMEOUT, "computation_budget_exceeded"),
-                _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
-            };
-
-            let error_response = ErrorResponse::new(error_type, e.to_string());
-
-            Err(poem::Error::from_string(
-                serde_json::to_string(&error_response).unwrap_or_default(),
-                status_code,
-            ))
+            // Shared status policy (roadmap C2).
+            Err(service_error(&e))
         }
     }
 }
@@ -679,13 +637,10 @@ pub async fn get_antenna_details(
     if feed_ids.is_empty() {
         warn!(antenna_id = %antenna_id, "Antenna not found");
         let error_response = ErrorResponse::new(
-            "antenna_not_found",
+            error_codes::ANTENNA_NOT_FOUND,
             format!("Antenna '{}' not found", antenna_id),
         );
-        return Err(poem::Error::from_string(
-            serde_json::to_string(&error_response).unwrap_or_default(),
-            StatusCode::NOT_FOUND,
-        ));
+        return Err(json_error(StatusCode::NOT_FOUND, &error_response));
     }
 
     // Use first feed to get antenna-level information
@@ -694,9 +649,22 @@ pub async fn get_antenna_details(
         .repository
         .get_calibration(&antenna_id, first_feed_id)
         .ok_or_else(|| {
-            poem::Error::from_string(
-                format!("Antenna {}/{} not found", antenna_id, first_feed_id),
+            // Reachable only if the repository lists a feed it cannot then resolve.
+            // Before C4 this site returned a bare string body with no error code at
+            // all — the one error path in the service that carried nothing
+            // machine-readable.
+            error!(
+                antenna_id = %antenna_id,
+                feed_id = %first_feed_id,
+                "Repository listed a feed with no retrievable calibration"
+            );
+            json_error(
                 StatusCode::NOT_FOUND,
+                &ErrorResponse::new(
+                    error_codes::FEED_NOT_FOUND,
+                    format!("Feed '{first_feed_id}' not found for antenna '{antenna_id}'"),
+                )
+                .with_field("feed_id"),
             )
         })?;
 
@@ -820,13 +788,10 @@ pub async fn list_antenna_feeds(
     if feed_ids.is_empty() {
         warn!(antenna_id = %antenna_id, "Antenna not found");
         let error_response = ErrorResponse::new(
-            "antenna_not_found",
+            error_codes::ANTENNA_NOT_FOUND,
             format!("Antenna '{}' not found", antenna_id),
         );
-        return Err(poem::Error::from_string(
-            serde_json::to_string(&error_response).unwrap_or_default(),
-            StatusCode::NOT_FOUND,
-        ));
+        return Err(json_error(StatusCode::NOT_FOUND, &error_response));
     }
 
     // Build feed information
@@ -919,12 +884,12 @@ pub async fn get_feed_details(
 
             let (error_type, error_msg) = if antenna_exists {
                 (
-                    "feed_not_found",
+                    error_codes::FEED_NOT_FOUND,
                     format!("Feed '{}' not found for antenna '{}'", feed_id, antenna_id),
                 )
             } else {
                 (
-                    "antenna_not_found",
+                    error_codes::ANTENNA_NOT_FOUND,
                     format!("Antenna '{}' not found", antenna_id),
                 )
             };
@@ -937,10 +902,7 @@ pub async fn get_feed_details(
             );
 
             let error_response = ErrorResponse::new(error_type, error_msg);
-            Err(poem::Error::from_string(
-                serde_json::to_string(&error_response).unwrap_or_default(),
-                StatusCode::NOT_FOUND,
-            ))
+            Err(json_error(StatusCode::NOT_FOUND, &error_response))
         }
     }
 }
@@ -994,46 +956,47 @@ pub async fn h3_link_budget(
             error = %validation_err,
             "H3 link budget request validation failed"
         );
-        let error_response = ErrorResponse::new("validation_error", validation_err.to_string());
-        return Err(poem::Error::from_string(
-            serde_json::to_string(&error_response).unwrap_or_default(),
-            StatusCode::UNPROCESSABLE_ENTITY,
-        ));
+        return Err(validation_error(&validation_err, None));
     }
 
-    // Look up antenna/feed calibration
+    // Existence is checked through the shared validator rather than hand-rolled from
+    // the lookup miss (roadmap C2): this endpoint's request validator does not take
+    // the repository, and before C2 the bespoke rejection here was the reason the same
+    // unknown antenna produced 404 on `/h3-heatmap` and 422 on `/gain`.
+    if let Err(lookup_err) = validator::validate_antenna_feed_exists(
+        &request.antenna_id,
+        &request.feed_id,
+        &state.repository,
+    ) {
+        warn!(
+            antenna_id = %request.antenna_id,
+            feed_id = %request.feed_id,
+            error = %lookup_err,
+            "H3 link budget antenna/feed lookup failed"
+        );
+        return Err(validation_error(&lookup_err, None));
+    }
+
     let calibration = match state
         .repository
         .get_calibration(&request.antenna_id, &request.feed_id)
     {
         Some(cal) => cal,
         None => {
-            // Distinguish missing antenna from missing feed
-            let antenna_exists = !state.repository.list_feeds(&request.antenna_id).is_empty();
-            let (error_type, error_msg) = if antenna_exists {
-                (
-                    "feed_not_found",
-                    format!(
-                        "Feed '{}' not found for antenna '{}'",
-                        request.feed_id, request.antenna_id
-                    ),
-                )
-            } else {
-                (
-                    "antenna_not_found",
-                    format!("Antenna '{}' not found", request.antenna_id),
-                )
-            };
-            warn!(
+            // Unreachable: the existence check above passed, so the pair resolves.
+            // Reachable only if the repository were mutated between the two calls,
+            // which it is not — it is immutable after startup.
+            error!(
                 antenna_id = %request.antenna_id,
                 feed_id = %request.feed_id,
-                error = %error_msg,
-                "H3 link budget antenna/feed lookup failed"
+                "Calibration vanished between the existence check and the lookup"
             );
-            let error_response = ErrorResponse::new(error_type, error_msg);
-            return Err(poem::Error::from_string(
-                serde_json::to_string(&error_response).unwrap_or_default(),
-                StatusCode::NOT_FOUND,
+            return Err(json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &ErrorResponse::new(
+                    error_codes::INTERNAL_ERROR,
+                    "calibration lookup failed after a successful existence check",
+                ),
             ));
         }
     };
@@ -1062,13 +1025,10 @@ pub async fn h3_link_budget(
     .map_err(|join_err| {
         error!(error = %join_err, "H3 link budget compute task failed to join");
         let error_response = ErrorResponse::new(
-            "internal_error",
+            error_codes::INTERNAL_ERROR,
             format!("H3 link budget computation task failed: {join_err}"),
         );
-        poem::Error::from_string(
-            serde_json::to_string(&error_response).unwrap_or_default(),
-            StatusCode::INTERNAL_SERVER_ERROR,
-        )
+        json_error(StatusCode::INTERNAL_SERVER_ERROR, &error_response)
     })?;
 
     match result {
@@ -1092,27 +1052,8 @@ pub async fn h3_link_budget(
                 "H3 link budget computation failed"
             );
 
-            let (status_code, error_type) = match &e {
-                crate::error::AntennaModelError::FeedNotFound { .. } => {
-                    (StatusCode::NOT_FOUND, "feed_not_found")
-                }
-                crate::error::AntennaModelError::InvalidCoordinate { .. } => {
-                    (StatusCode::BAD_REQUEST, "invalid_coordinate")
-                }
-                crate::error::AntennaModelError::Validation(_) => {
-                    (StatusCode::BAD_REQUEST, "validation_error")
-                }
-                crate::error::AntennaModelError::Computation(
-                    crate::error::ComputationError::TimeBudgetExceeded { .. },
-                ) => (StatusCode::GATEWAY_TIMEOUT, "computation_budget_exceeded"),
-                _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
-            };
-
-            let error_response = ErrorResponse::new(error_type, e.to_string());
-            Err(poem::Error::from_string(
-                serde_json::to_string(&error_response).unwrap_or_default(),
-                status_code,
-            ))
+            // Shared status policy (roadmap C2).
+            Err(service_error(&e))
         }
     }
 }

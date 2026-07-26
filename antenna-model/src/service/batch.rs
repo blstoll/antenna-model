@@ -25,6 +25,13 @@ const MIN_PARALLEL_BATCH_SIZE: usize = 5;
 /// It handles partial failures gracefully - individual request failures do not prevent other
 /// requests from being processed.
 ///
+/// # Note on the served endpoint
+///
+/// `POST /api/v1/gain/batch` pre-validates every item and rejects the whole batch before
+/// calling this (roadmap C2), so over HTTP the per-item degradation below is reached only
+/// by *compute*-class failures. This function keeps the permissive behavior for direct
+/// in-process callers, who may legitimately want best-effort evaluation.
+///
 /// # Arguments
 /// * `request` - Batch request containing multiple gain computation requests
 /// * `repository` - Calibration data repository

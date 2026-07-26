@@ -4,7 +4,7 @@
 
 pub mod batch;
 pub mod cache;
-pub use cache::{GainCache, GainCacheKey};
+pub use cache::{CachedGain, GainCache, GainCacheKey};
 pub mod evaluator;
 pub mod h3_link_budget;
 pub mod heatmap;

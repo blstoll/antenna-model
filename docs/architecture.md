@@ -1072,33 +1072,53 @@ spec:
 
 ### 6.3 Error Handling
 
-**Error Categories:**
-```rust
-enum ApiError {
-    AntennaNotFound { antenna_id: String },
-    FeedNotFound { antenna_id: String, feed_id: String },
-    InvalidParameter { param: String, reason: String },
-    InvalidCoordinate { param: String, reason: String },
-    InvalidAttitude { reason: String },
-    CoordinateTransformError { details: String },
-    ComputationError { details: String },
-    InternalError { details: String },
+The wire error contract is specified in
+[`api-documentation.md`](api-documentation.md#error-handling) and `openapi.yaml`; this
+section summarises it. The code vocabulary is defined once in `api/schemas.rs`
+(`mod error_codes`) and referenced by every emission site.
+
+**Wire shape.** All errors serialize as `ErrorResponse`:
+
+```json
+{
+  "error": "antenna_not_found",
+  "message": "Antenna 'invalid_antenna' not found",
+  "field": "antenna_id"
 }
 ```
 
-**HTTP Status Mappings:**
-- 200: Success
-- 400: Invalid parameters, coordinates, or attitude
-- 404: Antenna or feed not found
-- 500: Internal computation/system error (including coordinate transform failures)
-- 503: Service unavailable (startup, shutdown)
+`error` is a stable `snake_case` code; `message` is human-readable and unstable; `field`
+and `details` are optional strings, omitted when absent. There are no nested objects and
+no per-error field sets — an earlier draft of this section described a variant-per-error
+`enum ApiError` with bespoke fields (`param`, `reason`, `antenna_id`) and `PascalCase`
+codes. None of that was ever built; it was corrected in roadmap unit C3.
 
-**Common Error Examples:**
-- Invalid ECEF coordinates: `{"error": "InvalidCoordinate", "param": "vehicle_position", "reason": "Coordinates exceed Earth radius (|pos| > 10000 km)"}`
-- Invalid Geodetic coordinates: `{"error": "InvalidCoordinate", "param": "emitter_position", "reason": "Latitude out of range [-90, 90] degrees"}`
-- Invalid attitude: `{"error": "InvalidAttitude", "reason": "Quaternion not normalized (|q| = 1.15)"}`
-- Feed not found: `{"error": "FeedNotFound", "antenna_id": "antenna_1", "feed_id": "invalid_feed"}`
-- Coordinate singularity: `{"error": "CoordinateTransformError", "details": "Gimbal lock at zenith (elevation = 90 degrees)"}`
+**Internal error type.** `error.rs` carries `ApiError` with status-shaped variants
+(`BadRequest`, `NotFound`, `UnprocessableEntity`, `InternalError`, `ServiceUnavailable`,
+`Timeout`, `PayloadTooLarge`, `RateLimitExceeded`) plus the domain error tree
+(`AntennaModelError`, `ValidationError`, `ComputationError`, `DataError`). Handlers map
+those onto the wire codes; the two vocabularies are deliberately separate.
+
+**HTTP status mappings:**
+- 200: Success
+- 400: Unparseable request body — and nothing else
+- 404: The request names an antenna or feed that does not exist
+- 422: Body parsed but semantically invalid (out-of-range value, degenerate geometry,
+  empty/oversized batch), whichever layer notices
+- 413: Body exceeds `server.max_body_size_bytes`
+- 500: Internal computation/system error (including coordinate transform failures)
+- 503: Service unavailable (startup, shutdown) or admission control
+- 504: Request timeout or per-integration compute budget exceeded
+
+**Where the decision lives.** `api::error_response::validation_status` and
+`service_status` are the only two functions that pick a status. Roadmap unit C2 created
+them by collapsing four hand-written `match` blocks — one per compute handler — that had
+drifted apart: `/gain`'s had no `Validation(_)` arm and fell through to 500, `/heatmap`'s
+and `/h3-heatmap`'s answered 400 for the same class, and unknown antennas were 422 on
+`/gain` and `/heatmap` but 404 on `/h3-heatmap`. `/api/v1/gain/batch` validated nothing at
+all and degraded invalid items into a 200 response with `"gain_db": null`. The
+(endpoint × failure-class) matrix in
+`tests/integration/status_code_matrix_tests.rs` is what keeps the four in agreement.
 
 ### 6.4 Performance Targets
 

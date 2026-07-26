@@ -10,7 +10,8 @@
 //! - **ErrorHandler**: Consistent error response formatting
 //! - **RequestSizeTracker**: Tracks request and response body sizes
 
-use crate::api::schemas::ErrorResponse;
+use crate::api::error_response::json_error;
+use crate::api::schemas::{error_codes, ErrorResponse};
 use poem::{Endpoint, IntoResponse, Middleware, Request, Response, Result};
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
@@ -215,6 +216,38 @@ impl<E: Endpoint> Endpoint for RequestLoggerImpl<E> {
 /// Ensures all errors are formatted consistently and logged appropriately.
 /// This middleware catches any errors that weren't already handled by
 /// endpoint-specific error handlers.
+///
+/// # Normalizing framework-generated body-parse failures (roadmap C4)
+///
+/// Handlers and middleware build their errors through
+/// [`crate::api::error_response::json_error`], so those always carry a JSON
+/// `ErrorResponse`. One error path is **not** ours: when a request body fails to
+/// deserialize, poem's `Json` extractor rejects it before the handler runs, with
+/// its own `400` and a bare `text/plain` message —
+/// `"parse error: key must be a string at line 1 column 3"` — carrying no
+/// machine-readable code at all.
+///
+/// This middleware converts that specific case into the standard JSON body with
+/// the `invalid_request_body` code, preserving poem's message (which is the
+/// genuinely useful part: it names the offending line and column).
+///
+/// The rewrite is deliberately narrow:
+///
+/// - It fires only for errors **not** built from a response
+///   (`Error::is_from_response`), which is exactly the set the framework
+///   produced — every error of ours goes through `json_error`, which builds from
+///   a response. A handler's own 400 is therefore never touched.
+/// - It fires only on `400`. Routing-level rejections poem raises on its own —
+///   `404` for an unrouted path, `405`, `415` — are left framework-shaped,
+///   because giving them JSON bodies means adding error codes that do not exist
+///   in the vocabulary yet, and that is a contract decision belonging to roadmap
+///   unit C8, not a transport fix.
+///
+/// After roadmap C2, `400` is the *only* status the framework and the service could
+/// both produce, and the service no longer produces it from any typed error — the
+/// status now means exactly "unparseable body". The `is_from_response` guard is kept
+/// regardless, since it is what makes the narrowness structural rather than incidental;
+/// `error_handler_does_not_rewrite_our_own_400` pins it.
 pub struct ErrorHandler;
 
 impl<E: Endpoint> Middleware<E> for ErrorHandler {
@@ -249,7 +282,15 @@ impl<E: Endpoint> Endpoint for ErrorHandlerImpl<E> {
                     "Request error caught by error handler"
                 );
 
-                // Return the error response (poem handles error to response conversion)
+                // Give a framework-generated body-parse rejection the project's
+                // standard JSON shape; see the type-level docs for why this is
+                // scoped to 400-and-not-ours.
+                if !err.is_from_response() && err.status() == poem::http::StatusCode::BAD_REQUEST {
+                    let body =
+                        ErrorResponse::new(error_codes::INVALID_REQUEST_BODY, err.to_string());
+                    return Err(json_error(poem::http::StatusCode::BAD_REQUEST, &body));
+                }
+
                 Err(err)
             }
         }
@@ -351,11 +392,8 @@ impl<E> RequestSizeTrackerImpl<E> {
     /// arms, so a chunked client and a `content-length` client see the same
     /// error code and body shape.
     fn too_large_error(&self, message: String) -> poem::Error {
-        let body = ErrorResponse::new("payload_too_large", message);
-        poem::Error::from_string(
-            serde_json::to_string(&body).unwrap_or_default(),
-            poem::http::StatusCode::PAYLOAD_TOO_LARGE,
-        )
+        let body = ErrorResponse::new(error_codes::PAYLOAD_TOO_LARGE, message);
+        json_error(poem::http::StatusCode::PAYLOAD_TOO_LARGE, &body)
     }
 }
 
@@ -445,13 +483,10 @@ impl<E: Endpoint> Endpoint for RequestSizeTrackerImpl<E> {
                     );
 
                     let body = ErrorResponse::new(
-                        "invalid_request_body",
+                        error_codes::INVALID_REQUEST_BODY,
                         format!("Failed to read request body: {read_err}"),
                     );
-                    return Err(poem::Error::from_string(
-                        serde_json::to_string(&body).unwrap_or_default(),
-                        poem::http::StatusCode::BAD_REQUEST,
-                    ));
+                    return Err(json_error(poem::http::StatusCode::BAD_REQUEST, &body));
                 }
             }
         }
@@ -573,16 +608,13 @@ impl<E: Endpoint> Endpoint for RequestTimeoutImpl<E> {
                     "Request exceeded the configured timeout; responding with 504"
                 );
                 let body = ErrorResponse::new(
-                    "request_timeout",
+                    error_codes::REQUEST_TIMEOUT,
                     format!(
                         "Request processing exceeded the configured timeout of {} ms",
                         self.timeout.as_millis()
                     ),
                 );
-                Err(poem::Error::from_string(
-                    serde_json::to_string(&body).unwrap_or_default(),
-                    poem::http::StatusCode::GATEWAY_TIMEOUT,
-                ))
+                Err(json_error(poem::http::StatusCode::GATEWAY_TIMEOUT, &body))
             }
         }
     }
@@ -731,7 +763,7 @@ impl<E: Endpoint> Endpoint for ConcurrencyLimitImpl<E> {
                 );
 
                 let body = ErrorResponse::new(
-                    "service_overloaded",
+                    error_codes::SERVICE_OVERLOADED,
                     format!(
                         "Server is at its concurrent heavy-request limit ({}); retry after {} s",
                         self.limit, self.retry_after_secs
@@ -842,12 +874,92 @@ mod tests {
                     ))
                 }),
             )
-            .with(RequestId)
-            .with(ErrorHandler);
+            // Order matters: the last `.with` is outermost, so `ErrorHandler` must be
+            // applied FIRST to sit inside `RequestId` — as it does in `routes.rs`.
+            // Inverted, `RequestId` folds the handler's `Err` into a response and
+            // `ErrorHandler` never sees an error at all, which makes the test vacuous.
+            .with(ErrorHandler)
+            .with(RequestId);
 
         let cli = TestClient::new(app);
         let response = cli.get("/test").send().await;
         response.assert_status(StatusCode::BAD_REQUEST);
+    }
+
+    /// A framework-generated 400 gets the standard JSON body (roadmap C4).
+    #[tokio::test]
+    async fn error_handler_normalizes_a_framework_400() {
+        let app = Route::new()
+            .at(
+                "/test",
+                poem::endpoint::make_sync(|_req: Request| {
+                    // `from_string` is how poem's own `Json` extractor rejects an
+                    // unparseable body: not built from a response, no error code.
+                    Err::<String, _>(poem::Error::from_string(
+                        "parse error: expected value at line 1 column 3",
+                        StatusCode::BAD_REQUEST,
+                    ))
+                }),
+            )
+            // See `test_error_handler` on why ErrorHandler is applied first.
+            .with(ErrorHandler)
+            .with(RequestId);
+
+        let cli = TestClient::new(app);
+        let response = cli.get("/test").send().await;
+        response.assert_status(StatusCode::BAD_REQUEST);
+
+        let body = response.0.into_body().into_string().await.unwrap();
+        let err: ErrorResponse = serde_json::from_str(&body)
+            .unwrap_or_else(|e| panic!("expected a JSON error body ({e}), got {body:?}"));
+        assert_eq!(err.error, error_codes::INVALID_REQUEST_BODY);
+        assert!(
+            err.message.contains("line 1 column 3"),
+            "the parse location must survive normalization, got {:?}",
+            err.message
+        );
+    }
+
+    /// ...but a 400 the service built itself must pass through untouched.
+    ///
+    /// The discriminator is `Error::is_from_response()`, false only for
+    /// framework-generated errors — everything of ours goes through `json_error`,
+    /// which builds from a response. If that ever stopped holding, every error we
+    /// emit at 400 would be relabelled `invalid_request_body`.
+    ///
+    /// This was an integration test until roadmap C2, driven by the oversized-batch
+    /// rejection that used to answer 400. C2 leaves no endpoint that answers 400 from
+    /// a typed error, so the input is synthesized here instead — which is also the
+    /// honest scope, since the invariant is about error construction, not any endpoint.
+    #[tokio::test]
+    async fn error_handler_does_not_rewrite_our_own_400() {
+        let app = Route::new()
+            .at(
+                "/test",
+                poem::endpoint::make_sync(|_req: Request| {
+                    let body = ErrorResponse::new(
+                        error_codes::PAYLOAD_TOO_LARGE,
+                        "a service-built 400 with a code of its own",
+                    );
+                    Err::<String, _>(json_error(StatusCode::BAD_REQUEST, &body))
+                }),
+            )
+            // See `test_error_handler` on why ErrorHandler is applied first.
+            .with(ErrorHandler)
+            .with(RequestId);
+
+        let cli = TestClient::new(app);
+        let response = cli.get("/test").send().await;
+        response.assert_status(StatusCode::BAD_REQUEST);
+
+        let body = response.0.into_body().into_string().await.unwrap();
+        let err: ErrorResponse = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            err.error,
+            error_codes::PAYLOAD_TOO_LARGE,
+            "a service-built 400 must keep its own code, not be rewritten as a \
+             body-parse failure"
+        );
     }
 
     #[tokio::test]

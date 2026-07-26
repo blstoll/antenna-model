@@ -209,35 +209,57 @@ async fn test_batch_gain_computation() {
     server.shutdown().await;
 }
 
-/// Test batch with partial failures
+/// A batch naming a nonexistent antenna is rejected whole (roadmap C2, call C).
+///
+/// **Behavior changed in C2.** This test previously asserted the opposite: that the
+/// bad item came back inside an HTTP **200** with a NaN `gain_db` and the reason in
+/// that item's `warnings`. That is the silent-null hazard C2 removes — `serde_json`
+/// renders `f64::NAN` as `null`, so a client checking the status code saw success and
+/// one deserializing `gain_db` into a non-optional float got an unexplained parse
+/// error.
+///
+/// Per-item degradation still exists, but only for *compute*-class failures that
+/// cannot be predicted before running the integral; those are covered by
+/// `budget_tests`. Validation-class failures are now caught by the pre-check.
 #[tokio::test]
-async fn test_batch_with_failures() {
+async fn test_batch_with_invalid_item_is_rejected_whole() {
     let server = TestServer::start()
         .await
         .expect("Failed to start test server");
 
     let mut request = builders::simple_batch_request(5);
-    // Make one request invalid
     request.evaluations[2].antenna_id = "invalid".to_string();
 
-    let response: BatchGainResponse = server
-        .post("/api/v1/gain/batch", &request)
+    let response = server
+        .client
+        .post(format!("{}/api/v1/gain/batch", server.base_url))
+        .json(&request)
+        .send()
         .await
-        .expect("Batch computation failed");
+        .expect("request should complete");
 
-    assert_eq!(response.results.len(), 5);
+    assert_eq!(
+        response.status(),
+        404,
+        "an unknown antenna is absent, not invalid"
+    );
 
-    // Third result should have NaN gain and error in warnings
-    let failed_result = &response.results[2];
-    assert!(failed_result.gain_db.is_nan());
-    assert!(!failed_result.warnings.is_empty());
+    let body: ErrorResponse = response.json().await.expect("JSON error body");
+    assert_eq!(body.error, "antenna_not_found");
+    assert_eq!(body.field.as_deref(), Some("evaluations[2]"));
 
     server.shutdown().await;
 }
 
-/// Test empty batch request
+/// An empty batch is rejected with 422 (roadmap C2, call C).
+///
+/// **Behavior changed in C2.** This previously returned **200** with zero results and
+/// `count: 0`. Under the unified policy an empty `evaluations` array is a
+/// semantically invalid body like any other batch-level constraint violation, so it
+/// takes the same 422 as an oversized batch. Answering 200 also made the request
+/// indistinguishable from a successful no-op, which is never what the caller meant.
 #[tokio::test]
-async fn test_empty_batch() {
+async fn test_empty_batch_is_rejected() {
     let server = TestServer::start()
         .await
         .expect("Failed to start test server");
@@ -246,14 +268,24 @@ async fn test_empty_batch() {
         evaluations: vec![],
     };
 
-    let response: BatchGainResponse = server
-        .post("/api/v1/gain/batch", &request)
+    let response = server
+        .client
+        .post(format!("{}/api/v1/gain/batch", server.base_url))
+        .json(&request)
+        .send()
         .await
-        .expect("Empty batch should succeed");
+        .expect("request should complete");
 
-    // Empty batch should return empty results
-    assert_eq!(response.results.len(), 0);
-    assert_eq!(response.metadata.count, 0);
+    assert_eq!(response.status(), 422);
+
+    let body: ErrorResponse = response.json().await.expect("JSON error body");
+    assert_eq!(body.error, "validation_error");
+    assert_eq!(body.field.as_deref(), Some("evaluations"));
+    assert!(
+        body.message.contains("at least one evaluation"),
+        "message should say what is wrong, got {:?}",
+        body.message
+    );
 
     server.shutdown().await;
 }

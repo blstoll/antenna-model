@@ -10,6 +10,7 @@
 //! - Graceful shutdown with signal handling
 //! - Connection management and resource cleanup
 
+pub mod error_response;
 pub mod handlers;
 pub mod middleware;
 pub mod routes;

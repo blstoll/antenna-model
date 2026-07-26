@@ -41,8 +41,13 @@ G1 ─┬─ G2 ── G3
     ├─ S1 ─ S2 ─ S3(after Phase 1) ─ S4 ─ S5 │  (Phase 2 DONE 2026-07-23,
     │  S1b, S2b (Phase 2 review follow-ups)   │   S1b+S2b open — see below)
     ├─ S6                                    │
-    ├─ C3 ─ C4 ─ C2 ─ C8 ─ C7                │
-    │  C1(after S6; may fold into C8 stage 4)│
+    ├─ C3 ─ C4 ─ C2 ─ C9 ─ C8 ─ C7           │
+    │  C1 DONE 2026-07-25 (did not fold into │
+    │      C8; C9 then C8 stage 4 update it) │
+    │  C10, C11 DONE 2026-07-25 (both filed  │
+    │      out of C1's findings; C11 is C7's │
+    │      prose sibling, landed before C8   │
+    │      so it guards C8's own rewrites)   │
     ├─ D1 ─ D2 ─ D3;  D6                     │
     └─ (Phases 1–3 done) ─ D4 ─ D7
 Superseded by C8 (do not implement): S7, C5, C6
@@ -1177,10 +1182,74 @@ Phase 2 banner flipped to unqualified DONE.
 ## Phase 3 — API contract quality
 
 Sequencing: **C3 → C4 → C2** share the handler error paths — land in that order, then
-**C8** (the consolidated breaking pass), then **C7** (drift guard) freezes the result.
-C1 can run in parallel with C3–C2. C5 and C6 are superseded by C8.
+**C9** (the one value-changing break), then **C8** (the consolidated breaking pass), then
+**C7** (drift guard) freezes the result. C1, C10 and C11 ran in parallel with C3–C2 and are
+done. C5 and C6 are superseded by C8.
+
+**Why C9 sits outside C8** even though both are breaking: C8's charter forbids altering any
+computed value, and its review net is exactly that — every existing numeric assertion must
+still hold, so a reviewer can confirm "no number moved" across a large rename/reshape diff.
+C9 moves numbers by design. Folding it in would destroy the one property that makes a
+four-stage breaking pass safe to review. It lands immediately *before* C8 instead, which
+still satisfies "break once, then freeze" — the freeze point is C7, and nothing consumes
+the API yet.
 
 ### C1 — Document `/api/v1/h3-heatmap` — Effort: S/M
+**[✅ DONE 2026-07-25 — branch `feat/c3-error-code-vocabulary`]**
+
+Delivered: an `/api/v1/h3-heatmap` path entry in `openapi.yaml` wired to the previously
+orphaned `H3LinkBudgetRequest`/`H3LinkBudgetResponse` schemas, documenting **current**
+behavior including the C2 status codes (400/404/422) and the S1b/S2/S3/S4 transport codes
+(413/504/503) it inherits from the shared middleware; an "H3 Link Budget Grid" section in
+`docs/api-documentation.md` plus a worked cURL example and full response; and
+`examples/requests/h3_link_budget_request.json`, mapped into G3's
+`every_example_request_deserializes` (whose unmapped-file arm panics, so the example
+cannot drift out of coverage silently).
+
+The example is **verified, not illustrative**: it uses `gs_3.7m_uncalibrated` /
+`s_band_feed` from the shipped `calibration_data/antennas.yaml`, and the documented
+response was captured from a cold-cache local service running that exact body (only
+`computation_time_ms` varies between runs). The error-body examples in the spec were
+likewise captured from live 400/404/422 responses rather than written from the source —
+the first draft's invented `n_rings` message did not match what the validator emits.
+
+Three things found while writing it, all documented rather than changed (C1 is a
+documentation unit; each is someone else's to decide):
+
+1. **`loss_db` is referenced to the grid *centre cell*, not the beam peak**, so cells
+   nearer the peak carry a **negative** `loss_db`, and `total_path_loss_db`
+   (`= fspl + loss_db`) can fall below the free-space value. This is what the code says
+   and does; it is a genuine trap for a client, so it now has an explicit paragraph in
+   both the spec and the docs, and the worked example was deliberately chosen to *show* a
+   negative value rather than hide it. **Superseded 2026-07-25 by unit C9** (maintainer
+   decided the same day to reference `loss_db` to the grid peak, matching `/heatmap`): the
+   paragraphs and the worked example written here are C9's to rewrite, and they were
+   written knowing that — documenting the behavior accurately is what made the decision
+   possible.
+2. **`/h3-heatmap` drops model-produced warnings on a gain-cache hit.** A repeat of an
+   identical request returns a shorter `warnings` array than the first call (measured: the
+   spillover warning present on call 1, absent on call 2). This is deliberate and
+   commented in `h3_link_budget.rs:145-146,204-209`, and it is why P3 had to re-emit
+   `RAY_TRACING_STUB_WARNING` outside the cache closure — geometry-class warnings (P3, P8,
+   P10-tail) are emitted outside and are unaffected; model-class warnings are not.
+   `/gain` and `/heatmap` were checked and do **not** behave this way. **Superseded
+   2026-07-25 by unit C10, which fixed it the same day** — the "defer to C8 stage 3" call
+   recorded here was wrong: the swallowed set includes the P10 non-convergence warning, so
+   this was an honesty defect against a stated invariant, not a contract-polish question.
+   The paragraph C1 added to `api-documentation.md` describing the behavior was removed
+   when C10 landed.
+3. **`docs/api-documentation.md` still carried the `{"w":…}` object form of
+   `vehicle_attitude`** in its cURL and JavaScript examples — the exact deserialization
+   break G3 fixed in `examples/requests/`, surviving in the prose the whole time (the
+   schema requires `[w,x,y,z]`). Both corrected; they are not covered by G3's test, which
+   only reads `examples/requests/*.json`. **The coverage gap behind it is closed by unit
+   C11** (2026-07-25), which puts the prose examples under a schema guard.
+
+Not done here, deliberately: the `cells` array's per-cell shape had no schema at all
+(`items: {type: object}`), which would have left the endpoint documented in name only, so
+an `H3CellResult` component was added and wired up — the one addition beyond a pure path
+entry. C8 will revisit this entry for the `feed_position` rename, required
+`coordinate_system`, and typed warnings; C7 then freezes it.
 
 - **Entrance / read first:** `api/routes.rs` (the registered route + method), the h3
   handler in `api/handlers.rs`, the orphaned schemas at `openapi.yaml:750,822`
@@ -1198,6 +1267,28 @@ C1 can run in parallel with C3–C2. C5 and C6 are superseded by C8.
 - **Depends on:** G3, S6 (new validation constraints must appear in the spec).
 
 ### C3 — Single error-code vocabulary; delete dead PascalCase constructors — Effort: S
+**[✅ DONE 2026-07-24 — branch `feat/c3-error-code-vocabulary`]**
+
+Delivered: all seven PascalCase `ErrorResponse` constructors deleted (grep-confirmed zero
+callers — they only ever appeared in their own definitions and unit tests, so the
+PascalCase codes never reached the wire); `api::schemas::error_codes` added as the single
+source of truth for the **11** live codes, with every emission site in `handlers.rs` and
+`middleware.rs` referencing the constants instead of a string literal, so a typo is now a
+compile error. Docs re-trued: `openapi.yaml`'s `ErrorResponse` schema gained the code
+`enum` and the missing `field` property (and `details` was corrected from `object` to
+`string` — the Rust type is `Option<String>`, so the old spec could not describe any real
+body), `docs/api-documentation.md` gained the error-code table, and
+`docs/architecture.md` §6.3 lost a fabricated variant-per-error `enum ApiError` with
+bespoke per-error fields that was never built. `examples/api_requests.json` advertised two
+codes the service cannot emit (`InvalidAttitude`, `CoordinateTransformError`); corrected to
+`validation_error` and `internal_error`. Drift guard: `tests/error_code_vocabulary.rs`
+(3 tests) pins the spec enum and the docs table against `error_codes::ALL` and fails on any
+PascalCase code reappearing in the published contract — each verified to fail on injected
+drift before being accepted.
+
+Deliberately **not** done here (C2 owns it): the spec still files `validation_error` under
+its current `400` response block, and the status inconsistencies are documented as a
+caveat rather than fixed.
 
 - **Entrance / read first:** `api/schemas.rs:~1085-1110` — `ErrorResponse` convenience
   constructors emitting PascalCase codes (`"AntennaNotFound"`, `"FeedNotFound"`,
@@ -1212,6 +1303,42 @@ C1 can run in parallel with C3–C2. C5 and C6 are superseded by C8.
 - **Depends on:** G1.
 
 ### C4 — Error bodies as `application/json` — Effort: S
+**[✅ DONE 2026-07-24 — branch `feat/c3-error-code-vocabulary`]**
+
+Delivered: `api::error_response::json_error` is now the only place in the crate that turns
+an `ErrorResponse` into a `poem::Error`, and all **19** production sites (16 in
+`handlers.rs`, 3 in `middleware.rs`) go through it. Bodies are byte-identical — pinned by
+`assert_json_error`, which re-serializes the parsed body and asserts equality with the raw
+bytes.
+
+**The diagnosis in this unit was optimistic.** `poem::Error::from_string` does not serve
+`text/plain`; it sets **no `Content-Type` header at all**. Verified by reverting the helper
+and watching all four original tests report `got "<missing>"`.
+
+Two things found while executing, both fixed here:
+
+1. **One error site carried no code at all.** The antenna-details handler's
+   feed-lookup failure used `from_string` with a bare `format!` string, so that 404 had no
+   `error` field — it was not an `ErrorResponse` in any sense. Now emits `feed_not_found`.
+2. **Malformed request bodies never reached our error path.** poem's `Json` extractor
+   rejects an unparseable body before the handler runs, returning its own `400` +
+   `text/plain` + no code. `ErrorHandler` now normalizes that one case to
+   `invalid_request_body`, preserving poem's parse-location message. The rewrite is gated
+   on `Error::is_from_response()` (false only for framework-generated errors, since every
+   error of ours is built from a response) **and** `status == 400`, so a handler's own 400
+   is never touched — pinned by `normalization_does_not_rewrite_our_own_400`.
+
+**Known remaining exception, deliberately left for C2/C8:** routing-level rejections poem
+raises on its own — `404` for an unrouted path, `405`, `415` — are still framework-shaped
+`text/plain`. Normalizing them requires error codes that do not exist in the vocabulary
+(there is no `route_not_found` / `method_not_allowed` / `unsupported_media_type`), and
+minting them is a contract decision, not a transport fix. Consequence worth knowing: a
+`404` can arrive in either shape today. Documented in `api-documentation.md`.
+
+Tests: `tests/integration/error_content_type_tests.rs` (6 tests) covers the four distinct
+construction paths — handler pre-check (422), handler-maps-service-error (400), GET handler
+(404), middleware (413) — plus the framework normalization and its guard. All four original
+tests were verified to fail against the pre-C4 helper.
 
 - **Entrance / read first:** the `poem::Error::from_string(serde_json::to_string(…))`
   pattern (e.g. `handlers.rs:203-206`) — poem serves these as `text/plain`. **Find all
@@ -1222,21 +1349,129 @@ C1 can run in parallel with C3–C2. C5 and C6 are superseded by C8.
 - **Depends on:** C3.
 
 ### C2 `[DECISION]` — Unify validation status codes — Effort: M
+**[DECIDED 2026-07-24 — all three calls at the recommended option; see the register row for the full rationale]**
 
-- **Question:** validation failures return 422 from the pre-check path
-  (`handlers.rs:205,428,905`) but 400 when the same class of error surfaces from the
-  service layer (`handlers.rs:341,463,976`); batch=400 vs single=422 for equivalent inputs.
-  Changing codes is a behavioral API change.
-- **Recommended default:** **400 = malformed/undeserializable body; 422 = well-formed but
-  semantically invalid** — both layers, all endpoints. Treat as bug-fix-grade in v1 (no
-  client can have relied on the inconsistency), with a changelog note.
-- **Exit criteria:** register row Decided; an integration test matrix
-  (endpoint × {malformed, invalid}) **written first**, then codes fixed until it passes;
-  openapi.yaml responses updated for every endpoint; api-documentation.md error section
-  updated.
-- **Gotchas:** grep handlers.rs for every `StatusCode`/`from_status` site (~6); the matrix
-  test is the net that catches a missed one. Don't touch error *bodies* here (C3/C4 own
-  those).
+**[✅ DONE 2026-07-24 — branch `feat/c3-error-code-vocabulary`]**
+
+Shipped as decided, all three calls. What is worth knowing beyond the decision record:
+
+- **The fix is structural, not four edits.** `api::error_response::validation_status` and
+  `service_status` are now the only two functions that pick a status; the four handlers
+  call them. The bug the unit describes — `/gain`'s missing `Validation(_)` arm — was a
+  symptom of four hand-maintained `match` blocks over the same error type, so patching the
+  arm would have left the cause in place. Adding an error variant is now one edit.
+- **Shape choice for call (B): the *first* option, not the second.** The unit suggested the
+  validators-stop-checking-existence option as "closer to how `/h3-heatmap` works today"
+  and the smaller diff. It is the wrong fit once call (C) is in scope: batch pre-validation
+  has to classify per-item existence failures, and moving lookups into handlers would make
+  the batch handler re-implement 1000 lookups the validator already does. Existence
+  failures instead left the validation *class*, as
+  `ValidationError::{AntennaNotFound, FeedNotFound}`. `/h3-heatmap` moved the *other* way —
+  it now calls the shared `validate_antenna_feed_exists` instead of hand-building its own
+  404, which is what made it disagree with its siblings in the first place.
+- **Batch needed a new error type.** `BatchValidationError` carries the item index *and*
+  preserves the inner failure class. The pre-C2 validator flattened item errors into
+  `InvalidValue { param: "evaluations[i]" }` — index kept, class erased, so every item
+  failure would have been a 422 including absent antennas. Index reaches the wire as
+  `field: "evaluations[3]"` and is also prefixed onto `message`.
+- **Defect (1) was latent, not reachable.** Nothing in the single-gain evaluator raises
+  `AntennaModelError::Validation(_)` — the geometry builders return `ValidationError`, but
+  the evaluator wraps every one as `Generic` (correctly: bad calibration data is a
+  server-side fault). So the 500 fallthrough could not be triggered over HTTP, and no
+  integration test can fail-before-fix on it. It is covered instead by
+  `service_status_policy_table`, a unit test enumerating every rejection class with its
+  required (status, code) — which does fail when the arm is removed.
+- **Two behavior changes beyond the three calls**, both intentional:
+  1. An **empty** batch was 200-with-zero-results (indistinguishable from a successful
+     no-op) and is now 422, like any other batch-level constraint violation.
+  2. A **non-finite** number in a request is a **400**, not a 422. JSON has no `NaN` or
+     `Infinity` literal; serializers emit `null`, which will not deserialize into a
+     declared `f64`, so the body really is unparseable. Consequence worth recording: the
+     validator's own non-finite checks are **unreachable over HTTP** and guard only the
+     in-process service API. Pinned by `non_finite_request_value_is_a_parse_failure`.
+- **The service now emits no 400 from any typed error.** `the_service_never_answers_400_from_a_typed_error`
+  asserts it. That removed the only endpoint capable of producing the input for C4's
+  `normalization_does_not_rewrite_our_own_400` guard, which moved from an integration test
+  to `middleware::tests::error_handler_does_not_rewrite_our_own_400` with a synthetic
+  endpoint — better-scoped anyway, since the invariant is about error construction rather
+  than any endpoint. Fixing that test's middleware ordering (`ErrorHandler` must be applied
+  *before* `RequestId` to sit inside it) also revealed that the pre-existing
+  `test_error_handler` had the same inversion and was vacuous; corrected.
+- **Verification.** All 7 pre-fix failures in the new matrix were observed before any
+  implementation. Afterwards, three regressions were injected and confirmed caught:
+  `InvalidCoordinate → 400` (3 tests), `AntennaNotFound → 422` (3 tests), and removing the
+  batch pre-check (5 tests). C3's fix also missed two `"feed_not_found"` / `"antenna_not_found"`
+  string literals in `get_feed_details`; converted to constants here.
+- **Scope limitation.** The exit criteria call for openapi.yaml updated "for every
+  endpoint". `/api/v1/h3-heatmap` **is not in openapi.yaml at all** — adding it is unit
+  **C1**. The three documented compute endpoints gained `422` and `404` blocks with examples
+  and had their `400` descriptions corrected; `ErrorResponse.error`'s status caveat was
+  replaced with the settled rule. api-documentation.md and architecture.md §6.3 likewise.
+- **Untouched, as scoped:** the per-item batch response *shape* (`gain_db: null` + a
+  warning string for compute-class failures) remains C8 stage 3. Routing-level 404/405/415
+  remain framework-shaped `text/plain` — that needs new error codes, which is C8's call, so
+  the "a 404 can arrive in either shape" caveat C4 documented still stands.
+
+- **Question:** validation failures return 422 from the pre-check path but 400 when the
+  same class of error surfaces from the service layer; batch differs again. Changing codes
+  is a behavioral API change.
+
+**Measured current state (verified against the code 2026-07-24 — the question above
+understated it):**
+
+| Case | `/gain` | `/gain/batch` | `/heatmap` | `/h3-heatmap` |
+|---|---|---|---|---|
+| Malformed / unreadable body | 400 | 400 | 400 | 400 |
+| Well-formed, semantically invalid | 422 | **200**, `gain_db: null` | 422 | 422 |
+| Unknown `antenna_id` / `feed_id` | 422 | **200** + null item | 422 | **404** |
+| Batch-level (empty, >1000) | — | **400** | — | — |
+| `Validation(_)` from the service layer | **500** ⚠️ | 400 | 400 | 400 |
+| `InvalidCoordinate` from the service | 400 | per-item | 400 | 400 |
+
+**Decided policy:**
+
+- **(A) 400 = body that cannot be parsed; 422 = parses but is semantically invalid** — at
+  *both* the pre-check and service layers, on all four compute endpoints. Service-layer
+  `InvalidCoordinate` therefore moves 400 → **422**.
+- **(B) Unknown `antenna_id`/`feed_id` referenced in a request body → 404 everywhere**,
+  with the existing `antenna_not_found` / `feed_not_found` codes. Reserve 422 for
+  parameters that are wrong rather than absent.
+- **(C) `/gain/batch` pre-validates every item and rejects the whole batch 422**, naming
+  the failing item index. Per-item degradation survives only for *compute*-class failures
+  (time-budget exceeded, non-convergence).
+
+**Two defects in scope, both found while scoping this unit:**
+
+1. `/gain`'s service-error match (`handlers.rs:268-278`) has **no `Validation(_)` arm** —
+   it falls through `_ => INTERNAL_SERVER_ERROR`. Any validation error the pre-check does
+   not catch is served as a **500**.
+2. The 404 arms on `/gain` and `/heatmap` are **dead code today**:
+   `validate_gain_request` / `validate_heatmap_request` take the repository and reject
+   unknown antenna/feed as `InvalidAntennaId` / `InvalidValue` (`validator.rs:432-451`)
+   → 422, so `FeedNotFound → 404` is unreachable. `validate_h3_link_budget_request` does
+   *not* take the repository, so `/h3-heatmap` reaches the lookup and returns a real 404.
+   Same input, two answers. Call (B) makes all four agree on 404.
+
+- **Exit criteria:** an integration test matrix (endpoint ×
+  {malformed, semantically-invalid, unknown-antenna, unknown-feed}) **written first**,
+  then codes fixed until it passes; the `/gain` 500-fallthrough covered by a test that
+  fails before the fix; a batch test asserting 422-with-item-index (and that no response
+  ever carries `gain_db: null` for a validation-class failure); openapi.yaml responses
+  updated for every endpoint; api-documentation.md error section updated. Treat as
+  bug-fix-grade in v1 (no client can have relied on the inconsistency), with a changelog
+  note.
+- **Implementation note for (B):** the existence failures must leave the validation error
+  class so handlers can map them — `ValidationError::InvalidAntennaId` and the
+  feed-not-found `InvalidValue` arm at `validator.rs:441-450` become a distinct
+  not-found variant (or the validators stop performing existence checks and the handlers
+  do the lookup, as `/h3-heatmap` already does). Pick one shape and apply it to all four
+  endpoints; the second option is closer to how `/h3-heatmap` works today.
+- **Gotchas:** grep handlers.rs for every `StatusCode` site (~20 including the
+  non-validation ones); the matrix test is the net that catches a missed one. Don't touch
+  error *bodies* here (C3/C4 own those). The per-item batch *shape* — an explicit
+  `{code, message}` instead of `NaN` + a warning string (`batch.rs:199-227`) — is a
+  response-shape break and belongs to **C8 stage 3**, not here; C2 only stops
+  validation-class failures from reaching that path.
 - **Depends on:** C3, C4 (land after, to avoid triple-editing the same lines).
 
 ### C5 — `/heatmap` H3 grid-type stub — **SUPERSEDED by C8 (decided 2026-07-08)**
@@ -1250,6 +1485,172 @@ still gated.)
 The docs-only design existed only under the no-breaking-changes assumption. With
 pre-production confirmed, C8 stage 1 performs the actual rename to
 `feed_pointing_location`. Do not implement the docs-only variant.
+
+### C10 — `/h3-heatmap` loses warnings on a gain-cache hit — Effort: S
+**[✅ DONE 2026-07-25 — branch `feat/c3-error-code-vocabulary`]**
+
+**The defect.** `/api/v1/h3-heatmap` is the only endpoint that reads through
+`GainCache::get_or_compute`, and the model's warnings were captured *inside* the
+cache-MISS closure. A second identical request therefore came back with a shorter
+`warnings` array than the first — measured on `test_simple`: the spillover and
+feed-offset-band warnings present on call 1, gone on call 2. `/gain`, `/heatmap` and
+`/batch` were checked and are unaffected; they do not cache.
+
+**Why it outranked its size.** The swallowed set included
+`INTEGRATION_NONCONVERGENCE_WARNING`, raised by the P10 self-check. CLAUDE.md states that
+check is "surfaced as a response warning, never silent" — on a warm `/h3-heatmap` that was
+false: a gain from a non-converged aperture integral was served with no warning at all.
+That is the same honesty class as P8/P10/F7, not contract polish, which is why it was
+fixed here rather than deferred into C8 stage 3 as first proposed.
+
+**The fix, by warning class** — the classification is what makes it a fix rather than a
+patch:
+
+- *Computation-derived* (non-convergence): rides **with** the cached value. `GainCache`
+  now stores `CachedGain { value, converged }` instead of a bare `f64`, and the warning is
+  re-emitted from the flag on hit and miss alike. It cannot be re-derived any other way —
+  a hit is precisely the path that skips the integration that would reveal it.
+- *Configuration-derived* (spillover, feed-offset band): emitted **once per request** by
+  `compute_h3_link_budget`. `analyze_edge_cases` takes `(θ, φ)` and ignores both
+  (`_theta`, `_phi`), so these were identical at every cell anyway — deriving them once,
+  outside the cache, is both cheaper and cache-independent.
+- *Geometry-derived* (off-axis, rear-hemisphere, ray-tracing stub): already re-emitted
+  outside the closure by P3/P8/P10-tail. Unchanged — C10 generalizes what P3 did for one
+  warning to the rest.
+
+Nothing is smuggled out of the closure any more, so the `Cell`-style capture hack is gone
+and the "which warnings survive a hit?" question has a structural answer instead of a
+per-warning one.
+
+- **Tests:** `tests/integration/h3_link_budget_tests.rs::test_h3_warnings_stable_across_cache_hits`
+  (cold vs warm warning sets must be equal, with a non-empty guard so it cannot pass
+  vacuously) — verified to fail before the fix, naming both dropped warnings. Plus
+  `service::cache::tests::test_nonconvergence_flag_survives_cache_hit`, which asserts the
+  flag specifically: checking the hit's `value` alone would pass even with the flag
+  dropped, which is exactly how the original bug survived.
+- **Known gap:** no test drives a *genuinely* non-converged integration end-to-end over
+  HTTP — the flag's transport is pinned at the cache layer and the emission is a single
+  unconditional branch off it, but the two are not covered by one test. Triggering real
+  non-convergence needs a pathological geometry; not worth the runtime here.
+
+### C11 — Drift guard for API examples embedded in prose — Effort: S
+**[✅ DONE 2026-07-25 — branch `feat/c3-error-code-vocabulary`]**
+
+The prose sibling of **C7**: C7 will guard `openapi.yaml`'s paths against the route table;
+C11 guards `docs/api-documentation.md`'s worked examples against the request/response
+schemas. Filed and landed after C1 found that the cURL and JavaScript examples still
+carried the `{"w": …}` object form of `vehicle_attitude` — the *exact* deserialization
+break G3 fixed in `examples/requests/` — because G3's test only ever read
+`examples/requests/*.json`.
+
+Landed **before** C8 on purpose, by the same argument as roadmap principle 2 (guardrails
+first): C8 rewrites every one of these blocks across four stages, so a guard that exists
+beforehand catches C8's misses, while one added afterwards only ratifies whatever survived.
+
+- **Delivered:** `antenna-model/tests/doc_examples_deserialize.rs` (2 tests).
+  `every_documented_example_deserializes` reads each block marked
+  `<!-- api-example: TypeName -->` (an HTML comment, invisible in rendered Markdown) and
+  deserializes it into that schema; ten blocks are marked, requests and responses alike.
+  Payload extraction is per fence language: `json` whole-block, `bash` from the cURL
+  `-d '…'` argument, `javascript` from the `JSON.stringify(…)` argument.
+- **`every_api_example_block_is_marked`** is the half that matters: an *unmarked* block
+  that looks like an API payload is a hard failure, so a future example cannot quietly sit
+  outside coverage — which is precisely how the original break survived.
+- **One doc change to enable it:** the JavaScript example's object literal was rewritten
+  with quoted keys. Still valid JavaScript, now also valid JSON, so the example a reader
+  copies is the one the test checks.
+- **Scope:** `docs/api-documentation.md` only, via the `CONTRACT_DOCS` const. The design
+  and workflow docs contain JSON blocks too (28 unmarked blocks across `architecture.md`,
+  `partial-calibration-design.md`, `calibration-workflow-guide.md`,
+  `partial-calibration-setup-summary.md`, `kubernetes-deployment.md`) but they are
+  illustrative and knowingly aspirational in places — auditing them is **D5**'s job. Adding
+  a file to `CONTRACT_DOCS` is one line, so D5 should ratchet them in as it makes each true.
+- **Verified by injection:** re-introducing the historical `{"w": …}` form fails
+  `every_documented_example_deserializes` at the exact line; adding an unmarked
+  `antenna_id` block fails `every_api_example_block_is_marked`. Both were confirmed to fail
+  before being accepted.
+
+### C9 `[DECISION]` — `/h3-heatmap` `loss_db`: reference it to the grid peak, not the centre cell — Effort: S
+**[DECIDED 2026-07-25 — maintainer: reference `loss_db` to the beam peak; peak = max gain over
+the cells actually evaluated, matching `/heatmap`]**
+
+**The defect.** `/api/v1/h3-heatmap` returns `loss_db = gain(centre cell) − gain(this cell)`
+(`h3_link_budget.rs:648`, reference built at `h3_link_budget.rs:395-471`). The centre cell is
+merely the cell nearest `feed_position`; it is not the beam peak, and with any feed offset the
+beam is steered away from it. Consequences on the live path:
+
+- **`loss_db` goes negative** for every cell stronger than the centre cell. Measured on the
+  shipped `gs_3.7m_uncalibrated` / `s_band_feed` at 2200 MHz, `n_rings: 2`, resolution 7: the
+  centre cell reports `loss_db: 0.0` at 29.18 dB gain while a neighbour reports
+  **`loss_db: −5.43`** at 34.61 dB — the grid peak is not the grid centre.
+- **`total_path_loss_db` (`= fspl + loss_db`) inherits it** and can fall *below* the
+  free-space path loss, which reads as a link that beats free space.
+- **The two heatmap endpoints disagree.** `/api/v1/heatmap` already uses
+  `peak_gain_db − gain` with `peak_gain_db = max` over successful grid points
+  (`heatmap.rs:112-130`). Same field name, same concept, two different references.
+
+**The decision.** Peak = **max gain over the cells actually evaluated** — i.e.
+`loss_db = metadata.peak_gain_db − gain_db`, the rule `/heatmap` already applies. The
+alternative (numerically maximizing gain over direction to find the *true* beam peak,
+independent of the grid) was considered and rejected for this unit: it needs a robust 2D
+maximizer over a pattern whose peak is steered off-axis by the feed offset, costs extra
+integrations per request, and would force a matching change to `/heatmap`. It stays available
+as a later feature if a consumer ever needs cross-request comparability.
+
+- **Entrance / read first:** `h3_link_budget.rs:395-471` (step 6, the boresight reference),
+  `:648` (the subtraction), `:546-556` (`peak_gain_db`, already max-over-cells — so the new
+  reference is a value the response already reports), and `heatmap.rs:112-130` for the rule
+  being adopted.
+- **Work:**
+  1. Delete step 6 and the `boresight_gain_db` parameter threaded through
+     `compute_cell_result`. This *removes* one gain evaluation per request — the unit is a net
+     performance win, not a cost.
+  2. Restructure to `/heatmap`'s two-pass shape: compute every cell's gain, take the peak,
+     then fill `loss_db` and `total_path_loss_db` in a second pass. The parallel cell loop
+     currently builds a complete `H3CellResult` including `loss_db`, so the loss fields become
+     post-fill.
+  3. Update the `H3CellResult.loss_db` docstring (`schemas.rs:658-664`) — it is currently an
+     accurate description of the behavior being removed.
+- **Exit criteria:**
+  - `loss_db ≥ 0` for every cell, `== 0.0` at exactly the peak cell, on every endpoint test.
+  - `total_path_loss_db ≥ free_space_path_loss_db` for every cell (the property that fails
+    today) — assert it directly; it is the client-visible symptom.
+  - `loss_db == metadata.peak_gain_db − gain_db` for every cell, pinned by a test, so the
+    response is internally consistent and a reader can re-derive it.
+  - A test asserting `/heatmap` and `/h3-heatmap` compute loss by the same rule, so they cannot
+    drift apart again.
+  - openapi `H3CellResult.loss_db` / `total_path_loss_db` descriptions and the
+    `docs/api-documentation.md` "H3 Link Budget Grid" section rewritten — **both currently
+    document the centre-cell reference at length, including a worked example chosen to
+    display a negative `loss_db`** (added by C1, 2026-07-25). The example response's
+    `loss_db` / `total_path_loss_db` values must be recaptured from a live run, not edited by
+    hand.
+- **Gotchas:**
+  - **`tests/integration/h3_link_budget_tests.rs:108-158` pins the old semantics** ("Center
+    cell has loss_db ≈ 0.0 and is the minimum-loss cell") and must be rewritten to assert the
+    *peak* cell is the zero, not deleted. Its own comment already concedes that "coma lobes
+    can produce negative values" — the trap was known at the time and encoded as expected
+    behavior.
+  - **All-cells-failed fallback.** `peak_gain_db` currently falls back to `boresight_gain_db`
+    when no cell yields a finite gain (`:552-556`); that fallback disappears with step 6.
+    Decide and test the degenerate case explicitly — `/heatmap`'s answer is a
+    `FAILED_POINT_LOSS_DB` sentinel per failed point (`heatmap.rs:120-130`); reuse it rather
+    than inventing a second convention.
+  - **Mixed correction basis.** Step 6 deliberately applied the correction surface to the
+    reference so both sides of the subtraction shared a basis. With a grid peak the reference
+    *is* one of the cells, so the basis is consistent by construction — but cells outside
+    calibration coverage are uncorrected while in-coverage cells are corrected, so a grid can
+    still straddle two bases. `/heatmap` already has this property; note it, do not solve it
+    here.
+  - Standing rule 4: mirror the schema-description changes into `openapi.yaml` by hand (C7's
+    guard does not exist yet).
+- **Depends on:** C2 (the shared status/error work in the same handlers). **Blocks:** C8 — land
+  C9 first so C8 stage 4 documents the settled semantics once instead of rewriting the C1 entry
+  twice.
+- **Out of scope:** the true-beam-peak search (see the decision above); any change to
+  `/api/v1/gain`'s `loss_db`, which is a third and *deliberately* different quantity
+  (`reference_gain_db − gain_db`, ideal-aperture referenced, `evaluator.rs:336-411`) and is not
+  a grid quantity at all.
 
 ### C8 — v1 contract finalization (the one sanctioned breaking pass) — Effort: L
 **[DECIDED 2026-07-08 — pre-production confirmed: no consumers exist; break once now, then freeze]**

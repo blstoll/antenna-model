@@ -359,3 +359,56 @@ async fn test_h3_auto_resolution_from_frequency() {
 
     server.shutdown().await;
 }
+
+// ---------------------------------------------------------------------------
+// Test 10: an identical repeated request returns an identical warning set
+//
+// Regression pin for roadmap C10. `/h3-heatmap` is the only endpoint that reads
+// through `GainCache::get_or_compute`, and the model's warnings used to be
+// captured only inside the cache-MISS closure. A second identical request
+// therefore came back with a shorter `warnings` array than the first — worst
+// case, silently dropping INTEGRATION_NONCONVERGENCE_WARNING from a value that
+// a non-converged integration produced, breaking the "never silent" property
+// the P10 self-check is supposed to guarantee.
+//
+// Both requests go through one server, so the second is served entirely from a
+// warm cache.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_h3_warnings_stable_across_cache_hits() {
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
+
+    let request = base_h3_request();
+
+    let first: H3LinkBudgetResponse = server
+        .post("/api/v1/h3-heatmap", &request)
+        .await
+        .expect("first H3 heatmap computation failed");
+    let second: H3LinkBudgetResponse = server
+        .post("/api/v1/h3-heatmap", &request)
+        .await
+        .expect("second H3 heatmap computation failed");
+
+    // Guard against a vacuous pass: if this geometry stopped producing warnings
+    // the equality below would hold trivially and pin nothing.
+    assert!(
+        !first.warnings.is_empty(),
+        "test geometry must produce at least one warning for this test to mean \
+         anything; got none on the first (cold-cache) call"
+    );
+
+    let mut cold = first.warnings.clone();
+    cold.sort();
+    let mut warm = second.warnings.clone();
+    warm.sort();
+
+    assert_eq!(
+        cold, warm,
+        "warm-cache warnings must equal cold-cache warnings; a repeated identical \
+         request must not lose warnings.\n  cold: {cold:#?}\n  warm: {warm:#?}"
+    );
+
+    server.shutdown().await;
+}

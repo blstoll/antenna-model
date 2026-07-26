@@ -1,0 +1,26 @@
+{
+  "antenna_id": "gs_3.7m_uncalibrated",
+  "feed_id": "s_band_feed",
+  "vehicle_position": {
+    "x": -116.889,
+    "y": 35.4267,
+    "z": 1036.0,
+    "coordinate_system": "geodetic"
+  },
+  "reflector_boresight": {
+    "x": -116.45,
+    "y": 35.4267,
+    "z": 800.0,
+    "coordinate_system": "geodetic"
+  },
+  "feed_position": {
+    "x": -116.45,
+    "y": 35.4267,
+    "z": 800.0,
+    "coordinate_system": "geodetic"
+  },
+  "frequency_mhz": 2200.0,
+  "n_rings": 2,
+  "h3_resolution": 7,
+  "temperature_k": 150.0
+}
