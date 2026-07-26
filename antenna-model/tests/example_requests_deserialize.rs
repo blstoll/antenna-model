@@ -1,7 +1,9 @@
 //! Guards that every example request in `examples/requests/` deserializes into
 //! its documented schema type — prevents doc/example drift (roadmap unit G3).
 
-use antenna_model::api::schemas::{BatchGainRequest, GainRequest, HeatmapRequest};
+use antenna_model::api::schemas::{
+    BatchGainRequest, GainRequest, H3LinkBudgetRequest, HeatmapRequest,
+};
 use std::path::Path;
 
 fn assert_parses<T: serde::de::DeserializeOwned>(path: &Path) {
@@ -30,6 +32,7 @@ fn every_example_request_deserializes() {
         match name.as_str() {
             "batch_request.json" => assert_parses::<BatchGainRequest>(&path),
             "heatmap_request.json" => assert_parses::<HeatmapRequest>(&path),
+            "h3_link_budget_request.json" => assert_parses::<H3LinkBudgetRequest>(&path),
             // All single-gain examples, including every geo_*.json fixture.
             n if n.starts_with("gain_request") || n.starts_with("geo_") => {
                 assert_parses::<GainRequest>(&path)
@@ -43,7 +46,7 @@ fn every_example_request_deserializes() {
     }
 
     assert!(
-        checked >= 9,
+        checked >= 10,
         "expected to check all example requests, only saw {checked}"
     );
 }

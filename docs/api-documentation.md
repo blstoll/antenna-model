@@ -69,6 +69,8 @@ docker run -p 8080:8080 \
 ### Heatmap Generation
 
 - `POST /api/v1/heatmap` - Generate 2D loss heatmap across antenna field of view
+- `POST /api/v1/h3-heatmap` - Per-cell link budget over an H3 hexagonal grid on the
+  Earth's surface (gain, path loss, optional G/T)
 
 ### Antenna Information
 
@@ -213,10 +215,67 @@ antenna config, so heatmap/H3 aggregation deduplicates it to a single entry. See
 
 Each antenna can have multiple feeds with independent calibrations. Use composite `(antenna_id, feed_id)` identifiers for all queries.
 
+### H3 Link Budget Grid
+
+`POST /api/v1/h3-heatmap` returns a per-cell link budget over an
+[H3](https://h3geo.org) hexagonal grid laid on the Earth's surface — gain, free-space
+path loss, total path loss, and optionally G/T for every cell.
+
+**Grid placement and size.** The grid is centred on the H3 cell containing
+`feed_position` — the Earth location the beam is *aimed at*, not the feed's physical
+location on the antenna (see `docs/domain-contract.md`) — and extends `n_rings` rings
+outward, giving `1 + 3·n_rings·(n_rings + 1)` cells:
+
+| `n_rings` | 0 | 1 | 2 | 3 | 5 | 10 (max) |
+|---|---|---|---|---|---|---|
+| cells | 1 | 7 | 19 | 37 | 91 | 331 |
+
+**Resolution.** Supply `h3_resolution` (0-15) to fix the cell size, or omit it and the
+service derives one from `frequency_mhz`:
+
+| Frequency | Resolution |
+|---|---|
+| < 2000 MHz | 6 |
+| ≥ 2000 and < 8000 MHz | 7 |
+| ≥ 8000 and < 20000 MHz | 8 |
+| ≥ 20000 MHz | 9 |
+
+Either way, the resolution actually used is echoed back as `h3_resolution` in the
+response.
+
+**Reading the per-cell numbers.** Two fields have references that are easy to assume
+wrongly:
+
+- **`loss_db` is relative to the grid centre cell, not to the beam peak.** It is
+  `gain(centre cell) − gain(this cell)`, where the centre cell is merely the one nearest
+  `feed_position`. The true peak generally lies in a slightly different direction, so a
+  cell closer to the peak than the centre cell returns a **negative** `loss_db`. The
+  worked example below shows this. `metadata.peak_gain_db` reports the highest gain over
+  the cells actually evaluated, which is the number to compare against if you want a
+  peak-referenced figure.
+- **`total_path_loss_db` is `free_space_path_loss_db + loss_db`**, so it inherits the same
+  centre-cell reference and can fall *below* the free-space value.
+
+`g_over_t_db` is `gain_db − 10·log₁₀(temperature_k)` and appears only when the request
+supplies `temperature_k`. That temperature is a pure passthrough — the service models no
+antenna noise temperature of its own.
+
+**Warnings.** Cell warnings are deduplicated into one response-level `warnings` array, so
+a warning that fires for many cells appears once. The set does not depend on how much of
+the request the internal gain cache could serve: repeating an identical request returns an
+identical `warnings` array. One difference from `/api/v1/gain` remains — the
+calibration-status warning is not emitted here, because the response carries the
+structured `calibration_status` object instead.
+
+**Cost.** This is a compute-heavy endpoint: it runs one aperture integration per cell, so
+it shares the admission-control limit and the per-integration compute budget with
+`/api/v1/gain/batch` and `/api/v1/heatmap`.
+
 ## Example Usage
 
 ### cURL Example: Gain Computation (Geodetic)
 
+<!-- api-example: GainRequest -->
 ```bash
 curl -X POST http://localhost:3000/api/v1/gain \
   -H "Content-Type: application/json" \
@@ -224,7 +283,7 @@ curl -X POST http://localhost:3000/api/v1/gain \
     "antenna_id": "antenna_1",
     "feed_id": "x_band_feed",
     "vehicle_position": {"x": -118.1234, "y": 34.5678, "z": 100.0},
-    "vehicle_attitude": {"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0},
+    "vehicle_attitude": [1.0, 0.0, 0.0, 0.0],
     "reflector_boresight": {"x": -117.0, "y": 35.0, "z": 400000.0},
     "feed_position": {"x": -118.124, "y": 34.568, "z": 105.0},
     "emitter_position": {"x": -117.0, "y": 35.0, "z": 400000.0},
@@ -232,6 +291,91 @@ curl -X POST http://localhost:3000/api/v1/gain \
     "include_reference": true
   }'
 ```
+
+### cURL Example: H3 Link Budget
+
+A 3.7 m ground station at Goldstone aimed at a point ~40 km east, with two rings of
+resolution-7 cells (19 cells) around the aim point and a 150 K system temperature. The
+antenna and feed are the ones shipped in `calibration_data/antennas.yaml`, so this runs
+against a default local service; the body is also checked in as
+`examples/requests/h3_link_budget_request.json`.
+
+<!-- api-example: H3LinkBudgetRequest -->
+```bash
+curl -X POST http://localhost:3000/api/v1/h3-heatmap \
+  -H "Content-Type: application/json" \
+  -d '{
+    "antenna_id": "gs_3.7m_uncalibrated",
+    "feed_id": "s_band_feed",
+    "vehicle_position": {"x": -116.889, "y": 35.4267, "z": 1036.0, "coordinate_system": "geodetic"},
+    "reflector_boresight": {"x": -116.45, "y": 35.4267, "z": 800.0, "coordinate_system": "geodetic"},
+    "feed_position": {"x": -116.45, "y": 35.4267, "z": 800.0, "coordinate_system": "geodetic"},
+    "frequency_mhz": 2200.0,
+    "n_rings": 2,
+    "h3_resolution": 7,
+    "temperature_k": 150.0
+  }'
+```
+
+Response (19 cells; the first two are shown, and the second is the one that illustrates a
+negative `loss_db` — it sits closer to the beam peak than the grid centre cell does):
+
+<!-- api-example: H3LinkBudgetResponse -->
+```json
+{
+  "antenna_id": "gs_3.7m_uncalibrated",
+  "feed_id": "s_band_feed",
+  "frequency_mhz": 2200.0,
+  "center_cell_id": "87298484bffffff",
+  "h3_resolution": 7,
+  "cells": [
+    {
+      "cell_id": "87298484bffffff",
+      "center_lon": -116.44486581522226,
+      "center_lat": 35.43632856760593,
+      "azimuth_deg": 17.813005656019303,
+      "elevation_deg": 1.8951310668765187,
+      "distance_km": 40.36081496141387,
+      "gain_db": 29.176592765956944,
+      "loss_db": 0.0,
+      "free_space_path_loss_db": 131.41543537598358,
+      "total_path_loss_db": 131.41543537598358,
+      "g_over_t_db": 7.41568017540013
+    },
+    {
+      "cell_id": "87298484affffff",
+      "center_lon": -116.42008010656208,
+      "center_lat": 35.425316200276974,
+      "azimuth_deg": 314.0655073262443,
+      "elevation_deg": 1.084785862275493,
+      "distance_km": 42.60000836115257,
+      "gain_db": 34.60852864310095,
+      "loss_db": -5.431935877144003,
+      "free_space_path_loss_db": 131.88443052517158,
+      "total_path_loss_db": 126.45249464802758,
+      "g_over_t_db": 12.847616052544133
+    }
+  ],
+  "warnings": ["Estimated spillover 21.2% may reduce aperture efficiency."],
+  "metadata": {
+    "points_evaluated": 19,
+    "computation_time_ms": 3.789584,
+    "peak_gain_db": 34.60852864310095,
+    "failed_points": 0
+  },
+  "calibration_status": {
+    "status": "uncalibrated",
+    "accuracy_estimate_db": 3.0,
+    "loss_accuracy_estimate_db": 2.0,
+    "correction_applied": false,
+    "parameters_source": "design_specifications"
+  }
+}
+```
+
+Gain values from an uncalibrated antenna carry the ±3 dB accuracy stated in
+`calibration_status`; the numbers above are illustrative of the shape, not a
+specification.
 
 ### Python Example: List Antennas
 
@@ -250,22 +394,23 @@ for antenna in antennas["antennas"]:
 
 ### JavaScript Example: Heatmap Generation
 
+<!-- api-example: HeatmapRequest -->
 ```javascript
 const response = await fetch('http://localhost:3000/api/v1/heatmap', {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({
-    antenna_id: "antenna_1",
-    feed_id: "x_band_feed",
-    vehicle_position: { x: 4510731.123, y: 4510731.456, z: 3488865.789 },
-    vehicle_attitude: { w: 1.0, x: 0.0, y: 0.0, z: 0.0 },
-    reflector_boresight: { x: 4510732.0, y: 4510732.0, z: 3488950.0 },
-    feed_position: { x: 4510731.5, y: 4510731.5, z: 3488870.0 },
-    frequency_mhz: 8400.0,
-    grid_config: {
-      grid_type: "rectangular",
-      azimuth_range_deg: { min: 0.0, max: 360.0, step: 5.0 },
-      elevation_range_deg: { min: 0.0, max: 90.0, step: 2.0 }
+    "antenna_id": "antenna_1",
+    "feed_id": "x_band_feed",
+    "vehicle_position": { "x": 4510731.123, "y": 4510731.456, "z": 3488865.789 },
+    "vehicle_attitude": [1.0, 0.0, 0.0, 0.0],
+    "reflector_boresight": { "x": 4510732.0, "y": 4510732.0, "z": 3488950.0 },
+    "feed_position": { "x": 4510731.5, "y": 4510731.5, "z": 3488870.0 },
+    "frequency_mhz": 8400.0,
+    "grid_config": {
+      "grid_type": "rectangular",
+      "azimuth_range_deg": { "min": 0.0, "max": 360.0, "step": 5.0 },
+      "elevation_range_deg": { "min": 0.0, "max": 90.0, "step": 2.0 }
     }
   })
 });
@@ -289,6 +434,7 @@ All successful gain computation responses include:
 
 Example response:
 
+<!-- api-example: GainResponse -->
 ```json
 {
   "antenna_id": "antenna_2",
@@ -345,6 +491,7 @@ The API uses standard HTTP status codes:
 
 Error responses follow a consistent format:
 
+<!-- api-example: ErrorResponse -->
 ```json
 {
   "error": "antenna_not_found",
@@ -445,6 +592,7 @@ answer `411 Length Required` for a missing `content-length`.
 The default comfortably accommodates a maximum-size (1000-item) batch request
 (~0.6 MB). Operators can raise or lower the cap via configuration.
 
+<!-- api-example: ErrorResponse -->
 ```json
 {
   "error": "payload_too_large",
@@ -482,6 +630,7 @@ smaller request. The machine `error` code stays `request_timeout`. (Admission-
 control/overload rejection, which *is* transient, uses 503 + Retry-After — see
 **Admission Control** below.)
 
+<!-- api-example: ErrorResponse -->
 ```json
 {
   "error": "request_timeout",
@@ -507,6 +656,7 @@ the machine `error` code **`computation_budget_exceeded`** — distinct from the
 request timeout's `request_timeout` so operators can tell "the middleware gave up
 waiting" from "a single integral was aborted."
 
+<!-- api-example: ErrorResponse -->
 ```json
 {
   "error": "computation_budget_exceeded",
@@ -539,6 +689,7 @@ immediately** (never queued) with **503 Service Unavailable**, the standard JSON
 error body (`service_overloaded`), and a **`Retry-After`** header
 (`performance.admission_retry_after_secs`, default **5 s**).
 
+<!-- api-example: ErrorResponse -->
 ```json
 {
   "error": "service_overloaded",

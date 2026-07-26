@@ -714,6 +714,196 @@ paths:
                     error: "service_overloaded"
                     message: "Server is at its concurrent heavy-request limit (8); retry after 5 s"
 
+  /api/v1/h3-heatmap:
+    post:
+      tags:
+        - heatmap
+      summary: Compute a per-cell link budget over an H3 hexagonal grid
+      description: |
+        Computes antenna gain, free-space path loss, total path loss and (optionally) G/T
+        for every cell of an H3 hexagonal grid laid over the Earth's surface.
+
+        The grid is centred on the H3 cell containing `feed_position` — the Earth location
+        the feed's beam is aimed at, **not** the feed's physical location on the antenna —
+        and covers `n_rings` rings around it, so the response contains
+        `1 + 3 * n_rings * (n_rings + 1)` cells: 1, 7, 19, 37, … up to 331 at the maximum
+        `n_rings` of 10.
+
+        `h3_resolution` may be supplied explicitly (0-15). When it is absent the service
+        derives it from `frequency_mhz`, on half-open bands: 6 below 2000 MHz, 7 from
+        2000 up to but not including 8000 MHz, 8 from 8000 up to but not including
+        20000 MHz, 9 at 20000 MHz and above. The resolution actually used is echoed in
+        the response.
+
+        Two per-cell quantities need their definitions read before use:
+
+        - `loss_db` is `gain(centre cell) - gain(this cell)` — relative to the **grid
+          centre cell**, not to the true beam peak, which generally lies at a slightly
+          different direction. A cell nearer the peak than the centre cell therefore
+          carries a **negative** `loss_db`. `total_path_loss_db` is `free_space_path_loss_db
+          + loss_db` and inherits the same reference.
+        - `g_over_t_db` is `gain_db - 10*log10(temperature_k)` and is present only when the
+          request supplies `temperature_k`. The temperature is a pure passthrough — the
+          service models no antenna noise temperature of its own.
+
+        Like `/api/v1/gain/batch` and `/api/v1/heatmap`, this is a compute-heavy endpoint and
+        shares their admission-control limit and per-integration compute budget.
+      operationId: computeH3LinkBudget
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/H3LinkBudgetRequest'
+            examples:
+              ground_station_coverage:
+                summary: 3.7 m ground station, 2 rings at resolution 7 (19 cells)
+                value:
+                  antenna_id: "gs_3.7m_uncalibrated"
+                  feed_id: "s_band_feed"
+                  vehicle_position:
+                    x: -116.889
+                    y: 35.4267
+                    z: 1036.0
+                    coordinate_system: "geodetic"
+                  reflector_boresight:
+                    x: -116.45
+                    y: 35.4267
+                    z: 800.0
+                    coordinate_system: "geodetic"
+                  feed_position:
+                    x: -116.45
+                    y: 35.4267
+                    z: 800.0
+                    coordinate_system: "geodetic"
+                  frequency_mhz: 2200.0
+                  n_rings: 2
+                  h3_resolution: 7
+                  temperature_k: 150.0
+      responses:
+        '200':
+          description: Link budget computed for every cell in the grid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/H3LinkBudgetResponse'
+        '400':
+          description: |
+            The request body could not be parsed. See `/api/v1/gain` for the full
+            400-vs-422 rule.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                unparseable_body:
+                  summary: Malformed JSON
+                  value:
+                    error: "invalid_request_body"
+                    message: "parse error: expected value at line 1 column 3"
+        '422':
+          description: |
+            The body parsed but is semantically invalid — an out-of-range value
+            (`n_rings` above 10, `h3_resolution` outside 0-15, a non-positive
+            `temperature_k`, a frequency outside 100-50000 MHz), or a degenerate geometry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                too_many_rings:
+                  summary: n_rings above the maximum
+                  value:
+                    error: "validation_error"
+                    message: "invalid value for parameter 'n_rings': n_rings must be ≤ 10"
+                out_of_range_resolution:
+                  summary: h3_resolution outside 0-15
+                  value:
+                    error: "validation_error"
+                    message: "parameter 'h3_resolution' value 20 is out of valid range [0, 15]"
+        '404':
+          description: |
+            The request names an antenna or feed that does not exist (roadmap C2).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                antenna_not_found:
+                  summary: Antenna not found
+                  value:
+                    error: "antenna_not_found"
+                    message: "antenna 'invalid_antenna' not found"
+        '413':
+          description: |
+            Request body exceeds the configured maximum size
+            (`server.max_body_size_bytes`, default 10 MB). Enforced on both the
+            `content-length` and `Transfer-Encoding: chunked` framings — see
+            `/api/v1/heatmap` for the full description.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                payload_too_large:
+                  summary: Payload too large
+                  value:
+                    error: "payload_too_large"
+                    message: "Request body of 12000000 bytes exceeds the maximum of 10485760 bytes"
+        '504':
+          description: |
+            A server-side wall-clock budget was exceeded — either the whole request
+            (`request_timeout`, `server.request_timeout_secs`) or a single aperture
+            integration (`computation_budget_exceeded`,
+            `performance.integration_budget_ms`). See `/api/v1/heatmap` for how the two
+            budgets differ; the fan-out caveat applies here too, since one request
+            integrates once per cell.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                request_timeout:
+                  summary: Whole-request timeout (S2)
+                  value:
+                    error: "request_timeout"
+                    message: "Request processing exceeded the configured timeout of 30000 ms"
+                computation_budget_exceeded:
+                  summary: Single integration over budget (S3)
+                  value:
+                    error: "computation_budget_exceeded"
+                    message: "computation exceeded time budget in azimuthal_mode_field: 31000 ms > 30000 ms budget"
+        '503':
+          description: |
+            Admission control (roadmap S4): the server is already running the maximum
+            number of concurrent heavy requests (batch / heatmap / h3-heatmap), configured
+            by `performance.max_concurrent_heavy_requests` and shared across those three
+            endpoints. The request was rejected immediately (never queued), so a
+            `Retry-After` header is included. Never returned when the limit is 0 (the
+            default; admission control disabled).
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying (performance.admission_retry_after_secs).
+              schema:
+                type: integer
+              example: 5
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                service_overloaded:
+                  summary: Heavy-request concurrency limit reached (S4)
+                  value:
+                    error: "service_overloaded"
+                    message: "Server is at its concurrent heavy-request limit (8); retry after 5 s"
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /api/v1/antennas:
     get:
       tags:
@@ -1198,6 +1388,65 @@ components:
             heuristic (approximate and discontinuous near boresight parallel to Earth-Z).
             The quaternion must be normalised to unit length (norm within 1e-3 of 1.0).
 
+    H3CellResult:
+      type: object
+      description: Link budget for a single H3 cell.
+      properties:
+        cell_id:
+          type: string
+          description: H3 cell index (string representation)
+        center_lon:
+          type: number
+          format: double
+          description: Cell centre longitude in degrees
+        center_lat:
+          type: number
+          format: double
+          description: Cell centre latitude in degrees
+        azimuth_deg:
+          type: number
+          format: double
+          description: Azimuth to the cell centre in the antenna frame (degrees)
+        elevation_deg:
+          type: number
+          format: double
+          description: Elevation to the cell centre in the antenna frame (degrees)
+        distance_km:
+          type: number
+          format: double
+          description: Distance from the vehicle to the cell centre in km
+        gain_db:
+          type: number
+          format: double
+          description: Antenna gain toward the cell centre in dB
+        loss_db:
+          type: number
+          format: double
+          description: >-
+            Gain relative to the GRID CENTRE cell, as
+            `gain(centre cell) - gain(this cell)`. The centre cell is the one nearest the
+            feed pointing location, which is generally NOT the true beam peak — so a cell
+            closer to the peak than the centre cell carries a negative loss_db. Both gains
+            are computed on the same basis (physics plus correction surface where one
+            exists), so the difference is internally consistent.
+        free_space_path_loss_db:
+          type: number
+          format: double
+          description: Free-space path loss in dB, 20*log10(4*pi*d*f/c)
+        total_path_loss_db:
+          type: number
+          format: double
+          description: >-
+            free_space_path_loss_db + loss_db. Inherits loss_db's centre-cell reference,
+            and can therefore fall below free_space_path_loss_db.
+        g_over_t_db:
+          type: number
+          format: double
+          nullable: true
+          description: >-
+            gain_db - 10*log10(temperature_k), in dB/K. Present only when the request
+            supplied temperature_k; the temperature is a passthrough, not modelled.
+
     H3LinkBudgetResponse:
       type: object
       properties:
@@ -1216,12 +1465,15 @@ components:
           description: H3 cell index of the center cell (string representation)
         h3_resolution:
           type: integer
-          description: H3 resolution used
+          description: >-
+            H3 resolution actually used — the request's h3_resolution when supplied,
+            otherwise the value derived from frequency_mhz.
         cells:
           type: array
-          description: Per-cell results
+          description: >-
+            Per-cell results, 1 + 3*n_rings*(n_rings + 1) of them.
           items:
-            type: object
+            $ref: '#/components/schemas/H3CellResult'
         warnings:
           type: array
           description: >
