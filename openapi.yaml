@@ -737,11 +737,13 @@ paths:
 
         Two per-cell quantities need their definitions read before use:
 
-        - `loss_db` is `gain(centre cell) - gain(this cell)` — relative to the **grid
-          centre cell**, not to the true beam peak, which generally lies at a slightly
-          different direction. A cell nearer the peak than the centre cell therefore
-          carries a **negative** `loss_db`. `total_path_loss_db` is `free_space_path_loss_db
-          + loss_db` and inherits the same reference.
+        - `loss_db` is `metadata.peak_gain_db - gain(this cell)` — relative to the **peak
+          over the cells actually evaluated**, the same rule `/api/v1/heatmap` applies. It
+          is therefore never negative and is exactly `0` at the peak cell, and
+          `total_path_loss_db` (`= free_space_path_loss_db + loss_db`) never falls below
+          the free-space value. Note that the peak of the *grid* need not be the peak of
+          the *beam*: a grid that does not contain the beam peak understates loss for
+          every cell in it.
         - `g_over_t_db` is `gain_db - 10*log10(temperature_k)` and is present only when the
           request supplies `temperature_k`. The temperature is a pure passthrough — the
           service models no antenna noise temperature of its own.
@@ -1423,12 +1425,15 @@ components:
           type: number
           format: double
           description: >-
-            Gain relative to the GRID CENTRE cell, as
-            `gain(centre cell) - gain(this cell)`. The centre cell is the one nearest the
-            feed pointing location, which is generally NOT the true beam peak — so a cell
-            closer to the peak than the centre cell carries a negative loss_db. Both gains
-            are computed on the same basis (physics plus correction surface where one
-            exists), so the difference is internally consistent.
+            Gain relative to the GRID PEAK, as `metadata.peak_gain_db - gain_db`, where
+            peak_gain_db is the highest gain over the cells actually evaluated. Always >= 0,
+            and exactly 0 at the peak cell. This is the same rule /api/v1/heatmap applies,
+            so the field means one thing on both heatmap endpoints. The reference is one of
+            the cells, so both sides of the subtraction share a basis by construction; a
+            grid can still straddle two bases where it leaves calibration coverage
+            (in-coverage cells corrected, out-of-coverage cells physics-only), as on
+            /api/v1/heatmap. The peak of the grid need not be the peak of the beam: a grid
+            that does not contain the beam peak understates loss for every cell in it.
         free_space_path_loss_db:
           type: number
           format: double
@@ -1437,8 +1442,8 @@ components:
           type: number
           format: double
           description: >-
-            free_space_path_loss_db + loss_db. Inherits loss_db's centre-cell reference,
-            and can therefore fall below free_space_path_loss_db.
+            free_space_path_loss_db + loss_db. Since loss_db is referenced to the grid peak
+            it is never negative, so this never falls below free_space_path_loss_db.
         g_over_t_db:
           type: number
           format: double
@@ -1506,6 +1511,11 @@ components:
             peak_gain_db:
               type: number
               format: double
+              description: >-
+                Highest gain in dB over the cells that evaluated successfully — the
+                reference every loss_db in this response is measured against. When no cell
+                evaluated successfully there is no peak and the sentinel -999999.0 is
+                reported (never null); failed_points then equals points_evaluated.
             failed_points:
               type: integer
         calibration_status:
@@ -1654,6 +1664,11 @@ components:
               type: number
             peak_gain_db:
               type: number
+              description: >-
+                Highest gain in dB over the grid points that evaluated successfully — the
+                reference every loss_db in this response is measured against. When no point
+                evaluated successfully there is no peak and the sentinel -999999.0 is
+                reported (never null).
         calibration_status:
           $ref: '#/components/schemas/CalibrationStatusInfo'
 

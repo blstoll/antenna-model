@@ -2,7 +2,8 @@
 //!
 //! Tests cover:
 //! - Cell count for various n_rings values
-//! - Center cell loss is minimum and approximately 0.0
+//! - loss_db is referenced to the grid peak: never negative, exactly 0.0 at the peak cell,
+//!   and computed by the same rule as `/api/v1/heatmap` (roadmap C9)
 //! - Link budget arithmetic consistency (total = loss + fspl)
 //! - Unknown antenna returns HTTP 404
 //! - n_rings > 10 returns HTTP 422
@@ -105,10 +106,16 @@ async fn test_h3_n_rings_2_returns_19_cells() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 3: Center cell has loss_db ≈ 0.0 and is the minimum-loss cell
+// Test 3: loss_db is referenced to the grid PEAK (roadmap C9)
+//
+// Replaces the pre-C9 "centre cell is the zero" test. The centre cell is merely
+// the cell nearest `feed_position`; the beam peak generally lies elsewhere, and
+// referencing loss to the centre made every stronger cell report a negative
+// loss_db. The reference is now `metadata.peak_gain_db` — max gain over the cells
+// actually evaluated, the same rule `/api/v1/heatmap` applies.
 // ---------------------------------------------------------------------------
 #[tokio::test]
-async fn test_h3_center_cell_minimum_loss() {
+async fn test_h3_peak_cell_is_the_zero_loss_reference() {
     let server = TestServer::start()
         .await
         .expect("Failed to start test server");
@@ -120,39 +127,100 @@ async fn test_h3_center_cell_minimum_loss() {
         .await
         .expect("H3 heatmap computation failed");
 
-    // Find the center cell
-    let center_cell = response
-        .cells
-        .iter()
-        .find(|c| c.cell_id == response.center_cell_id)
-        .expect("Center cell must be present in cells list");
-
-    // Center cell loss should be exactly 0.0 dB: it is the boresight reference
-    // (the service computes boresight_gain_db from the center cell, so
-    // loss_db = boresight_gain_db − gain_db = 0 for the center by definition).
+    let peak = response.metadata.peak_gain_db;
     assert!(
-        center_cell.loss_db.abs() < 0.01,
-        "Center cell loss_db should be ≈ 0.0, got {}",
-        center_cell.loss_db
+        peak.is_finite(),
+        "peak_gain_db must be finite, got {}",
+        peak
     );
 
-    // The center cell is the reference (loss_db = 0).  Off-axis cells generally
-    // have loss_db > 0, but coma lobes can produce negative values for some
-    // geometries.  Verify that no other cell has a *larger* absolute loss than
-    // would be reasonable, and that the center cell has the minimum absolute
-    // loss (i.e. it is closest to zero).
-    let min_abs_loss = response
-        .cells
-        .iter()
-        .map(|c| c.loss_db.abs())
-        .fold(f64::INFINITY, f64::min);
+    let mut zero_loss_cells = 0usize;
+    for cell in &response.cells {
+        // The client-visible symptom of the old reference: negative losses.
+        assert!(
+            cell.loss_db >= 0.0,
+            "Cell {}: loss_db must never be negative under a peak reference, got {}",
+            cell.cell_id,
+            cell.loss_db
+        );
+        // …and its knock-on: a total path loss below free space.
+        assert!(
+            cell.total_path_loss_db >= cell.free_space_path_loss_db,
+            "Cell {}: total_path_loss_db ({}) fell below free_space_path_loss_db ({})",
+            cell.cell_id,
+            cell.total_path_loss_db,
+            cell.free_space_path_loss_db
+        );
+        // The response is internally re-derivable from the values it reports.
+        assert!(
+            (cell.loss_db - (peak - cell.gain_db)).abs() < 1e-9,
+            "Cell {}: loss_db ({}) != peak_gain_db ({}) − gain_db ({})",
+            cell.cell_id,
+            cell.loss_db,
+            peak,
+            cell.gain_db
+        );
+        if cell.loss_db == 0.0 {
+            zero_loss_cells += 1;
+            assert!(
+                (cell.gain_db - peak).abs() < 1e-12,
+                "Cell {}: the zero-loss cell must be the peak cell",
+                cell.cell_id
+            );
+        }
+    }
 
-    assert!(
-        center_cell.loss_db.abs() <= min_abs_loss + 0.001,
-        "Center cell |loss_db| ({}) should be the minimum absolute loss (min_abs={})",
-        center_cell.loss_db.abs(),
-        min_abs_loss
+    assert_eq!(
+        zero_loss_cells, 1,
+        "Exactly one cell — the peak — should carry loss_db == 0.0"
     );
+
+    server.shutdown().await;
+}
+
+// ---------------------------------------------------------------------------
+// Test 3b: /heatmap and /h3-heatmap reference loss by the same rule (C9)
+//
+// Both endpoints report `loss_db` relative to the peak gain over the points they
+// actually evaluated, so on both the minimum loss over the grid is exactly 0.0 and
+// no value is negative. This is the drift guard: the two endpoints gave the same
+// field two meanings before C9.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn test_heatmap_and_h3_heatmap_reference_loss_by_the_same_rule() {
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
+
+    let h3: H3LinkBudgetResponse = server
+        .post("/api/v1/h3-heatmap", &base_h3_request())
+        .await
+        .expect("H3 heatmap computation failed");
+
+    let heatmap: HeatmapResponse = server
+        .post("/api/v1/heatmap", &builders::simple_heatmap_request())
+        .await
+        .expect("Heatmap computation failed");
+
+    let h3_losses: Vec<f64> = h3.cells.iter().map(|c| c.loss_db).collect();
+    let rect_losses: Vec<f64> = match &heatmap.grid {
+        GridData::Rectangular { loss_db, .. } => loss_db.iter().flatten().copied().collect(),
+        GridData::H3 { loss_db, .. } => loss_db.clone(),
+    };
+
+    for (endpoint, losses) in [("/h3-heatmap", &h3_losses), ("/heatmap", &rect_losses)] {
+        assert!(!losses.is_empty(), "{endpoint} returned no grid values");
+        let min = losses.iter().copied().fold(f64::INFINITY, f64::min);
+        assert!(
+            min == 0.0,
+            "{endpoint}: loss is peak-referenced, so the minimum over the grid must be \
+             exactly 0.0 (the peak point), got {min}"
+        );
+        assert!(
+            losses.iter().all(|l| *l >= 0.0),
+            "{endpoint}: peak-referenced loss must never be negative"
+        );
+    }
 
     server.shutdown().await;
 }

@@ -42,6 +42,8 @@ G1 ─┬─ G2 ── G3
     │  S1b, S2b (Phase 2 review follow-ups)   │   S1b+S2b open — see below)
     ├─ S6                                    │
     ├─ C3 ─ C4 ─ C2 ─ C9 ─ C8 ─ C7           │
+    │  C9 DONE 2026-07-26 (loss_db now peak- │
+    │      referenced on both heatmaps)      │
     │  C1 DONE 2026-07-25 (did not fold into │
     │      C8; C9 then C8 stage 4 update it) │
     │  C10, C11 DONE 2026-07-25 (both filed  │
@@ -1573,6 +1575,40 @@ beforehand catches C8's misses, while one added afterwards only ratifies whateve
 ### C9 `[DECISION]` — `/h3-heatmap` `loss_db`: reference it to the grid peak, not the centre cell — Effort: S
 **[DECIDED 2026-07-25 — maintainer: reference `loss_db` to the beam peak; peak = max gain over
 the cells actually evaluated, matching `/heatmap`]**
+**[✅ DONE 2026-07-26 — branch `feat/c9-h3-loss-peak-referenced`]**
+
+**As landed.** Step 6 (the separate boresight-reference evaluation) is gone, so the endpoint
+runs one *fewer* gain evaluation per request. `compute_cell_result` now returns a private
+`CellGain` — the peak-independent quantities only — and `H3CellResult` is constructed solely
+in the caller's second pass, so a cell cannot escape with an unfilled loss (the two-pass
+shape is enforced by the type, not by a comment). Measured on the shipped
+`gs_3.7m_uncalibrated` example the numbers moved exactly as predicted: centre cell
+`loss_db 0.0 → 5.43`, the neighbour `−5.43 → 0.0`, and its `total_path_loss_db`
+`126.45 → 131.88` (now equal to its FSPL, since it is the peak).
+
+**Degenerate case (the gotcha, decided here).** With step 6 removed there is no fallback
+reference when *no* cell yields a finite gain. Reusing `/heatmap`'s convention rather than
+inventing a second one: `FAILED_POINT_LOSS_DB` became `pub(crate)` and a negated
+counterpart `NO_PEAK_GAIN_DB = -999_999.0` was added beside it, reported as
+`metadata.peak_gain_db` when there is no peak. A finite value is required — `f64::NEG_INFINITY`
+serializes to JSON `null` for a field the schema declares as a number, which is the
+null-under-200 hazard C2 called out. Pinned by
+`h3_all_cells_failed_reports_a_finite_peak_sentinel` (forces total failure with a zero S3
+integration budget).
+
+**One change beyond the unit's H3 scope, deliberate:** `/heatmap` had the identical
+`peak_gain_db = -inf → null` hole in its own all-points-failed path. It now reports the same
+sentinel. Two lines, and leaving it would have meant the shared convention disagreed with
+itself on the very endpoint C9 aligns to.
+
+**Tests added:** `h3_loss_is_referenced_to_the_grid_peak_not_the_centre_cell` (unit — a
+0.06·f lateral design-feed displacement steers the peak off the centre cell, asserted
+non-vacuously, so it fails outright on the pre-C9 rule),
+`h3_all_cells_failed_reports_a_finite_peak_sentinel` (unit),
+`test_h3_peak_cell_is_the_zero_loss_reference` (integration — replaces
+`test_h3_center_cell_minimum_loss`), and
+`test_heatmap_and_h3_heatmap_reference_loss_by_the_same_rule` (integration — the drift guard:
+on both endpoints the minimum loss over the grid is exactly 0.0 and no value is negative).
 
 **The defect.** `/api/v1/h3-heatmap` returns `loss_db = gain(centre cell) − gain(this cell)`
 (`h3_link_budget.rs:648`, reference built at `h3_link_budget.rs:395-471`). The centre cell is

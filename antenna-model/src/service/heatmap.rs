@@ -20,7 +20,21 @@ const PARALLEL_THRESHOLD: usize = 100;
 
 /// Sentinel loss value used when a grid point computation fails.
 /// Using a large finite value avoids NaN serialization issues.
-const FAILED_POINT_LOSS_DB: f64 = 999_999.0;
+///
+/// Shared with `service::h3_link_budget` so both heatmap endpoints report a failed
+/// point/cell the same way (roadmap C9).
+pub(crate) const FAILED_POINT_LOSS_DB: f64 = 999_999.0;
+
+/// Sentinel `metadata.peak_gain_db` reported when *no* grid point (or H3 cell) yielded a
+/// finite gain, so there is no peak to reference.
+///
+/// It is the peak-side counterpart of [`FAILED_POINT_LOSS_DB`] — negated, so that the
+/// degenerate response still satisfies the documented identity
+/// `loss_db = peak_gain_db - gain_db` in sign and magnitude class rather than introducing a
+/// second, unrelated convention. A finite value is required: `f64::NEG_INFINITY` serializes
+/// to JSON `null` for a field the schema declares as a number, which is exactly the
+/// null-under-200 hazard roadmap C2 called out.
+pub(crate) const NO_PEAK_GAIN_DB: f64 = -FAILED_POINT_LOSS_DB;
 
 /// Type alias for grid generation results.
 ///
@@ -108,13 +122,20 @@ pub fn generate_heatmap_with_budget(
         .filter(|(_, _, _, _, failed)| *failed)
         .count();
 
-    // Find peak gain (maximum across all successful points only)
+    // Find peak gain (maximum across all successful points only).
+    // With no successful point there is no peak: report the finite sentinel rather than
+    // -inf, which would serialize to `null` under HTTP 200.
     let peak_gain_db = results
         .iter()
         .filter(|(_, _, _, _, failed)| !failed)
         .map(|(_, _, gain, _, _)| *gain)
         .filter(|g| g.is_finite())
         .fold(f64::NEG_INFINITY, f64::max);
+    let peak_gain_db = if peak_gain_db.is_finite() {
+        peak_gain_db
+    } else {
+        NO_PEAK_GAIN_DB
+    };
 
     // Compute loss relative to peak for each point.
     // Failed points receive FAILED_POINT_LOSS_DB sentinel — never NaN.
