@@ -20,13 +20,15 @@ use crate::data::types::AntennaCalibration;
 use crate::error::{AntennaModelError, Result};
 use crate::model::compute_gain_db;
 use crate::model::integration::DEFAULT_INTEGRATION_BUDGET;
+use crate::model::pattern::INTEGRATION_NONCONVERGENCE_WARNING;
 use crate::model::{
-    compute_emitter_direction_with_attitude, compute_feed_position_from_pointing, ecef_to_geodetic,
-    evaluate_correction, geodetic_to_ecef, squint_corrected_direction, AntennaConfiguration,
-    FeedParameters as ModelFeedParams, FeedPosition, IntegrationParams,
-    MeshParameters as ModelMeshParams, ReflectorGeometry as ModelReflector,
+    analyze_edge_cases, compute_emitter_direction_with_attitude,
+    compute_feed_position_from_pointing, ecef_to_geodetic, evaluate_correction, geodetic_to_ecef,
+    squint_corrected_direction, AntennaConfiguration, FeedParameters as ModelFeedParams,
+    FeedPosition, IntegrationParams, MeshParameters as ModelMeshParams,
+    ReflectorGeometry as ModelReflector,
 };
-use crate::service::{GainCache, GainCacheKey};
+use crate::service::{CachedGain, GainCache, GainCacheKey};
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -142,9 +144,11 @@ fn build_antenna_config(
 /// lookup so that the cache key space remains consistent regardless of whether a
 /// correction surface is present.
 ///
-/// On a cache hit, physics warnings are not re-surfaced (they were already returned
-/// on the first call that populated the entry). Correction-surface warnings ARE
-/// always re-surfaced because they are computed fresh on every call.
+/// Every warning this returns is reachable on a cache HIT as well as a miss
+/// (roadmap C10) — see the comment on the `get_or_compute` call below for how each
+/// class gets there. The one warning class that is *not* returned here is the
+/// configuration-derived set (spillover, feed-offset band), which the caller emits
+/// once per request because it is identical at every cell.
 #[allow(clippy::too_many_arguments)]
 fn compute_cell_gain(
     cell_ecef: (f64, f64, f64),
@@ -201,28 +205,47 @@ fn compute_cell_gain(
     let theta_rad = el_deg.to_radians();
     let phi_rad = az_deg.to_radians();
 
-    // Use get_or_compute to handle the cache hit path (no warnings re-surfaced on
-    // a hit — acceptable since warnings were returned when the entry was first
-    // computed).  On a cache miss the closure runs compute_gain_db; we capture
-    // warnings by running compute_gain_db directly when the cache is disabled or
-    // misses.  To avoid double computation we use a cell to smuggle warnings out
-    // of the closure.
-    //
     // IMPORTANT: the cache stores PHYSICS-ONLY gain. The correction surface must
     // be applied after this call, never inside the closure.
+    //
+    // Nothing from `result.warnings` is smuggled out of the closure (roadmap C10).
+    // The closure runs on a MISS only, so anything captured there is lost on every
+    // later hit — which is exactly what used to happen. Instead each warning is
+    // re-derived on the path that can always reach it:
+    //   * convergence rides with the cached value (only the integration knows it,
+    //     and a hit is precisely the case that skips the integration);
+    //   * configuration-derived warnings (spillover, feed-offset band) are emitted
+    //     once per request by the caller — `analyze_edge_cases` ignores (θ, φ), so
+    //     they are identical at every cell;
+    //   * geometry-derived warnings (off-axis, rear-hemisphere, ray-tracing stub)
+    //     are re-derived below, outside the closure.
+    let cached = cache.get_or_compute(&request.antenna_id, &request.feed_id, cache_key, || {
+        let result = compute_gain_db(
+            theta_rad,
+            phi_rad,
+            antenna_config,
+            frequency_hz,
+            integration_params,
+        )?;
+        Ok(CachedGain::new(
+            result.gain,
+            !result
+                .warnings
+                .iter()
+                .any(|w| w == INTEGRATION_NONCONVERGENCE_WARNING),
+        ))
+    })?;
+    let physics_gain_db = cached.value;
+
     let mut captured_warnings: Vec<String> = Vec::new();
-    let physics_gain_db =
-        cache.get_or_compute(&request.antenna_id, &request.feed_id, cache_key, || {
-            let result = compute_gain_db(
-                theta_rad,
-                phi_rad,
-                antenna_config,
-                frequency_hz,
-                integration_params,
-            )?;
-            captured_warnings = result.warnings;
-            Ok(result.gain)
-        })?;
+
+    // Non-convergence of the aperture integral that produced this number. Derived
+    // from the cached flag rather than from the closure's warnings, so it surfaces
+    // identically on a hit and a miss — a served value whose integration did not
+    // converge is never silent (the P10 self-check's whole purpose).
+    if !cached.converged {
+        captured_warnings.push(INTEGRATION_NONCONVERGENCE_WARNING.to_string());
+    }
 
     // Apply correction surface (post-cache). Uses the same gating logic as
     // `service::evaluator::compute_gain_from_request` (the calibration's
@@ -434,9 +457,13 @@ pub fn compute_h3_link_budget_with_budget(
         );
         let theta_rad = el_deg.to_radians();
         let phi_rad = az_deg.to_radians();
-        // Cache stores physics-only gain; correction is applied below.
-        let physics_gain =
-            cache.get_or_compute(&request.antenna_id, &request.feed_id, cache_key, || {
+        // Cache stores physics-only gain; correction is applied below. This reference
+        // point's warnings are deliberately discarded: every warning it could raise is
+        // either configuration-derived (emitted once per request below) or geometry-
+        // derived at an angle some cell also covers, and a non-convergence here would
+        // be reported by the centre cell, which evaluates the same direction.
+        let physics_gain = cache
+            .get_or_compute(&request.antenna_id, &request.feed_id, cache_key, || {
                 let result = compute_gain_db(
                     theta_rad,
                     phi_rad,
@@ -444,8 +471,15 @@ pub fn compute_h3_link_budget_with_budget(
                     frequency_hz,
                     &integration_params,
                 )?;
-                Ok(result.gain)
-            })?;
+                Ok(CachedGain::new(
+                    result.gain,
+                    !result
+                        .warnings
+                        .iter()
+                        .any(|w| w == INTEGRATION_NONCONVERGENCE_WARNING),
+                ))
+            })?
+            .value;
         // Apply correction surface to boresight reference for consistent loss_db.
         if let Some(ref surface) = calibration.correction_surface {
             if crate::service::evaluator::is_in_coverage(
@@ -525,6 +559,17 @@ pub fn compute_h3_link_budget_with_budget(
     let mut warnings_set: HashSet<String> = HashSet::new();
     let mut failed_count = 0usize;
     let mut any_correction_applied = false;
+
+    // Configuration-derived warnings (spillover fraction, feed-offset band), emitted
+    // once per request rather than gathered from the cells (roadmap C10).
+    // `analyze_edge_cases` takes (θ, φ) but ignores both, so its warnings are identical
+    // at every cell and the set below is exactly what the per-cell path used to produce.
+    // Emitting them here removes their dependence on the gain cache: they used to be
+    // captured only inside the cache-MISS closure, so a repeated identical request came
+    // back missing them entirely.
+    for warning in analyze_edge_cases(&antenna_config, 0.0, 0.0).warnings {
+        warnings_set.insert(warning);
+    }
 
     for result in results {
         match result {
