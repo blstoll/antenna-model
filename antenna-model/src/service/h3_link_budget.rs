@@ -92,7 +92,7 @@ fn build_antenna_config(
 
     // Compute physical feed position from pointing target
     let (steer_x, steer_y, steer_z) = compute_feed_position_from_pointing(
-        &request.feed_position,
+        &request.feed_pointing_location,
         &request.reflector_boresight,
         &request.vehicle_position,
         focal_length_m,
@@ -104,10 +104,10 @@ fn build_antenna_config(
     let feed_x = steer_x + design_pos.0;
     let feed_y = steer_y + design_pos.1;
     let feed_z = steer_z + design_pos.2;
-    let feed_position = FeedPosition::new(feed_x, feed_y, feed_z);
+    let physical_feed_position = FeedPosition::new(feed_x, feed_y, feed_z);
 
     let feed = ModelFeedParams::builder()
-        .position(feed_position)
+        .position(physical_feed_position)
         .q_factor(calibration.physical_config.feed.q_factor)
         .phase_center_offset(calibration.physical_config.feed.phase_center_offset_m)
         .axial_defocus(calibration.physical_config.feed.axial_defocus_m)
@@ -357,8 +357,8 @@ pub fn compute_h3_link_budget_with_budget(
     })?;
 
     // 2. Find center cell from feed position
-    // Use feed_position to determine where on Earth we're centering the grid
-    let (feed_ex, feed_ey, feed_ez) = pos_to_ecef(&request.feed_position)?;
+    // Use feed_pointing_location to determine where on Earth we're centering the grid
+    let (feed_ex, feed_ey, feed_ez) = pos_to_ecef(&request.feed_pointing_location)?;
     let (feed_lon_deg, feed_lat_deg, _) = ecef_to_geodetic(feed_ex, feed_ey, feed_ez)?;
 
     let center_latlng = h3o::LatLng::new(feed_lat_deg, feed_lon_deg).map_err(|e| {
@@ -763,7 +763,7 @@ mod tests {
             feed_id: "h3_test_feed".to_string(),
             vehicle_position: vehicle,
             reflector_boresight: boresight,
-            feed_position: feed,
+            feed_pointing_location: feed,
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: None,
             n_rings: 0, // single center cell only — fast
@@ -985,7 +985,7 @@ mod tests {
             feed_id: "h3_test_feed".to_string(),
             vehicle_position: geo(-118.1234, 34.5678, 100.0),
             reflector_boresight: geo(-118.1234, 34.5679, 110.0),
-            feed_position: geo(-118.1234, 34.5679, 110.0), // feed aimed at boresight → at focus
+            feed_pointing_location: geo(-118.1234, 34.5679, 110.0), // feed aimed at boresight → at focus
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: None,
             n_rings: 2,
@@ -1093,15 +1093,15 @@ mod tests {
 
         let mut req_squint = make_h3_test_request();
         // Steer the feed off boresight so feed displacement (hence squint) is non-zero.
-        req_squint.feed_position = Position3D::new(
+        req_squint.feed_pointing_location = Position3D::new(
             req_squint.reflector_boresight.x + 0.05,
             req_squint.reflector_boresight.y,
             req_squint.reflector_boresight.z,
         );
         // Explicit tag (matches make_h3_test_request); don't rely on auto-detection.
-        req_squint.feed_position.coordinate_system = Some(CoordinateSystem::Geodetic);
+        req_squint.feed_pointing_location.coordinate_system = Some(CoordinateSystem::Geodetic);
         req_squint.pointing_frequency_mhz = Some(req_squint.frequency_mhz * 1.4);
-        req_baseline.feed_position = req_squint.feed_position.clone();
+        req_baseline.feed_pointing_location = req_squint.feed_pointing_location.clone();
 
         let cache1 = GainCache::new(false, 1);
         let resp_baseline = compute_h3_link_budget(
@@ -1157,12 +1157,12 @@ mod tests {
         let calibration = make_h3_test_calibration();
 
         let mut req = make_h3_test_request();
-        req.feed_position = Position3D::new(
+        req.feed_pointing_location = Position3D::new(
             req.reflector_boresight.x + 0.05,
             req.reflector_boresight.y,
             req.reflector_boresight.z,
         );
-        req.feed_position.coordinate_system = Some(CoordinateSystem::Geodetic);
+        req.feed_pointing_location.coordinate_system = Some(CoordinateSystem::Geodetic);
         req.pointing_frequency_mhz = Some(req.frequency_mhz * 1.4);
         let cache = GainCache::new(false, 1);
         let resp =
@@ -1176,12 +1176,12 @@ mod tests {
         // Displace the feed too, so this asserts None comes from pointing == None — not
         // merely from zero feed displacement.
         let mut req_none = make_h3_test_request();
-        req_none.feed_position = Position3D::new(
+        req_none.feed_pointing_location = Position3D::new(
             req_none.reflector_boresight.x + 0.05,
             req_none.reflector_boresight.y,
             req_none.reflector_boresight.z,
         );
-        req_none.feed_position.coordinate_system = Some(CoordinateSystem::Geodetic);
+        req_none.feed_pointing_location.coordinate_system = Some(CoordinateSystem::Geodetic);
         req_none.pointing_frequency_mhz = None;
         let cache_none = GainCache::new(false, 1);
         let resp_none = compute_h3_link_budget(
@@ -1239,7 +1239,7 @@ mod tests {
             .unwrap_or_else(|| h3_resolution_from_frequency(request.frequency_mhz));
         let h3_res = h3o::Resolution::try_from(resolution).expect("valid H3 resolution");
         let (feed_ex, feed_ey, feed_ez) =
-            pos_to_ecef(&request.feed_position).expect("feed position to ECEF");
+            pos_to_ecef(&request.feed_pointing_location).expect("feed position to ECEF");
         let (feed_lon_deg, feed_lat_deg, _) =
             ecef_to_geodetic(feed_ex, feed_ey, feed_ez).expect("feed ECEF to geodetic");
         let center_latlng =
@@ -1258,7 +1258,7 @@ mod tests {
             feed_id: request.feed_id.clone(),
             vehicle_position: request.vehicle_position.clone(),
             reflector_boresight: request.reflector_boresight.clone(),
-            feed_position: request.feed_position.clone(),
+            feed_pointing_location: request.feed_pointing_location.clone(),
             emitter_position,
             frequency_mhz: request.frequency_mhz,
             pointing_frequency_mhz: request.pointing_frequency_mhz,

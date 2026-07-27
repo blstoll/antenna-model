@@ -36,8 +36,8 @@ fn base_h3_request() -> H3LinkBudgetRequest {
             z: 110.0,
             coordinate_system: None,
         },
-        // feed_position is the H3 center cell location (same area as vehicle)
-        feed_position: Position3D {
+        // feed_pointing_location is the H3 center cell location (same area as vehicle)
+        feed_pointing_location: Position3D {
             x: -118.124,
             y: 34.568,
             z: 105.0,
@@ -109,7 +109,7 @@ async fn test_h3_n_rings_2_returns_19_cells() {
 // Test 3: loss_db is referenced to the grid PEAK (roadmap C9)
 //
 // Replaces the pre-C9 "centre cell is the zero" test. The centre cell is merely
-// the cell nearest `feed_position`; the beam peak generally lies elsewhere, and
+// the cell nearest `feed_pointing_location`; the beam peak generally lies elsewhere, and
 // referencing loss to the centre made every stronger cell report a negative
 // loss_db. The reference is now `metadata.peak_gain_db` — max gain over the cells
 // actually evaluated, the same rule `/api/v1/heatmap` applies.

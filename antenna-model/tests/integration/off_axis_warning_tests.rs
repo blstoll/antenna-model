@@ -182,7 +182,7 @@ async fn test_h3_heatmap_off_axis_uncalibrated_warns() {
             z: 110.0,
             coordinate_system: None,
         },
-        feed_position: Position3D {
+        feed_pointing_location: Position3D {
             x: -118.124,
             y: 34.568,
             z: 105.0,

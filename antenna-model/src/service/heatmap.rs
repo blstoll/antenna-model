@@ -328,7 +328,7 @@ fn evaluate_grid_point(
         feed_id: request.feed_id.clone(),
         vehicle_position: request.vehicle_position.clone(),
         reflector_boresight: request.reflector_boresight.clone(),
-        feed_position: request.feed_position.clone(),
+        feed_pointing_location: request.feed_pointing_location.clone(),
         emitter_position,
         frequency_mhz: request.frequency_mhz,
         pointing_frequency_mhz: request.pointing_frequency_mhz,
@@ -597,7 +597,7 @@ mod tests {
             feed_id: "test_feed".to_string(),
             vehicle_position: Position3D::new(0.0, 0.0, 0.0),
             reflector_boresight: Position3D::new(0.0, 0.0, 10.0),
-            feed_position: Position3D::new(0.0, 0.0, 23.6),
+            feed_pointing_location: Position3D::new(0.0, 0.0, 23.6),
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: None,
             grid_config,
@@ -712,7 +712,7 @@ mod tests {
             feed_id: "test_feed".to_string(),
             vehicle_position: Position3D::new(0.0, 0.0, 0.0),
             reflector_boresight: Position3D::new(0.0, 0.0, 10.0),
-            feed_position: Position3D::new(0.0, 0.0, 23.6),
+            feed_pointing_location: Position3D::new(0.0, 0.0, 23.6),
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: None,
             grid_config,
@@ -816,7 +816,7 @@ mod tests {
 
         let vehicle_position = Position3D::new(0.0, 0.0, 0.0); // geodetic: equator, prime meridian
         let reflector_boresight = Position3D::new(0.0, 0.0, 10.0);
-        let feed_position = Position3D::new(0.0, 0.0, 10.0); // focused (unsteered) feed
+        let feed_pointing_location = Position3D::new(0.0, 0.0, 10.0); // focused (unsteered) feed
         let frequency_mhz = 8400.0;
         let azimuth_deg = 30.0;
         let elevation_deg = 20.0;
@@ -834,7 +834,7 @@ mod tests {
             feed_id: "heatmap_consistency_feed".to_string(),
             vehicle_position: vehicle_position.clone(),
             reflector_boresight: reflector_boresight.clone(),
-            feed_position: feed_position.clone(),
+            feed_pointing_location: feed_pointing_location.clone(),
             frequency_mhz,
             pointing_frequency_mhz: None,
             grid_config,
@@ -856,7 +856,7 @@ mod tests {
             feed_id: "heatmap_consistency_feed".to_string(),
             vehicle_position,
             reflector_boresight,
-            feed_position,
+            feed_pointing_location,
             emitter_position,
             frequency_mhz,
             pointing_frequency_mhz: None,

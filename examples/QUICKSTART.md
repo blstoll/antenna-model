@@ -47,7 +47,7 @@ curl -X POST http://localhost:3000/api/v1/gain \
     "vehicle_position": {"x": 6500000.0, "y": 0.0, "z": 0.0},
     "vehicle_attitude": [1.0, 0.0, 0.0, 0.0],
     "reflector_boresight": {"x": 6500010.0, "y": 0.0, "z": 0.0},
-    "feed_position": {"x": 6500005.0, "y": 0.0, "z": 0.0},
+    "feed_pointing_location": {"x": 6500005.0, "y": 0.0, "z": 0.0},
     "emitter_position": {"x": 7000000.0, "y": 0.0, "z": 500000.0},
     "frequency_mhz": 8450.0,
     "include_reference": true
@@ -67,7 +67,7 @@ response = requests.post(
         "vehicle_position": {"x": 6500000.0, "y": 0.0, "z": 0.0},
         "vehicle_attitude": [1.0, 0.0, 0.0, 0.0],
         "reflector_boresight": {"x": 6500010.0, "y": 0.0, "z": 0.0},
-        "feed_position": {"x": 6500005.0, "y": 0.0, "z": 0.0},
+        "feed_pointing_location": {"x": 6500005.0, "y": 0.0, "z": 0.0},
         "emitter_position": {"x": 7000000.0, "y": 0.0, "z": 500000.0},
         "frequency_mhz": 8450.0,
         "include_reference": True

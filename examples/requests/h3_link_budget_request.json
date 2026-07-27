@@ -13,7 +13,7 @@
     "z": 800.0,
     "coordinate_system": "geodetic"
   },
-  "feed_position": {
+  "feed_pointing_location": {
     "x": -116.45,
     "y": 35.4267,
     "z": 800.0,

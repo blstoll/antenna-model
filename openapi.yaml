@@ -143,7 +143,7 @@ paths:
                     x: 4510732.0
                     y: 4510732.0
                     z: 3488950.0
-                  feed_position:
+                  feed_pointing_location:
                     x: 4510731.5
                     y: 4510731.5
                     z: 3488870.0
@@ -167,7 +167,7 @@ paths:
                     x: -117.0
                     y: 35.0
                     z: 400000.0
-                  feed_position:
+                  feed_pointing_location:
                     x: -118.124
                     y: 34.568
                     z: 105.0
@@ -567,7 +567,7 @@ paths:
                     x: 4510732.0
                     y: 4510732.0
                     z: 3488950.0
-                  feed_position:
+                  feed_pointing_location:
                     x: 4510731.5
                     y: 4510731.5
                     z: 3488870.0
@@ -723,7 +723,7 @@ paths:
         Computes antenna gain, free-space path loss, total path loss and (optionally) G/T
         for every cell of an H3 hexagonal grid laid over the Earth's surface.
 
-        The grid is centred on the H3 cell containing `feed_position` — the Earth location
+        The grid is centred on the H3 cell containing `feed_pointing_location` — the Earth location
         the feed's beam is aimed at, **not** the feed's physical location on the antenna —
         and covers `n_rings` rings around it, so the response contains
         `1 + 3 * n_rings * (n_rings + 1)` cells: 1, 7, 19, 37, … up to 331 at the maximum
@@ -773,7 +773,7 @@ paths:
                     y: 35.4267
                     z: 800.0
                     coordinate_system: "geodetic"
-                  feed_position:
+                  feed_pointing_location:
                     x: -116.45
                     y: 35.4267
                     z: 800.0
@@ -1074,7 +1074,7 @@ components:
         - feed_id
         - vehicle_position
         - reflector_boresight
-        - feed_position
+        - feed_pointing_location
         - emitter_position
         - frequency_mhz
       properties:
@@ -1088,7 +1088,7 @@ components:
           $ref: '#/components/schemas/Position3D'
         reflector_boresight:
           $ref: '#/components/schemas/Position3D'
-        feed_position:
+        feed_pointing_location:
           allOf:
             - $ref: '#/components/schemas/Position3D'
           description: >-
@@ -1316,7 +1316,7 @@ components:
         - feed_id
         - vehicle_position
         - reflector_boresight
-        - feed_position
+        - feed_pointing_location
         - frequency_mhz
         - n_rings
       properties:
@@ -1330,7 +1330,7 @@ components:
           $ref: '#/components/schemas/Position3D'
         reflector_boresight:
           $ref: '#/components/schemas/Position3D'
-        feed_position:
+        feed_pointing_location:
           allOf:
             - $ref: '#/components/schemas/Position3D'
           description: >-
@@ -1555,7 +1555,7 @@ components:
         - feed_id
         - vehicle_position
         - reflector_boresight
-        - feed_position
+        - feed_pointing_location
         - frequency_mhz
         - grid_config
       properties:
@@ -1567,7 +1567,7 @@ components:
           $ref: '#/components/schemas/Position3D'
         reflector_boresight:
           $ref: '#/components/schemas/Position3D'
-        feed_position:
+        feed_pointing_location:
           allOf:
             - $ref: '#/components/schemas/Position3D'
           description: >-

@@ -77,7 +77,7 @@ fn compute_endpoints() -> Vec<Endpoint> {
                 "feed_id": "primary",
                 "vehicle_position": {"x": -118.1234, "y": 34.5678, "z": 100.0},
                 "reflector_boresight": {"x": -118.1234, "y": 34.5679, "z": 110.0},
-                "feed_position": {"x": -118.124, "y": 34.568, "z": 105.0},
+                "feed_pointing_location": {"x": -118.124, "y": 34.568, "z": 105.0},
                 "frequency_mhz": 8400.0,
                 "n_rings": 1,
                 "h3_resolution": 7
@@ -90,6 +90,9 @@ fn compute_endpoints() -> Vec<Endpoint> {
 /// POST a raw body and assert the status and `error` code, naming the endpoint and
 /// case in every failure message — with four endpoints and four cases, a bare
 /// `assertion failed` would not say which cell broke.
+///
+/// Returns the raw response body so a caller that also cares about the *message*
+/// (not just the code) can assert on it without posting the request twice.
 async fn assert_rejected(
     server: &TestServer,
     path: &str,
@@ -97,7 +100,7 @@ async fn assert_rejected(
     body: String,
     expected_status: u16,
     expected_code: &str,
-) {
+) -> String {
     let response = server
         .client
         .post(format!("{}{}", server.base_url, path))
@@ -121,6 +124,8 @@ async fn assert_rejected(
         parsed.error, expected_code,
         "{path} [{case}]: wrong error code; body: {raw}"
     );
+
+    raw
 }
 
 // ============================================================================
@@ -413,6 +418,47 @@ async fn batch_level_constraints_are_422() {
             response.text().await.unwrap_or_default()
         );
     }
+
+    server.shutdown().await;
+}
+
+// ============================================================================
+// C8 stage 1: the aim-point rename is a clean break
+// ============================================================================
+
+/// C8 stage 1: the aim-point field was renamed `feed_position` →
+/// `feed_pointing_location` as a **clean break** — no serde alias. A body using the
+/// old key is therefore missing a required field, i.e. unparseable, i.e. 400 under
+/// C2's policy. Pinned so a well-meaning future change cannot quietly reintroduce
+/// backwards compatibility that the C8 decision deliberately rejected.
+#[tokio::test]
+async fn legacy_feed_position_key_is_rejected_with_400() {
+    let server = TestServer::start().await.unwrap();
+
+    let body = json!({
+        "antenna_id": "test_simple",
+        "feed_id": "primary",
+        "vehicle_position": {"x": -118.1234, "y": 34.5678, "z": 100.0},
+        "reflector_boresight": {"x": -118.1234, "y": 34.5679, "z": 110.0},
+        "feed_position": {"x": -118.124, "y": 34.568, "z": 105.0},
+        "emitter_position": {"x": -117.0, "y": 35.0, "z": 400000.0},
+        "frequency_mhz": 8400.0
+    });
+
+    let raw = assert_rejected(
+        &server,
+        "/api/v1/gain",
+        "legacy feed_position key",
+        body.to_string(),
+        400,
+        "invalid_request_body",
+    )
+    .await;
+
+    assert!(
+        raw.contains("feed_pointing_location"),
+        "the 400 must name the field the client should send, got: {raw}"
+    );
 
     server.shutdown().await;
 }

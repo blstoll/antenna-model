@@ -104,7 +104,7 @@ fn heavy_gain_request() -> GainRequest {
             z: bore_z,
             coordinate_system: Some(CoordinateSystem::ECEF),
         },
-        feed_position: Position3D {
+        feed_pointing_location: Position3D {
             x: bore_x,
             y: bore_y,
             z: bore_z,

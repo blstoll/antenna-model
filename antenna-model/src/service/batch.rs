@@ -304,7 +304,7 @@ mod tests {
             feed_id: feed_id.to_string(),
             vehicle_position: Position3D::new(42_164_137.0, 0.0, 0.0), // GEO at (lon=0, lat=0)
             reflector_boresight: Position3D::new(42_164_127.0, 0.0, 0.0), // 10m toward Earth
-            feed_position: Position3D::new(42_164_132.0, 0.0, 0.0), // Feed at ~5m from vehicle (near focus)
+            feed_pointing_location: Position3D::new(42_164_132.0, 0.0, 0.0), // Feed at ~5m from vehicle (near focus)
             emitter_position: emitter,
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: None,

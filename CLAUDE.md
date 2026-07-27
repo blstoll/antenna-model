@@ -259,7 +259,7 @@ Active hardening and debt work is tracked in `docs/roadmap-2026-07.md` and
 
 ## Common Pitfalls
 
-1. **Coordinate System Confusion**: See `docs/domain-contract.md` for the frame table and known gotchas (ENU axis direction, GEO-altitude auto-detection, antenna-frame origin, `feed_position` = pointing target not physical offset) before touching coordinate transforms.
+1. **Coordinate System Confusion**: See `docs/domain-contract.md` for the frame table and known gotchas (ENU axis direction, GEO-altitude auto-detection, antenna-frame origin, `feed_pointing_location` = pointing target not physical offset) before touching coordinate transforms.
 
 2. **A wrong oscillatory integrator is not obviously wrong** — it returns a plausible number. Any change to `integration.rs` or `bessel.rs` must be cross-checked at angles whose answers are independently known, spanning the full θ range **and both Bessel branches** (small-argument and asymptotic): a P10-era spike was confidently wrong by 22 dB at θ=0 while looking flawless at θ=90°, because special-function bugs fail branch-locally. The validation protocol lives in `antenna-model/tests/reference_validation.rs` (anchors, independent Hankel oracle, physicality sweeps) — run it, and never validate at a single angle. Performance note: the integrator is O(D/λ) per point, cheap near boresight; the remaining hot case is wide-angle Ka on offset-feed (coma) antennas — see roadmap unit P10-perf before "optimizing" anything by reducing sample density.
 

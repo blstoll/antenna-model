@@ -1,6 +1,10 @@
 //! LRU Gain Cache
 //!
-//! Caches physics model results keyed on quantized (az, el, freq, feed_position).
+//! Caches physics model results keyed on quantized (az, el, freq, physical feed
+//! position). The feed coordinates in the key are the *physical* feed displacement
+//! in the antenna frame — the resolved product of the request's
+//! `feed_pointing_location` aim point and the feed's design offset — not the aim
+//! point itself.
 //! Per-feed caches are stored in a DashMap to avoid cross-feed lock contention.
 
 use dashmap::DashMap;

@@ -237,7 +237,7 @@ curl -X POST http://localhost:3000/api/v1/gain \
     "vehicle_position": {"x": 0, "y": 0, "z": 0},
     "vehicle_attitude": {"roll": 0, "pitch": 0, "yaw": 0},
     "antenna_pointing": {"azimuth": 45, "elevation": 30},
-    "feed_position": {"x": -6400000, "y": 1000000, "z": 2000000},
+    "feed_pointing_location": {"x": -6400000, "y": 1000000, "z": 2000000},
     "emitter_position": {"x": -6500000, "y": 1100000, "z": 2100000},
     "reference_position": {"x": -6500000, "y": 1100000, "z": 2000000},
     "frequency_mhz": 7500,

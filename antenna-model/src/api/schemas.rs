@@ -244,7 +244,7 @@ pub struct GainRequest {
     /// physical feed displacement in the antenna frame (including the beam
     /// deviation factor). To model an unsteered (focused) feed, set this equal
     /// to `reflector_boresight`.
-    pub feed_position: Position3D,
+    pub feed_pointing_location: Position3D,
 
     /// Emitter position (ECEF or Geodetic)
     pub emitter_position: Position3D,
@@ -437,7 +437,7 @@ pub struct HeatmapRequest {
     /// physical feed displacement in the antenna frame (including the beam
     /// deviation factor). To model an unsteered (focused) feed, set this equal
     /// to `reflector_boresight`.
-    pub feed_position: Position3D,
+    pub feed_pointing_location: Position3D,
 
     /// Operating frequency in MHz
     pub frequency_mhz: f64,
@@ -602,7 +602,7 @@ pub struct H3LinkBudgetRequest {
     /// physical feed displacement in the antenna frame (including the beam
     /// deviation factor). To model an unsteered (focused) feed, set this equal
     /// to `reflector_boresight`.
-    pub feed_position: Position3D,
+    pub feed_pointing_location: Position3D,
 
     /// Operating frequency in MHz
     pub frequency_mhz: f64,
@@ -1351,7 +1351,7 @@ mod tests {
                 coordinate_system: Some(CoordinateSystem::ECEF),
                 ..Position3D::new(4510732.0, 4510732.0, 3488950.0)
             },
-            feed_position: Position3D {
+            feed_pointing_location: Position3D {
                 coordinate_system: Some(CoordinateSystem::ECEF),
                 ..Position3D::new(4510731.5, 4510731.5, 3488870.0)
             },
@@ -1378,7 +1378,7 @@ mod tests {
             feed_id: "x_band_feed".to_string(),
             vehicle_position: Position3D::new(-118.1234, 34.5678, 100.0),
             reflector_boresight: Position3D::new(-118.1234, 34.5679, 110.0), // 10m above vehicle
-            feed_position: Position3D::new(-118.124, 34.568, 105.0),
+            feed_pointing_location: Position3D::new(-118.124, 34.568, 105.0),
             emitter_position: Position3D::new(-117.0, 35.0, 400000.0),
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: None,
@@ -1608,7 +1608,7 @@ mod tests {
             feed_id: "x_band_feed".to_string(),
             vehicle_position: Position3D::new(0.0, 0.0, 0.0),
             reflector_boresight: Position3D::new(0.0, 0.0, 10.0), // 10m above vehicle
-            feed_position: Position3D::new(0.0, 0.0, 23.6),       // 10m + 13.6m focal length
+            feed_pointing_location: Position3D::new(0.0, 0.0, 23.6), // 10m + 13.6m focal length
             emitter_position: Position3D::new(100.0, 100.0, 100.0),
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: None,
@@ -1623,7 +1623,7 @@ mod tests {
         assert!(json.contains("\"feed_id\""));
         assert!(json.contains("\"vehicle_position\""));
         assert!(json.contains("\"reflector_boresight\""));
-        assert!(json.contains("\"feed_position\""));
+        assert!(json.contains("\"feed_pointing_location\""));
         assert!(json.contains("\"emitter_position\""));
         assert!(json.contains("\"frequency_mhz\""));
         assert!(json.contains("\"include_reference\""));
@@ -1950,7 +1950,7 @@ mod tests {
                 coordinate_system: Some(CoordinateSystem::ECEF),
                 ..Position3D::new(4510732.0, 4510732.0, 3488950.0)
             },
-            feed_position: Position3D {
+            feed_pointing_location: Position3D {
                 coordinate_system: Some(CoordinateSystem::ECEF),
                 ..Position3D::new(4510731.5, 4510731.5, 3488870.0)
             },

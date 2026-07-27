@@ -21,7 +21,7 @@
     "z": 3546502.48,
     "coordinate_system": "ecef"
   },
-  "feed_position": {
+  "feed_pointing_location": {
     "x": -2000741.62,
     "y": -5212110.11,
     "z": 3073949.68,

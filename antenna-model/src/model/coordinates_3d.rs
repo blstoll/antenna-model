@@ -593,7 +593,7 @@ pub fn beam_deviation_factor(f_over_d: f64) -> f64 {
 
 /// Compute physical feed position from pointing directions (Earth positions).
 ///
-/// When the API provides `feed_position` and `reflector_boresight` as Earth positions
+/// When the API provides `feed_pointing_location` and `reflector_boresight` as Earth positions
 /// (points where the feed and reflector are aimed), this function computes the
 /// corresponding physical feed displacement in the antenna's coordinate frame.
 ///

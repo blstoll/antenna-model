@@ -43,7 +43,7 @@ fn large_feed_offset_gain_request() -> GainRequest {
 /// boresight, so the feed offset is ≈ 0 (well under 0.5·f) — no ray-tracing stub.
 fn small_feed_offset_gain_request() -> GainRequest {
     let mut req = builders::uncalibrated_antenna_request();
-    req.feed_position = req.reflector_boresight.clone();
+    req.feed_pointing_location = req.reflector_boresight.clone();
     req
 }
 
@@ -54,7 +54,7 @@ fn large_feed_offset_heatmap_request() -> HeatmapRequest {
         feed_id: g.feed_id,
         vehicle_position: g.vehicle_position,
         reflector_boresight: g.reflector_boresight,
-        feed_position: g.feed_position,
+        feed_pointing_location: g.feed_pointing_location,
         frequency_mhz: g.frequency_mhz,
         pointing_frequency_mhz: None,
         grid_config: GridConfig::Rectangular {
@@ -79,7 +79,7 @@ fn large_feed_offset_h3_request() -> H3LinkBudgetRequest {
         feed_id: g.feed_id,
         vehicle_position: g.vehicle_position,
         reflector_boresight: g.reflector_boresight,
-        feed_position: g.feed_position,
+        feed_pointing_location: g.feed_pointing_location,
         frequency_mhz: g.frequency_mhz,
         pointing_frequency_mhz: None,
         n_rings: 1,
