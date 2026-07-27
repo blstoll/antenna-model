@@ -829,7 +829,33 @@ Confirm that work is present rather than redoing it.
       a Task 1/3 miss — add it here and say so in the PR).
 - [ ] `roadmap-2026-07.md:211` no longer reads as if all of C8 landed; the C8 unit in the
       work-units doc marks stage 1 done in C9's style and states stages 2–4 remain.
+- [ ] **File the `CalibrationInfo` null-vs-omitted discrepancy found during Task 2** (below).
+      File it, do **not** fix it — it is a contract change, and C8 stage 1's charter forbids
+      moving any value or shape.
 - [ ] The final exit grep returns no output (Step 3 below).
+
+**The finding to file** (standing rule 5: a doc/code disagreement no unit covers gets filed,
+never silently "fixed"):
+
+> `antenna-model/src/api/schemas.rs:835,839` document `rmse_db` / `r_squared` as *"(None for
+> uncalibrated antennas)"*, and both carry `#[serde(skip_serializing_if = "Option::is_none")]`
+> (`:836,840`) — which reads as "omitted from the response for uncalibrated antennas". **The
+> code does not do that.** `data/types.rs:148,151` types the underlying `CalibrationMetadata`
+> fields as plain `f64`, so `None` is not representable; `data/repository.rs:259-260` fills
+> them with `f64::NAN` for design-spec antennas; and `api/handlers.rs:701-702` — the only
+> `CalibrationInfo` construction in the repo — wraps them in `Some(...)` unconditionally. The
+> attribute therefore never fires, and `/api/v1/antennas/{id}` emits
+> `"rmse_db": null, "r_squared": null`. Nothing pins the uncalibrated shape (`routes.rs:867`
+> asserts only the calibrated path), which is why it survived.
+>
+> Decision needed: either map `NaN` → `None` in `handlers.rs` so the field is genuinely absent
+> and the doc becomes true, or delete the misleading doc comments and declare "null for
+> uncalibrated" the contract.
+>
+> Discovered 2026-07-26 while landing the `examples/responses/` drift guard (Task 2), which
+> initially misread the *correct* nulls in `antenna_details_response.json` as stale keys and
+> deleted them. That deletion was caught in review and reverted; the guard now exempts null
+> sources for exactly this reason.
 
 **Verify:**
 ```bash
