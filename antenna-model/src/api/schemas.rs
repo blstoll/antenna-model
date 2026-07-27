@@ -324,9 +324,9 @@ pub struct GeometryInfo {
     ///
     /// This is the **total** offset actually used for this request: the antenna's
     /// static design offset (reported as `FeedInfo.design_feed_offset_m`) plus the
-    /// displacement induced by steering the beam to `feed_pointing_location`.
-    /// It is a physical displacement in the antenna frame — *not* an Earth
-    /// location, and not to be confused with `feed_pointing_location`.
+    /// steering displacement, expressed relative to the focal point. It is a
+    /// physical displacement in the antenna frame — *not* an Earth location, and
+    /// not to be confused with `feed_pointing_location`.
     ///
     /// `x` and `y` are the lateral displacement of the feed from the optical axis;
     /// `z` is the axial displacement from the focal point (**positive = away from

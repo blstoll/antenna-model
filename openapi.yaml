@@ -194,7 +194,7 @@ paths:
                     reference_gain_db: 43.5
                     loss_db: 2.3
                     geometry:
-                      feed_offset_meters:
+                      physical_feed_offset_m:
                         x: 0.05
                         y: 0.02
                         z: 0.01
@@ -227,7 +227,7 @@ paths:
                     reference_gain_db: 43.8
                     loss_db: 3.3
                     geometry:
-                      feed_offset_meters:
+                      physical_feed_offset_m:
                         x: 0.0
                         y: 0.0
                         z: 0.0
@@ -1190,13 +1190,13 @@ components:
     GeometryInfo:
       type: object
       properties:
-        feed_offset_meters:
+        physical_feed_offset_m:
           type: object
           description: >
             Physical feed offset from the focal point in the antenna frame (meters).
             x and y are the lateral displacement of the feed from the optical axis;
-            z is the axial displacement from the focal point (positive toward the
-            reflector vertex). All three components are ~zero for an on-axis feed.
+            z is the axial displacement from the focal point (positive = AWAY from
+            the reflector vertex). All three components are ~zero for an on-axis feed.
           properties:
             x:
               type: number

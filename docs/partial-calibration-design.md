@@ -709,7 +709,7 @@ impl From<&CalibrationStatus> for CalibrationStatusInfo {
   "reference_gain_db": 43.5,
   "loss_db": 2.3,
   "geometry": {
-    "feed_offset_meters": {
+    "physical_feed_offset_m": {
       "x": 0.05,
       "y": 0.02,
       "z": 0.01
