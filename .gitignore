@@ -45,3 +45,9 @@ perf.data*
 # Temporary files
 tmp/
 temp/
+
+# Python bytecode. examples/python_examples.py is checked with
+# `python3 -m py_compile`, which drops a __pycache__ beside it; without this a
+# `git add -A` tracks the .pyc (it did once, in C8 stage 1).
+__pycache__/
+*.pyc

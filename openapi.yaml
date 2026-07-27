@@ -1194,6 +1194,14 @@ components:
           type: object
           description: >
             Physical feed offset from the focal point in the antenna frame (meters).
+
+            This is the TOTAL offset actually used for this request: the antenna's
+            static design offset (reported as FeedInfo.design_feed_offset_m) plus the
+            displacement induced by steering the beam to feed_pointing_location. It
+            is a physical displacement in the antenna frame - NOT an Earth location,
+            and not to be confused with feed_pointing_location. Because it is
+            per-request, it must not be cached across requests.
+
             x and y are the lateral displacement of the feed from the optical axis;
             z is the axial displacement from the focal point (positive = AWAY from
             the reflector vertex). All three components are ~zero for an on-axis feed.
@@ -1742,17 +1750,35 @@ components:
 
     FeedInfo:
       type: object
+      # DRIFT (filed, not fixed here — C8 stage 4 / C7): apart from
+      # design_feed_offset_m and q_factor, this schema does not match what the
+      # service serves. The Rust FeedInfo (api/schemas.rs) emits `id` (not
+      # `feed_id`), `frequency_range_mhz` (not `frequency_range`), and no `name`
+      # or `phase_center_offset_m` at all. C8 stage 1 corrected only the field it
+      # renamed; the rest is spec-completeness work for the drift guard.
       properties:
         feed_id:
           type: string
         name:
           type: string
-        position:
-          type: array
-          items:
-            type: number
-          minItems: 3
-          maxItems: 3
+        design_feed_offset_m:
+          type: object
+          description: >
+            The feed's DESIGN offset from the focal point in the antenna frame
+            (meters) - a static property of this antenna's configuration, identical
+            for every request. The per-request total (this design offset plus the
+            beam-steering displacement) is reported as
+            GeometryInfo.physical_feed_offset_m.
+
+            z is positive AWAY from the reflector vertex, matching the phase model's
+            delta_z convention.
+          properties:
+            x:
+              type: number
+            y:
+              type: number
+            z:
+              type: number
         q_factor:
           type: number
         phase_center_offset_m:
