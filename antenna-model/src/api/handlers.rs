@@ -674,7 +674,7 @@ pub async fn get_antenna_details(
         if let Some(cal) = state.repository.get_calibration(&antenna_id, feed_id) {
             feeds.push(crate::api::schemas::FeedInfo {
                 id: feed_id.clone(),
-                position_offset: crate::api::schemas::Vector3D {
+                design_feed_offset_m: crate::api::schemas::Vector3D {
                     x: cal.physical_config.feed.position.0,
                     y: cal.physical_config.feed.position.1,
                     z: cal.physical_config.feed.position.2,
@@ -768,7 +768,7 @@ pub async fn get_antenna_details(
 ///   "feeds": [
 ///     {
 ///       "id": "x_band",
-///       "position_offset": {"x": 0.05, "y": 0.02, "z": 0.01},
+///       "design_feed_offset_m": {"x": 0.05, "y": 0.02, "z": 0.01},
 ///       "frequency_range_mhz": [7100.0, 8500.0],
 ///       "q_factor": 8.0
 ///     }
@@ -800,7 +800,7 @@ pub async fn list_antenna_feeds(
         if let Some(cal) = state.repository.get_calibration(&antenna_id, feed_id) {
             feeds.push(crate::api::schemas::FeedInfo {
                 id: feed_id.clone(),
-                position_offset: crate::api::schemas::Vector3D {
+                design_feed_offset_m: crate::api::schemas::Vector3D {
                     x: cal.physical_config.feed.position.0,
                     y: cal.physical_config.feed.position.1,
                     z: cal.physical_config.feed.position.2,
@@ -831,7 +831,7 @@ pub async fn list_antenna_feeds(
 /// # Response
 /// Returns HTTP 200 with JSON body containing:
 /// - id: Feed identifier
-/// - position_offset: Feed position offset from focal point (meters)
+/// - design_feed_offset_m: Feed design offset from focal point (meters)
 /// - frequency_range_mhz: Valid frequency range [min, max] in MHz
 /// - q_factor: Feed pattern q-factor
 ///
@@ -841,7 +841,7 @@ pub async fn list_antenna_feeds(
 /// ```json
 /// {
 ///   "id": "x_band",
-///   "position_offset": {"x": 0.05, "y": 0.02, "z": 0.01},
+///   "design_feed_offset_m": {"x": 0.05, "y": 0.02, "z": 0.01},
 ///   "frequency_range_mhz": [7100.0, 8500.0],
 ///   "q_factor": 8.0
 /// }
@@ -862,7 +862,7 @@ pub async fn get_feed_details(
         Some(cal) => {
             let feed_info = crate::api::schemas::FeedInfo {
                 id: feed_id.clone(),
-                position_offset: crate::api::schemas::Vector3D {
+                design_feed_offset_m: crate::api::schemas::Vector3D {
                     x: cal.physical_config.feed.position.0,
                     y: cal.physical_config.feed.position.1,
                     z: cal.physical_config.feed.position.2,

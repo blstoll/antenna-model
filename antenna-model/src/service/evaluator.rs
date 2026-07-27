@@ -410,7 +410,7 @@ pub fn compute_gain_from_request_with_budget(
         reference_gain_db,
         loss_db,
         geometry: GeometryInfo {
-            feed_offset_meters: feed_offset,
+            physical_feed_offset_m: feed_offset,
             emitter_azimuth_deg: corrected_az,
             emitter_elevation_deg: corrected_el,
             beam_squint_deg: if squint_magnitude_deg > 0.001 {
@@ -1907,7 +1907,7 @@ mod tests {
         );
     }
 
-    /// Test that `feed_offset_meters` is ~zero when the feed is aimed at the same Earth
+    /// Test that `physical_feed_offset_m` is ~zero when the feed is aimed at the same Earth
     /// target as the reflector boresight (focused/on-axis configuration).
     ///
     /// When `feed_pointing_location == reflector_boresight`, `compute_feed_position_from_pointing`
@@ -1930,7 +1930,7 @@ mod tests {
         // so the physical feed offset from the focal point should be ~zero.
         request.feed_pointing_location = request.reflector_boresight.clone();
         let response = compute_gain_from_request(&request, &repo).unwrap();
-        let off = &response.geometry.feed_offset_meters;
+        let off = &response.geometry.physical_feed_offset_m;
         assert!(
             off.x.abs() < 0.05 && off.y.abs() < 0.05 && off.z.abs() < 0.05,
             "expected ~zero physical offset in meters for boresight-aimed feed, got ({}, {}, {})",
@@ -1940,12 +1940,12 @@ mod tests {
         );
     }
 
-    /// Discriminating test: verifies `feed_offset_meters` contains physical meters,
+    /// Discriminating test: verifies `physical_feed_offset_m` contains physical meters,
     /// not angular degrees.
     ///
     /// Strategy: call `compute_feed_position_from_pointing` directly to get the
     /// expected physical feed position (x, y, z) in the antenna frame, then assert
-    /// that `response.geometry.feed_offset_meters` equals (x, y, z - focal_length_m).
+    /// that `response.geometry.physical_feed_offset_m` equals (x, y, z - focal_length_m).
     ///
     /// The default `create_test_request()` has `feed_pointing_location` at a different altitude
     /// than `reflector_boresight` (123.6 m vs 110.0 m at the same lon/lat), giving a
@@ -1983,21 +1983,21 @@ mod tests {
         let expected_z_offset = steer_z - focal_length_m;
 
         let response = compute_gain_from_request(&request, &repo).unwrap();
-        let off = &response.geometry.feed_offset_meters;
+        let off = &response.geometry.physical_feed_offset_m;
 
         assert!(
             (off.x - expected_x).abs() < 1e-9,
-            "feed_offset_meters.x should be {expected_x} m (physical), got {}",
+            "physical_feed_offset_m.x should be {expected_x} m (physical), got {}",
             off.x
         );
         assert!(
             (off.y - expected_y).abs() < 1e-9,
-            "feed_offset_meters.y should be {expected_y} m (physical), got {}",
+            "physical_feed_offset_m.y should be {expected_y} m (physical), got {}",
             off.y
         );
         assert!(
             (off.z - expected_z_offset).abs() < 1e-9,
-            "feed_offset_meters.z should be {expected_z_offset} m (z - focal_length), got {}",
+            "physical_feed_offset_m.z should be {expected_z_offset} m (z - focal_length), got {}",
             off.z
         );
 
@@ -2259,9 +2259,9 @@ mod tests {
             phys.reflector.surface_rms_mm / 1000.0,
         )
         .unwrap();
-        // The evaluator's physical feed position: `feed_offset_meters` echoes
+        // The evaluator's physical feed position: `physical_feed_offset_m` echoes
         // (feed_x, feed_y, feed_z - focal), so feed_z = offset.z + focal reproduces it.
-        let fo = &response.geometry.feed_offset_meters;
+        let fo = &response.geometry.physical_feed_offset_m;
         let feed = ModelFeedParams::builder()
             .position(FeedPosition::new(fo.x, fo.y, fo.z + focal))
             .q_factor(phys.feed.q_factor)

@@ -322,11 +322,17 @@ pub struct GainResponse {
 pub struct GeometryInfo {
     /// Physical feed offset from the focal point in the antenna frame (meters).
     ///
+    /// This is the **total** offset actually used for this request: the antenna's
+    /// static design offset (reported as `FeedInfo.design_feed_offset_m`) plus the
+    /// displacement induced by steering the beam to `feed_pointing_location`.
+    /// It is a physical displacement in the antenna frame — *not* an Earth
+    /// location, and not to be confused with `feed_pointing_location`.
+    ///
     /// `x` and `y` are the lateral displacement of the feed from the optical axis;
     /// `z` is the axial displacement from the focal point (**positive = away from
     /// the reflector vertex**, matching the phase model's `delta_z` convention).
     /// For an on-axis (boresight-aimed) feed all three components are ~zero.
-    pub feed_offset_meters: Vector3D,
+    pub physical_feed_offset_m: Vector3D,
 
     /// Emitter azimuth in antenna frame (degrees)
     pub emitter_azimuth_deg: f64,
@@ -794,8 +800,13 @@ pub struct FeedInfo {
     /// Feed identifier
     pub id: String,
 
-    /// Feed position offset from focal point (meters)
-    pub position_offset: Vector3D,
+    /// The feed's **design** offset from the focal point in the antenna frame
+    /// (meters) — a static property of this antenna's configuration, identical
+    /// for every request. It is a physical displacement, *not* an Earth location:
+    /// it is not the aim point `feed_pointing_location`. The per-request total
+    /// (design offset + beam-steering displacement) is reported as
+    /// `GeometryInfo.physical_feed_offset_m`.
+    pub design_feed_offset_m: Vector3D,
 
     /// Frequency range in MHz
     pub frequency_range_mhz: (f64, f64),
@@ -1874,7 +1885,7 @@ mod tests {
             reference_gain_db: Some(50.0),
             loss_db: Some(4.5),
             geometry: GeometryInfo {
-                feed_offset_meters: Vector3D::new(0.0, 0.0, 0.1),
+                physical_feed_offset_m: Vector3D::new(0.0, 0.0, 0.1),
                 emitter_azimuth_deg: 10.0,
                 emitter_elevation_deg: 45.0,
                 beam_squint_deg: None,
@@ -1915,7 +1926,7 @@ mod tests {
             "feed_id": "x_band",
             "gain_db": 45.5,
             "geometry": {
-                "feed_offset_meters": {"x": 0.0, "y": 0.0, "z": 0.1},
+                "physical_feed_offset_m": {"x": 0.0, "y": 0.0, "z": 0.1},
                 "emitter_azimuth_deg": 10.0,
                 "emitter_elevation_deg": 45.0
             },

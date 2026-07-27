@@ -215,7 +215,7 @@ fn create_error_response(request: &GainRequest, error: AntennaModelError) -> Gai
         reference_gain_db: None,
         loss_db: None,
         geometry: GeometryInfo {
-            feed_offset_meters: Vector3D::new(0.0, 0.0, 0.0),
+            physical_feed_offset_m: Vector3D::new(0.0, 0.0, 0.0),
             emitter_azimuth_deg: 0.0,
             emitter_elevation_deg: 0.0,
             beam_squint_deg: None,

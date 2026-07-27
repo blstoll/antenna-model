@@ -454,7 +454,7 @@ Example response:
   "reference_gain_db": 43.5,
   "loss_db": 2.3,
   "geometry": {
-    "feed_offset_meters": { "x": 0.05, "y": 0.02, "z": 0.01 },
+    "physical_feed_offset_m": { "x": 0.05, "y": 0.02, "z": 0.01 },
     "emitter_azimuth_deg": 185.5,
     "emitter_elevation_deg": 32.1
   },
