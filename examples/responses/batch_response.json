@@ -87,6 +87,7 @@
   ],
   "metadata": {
     "total_computation_time_ms": 0.014834,
-    "count": 3
+    "count": 3,
+    "failure_count": 0
   }
 }
