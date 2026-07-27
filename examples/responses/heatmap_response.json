@@ -25,7 +25,6 @@
     "points_evaluated": 121,
     "computation_time_ms": 1850.5,
     "peak_gain_db": 60.0,
-    "failed_points": 0,
-    "parallel_processing": true
+    "failed_points": 0
   }
 }
