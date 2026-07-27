@@ -6,7 +6,7 @@
 //! # Pipeline
 //!
 //! 1. Resolve H3 resolution from request (or derive from frequency)
-//! 2. Find center H3 cell from feed position lat/lon
+//! 2. Find center H3 cell from feed pointing location lat/lon
 //! 3. Generate grid disk of N rings around center cell
 //! 4. Build antenna configuration from calibration data
 //! 5. For each cell (parallel): compute az/el, look up gain via cache, compute FSPL
@@ -356,7 +356,7 @@ pub fn compute_h3_link_budget_with_budget(
         AntennaModelError::Generic(format!("Invalid H3 resolution {}: {}", resolution, e))
     })?;
 
-    // 2. Find center cell from feed position
+    // 2. Find center cell from the feed pointing location
     // Use feed_pointing_location to determine where on Earth we're centering the grid
     let (feed_ex, feed_ey, feed_ez) = pos_to_ecef(&request.feed_pointing_location)?;
     let (feed_lon_deg, feed_lat_deg, _) = ecef_to_geodetic(feed_ex, feed_ey, feed_ez)?;
@@ -1239,7 +1239,7 @@ mod tests {
             .unwrap_or_else(|| h3_resolution_from_frequency(request.frequency_mhz));
         let h3_res = h3o::Resolution::try_from(resolution).expect("valid H3 resolution");
         let (feed_ex, feed_ey, feed_ez) =
-            pos_to_ecef(&request.feed_pointing_location).expect("feed position to ECEF");
+            pos_to_ecef(&request.feed_pointing_location).expect("feed pointing location to ECEF");
         let (feed_lon_deg, feed_lat_deg, _) =
             ecef_to_geodetic(feed_ex, feed_ey, feed_ez).expect("feed ECEF to geodetic");
         let center_latlng =

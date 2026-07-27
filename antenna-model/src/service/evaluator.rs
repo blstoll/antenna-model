@@ -89,7 +89,7 @@ use std::time::{Duration, Instant};
 ///
 /// # Arguments
 ///
-/// * `request` - The gain request containing vehicle position, reflector boresight, and feed position
+/// * `request` - The gain request containing vehicle position, reflector boresight, and feed pointing location
 /// * `repository` - The calibration data repository
 ///
 /// # Returns
