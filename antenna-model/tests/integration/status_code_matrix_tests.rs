@@ -638,3 +638,39 @@ async fn geo_altitude_geodetic_emitter_is_accepted_when_tagged() {
 
     server.shutdown().await;
 }
+
+// ============================================================================
+// C8 stage 4: /heatmap's `h3` grid_type stub is gone
+// ============================================================================
+
+/// C8 stage 4 deleted the `GridConfig` variant that used to parse and validate an
+/// `h3` grid_type on `POST /api/v1/heatmap` and then fail with `not_implemented` — a
+/// stub, never an alternative to the separate, fully-implemented
+/// `POST /api/v1/h3-heatmap` endpoint. An `h3` tag is now an unknown serde variant,
+/// i.e. an unparseable body: 400 `invalid_request_body` under C2's policy, not the
+/// 422/`not_implemented` the stub used to return.
+#[tokio::test]
+async fn h3_grid_type_on_heatmap_is_400_not_implemented_stub_removed() {
+    let server = TestServer::start().await.unwrap();
+
+    let mut body = serde_json::to_value(builders::simple_heatmap_request()).unwrap();
+    body["grid_config"] = json!({
+        "grid_type": "h3",
+        "h3_resolution": 7,
+        "center_azimuth_deg": 180.0,
+        "center_elevation_deg": 45.0,
+        "field_of_view_deg": 30.0
+    });
+
+    assert_rejected(
+        &server,
+        "/api/v1/heatmap",
+        "h3 grid_type",
+        body.to_string(),
+        400,
+        "invalid_request_body",
+    )
+    .await;
+
+    server.shutdown().await;
+}

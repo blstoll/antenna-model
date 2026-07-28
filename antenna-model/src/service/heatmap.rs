@@ -201,12 +201,6 @@ pub fn generate_heatmap_with_budget(
                 loss_db,
             }
         }
-        GridConfig::H3 { .. } => {
-            // H3 support: for now, return error indicating it's not implemented
-            return Err(AntennaModelError::NotImplemented {
-                feature: "H3 hexagonal grid".to_string(),
-            });
-        }
     };
 
     let computation_time_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -284,9 +278,6 @@ fn generate_grid_points(grid_config: &GridConfig) -> Result<GridPoints> {
             azimuth_range_deg,
             elevation_range_deg,
         } => generate_rectangular_grid(azimuth_range_deg, elevation_range_deg),
-        GridConfig::H3 { .. } => Err(AntennaModelError::NotImplemented {
-            feature: "H3 hexagonal grid".to_string(),
-        }),
     }
 }
 
@@ -687,22 +678,6 @@ mod tests {
     }
 
     #[test]
-    fn test_h3_grid_not_implemented() {
-        let grid_config = GridConfig::H3 {
-            h3_resolution: 7,
-            center_azimuth_deg: 180.0,
-            center_elevation_deg: 45.0,
-            field_of_view_deg: 30.0,
-        };
-
-        let result = generate_grid_points(&grid_config);
-
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, AntennaModelError::NotImplemented { .. }));
-    }
-
-    #[test]
     fn test_grid_generation_boundary_values() {
         // Test with fractional steps that don't divide evenly
         let azimuth_range = RangeConfig::new(0.0, 10.0, 3.0);
@@ -806,11 +781,10 @@ mod tests {
         assert!(!json.contains("NaN"), "Response JSON must not contain NaN");
 
         // Failed points should use sentinel value
-        if let GridData::Rectangular { ref loss_db, .. } = result.grid {
-            for row in loss_db {
-                for &val in row {
-                    assert!(val.is_finite(), "Loss values must be finite, got {}", val);
-                }
+        let GridData::Rectangular { ref loss_db, .. } = result.grid;
+        for row in loss_db {
+            for &val in row {
+                assert!(val.is_finite(), "Loss values must be finite, got {}", val);
             }
         }
     }

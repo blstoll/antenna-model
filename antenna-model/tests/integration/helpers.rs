@@ -478,9 +478,6 @@ pub mod validators {
                     }
                 }
             }
-            GridData::H3 { .. } => {
-                // H3 validation
-            }
         }
         Ok(())
     }

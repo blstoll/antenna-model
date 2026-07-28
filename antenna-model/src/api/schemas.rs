@@ -462,11 +462,19 @@ pub struct HeatmapRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pointing_frequency_mhz: Option<f64>,
 
-    /// Grid configuration (rectangular or H3 hexagonal)
+    /// Grid configuration (rectangular)
     pub grid_config: GridConfig,
 }
 
 /// Grid configuration for heatmap generation.
+///
+/// A **single-variant tagged enum by design**: `grid_type` stays in the wire contract so a
+/// second grid family can be added later without a breaking change (feature F5 would merge
+/// `/api/v1/h3-heatmap` back in here). Do not collapse this into a plain struct.
+///
+/// The `H3` variant that lived here until C8 stage 4 (2026-07-28) was a `NotImplemented`
+/// stub — it parsed and validated, then failed. The real H3 grid is the separate
+/// `POST /api/v1/h3-heatmap` endpoint. An `h3` tag is now an unknown variant → 400.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(tag = "grid_type", rename_all = "lowercase")]
 pub enum GridConfig {
@@ -476,17 +484,6 @@ pub enum GridConfig {
         azimuth_range_deg: RangeConfig,
         /// Elevation range configuration
         elevation_range_deg: RangeConfig,
-    },
-    /// H3 hexagonal grid
-    H3 {
-        /// H3 resolution (0-15, higher = finer resolution)
-        h3_resolution: u8,
-        /// Center azimuth in degrees
-        center_azimuth_deg: f64,
-        /// Center elevation in degrees
-        center_elevation_deg: f64,
-        /// Field of view in degrees
-        field_of_view_deg: f64,
     },
 }
 
@@ -528,7 +525,7 @@ pub struct HeatmapResponse {
     /// Operating frequency in MHz
     pub frequency_mhz: f64,
 
-    /// Grid data (rectangular or H3)
+    /// Grid data (rectangular)
     pub grid: GridData,
 
     /// Aggregated, deduplicated warnings across all grid points.
@@ -549,6 +546,10 @@ pub struct HeatmapResponse {
 }
 
 /// Grid data for heatmap.
+///
+/// Single-variant tagged enum for the same reason as [`GridConfig`] — `grid_type` stays on
+/// the wire. The `H3` variant was removed by C8 stage 4 (2026-07-28); it had no producer,
+/// because the only `GridConfig` that could have selected it was the `NotImplemented` stub.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(tag = "grid_type", rename_all = "lowercase")]
 pub enum GridData {
@@ -560,13 +561,6 @@ pub enum GridData {
         elevation_values: Vec<f64>,
         /// Loss values in dB (2D array: rows are elevation, columns are azimuth)
         loss_db: Vec<Vec<f64>>,
-    },
-    /// H3 hexagonal grid data
-    H3 {
-        /// H3 cell indices
-        h3_indices: Vec<String>,
-        /// Loss values in dB (one per H3 cell)
-        loss_db: Vec<f64>,
     },
 }
 
@@ -1430,19 +1424,20 @@ mod tests {
     }
 
     #[test]
-    fn test_grid_config_h3_serialization() {
-        let grid = GridConfig::H3 {
-            h3_resolution: 7,
-            center_azimuth_deg: 180.0,
-            center_elevation_deg: 45.0,
-            field_of_view_deg: 30.0,
-        };
+    fn h3_grid_type_is_rejected_as_an_unknown_variant() {
+        // The `h3` grid type on /api/v1/heatmap was a NotImplemented stub until C8
+        // stage 4 removed it; the real H3 grid is the separate POST /api/v1/h3-heatmap
+        // endpoint. An `h3` tag is now an unknown variant — i.e. a body that cannot be
+        // parsed, which under roadmap C2's policy is a 400, not a 422.
+        let json = r#"{"grid_type":"h3","h3_resolution":7,"center_azimuth_deg":180.0,"center_elevation_deg":45.0,"field_of_view_deg":30.0}"#;
 
-        let json = serde_json::to_string(&grid).unwrap();
-        assert!(json.contains("\"grid_type\":\"h3\""));
+        let err = serde_json::from_str::<GridConfig>(json)
+            .expect_err("an `h3` grid_type must not deserialize");
 
-        let deserialized: GridConfig = serde_json::from_str(&json).unwrap();
-        assert!(matches!(deserialized, GridConfig::H3 { .. }));
+        assert!(
+            err.to_string().contains("unknown variant"),
+            "expected an unknown-variant parse error, got: {err}"
+        );
     }
 
     // ========================================================================
