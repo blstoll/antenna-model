@@ -86,19 +86,47 @@ fn every_warning_code_is_documented_in_the_api_docs() {
     }
 }
 
-/// The published contract carries no bare-string warnings.
+/// Every `warnings` array in the parseable published contract holds objects, not
+/// prose strings.
 ///
 /// Before C8 stage 3 every `warnings` array held prose. A documented example that
 /// still shows `"warnings": ["some sentence"]` would advertise the pre-stage-3
 /// shape, and — unlike the request examples — nothing else would catch it in files
 /// the C11 deserialization guard does not cover.
+///
+/// The check parses each file and walks it, rather than matching source lines. The
+/// first version of this test looked for the one-line forms `"warnings": ["` and
+/// `warnings: ["` and was therefore vacuous: `openapi.yaml` writes its examples as
+/// YAML block sequences (`warnings:` / `- code: …` on the following lines) and the
+/// JSON examples span multiple lines too, so *no* file it scanned could ever match,
+/// and reverting an example to bare strings left it green.
 #[test]
-fn no_bare_string_warnings_remain_in_the_published_contract() {
+fn no_bare_string_warnings_remain_in_the_parseable_contract() {
+    for file in structured_contract_files() {
+        let path = repo_root().join(&file);
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+        // serde_yaml parses JSON too — JSON is a subset of YAML 1.2.
+        let doc: serde_yaml::Value = serde_yaml::from_str(&text)
+            .unwrap_or_else(|e| panic!("{file} must parse as YAML/JSON: {e}"));
+
+        assert_no_bare_string_warnings(&doc, &file, "$");
+    }
+}
+
+/// The same check for the Markdown docs, whose examples live in fenced JSON blocks.
+///
+/// These cannot be parsed as a whole file, so the scan is line-based — but on the
+/// *element* form (an array entry opening with a quote), which is what the examples
+/// actually use, rather than the single-line form that never appears.
+#[test]
+fn no_bare_string_warnings_remain_in_the_markdown_docs() {
     let files = [
-        "openapi.yaml",
         "docs/api-documentation.md",
         "docs/architecture.md",
-        "examples/api_requests.json",
+        "examples/README.md",
+        "examples/TESTING.md",
+        "examples/QUICKSTART.md",
     ];
 
     for file in files {
@@ -106,19 +134,128 @@ fn no_bare_string_warnings_remain_in_the_published_contract() {
         let text = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
 
-        for (lineno, line) in text.lines().enumerate() {
+        let mut in_fence = false;
+        let mut in_warnings_array = false;
+        // Depth of `{}` nesting inside the array: an element's own fields also open
+        // with a quote, so only lines at depth 0 are array elements.
+        let mut object_depth = 0i32;
+
+        for (idx, line) in text.lines().enumerate() {
+            let lineno = idx + 1;
             let trimmed = line.trim();
-            // A warnings array opening with a quote is a string element; the typed
-            // form opens with `{` or `[` (empty) or spans lines starting with `{`.
-            for marker in ["\"warnings\": [\"", "warnings: [\""] {
-                assert!(
-                    !trimmed.contains(marker),
-                    "{file}:{} shows a bare-string warning; warnings are \
-                     {{code, message}} objects since C8 stage 3",
-                    lineno + 1
-                );
+
+            if trimmed.starts_with("```") {
+                in_fence = !in_fence;
+                in_warnings_array = false;
+                continue;
+            }
+            if !in_fence {
+                continue;
+            }
+
+            if in_warnings_array {
+                if object_depth == 0 {
+                    if trimmed.starts_with(']') {
+                        in_warnings_array = false;
+                        continue;
+                    }
+                    assert!(
+                        !trimmed.starts_with('"'),
+                        "{file}:{lineno} shows a bare-string warning ({trimmed}); warnings \
+                         are {{code, message}} objects since C8 stage 3"
+                    );
+                }
+                object_depth += trimmed.matches('{').count() as i32;
+                object_depth -= trimmed.matches('}').count() as i32;
+                continue;
+            }
+
+            // `"warnings": [` — possibly with elements or the closing bracket on the
+            // same line.
+            let Some(rest) = trimmed
+                .split_once("\"warnings\"")
+                .and_then(|(_, r)| r.trim_start().strip_prefix(':'))
+                .map(str::trim_start)
+                .and_then(|r| r.strip_prefix('['))
+            else {
+                continue;
+            };
+            let rest = rest.trim_start();
+            assert!(
+                !rest.starts_with('"'),
+                "{file}:{lineno} shows a bare-string warning ({trimmed}); warnings are \
+                 {{code, message}} objects since C8 stage 3"
+            );
+            in_warnings_array = !rest.starts_with(']');
+            object_depth = 0;
+        }
+    }
+}
+
+/// Files in the published contract that parse as YAML or JSON in full.
+///
+/// `examples/responses/` is enumerated rather than listed so that a response example
+/// added later is covered without anyone remembering to extend this test.
+fn structured_contract_files() -> Vec<String> {
+    let mut files = vec![
+        "openapi.yaml".to_string(),
+        "examples/api_requests.json".to_string(),
+        "examples/postman_collection.json".to_string(),
+    ];
+
+    let responses = repo_root().join("examples/responses");
+    let entries = std::fs::read_dir(&responses)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", responses.display()));
+    let mut response_files: Vec<String> = entries
+        .map(|entry| entry.expect("readable dir entry").path())
+        .filter(|p| p.extension().is_some_and(|ext| ext == "json"))
+        .map(|p| {
+            format!(
+                "examples/responses/{}",
+                p.file_name().expect("named file").to_string_lossy()
+            )
+        })
+        .collect();
+    assert!(
+        !response_files.is_empty(),
+        "examples/responses/ holds no JSON files; the guard would be vacuous"
+    );
+    response_files.sort();
+
+    files.extend(response_files);
+    files
+}
+
+/// Recursively assert that no mapping key named `warnings` holds a string element.
+fn assert_no_bare_string_warnings(node: &serde_yaml::Value, file: &str, path: &str) {
+    match node {
+        serde_yaml::Value::Mapping(map) => {
+            for (key, value) in map {
+                let key_str = key.as_str().unwrap_or("<non-string key>");
+                let child = format!("{path}.{key_str}");
+
+                if key_str == "warnings" {
+                    if let Some(items) = value.as_sequence() {
+                        for (i, item) in items.iter().enumerate() {
+                            assert!(
+                                !item.is_string(),
+                                "{file}: {child}[{i}] is a bare string ({:?}); warnings are \
+                                 {{code, message}} objects since C8 stage 3",
+                                item.as_str().unwrap_or_default()
+                            );
+                        }
+                    }
+                }
+
+                assert_no_bare_string_warnings(value, file, &child);
             }
         }
+        serde_yaml::Value::Sequence(items) => {
+            for (i, item) in items.iter().enumerate() {
+                assert_no_bare_string_warnings(item, file, &format!("{path}[{i}]"));
+            }
+        }
+        _ => {}
     }
 }
 

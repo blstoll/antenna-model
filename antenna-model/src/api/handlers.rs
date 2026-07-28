@@ -295,7 +295,9 @@ pub async fn compute_gain(
 ///
 /// Per-item degradation survives only for *compute*-class failures, which cannot be
 /// predicted in advance: such an item carries a NaN `gain_db` (rendered as JSON `null`)
-/// and the reason in its `warnings`, and does not stop the other items.
+/// and the reason in its typed `error` object — `{code, message}`, drawn from the same
+/// vocabulary as `ErrorResponse.error` — and does not stop the other items. Its
+/// `warnings` array is empty; before C8 stage 3 the reason was a prose string in there.
 ///
 /// # Performance
 /// - Small batches (<5 requests): Processed sequentially

@@ -1935,7 +1935,10 @@ components:
             * `spillover_significant` — estimated feed spillover exceeds 10% of
               radiated power, enough to reduce aperture efficiency materially.
             * `points_extrapolated` — `/heatmap` grid summary: how many evaluated
-              points carried `extrapolated` or `out_of_coverage`.
+              points carried `extrapolated`, `correction_not_applied`, or
+              `out_of_coverage` — the three ways a returned value can be an
+              extrapolation. The first two are exactly the per-point
+              `metadata.extrapolated` flag returned by `/gain`.
             * `point_computation_failed` — at least one grid point (`/heatmap`) or
               cell (`/h3-heatmap`) could not be evaluated. Those points are counted
               in the response metadata and carry the failure sentinel.

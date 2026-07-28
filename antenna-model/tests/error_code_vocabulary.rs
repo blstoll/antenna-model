@@ -16,8 +16,39 @@ fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
 }
 
+/// Read a `components.schemas.<schema>.properties.<property>.enum` string list.
+fn spec_enum<'a>(spec: &'a serde_yaml::Value, schema: &str, property: &str) -> Vec<&'a str> {
+    let enum_node = spec
+        .get("components")
+        .and_then(|n| n.get("schemas"))
+        .and_then(|n| n.get(schema))
+        .and_then(|n| n.get("properties"))
+        .and_then(|n| n.get(property))
+        .and_then(|n| n.get("enum"))
+        .and_then(|n| n.as_sequence())
+        .unwrap_or_else(|| {
+            panic!(
+                "openapi.yaml must define components.schemas.{schema}.properties.{property}.enum"
+            )
+        });
+
+    enum_node
+        .iter()
+        .map(|v| {
+            v.as_str()
+                .unwrap_or_else(|| panic!("every {schema}.{property} enum entry must be a string"))
+        })
+        .collect()
+}
+
 /// Every code in `error_codes::ALL` appears in openapi.yaml's `ErrorResponse.error`
-/// enum, and the enum contains nothing else.
+/// enum **and** in `GainError.code`, and neither enum contains anything else.
+///
+/// Both are checked because both are hand-maintained copies of the same vocabulary.
+/// `GainError` (the typed per-item failure C8 stage 3 added to batch responses) draws
+/// on `ErrorResponse.error`'s codes but re-lists them, so before this test covered it,
+/// renaming a code updated the enum with a drift guard and silently rotted the one
+/// without — the exact failure mode C3 introduced this file to prevent.
 #[test]
 fn openapi_error_enum_matches_the_served_vocabulary() {
     let path = repo_root().join("openapi.yaml");
@@ -26,36 +57,23 @@ fn openapi_error_enum_matches_the_served_vocabulary() {
     let spec: serde_yaml::Value =
         serde_yaml::from_str(&text).expect("openapi.yaml must be valid YAML");
 
-    let enum_node = spec
-        .get("components")
-        .and_then(|n| n.get("schemas"))
-        .and_then(|n| n.get("ErrorResponse"))
-        .and_then(|n| n.get("properties"))
-        .and_then(|n| n.get("error"))
-        .and_then(|n| n.get("enum"))
-        .and_then(|n| n.as_sequence())
-        .expect("openapi.yaml must define components.schemas.ErrorResponse.properties.error.enum");
+    for (schema, property) in [("ErrorResponse", "error"), ("GainError", "code")] {
+        let documented = spec_enum(&spec, schema, property);
 
-    let documented: Vec<&str> = enum_node
-        .iter()
-        .map(|v| {
-            v.as_str()
-                .expect("every ErrorResponse.error enum entry must be a string")
-        })
-        .collect();
-
-    for code in error_codes::ALL {
-        assert!(
-            documented.contains(code),
-            "error code {code:?} is served but missing from openapi.yaml's \
-             ErrorResponse.error enum"
-        );
-    }
-    for code in &documented {
-        assert!(
-            error_codes::ALL.contains(code),
-            "openapi.yaml documents error code {code:?}, which the service never emits"
-        );
+        for code in error_codes::ALL {
+            assert!(
+                documented.contains(code),
+                "error code {code:?} is served but missing from openapi.yaml's \
+                 {schema}.{property} enum"
+            );
+        }
+        for code in &documented {
+            assert!(
+                error_codes::ALL.contains(code),
+                "openapi.yaml's {schema}.{property} enum documents error code {code:?}, \
+                 which the service never emits"
+            );
+        }
     }
 }
 
