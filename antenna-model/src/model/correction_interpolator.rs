@@ -192,18 +192,26 @@ pub fn evaluate_correction(
     if any_extrapolated {
         result = result.with_extrapolation();
 
+        // The message names the out-of-range *dimensions* and deliberately does not
+        // interpolate the query values. `/heatmap` and `/h3-heatmap` dedupe aggregated
+        // warnings on the whole `(code, message)` pair, so a message carrying
+        // "azimuth (12.34°)" would differ at every grid point and produce one array
+        // entry per evaluated point — up to 3276 of them in a single response. Naming
+        // the dimensions alone bounds the set to 15 possible messages, and the query
+        // values are the client's own inputs (or, for the derived pointing angles,
+        // echoed in `geometry`), so nothing diagnostic is lost.
         let mut out_of_range_dims = Vec::new();
         if az_extrapolated {
-            out_of_range_dims.push(format!("azimuth ({:.2}°)", azimuth_deg));
+            out_of_range_dims.push("azimuth");
         }
         if el_extrapolated {
-            out_of_range_dims.push(format!("elevation ({:.2}°)", elevation_deg));
+            out_of_range_dims.push("elevation");
         }
         if freq_extrapolated {
-            out_of_range_dims.push(format!("frequency ({:.1} MHz)", frequency_mhz));
+            out_of_range_dims.push("frequency");
         }
         if temp_extrapolated {
-            out_of_range_dims.push(format!("temperature ({:.1} K)", temperature_k));
+            out_of_range_dims.push("temperature");
         }
 
         result = result.with_warning(WarningCode::Extrapolated.with(format!(
@@ -534,6 +542,50 @@ mod tests {
         assert!(!result.warnings.is_empty());
         assert_eq!(result.warnings[0].code, WarningCode::Extrapolated);
         assert!(result.warnings[0].message.contains("azimuth"));
+    }
+
+    /// The extrapolation message is identical for every query out of range in the same
+    /// dimensions.
+    ///
+    /// `/heatmap` and `/h3-heatmap` dedupe aggregated warnings on `(code, message)`, so
+    /// a message interpolating the query angle — as this one did until 2026-07-28 —
+    /// yields one array entry per grid point, up to 3276 of them in one response.
+    #[test]
+    fn extrapolation_message_does_not_vary_with_the_query() {
+        let model = BSplineModel4D {
+            coefficients: vec![1.0; 2 * 2 * 2],
+            shape: [2, 2, 2, 1],
+            knots_azimuth: vec![0.0, 0.0, 0.0, 10.0, 10.0, 10.0],
+            knots_elevation: vec![0.0, 0.0, 0.0, 20.0, 20.0, 20.0],
+            knots_frequency: vec![8000.0, 8000.0, 8000.0, 9000.0, 9000.0, 9000.0],
+            knots_temperature: vec![290.0, 290.0, 290.0, 290.0, 290.0, 290.0],
+            spline_order: 3,
+        };
+
+        // Three different azimuths, all past the top of the azimuth knot range.
+        let messages: std::collections::HashSet<String> = [11.0, 15.0, 99.5]
+            .into_iter()
+            .map(|az| {
+                let result = evaluate_correction(&model, az, 10.0, 8500.0, 290.0).unwrap();
+                result.warnings[0].message.clone()
+            })
+            .collect();
+
+        assert_eq!(
+            messages.len(),
+            1,
+            "the message must not depend on the query values; got {messages:?}"
+        );
+        let message = messages.into_iter().next().expect("one message");
+        assert!(
+            !message.contains('°'),
+            "message carries an angle: {message}"
+        );
+
+        // A different set of out-of-range dimensions is still allowed to differ — the
+        // set is bounded at 15, which is what keeps the response array bounded.
+        let both = evaluate_correction(&model, 15.0, 25.0, 8500.0, 290.0).unwrap();
+        assert_eq!(both.warnings[0].message, format!("{message}, elevation"));
     }
 
     #[test]

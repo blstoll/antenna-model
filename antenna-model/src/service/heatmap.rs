@@ -160,20 +160,9 @@ pub fn generate_heatmap_with_budget(
     warnings.sort();
 
     // Count points whose gain was extrapolated rather than interpolated.
-    //
-    // Before C8 stage 3 this read `w.contains("extrapolat") || w.contains("out of
-    // range")` — a substring test against prose owned by two other modules, which
-    // silently depended on their spelling (and on the second phrase, which no
-    // producer had emitted for some time). The typed codes make the predicate say
-    // what it means: the correction surface was extrapolated, or the query fell
-    // outside a partially calibrated antenna's measured region.
     let extrapolated_count = results
         .iter()
-        .filter(|(_, _, _, warns, _)| {
-            warns
-                .iter()
-                .any(|w| w.is(WarningCode::Extrapolated) || w.is(WarningCode::OutOfCoverage))
-        })
+        .filter(|(_, _, _, warns, _)| point_was_extrapolated(warns))
         .count();
     if extrapolated_count > 0 {
         warnings.insert(
@@ -248,6 +237,39 @@ pub fn generate_heatmap_with_budget(
             failed_points: failed_count,
         },
         calibration_status: calibration_status_info,
+    })
+}
+
+/// Whether a grid point's warnings say its gain was extrapolated rather than
+/// interpolated — the predicate behind the `points_extrapolated` summary.
+///
+/// Before C8 stage 3 this was `w.contains("extrapolat") || w.contains("out of range")`
+/// — a substring test against prose owned by two other modules, which silently
+/// depended on their spelling (and on the second phrase, which no producer had emitted
+/// for some time). The typed codes let the predicate say what it means.
+///
+/// The three codes are exactly the ways a returned value can be an extrapolation:
+///
+/// - [`WarningCode::Extrapolated`] — the correction surface was applied outside its
+///   knot range.
+/// - [`WarningCode::CorrectionNotApplied`] — a correction surface exists but the query
+///   fell outside its coverage, so the point is raw physics.
+/// - [`WarningCode::OutOfCoverage`] — a partially calibrated antenna was queried
+///   outside the region it was measured over.
+///
+/// The first two are precisely `service::evaluator`'s per-point `metadata.extrapolated`
+/// (`correction_extrapolated || out_of_coverage`), so this count does not disagree with
+/// the flag a client gets from `/api/v1/gain` for the same point.
+/// `CorrectionNotApplied` was the disjunct this predicate missed until 2026-07-28,
+/// which zeroed the count on a fully calibrated antenna whose whole grid fell outside
+/// coverage. [`WarningCode::OutOfCoverage`] is counted on top: it has no single-point
+/// flag of its own, and a partially calibrated antenna queried outside its measured
+/// region is extrapolated by any reading.
+fn point_was_extrapolated(warnings: &[ApiWarning]) -> bool {
+    warnings.iter().any(|w| {
+        w.is(WarningCode::Extrapolated)
+            || w.is(WarningCode::CorrectionNotApplied)
+            || w.is(WarningCode::OutOfCoverage)
     })
 }
 
@@ -418,6 +440,51 @@ fn compute_emitter_position_from_angles(
 mod tests {
     use super::*;
     use crate::data::repository::CalibrationRepository;
+
+    /// `points_extrapolated` counts every way a point can be an extrapolation.
+    ///
+    /// `correction_not_applied` is the case that regressed: it is half of
+    /// `service::evaluator`'s per-point `metadata.extrapolated`, but the C8 stage 3
+    /// rewrite of this predicate dropped it, so a `/heatmap` over a fully calibrated
+    /// antenna whose whole grid fell outside the correction coverage reported no
+    /// extrapolated points while every single-point query reported `extrapolated:
+    /// true`. The predicate is asserted directly because reaching it end-to-end needs
+    /// a calibration artifact with a correction surface, which this crate's tests do
+    /// not ship.
+    #[test]
+    fn extrapolation_predicate_covers_every_extrapolating_code() {
+        let extrapolating = [
+            WarningCode::Extrapolated,
+            WarningCode::CorrectionNotApplied,
+            WarningCode::OutOfCoverage,
+        ];
+        for code in extrapolating {
+            assert!(
+                point_was_extrapolated(&[code.with("…")]),
+                "{code} means the returned value is an extrapolation but is not counted"
+            );
+        }
+
+        // Warnings about model fidelity are not extrapolation of a fitted surface.
+        for code in [
+            WarningCode::Uncalibrated,
+            WarningCode::PartiallyCalibrated,
+            WarningCode::OffAxisUnvalidated,
+            WarningCode::NonConvergence,
+        ] {
+            assert!(
+                !point_was_extrapolated(&[code.with("…")]),
+                "{code} does not mean the point was extrapolated"
+            );
+        }
+
+        assert!(!point_was_extrapolated(&[]));
+        // One extrapolating code among others still counts the point.
+        assert!(point_was_extrapolated(&[
+            WarningCode::Uncalibrated.with("…"),
+            WarningCode::CorrectionNotApplied.with("…"),
+        ]));
+    }
 
     #[test]
     fn test_generate_rectangular_grid_small() {

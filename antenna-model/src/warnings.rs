@@ -39,6 +39,12 @@
 //! warnings in `service::evaluator` are documented as "constant per (antenna,
 //! frequency)" and must not interpolate the query angle: a message that varies
 //! per grid point would produce one array entry per point.
+//!
+//! This constrains every producer reachable from an aggregating endpoint, not just
+//! the honesty warnings. A message there may interpolate values that are constant
+//! across the grid (an antenna's accuracy estimate, a feed offset in units of `f`)
+//! but not values that vary with the query. `model::correction_interpolator` names
+//! the out-of-range *dimensions* rather than the angles for exactly this reason.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -117,8 +123,11 @@ pub enum WarningCode {
     SpilloverSignificant,
 
     /// `points_extrapolated` — grid-level summary from `/heatmap`: how many of the
-    /// evaluated points carried [`WarningCode::Extrapolated`] or
-    /// [`WarningCode::OutOfCoverage`]. Producer: `service::heatmap`.
+    /// evaluated points carried [`WarningCode::Extrapolated`],
+    /// [`WarningCode::CorrectionNotApplied`], or [`WarningCode::OutOfCoverage`] —
+    /// the three ways a returned value can be an extrapolation. The first two are
+    /// exactly the per-point `metadata.extrapolated` flag that `/api/v1/gain`
+    /// returns. Producer: `service::heatmap`.
     PointsExtrapolated,
 
     /// `point_computation_failed` — at least one grid point (`/heatmap`) or cell

@@ -361,9 +361,12 @@ if 'calibration_status' in data:
         print(f"Loss accuracy (better): ±{loss_accuracy} dB")
         print(f"Use loss_db ({data['loss_db']}) for comparative analysis")
 
-    # For partially calibrated, check if query is in coverage
+    # For partially calibrated, check if query is in coverage.
+    # Branch on the warning `code`, never on `message` — codes are the stable
+    # contract, messages may be reworded in any release.
     if status == 'partially_calibrated':
-        if 'Query is outside calibrated region' in data.get('warnings', []):
+        codes = {w['code'] for w in data.get('warnings', [])}
+        if 'out_of_coverage' in codes:
             print("Warning: Query outside calibrated region (degraded accuracy)")
 else:
     print("Calibration status not available (old format or fully calibrated)")
