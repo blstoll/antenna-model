@@ -204,12 +204,30 @@ re-emitted at the service layer so it also survives gain-cache hits — and is c
 antenna config, so heatmap/H3 aggregation deduplicates it to a single entry. See
 `docs/domain-contract.md`, "Large feed offsets (> 0.5·f): ray-tracing stub".
 
-### Coordinate System Auto-Detection
+### Coordinate Systems
 
-3D positions automatically detect coordinate system:
+Every 3D position carries a **required** `coordinate_system` field naming its frame:
 
-- **ECEF**: If `|x| > 6400e3 OR |y| > 6400e3 OR |z| > 6400e3` (meters)
-- **Geodetic**: Otherwise (longitude degrees, latitude degrees, altitude meters)
+- **`"ecef"`**: `x`, `y`, `z` in meters from Earth's centre
+- **`"geodetic"`**: `x` = longitude degrees, `y` = latitude degrees, `z` = altitude meters
+  above the WGS84 ellipsoid
+
+```json
+{"x": -118.1234, "y": 34.5678, "z": 100.0, "coordinate_system": "geodetic"}
+```
+
+The frame is never inferred. A position that omits the field is a request-body parse
+failure — **400 `invalid_request_body`**, with the message naming `coordinate_system`.
+
+Range validation follows the frame you declare, so the same three numbers can be a valid
+ECEF point and an invalid geodetic one (`x: 6500000` is fine as a metre offset and out of
+range as a longitude).
+
+**Breaking change, 2026-07-27.** The field was previously optional, and the frame was
+inferred from coordinate magnitude — ECEF when any component exceeded 6400 km. That could
+not distinguish a geodetic GEO satellite (altitude ~35,786 km) from an ECEF point, so an
+untagged GEO position was read as a near-Earth-centre ECEF one and answered with a
+confidently wrong gain under HTTP 200. There is no compatibility shim: tag your positions.
 
 ### Multi-Feed Support
 
@@ -292,11 +310,11 @@ curl -X POST http://localhost:3000/api/v1/gain \
   -d '{
     "antenna_id": "antenna_1",
     "feed_id": "x_band_feed",
-    "vehicle_position": {"x": -118.1234, "y": 34.5678, "z": 100.0},
+    "vehicle_position": {"x": -118.1234, "y": 34.5678, "z": 100.0, "coordinate_system": "geodetic"},
     "vehicle_attitude": [1.0, 0.0, 0.0, 0.0],
-    "reflector_boresight": {"x": -117.0, "y": 35.0, "z": 400000.0},
-    "feed_pointing_location": {"x": -118.124, "y": 34.568, "z": 105.0},
-    "emitter_position": {"x": -117.0, "y": 35.0, "z": 400000.0},
+    "reflector_boresight": {"x": -117.0, "y": 35.0, "z": 400000.0, "coordinate_system": "geodetic"},
+    "feed_pointing_location": {"x": -118.124, "y": 34.568, "z": 105.0, "coordinate_system": "geodetic"},
+    "emitter_position": {"x": -117.0, "y": 35.0, "z": 400000.0, "coordinate_system": "geodetic"},
     "frequency_mhz": 8400.0,
     "include_reference": true
   }'
@@ -413,10 +431,10 @@ const response = await fetch('http://localhost:3000/api/v1/heatmap', {
   body: JSON.stringify({
     "antenna_id": "antenna_1",
     "feed_id": "x_band_feed",
-    "vehicle_position": { "x": 4510731.123, "y": 4510731.456, "z": 3488865.789 },
+    "vehicle_position": { "x": 4510731.123, "y": 4510731.456, "z": 3488865.789, "coordinate_system": "ecef" },
     "vehicle_attitude": [1.0, 0.0, 0.0, 0.0],
-    "reflector_boresight": { "x": 4510732.0, "y": 4510732.0, "z": 3488950.0 },
-    "feed_pointing_location": { "x": 4510731.5, "y": 4510731.5, "z": 3488870.0 },
+    "reflector_boresight": { "x": 4510732.0, "y": 4510732.0, "z": 3488950.0, "coordinate_system": "ecef" },
+    "feed_pointing_location": { "x": 4510731.5, "y": 4510731.5, "z": 3488870.0, "coordinate_system": "ecef" },
     "frequency_mhz": 8400.0,
     "grid_config": {
       "grid_type": "rectangular",

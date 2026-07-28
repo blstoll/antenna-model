@@ -10,23 +10,27 @@
         "vehicle_position": {
           "x": 4510731.123,
           "y": 4510731.456,
-          "z": 3488865.789
+          "z": 3488865.789,
+          "coordinate_system": "ecef"
         },
         "vehicle_attitude": [1.0, 0.0, 0.0, 0.0],
         "reflector_boresight": {
           "x": 4510732.0,
           "y": 4510732.0,
-          "z": 3488950.0
+          "z": 3488950.0,
+          "coordinate_system": "ecef"
         },
         "feed_pointing_location": {
           "x": 4510731.5,
           "y": 4510731.5,
-          "z": 3488870.0
+          "z": 3488870.0,
+          "coordinate_system": "ecef"
         },
         "emitter_position": {
           "x": 4520000.0,
           "y": 4520000.0,
-          "z": 3500000.0
+          "z": 3500000.0,
+          "coordinate_system": "ecef"
         },
         "frequency_mhz": 8400.0,
         "pointing_frequency_mhz": 8450.0,
@@ -41,23 +45,27 @@
         "vehicle_position": {
           "x": -118.1234,
           "y": 34.5678,
-          "z": 100.0
+          "z": 100.0,
+          "coordinate_system": "geodetic"
         },
         "vehicle_attitude": [0.0, -0.043619, 0.0, 0.999048],
         "reflector_boresight": {
           "x": -117.0,
           "y": 35.0,
-          "z": 400000.0
+          "z": 400000.0,
+          "coordinate_system": "geodetic"
         },
         "feed_pointing_location": {
           "x": -118.124,
           "y": 34.568,
-          "z": 105.0
+          "z": 105.0,
+          "coordinate_system": "geodetic"
         },
         "emitter_position": {
           "x": -117.0,
           "y": 35.0,
-          "z": 400000.0
+          "z": 400000.0,
+          "coordinate_system": "geodetic"
         },
         "frequency_mhz": 8400.0,
         "include_reference": false
@@ -103,23 +111,27 @@
             "vehicle_position": {
               "x": 4510731.123,
               "y": 4510731.456,
-              "z": 3488865.789
+              "z": 3488865.789,
+              "coordinate_system": "ecef"
             },
             "vehicle_attitude": [1.0, 0.0, 0.0, 0.0],
             "reflector_boresight": {
               "x": 4510732.0,
               "y": 4510732.0,
-              "z": 3488950.0
+              "z": 3488950.0,
+              "coordinate_system": "ecef"
             },
             "feed_pointing_location": {
               "x": 4510731.5,
               "y": 4510731.5,
-              "z": 3488870.0
+              "z": 3488870.0,
+              "coordinate_system": "ecef"
             },
             "emitter_position": {
               "x": 4520000.0,
               "y": 4520000.0,
-              "z": 3500000.0
+              "z": 3500000.0,
+              "coordinate_system": "ecef"
             },
             "frequency_mhz": 8400.0,
             "include_reference": false
@@ -130,23 +142,27 @@
             "vehicle_position": {
               "x": -118.1234,
               "y": 34.5678,
-              "z": 100.0
+              "z": 100.0,
+              "coordinate_system": "geodetic"
             },
             "vehicle_attitude": [1.0, 0.0, 0.0, 0.0],
             "reflector_boresight": {
               "x": -117.0,
               "y": 35.0,
-              "z": 400000.0
+              "z": 400000.0,
+              "coordinate_system": "geodetic"
             },
             "feed_pointing_location": {
               "x": -118.124,
               "y": 34.568,
-              "z": 105.0
+              "z": 105.0,
+              "coordinate_system": "geodetic"
             },
             "emitter_position": {
               "x": -117.0,
               "y": 35.0,
-              "z": 400000.0
+              "z": 400000.0,
+              "coordinate_system": "geodetic"
             },
             "frequency_mhz": 2200.0,
             "include_reference": false
@@ -212,17 +228,20 @@
         "vehicle_position": {
           "x": 4510731.123,
           "y": 4510731.456,
-          "z": 3488865.789
+          "z": 3488865.789,
+          "coordinate_system": "ecef"
         },
         "reflector_boresight": {
           "x": 4510732.0,
           "y": 4510732.0,
-          "z": 3488950.0
+          "z": 3488950.0,
+          "coordinate_system": "ecef"
         },
         "feed_pointing_location": {
           "x": 4510731.5,
           "y": 4510731.5,
-          "z": 3488870.0
+          "z": 3488870.0,
+          "coordinate_system": "ecef"
         },
         "frequency_mhz": 8400.0,
         "pointing_frequency_mhz": 8450.0,
@@ -249,17 +268,20 @@
         "vehicle_position": {
           "x": 4510731.123,
           "y": 4510731.456,
-          "z": 3488865.789
+          "z": 3488865.789,
+          "coordinate_system": "ecef"
         },
         "reflector_boresight": {
           "x": 4510732.0,
           "y": 4510732.0,
-          "z": 3488950.0
+          "z": 3488950.0,
+          "coordinate_system": "ecef"
         },
         "feed_pointing_location": {
           "x": 4510731.5,
           "y": 4510731.5,
-          "z": 3488870.0
+          "z": 3488870.0,
+          "coordinate_system": "ecef"
         },
         "frequency_mhz": 8400.0,
         "grid_config": {

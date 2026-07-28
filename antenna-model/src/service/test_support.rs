@@ -13,7 +13,7 @@
 //! site — that self-check intentionally stays in the tests, not here, so a
 //! coordinate-frame regression fails loudly in the test that relies on it.
 
-use crate::api::schemas::{CoordinateSystem, GainRequest, Position3D};
+use crate::api::schemas::{GainRequest, Position3D};
 use crate::data::repository::CalibrationRepository;
 use crate::data::types::{
     AntennaCalibration, CalibrationMetadata, CalibrationStatus, FeedParameters, MeshParameters,
@@ -31,9 +31,7 @@ use crate::model::coordinates_3d::geodetic_to_ecef;
 pub(crate) fn rear_hemisphere_request() -> GainRequest {
     let ecef = |lon: f64, lat: f64, alt: f64| {
         let (x, y, z) = geodetic_to_ecef(lon, lat, alt).unwrap();
-        let mut p = Position3D::new(x, y, z);
-        p.coordinate_system = Some(CoordinateSystem::ECEF);
-        p
+        Position3D::ecef(x, y, z)
     };
     GainRequest {
         antenna_id: "test_antenna".to_string(),

@@ -144,10 +144,11 @@ z_feed = -displacement²/(4f)  for large displacements
 ### 3.1 Edge Cases
 
 #### Coordinate Transformation Edge Cases
-- **Coordinate Auto-Detection Boundary**:
-  - Threshold: |x| or |y| or |z| > 6400 km → ECEF
-  - Near-threshold coordinates may be ambiguous (unlikely in practice)
-  - Validation: Detect obviously invalid coordinates (NaN, Inf, unreasonable magnitudes)
+- **Coordinate Frame Declaration** (auto-detection removed 2026-07-27, roadmap C8 stage 2):
+  - Each `Position3D` carries a required `coordinate_system` tag; there is no threshold and
+    no ambiguous band. The removed heuristic classified components above 6400 km as ECEF,
+    which could not separate a geodetic GEO satellite from an ECEF point.
+  - Validation: reject NaN/Inf, then apply the range rules of the **declared** frame
 - **Geodetic Singularities**:
   - Poles (latitude = ±90°): Handle azimuth ambiguity
   - Earth center (altitude → -6371 km): Invalid for antenna locations

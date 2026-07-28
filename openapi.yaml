@@ -16,9 +16,12 @@ info:
 
     ## Coordinate Systems
 
-    All 3D positions support automatic coordinate system detection:
-    - **ECEF**: If `abs(x) > 6400e3 OR abs(y) > 6400e3 OR abs(z) > 6400e3` (meters)
-    - **Geodetic**: Otherwise (x=longitude degrees, y=latitude degrees, z=altitude meters)
+    Every 3D position must declare its frame in the required `coordinate_system` field:
+    - **`ecef`**: x, y, z in meters from Earth's centre
+    - **`geodetic`**: x = longitude degrees, y = latitude degrees, z = altitude meters
+
+    There is no auto-detection. A position that omits `coordinate_system` is rejected
+    with **400 `invalid_request_body`** naming the field.
 
   version: 1.1.0
   contact:
@@ -117,8 +120,8 @@ paths:
       summary: Compute antenna gain from 3D geometric configuration
       description: |
         Computes antenna gain for a specific geometric configuration including vehicle position,
-        antenna orientation, feed position, and emitter location. Supports ECEF or Geodetic
-        coordinates (auto-detected).
+        antenna orientation, feed position, and emitter location. Each position declares
+        its own frame — ECEF or Geodetic — in its required `coordinate_system` field.
 
         Optionally computes reference gain (ideal case) and loss (reference - actual).
       operationId: computeGain
@@ -138,19 +141,23 @@ paths:
                     x: 4510731.123
                     y: 4510731.456
                     z: 3488865.789
+                    coordinate_system: "ecef"
                   vehicle_attitude: [1.0, 0.0, 0.0, 0.0]
                   reflector_boresight:
                     x: 4510732.0
                     y: 4510732.0
                     z: 3488950.0
+                    coordinate_system: "ecef"
                   feed_pointing_location:
                     x: 4510731.5
                     y: 4510731.5
                     z: 3488870.0
+                    coordinate_system: "ecef"
                   emitter_position:
                     x: 4520000.0
                     y: 4520000.0
                     z: 3500000.0
+                    coordinate_system: "ecef"
                   frequency_mhz: 8400.0
                   include_reference: true
               geodetic_coordinates:
@@ -162,19 +169,23 @@ paths:
                     x: -118.1234
                     y: 34.5678
                     z: 100.0
+                    coordinate_system: "geodetic"
                   vehicle_attitude: [1.0, 0.0, 0.0, 0.0]
                   reflector_boresight:
                     x: -117.0
                     y: 35.0
                     z: 400000.0
+                    coordinate_system: "geodetic"
                   feed_pointing_location:
                     x: -118.124
                     y: 34.568
                     z: 105.0
+                    coordinate_system: "geodetic"
                   emitter_position:
                     x: -117.0
                     y: 35.0
                     z: 400000.0
+                    coordinate_system: "geodetic"
                   frequency_mhz: 2200.0
                   include_reference: false
       responses:
@@ -562,15 +573,18 @@ paths:
                     x: 4510731.123
                     y: 4510731.456
                     z: 3488865.789
+                    coordinate_system: "ecef"
                   vehicle_attitude: [1.0, 0.0, 0.0, 0.0]
                   reflector_boresight:
                     x: 4510732.0
                     y: 4510732.0
                     z: 3488950.0
+                    coordinate_system: "ecef"
                   feed_pointing_location:
                     x: 4510731.5
                     y: 4510731.5
                     z: 3488870.0
+                    coordinate_system: "ecef"
                   frequency_mhz: 8400.0
                   grid_config:
                     grid_type: "rectangular"
@@ -1037,17 +1051,23 @@ components:
     Position3D:
       type: object
       description: |
-        3D position with automatic coordinate system detection:
-        - ECEF if |x| or |y| or |z| > 6400 km (matches Earth's radius)
-        - Geodetic otherwise (lon/lat degrees, alt meters)
+        3D position in the frame named by its required `coordinate_system` field:
+        - `ecef`: x, y, z in meters from Earth's centre
+        - `geodetic`: x = longitude degrees, y = latitude degrees, z = altitude meters
 
-        Set `coordinate_system` explicitly to override auto-detection. This is
-        recommended for high-altitude geodetic positions (e.g. GEO orbit at
-        ~35,786 km) where auto-detection may misclassify as ECEF.
+        The frame is never inferred. Omitting `coordinate_system` is a request-body
+        parse failure (400 `invalid_request_body`), not a defaulted value.
+
+        Earlier versions inferred the frame from coordinate magnitude, treating
+        components above 6400 km as ECEF. That heuristic could not tell a geodetic
+        GEO satellite (altitude ~35,786 km) from an ECEF point, so untagged GEO
+        positions were silently read as near-Earth-centre ECEF and answered with a
+        confidently wrong gain.
       required:
         - x
         - y
         - z
+        - coordinate_system
       properties:
         x:
           type: number

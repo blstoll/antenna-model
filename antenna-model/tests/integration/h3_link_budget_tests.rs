@@ -22,27 +22,12 @@ fn base_h3_request() -> H3LinkBudgetRequest {
     H3LinkBudgetRequest {
         antenna_id: "test_simple".to_string(),
         feed_id: "primary".to_string(),
-        // Vehicle at Los Angeles area, 100 m altitude (geodetic, auto-detected as small)
-        vehicle_position: Position3D {
-            x: -118.1234,
-            y: 34.5678,
-            z: 100.0,
-            coordinate_system: None,
-        },
+        // Vehicle at Los Angeles area, 100 m altitude (geodetic)
+        vehicle_position: Position3D::geodetic(-118.1234, 34.5678, 100.0),
         // Reflector boresight: slightly north and up (establishes pointing direction)
-        reflector_boresight: Position3D {
-            x: -118.1234,
-            y: 34.5679,
-            z: 110.0,
-            coordinate_system: None,
-        },
+        reflector_boresight: Position3D::geodetic(-118.1234, 34.5679, 110.0),
         // feed_pointing_location is the H3 center cell location (same area as vehicle)
-        feed_pointing_location: Position3D {
-            x: -118.124,
-            y: 34.568,
-            z: 105.0,
-            coordinate_system: None,
-        },
+        feed_pointing_location: Position3D::geodetic(-118.124, 34.568, 105.0),
         frequency_mhz: 8400.0,
         pointing_frequency_mhz: None,
         n_rings: 2,

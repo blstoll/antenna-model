@@ -163,7 +163,7 @@ pub async fn status(state: Data<&Arc<AppState>>) -> Json<StatusResponse> {
 /// JSON object containing:
 /// - antenna_id: Antenna identifier
 /// - feed_id: Feed identifier (for multi-feed antennas)
-/// - vehicle_position: Vehicle position (ECEF or Geodetic, auto-detected)
+/// - vehicle_position: Vehicle position (ECEF or Geodetic, per its `coordinate_system`)
 /// - reflector_boresight: Reflector boresight position (ECEF or Geodetic)
 /// - feed_pointing_location: Earth location the feed's beam is aimed at (ECEF or Geodetic)
 /// - emitter_position: Emitter position (ECEF or Geodetic)

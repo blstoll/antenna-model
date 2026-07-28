@@ -94,13 +94,13 @@ fn create_grid_config(grid_size: &str) -> GridConfig {
 /// - Grid configuration based on size parameter
 fn create_heatmap_request(grid_size: &str) -> HeatmapRequest {
     // Vehicle position (geodetic coordinates)
-    let vehicle_position = Position3D::new(0.0, 0.0, 0.0);
+    let vehicle_position = Position3D::geodetic(0.0, 0.0, 0.0);
 
     // Reflector boresight (10m above vehicle, pointing up)
-    let reflector_boresight = Position3D::new(0.0, 0.0, 10.0);
+    let reflector_boresight = Position3D::geodetic(0.0, 0.0, 10.0);
 
     // Feed position (at focal point: 10m + 2.0m focal length for test_simple antenna)
-    let feed_pointing_location = Position3D::new(0.0, 0.0, 12.0);
+    let feed_pointing_location = Position3D::geodetic(0.0, 0.0, 12.0);
 
     HeatmapRequest {
         antenna_id: "test_simple".to_string(),

@@ -16,8 +16,8 @@
 //! 7. Return H3LinkBudgetResponse with per-cell results and metadata
 
 use crate::api::schemas::{
-    CalibrationStatusInfo, CoordinateSystem, H3CellResult, H3LinkBudgetRequest,
-    H3LinkBudgetResponse, HeatmapMetadata, Position3D,
+    CalibrationStatusInfo, H3CellResult, H3LinkBudgetRequest, H3LinkBudgetResponse,
+    HeatmapMetadata, Position3D,
 };
 use crate::data::types::AntennaCalibration;
 use crate::error::{AntennaModelError, Result};
@@ -62,8 +62,8 @@ pub fn free_space_path_loss_db(d_m: f64, freq_hz: f64) -> f64 {
 
 /// Convert a Position3D to ECEF (x, y, z) in meters.
 ///
-/// If geodetic (auto-detected by magnitude threshold), converts via `geodetic_to_ecef`.
-/// Otherwise returns coordinates directly.
+/// A position declared geodetic is converted via `geodetic_to_ecef`; one declared ECEF
+/// is returned directly.
 fn pos_to_ecef(pos: &Position3D) -> Result<(f64, f64, f64)> {
     if pos.is_ecef() {
         Ok((pos.x, pos.y, pos.z))
@@ -165,11 +165,8 @@ fn compute_cell_gain(
     integration_params: &IntegrationParams,
     frequency_hz: f64,
 ) -> Result<(f64, f64, f64, Vec<String>, bool)> {
-    // Create a Position3D for the cell center (ECEF). Earth-surface ECEF values are
-    // typically 2–6 Mm which is below the 6400 km auto-detect threshold, so set
-    // an explicit tag to prevent misclassification as Geodetic.
-    let mut cell_pos = Position3D::new(cell_ecef.0, cell_ecef.1, cell_ecef.2);
-    cell_pos.coordinate_system = Some(CoordinateSystem::ECEF);
+    // The cell centre, in ECEF.
+    let cell_pos = Position3D::ecef(cell_ecef.0, cell_ecef.1, cell_ecef.2);
 
     // Compute az/el once; the result is returned to the caller so that
     // `compute_cell_result` does not need to call `compute_emitter_direction` again.
@@ -746,17 +743,13 @@ mod tests {
     /// (a single cell) so tests finish fast.  The vehicle is at 400 km altitude
     /// which keeps the geometry realistic without requiring real ECEF coordinates.
     fn make_h3_test_request() -> H3LinkBudgetRequest {
-        use crate::api::schemas::CoordinateSystem;
         // Vehicle: geodetic (lon, lat, alt_m)
-        let mut vehicle = Position3D::new(-122.0, 37.5, 400_000.0);
-        vehicle.coordinate_system = Some(CoordinateSystem::Geodetic);
+        let vehicle = Position3D::geodetic(-122.0, 37.5, 400_000.0);
         // Reflector boresight: aimed a tiny bit away from nadir so there is a
         // well-defined boresight direction.
-        let mut boresight = Position3D::new(-122.01, 37.49, 0.0);
-        boresight.coordinate_system = Some(CoordinateSystem::Geodetic);
+        let boresight = Position3D::geodetic(-122.01, 37.49, 0.0);
         // Feed position: same as boresight (on-axis) for simplicity.
-        let mut feed = Position3D::new(-122.01, 37.49, 0.0);
-        feed.coordinate_system = Some(CoordinateSystem::Geodetic);
+        let feed = Position3D::geodetic(-122.01, 37.49, 0.0);
 
         H3LinkBudgetRequest {
             antenna_id: "h3_test_antenna".to_string(),
@@ -969,17 +962,12 @@ mod tests {
     /// `floor_db` exactly.
     #[test]
     fn test_h3_sidelobe_floor_on_for_uncorrected_physics() {
-        use crate::api::schemas::CoordinateSystem;
         use crate::model::{
             wavelength_from_frequency, AntennaConfiguration, FeedParameters as ModelFeedParams,
             FeedPosition, MeshParameters as ModelMeshParams, ReflectorGeometry as ModelReflector,
         };
 
-        let geo = |lon: f64, lat: f64, alt: f64| {
-            let mut p = Position3D::new(lon, lat, alt);
-            p.coordinate_system = Some(CoordinateSystem::Geodetic);
-            p
-        };
+        let geo = |lon: f64, lat: f64, alt: f64| Position3D::geodetic(lon, lat, alt);
         let request = H3LinkBudgetRequest {
             antenna_id: "h3_test_antenna".to_string(),
             feed_id: "h3_test_feed".to_string(),
@@ -1093,13 +1081,11 @@ mod tests {
 
         let mut req_squint = make_h3_test_request();
         // Steer the feed off boresight so feed displacement (hence squint) is non-zero.
-        req_squint.feed_pointing_location = Position3D::new(
+        req_squint.feed_pointing_location = Position3D::geodetic(
             req_squint.reflector_boresight.x + 0.05,
             req_squint.reflector_boresight.y,
             req_squint.reflector_boresight.z,
         );
-        // Explicit tag (matches make_h3_test_request); don't rely on auto-detection.
-        req_squint.feed_pointing_location.coordinate_system = Some(CoordinateSystem::Geodetic);
         req_squint.pointing_frequency_mhz = Some(req_squint.frequency_mhz * 1.4);
         req_baseline.feed_pointing_location = req_squint.feed_pointing_location.clone();
 
@@ -1157,12 +1143,11 @@ mod tests {
         let calibration = make_h3_test_calibration();
 
         let mut req = make_h3_test_request();
-        req.feed_pointing_location = Position3D::new(
+        req.feed_pointing_location = Position3D::geodetic(
             req.reflector_boresight.x + 0.05,
             req.reflector_boresight.y,
             req.reflector_boresight.z,
         );
-        req.feed_pointing_location.coordinate_system = Some(CoordinateSystem::Geodetic);
         req.pointing_frequency_mhz = Some(req.frequency_mhz * 1.4);
         let cache = GainCache::new(false, 1);
         let resp =
@@ -1176,12 +1161,11 @@ mod tests {
         // Displace the feed too, so this asserts None comes from pointing == None — not
         // merely from zero feed displacement.
         let mut req_none = make_h3_test_request();
-        req_none.feed_pointing_location = Position3D::new(
+        req_none.feed_pointing_location = Position3D::geodetic(
             req_none.reflector_boresight.x + 0.05,
             req_none.reflector_boresight.y,
             req_none.reflector_boresight.z,
         );
-        req_none.feed_pointing_location.coordinate_system = Some(CoordinateSystem::Geodetic);
         req_none.pointing_frequency_mhz = None;
         let cache_none = GainCache::new(false, 1);
         let resp_none = compute_h3_link_budget(
@@ -1250,8 +1234,7 @@ mod tests {
             geodetic_to_ecef(cell_latlng.lng(), cell_latlng.lat(), 0.0)
                 .expect("cell lat/lon to ECEF");
 
-        let mut emitter_position = Position3D::new(cell_ex, cell_ey, cell_ez);
-        emitter_position.coordinate_system = Some(CoordinateSystem::ECEF);
+        let emitter_position = Position3D::ecef(cell_ex, cell_ey, cell_ez);
 
         let gain_request = GainRequest {
             antenna_id: request.antenna_id.clone(),

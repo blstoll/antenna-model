@@ -17,8 +17,8 @@ re-check it.
 
 | Frame | Convention | Origin | Axes / handedness | Used in |
 |---|---|---|---|---|
-| ECEF | Earth-Centered Earth-Fixed, meters | Earth's center of mass | X: equator ∩ prime meridian; Y: equator at 90°E; Z: North pole; right-handed | `Position3D` when `\|x\|,\|y\|,\|z\| > 6400 km` (or explicit `coordinate_system: ecef`); `geodetic_to_ecef`/`ecef_to_geodetic` (`antenna-model/src/model/coordinates_3d.rs:169,197`) |
-| Geodetic (WGS84) | lon °E ∈ [-180,180], lat °N ∈ [-90,90], alt meters above ellipsoid | WGS84 ellipsoid | N/A (angular + altitude) | `Position3D` default when magnitudes are small; auto-detection is **lossy above 6400 km altitude** — GEO satellites (~35,786 km) MUST set `coordinate_system: geodetic` explicitly or they silently misparse as near-Earth-center ECEF (`schemas.rs:62-98,126`) |
+| ECEF | Earth-Centered Earth-Fixed, meters | Earth's center of mass | X: equator ∩ prime meridian; Y: equator at 90°E; Z: North pole; right-handed | `Position3D` with `coordinate_system: ecef` (required, never inferred); `geodetic_to_ecef`/`ecef_to_geodetic` (`antenna-model/src/model/coordinates_3d.rs:169,197`) |
+| Geodetic (WGS84) | lon °E ∈ [-180,180], lat °N ∈ [-90,90], alt meters above ellipsoid | WGS84 ellipsoid | N/A (angular + altitude) | `Position3D` with `coordinate_system: geodetic` (required, never inferred). GEO altitudes (~35,786 km) are unremarkable now; before C8 stage 2 they were the frame table's sharpest trap (`schemas.rs`, `Position3D`) |
 | ENU (East-North-Up) | Local tangent-plane frame at a given (lat, lon) | The (lat, lon) point itself, not Earth's center | Rows of `R` are East, North, Up expressed in ECEF (`coordinates_3d.rs:263-266`) | `ecef_to_enu_rotation` (`coordinates_3d.rs:271`); heatmap emitter-position generation (`service/heatmap.rs:318-362`) |
 | Antenna frame | Cartesian, origin at the reflector vertex (≡ `vehicle_position`, see invariant below) | Reflector vertex / vehicle position (assumed coincident) | Z = boresight (vehicle → reflector_boresight, normalized); X = azimuth-zero reference (attitude quaternion body +X if supplied, else Earth-Z/East cross-product heuristic); Y completes right-hand system | `coordinates.rs` (feed math, vertex origin, `:28,31`); `compute_emitter_direction[_with_attitude]` (`coordinates_3d.rs:495,565`) |
 | Far-field / E-clock-E-cone | θ = **polar angle from boresight** (0°=boresight, 90°=perpendicular), NOT horizon elevation; φ = azimuth, 0°=+X, 90°=+Y | Antenna frame origin | Right-handed spherical | `FarFieldCoordinates`, `EClockConeCoordinates` (`coordinates.rs:80,115`); `antenna_frame_to_spherical` (`coordinates_3d.rs:321`) |
@@ -42,13 +42,27 @@ inline (`heatmap.rs:357-362`, indexes `rot[k][i]` = `Rᵀ`). Note the heatmap co
 these "columns" while `coordinates_3d.rs` calls them "rows" — the math is the transpose
 either way, but the wording is inconsistent between the two files.
 
-**Gotcha — the ECEF-detection threshold is lossy for GEO+ altitudes.** The auto-detect
-boundary is 6400 km on any axis (`Position3D::ECEF_THRESHOLD_M`, `schemas.rs:126`). A
-geodetic position with `alt_m` above that (any GEO or high-HEO satellite) will
-auto-classify as ECEF unless `coordinate_system: geodetic` is set explicitly. This is
-documented and tested (`schemas.rs:62-98`, `test_explicit_coordinate_system_overrides_detection`
-at `:1180`), but it is a standing trap for **any new endpoint or example that constructs a
-`Position3D` without setting the field explicitly**.
+**Resolved by design 2026-07-27 (C8 stage 2) — the ECEF-detection threshold is gone.**
+`Position3D.coordinate_system` is now a **required** field: the frame is declared, never
+inferred, and an untagged position is a 400 naming the field
+(`tests/integration/status_code_matrix_tests.rs::a_position_without_coordinate_system_is_rejected_with_400`).
+
+*The trap this replaced, recorded because it explains the shape of the fix.* Auto-detection
+classified a position as ECEF when any of `|x|`, `|y|`, `|z|` exceeded 6400 km
+(`Position3D::ECEF_THRESHOLD_M`, deleted). That boundary is not decidable: a geodetic GEO or
+high-HEO satellite has an altitude above it, so an untagged GEO position silently parsed as a
+near-Earth-centre ECEF point and returned a confidently wrong gain under HTTP 200. The
+converse failed too — a real Earth-surface ECEF point (equatorial radius 6378 km) sits *below*
+the boundary and parsed as geodetic. Both directions were live in the published examples: the
+`ecef_coordinates` example in `openapi.yaml` and its four siblings in `examples/api_requests.json`
+were being served as geodetic, and stage 2 corrected them while tagging. The service-layer
+`coordinate_ambiguity_warnings` plumbing that used to advise about the first direction was
+deleted with the heuristic; register row **S7** (warn-everywhere) was superseded by this unit
+for exactly that reason — removing the ambiguity beats warning about it.
+
+`Position3D::new` was replaced by `Position3D::ecef(x, y, z)` and
+`Position3D::geodetic(lon, lat, alt)`, so in-process construction states the frame too. A
+constructor that silently picks a frame is the same trap in Rust.
 
 ## Transforms
 
@@ -68,7 +82,8 @@ at `:1180`), but it is a standing trap for **any new endpoint or example that co
 
 | Name | Meaning | Units | Range / default | Gotchas |
 |---|---|---|---|---|
-| `Position3D.{x,y,z}` | ECEF meters *or* geodetic (lon°, lat°, alt m) depending on magnitude/explicit tag | mixed (see frame table) | ECEF magnitude ≤ ~406,378 km; geodetic alt ≤ 400,000 km | Auto-detection threshold is 6400 km; see gotcha above |
+| `Position3D.{x,y,z}` | ECEF meters *or* geodetic (lon°, lat°, alt m), per the sibling `coordinate_system` field | mixed (see frame table) | ECEF magnitude ≤ 400,000 km; geodetic lon ∈ [-180,180], lat ∈ [-90,90], alt ∈ [-10 km, 400,000 km] | Range validation follows the **declared** frame, so the same numbers can be valid as ECEF and rejected as geodetic (`validator.rs::the_same_numbers_validate_differently_per_declared_frame`) |
+| `Position3D.coordinate_system` | The frame `x,y,z` are expressed in: `"ecef"` or `"geodetic"` | enum | **Required — no default, no inference** | Made required 2026-07-27 by C8 stage 2 (breaking, sanctioned). Do not add `#[serde(default)]`, a magnitude heuristic, or any other fallback: each re-creates the GEO misparse recorded under the frame table |
 | `GainRequest.feed_pointing_location` / `HeatmapRequest.feed_pointing_location` / `H3LinkBudgetRequest.feed_pointing_location` | **The feed *pointing* location** — an Earth position the feed is aimed at (off the reflector boresight), NOT the feed's physical location in the antenna | Position3D | n/a | THE anchor bug. The feed's *physical* position (rel. to the vertex) is a derived property — the displacement the feed moves to in order to achieve this aim, given the pointing frequency (which may differ from the collected frequency for multi-receiver feeds). Do not confuse with `model::geometry::FeedPosition` (`geometry.rs:277`), which *is* the physical antenna-frame offset. Field occurs at `schemas.rs:247,446,611`.<br><br>**Renamed 2026-07-26 (C8 stage 1, breaking):** this field was `feed_position` until the v1 contract-finalization pass. The old name was THE anchor bug — it reads as the feed's physical location. Clean break, no serde alias: a body using `feed_position` is a 400 naming `feed_pointing_location` (pinned by `tests/integration/status_code_matrix_tests.rs::legacy_feed_position_key_is_rejected_with_400`).<br><br>The *physical* position remains a derived property, and the two response fields that carry it were renamed in the same pass so that no response field can be mistaken for the aim point: `GeometryInfo.physical_feed_offset_m` (was `feed_offset_meters`) is the **per-request total** — the static design offset plus the displacement induced by steering the beam to `feed_pointing_location`, both measured from the focal point — and `FeedInfo.design_feed_offset_m` (was `position_offset`) is the antenna's **static design** offset, identical for every request. Note for anyone reading `evaluator.rs`: the `− focal_length_m` there is a frame conversion, not a third term. `compute_feed_position_from_pointing` returns a **vertex-origin** position (`to_feed_position_with_bdf` → `(dx, dy, focal_length + dz)`, `coordinates.rs:250`), so subtracting `f` merely re-expresses the sum relative to the focus. The code adds the focus-relative design offset first (`evaluator.rs:173`) and subtracts `f` last (`:181`), which is equivalent. **Caveat — the "focus-relative" half of that holds only for the design-spec producer:** `calibrate` writes the same artifact field *vertex*-relative (`calibrate/src/main.rs:696`), which would place a `.bin`-calibrated antenna's feed at z ≈ 2f. Latent today because all four `.bin` antennas are `enabled: false`; tracked as unit **C13**, blocked behind **D9**. |
 | `GainRequest.reflector_boresight` | Earth position the reflector is pointed at; together with `vehicle_position` defines antenna Z-axis | Position3D | n/a | Must not coincide with `vehicle_position` (< 1mm separation raises `InvalidCoordinate`, `coordinates_3d.rs:513-515` and `:600-602`) |
 | `vehicle_attitude` | Optional unit quaternion `[w,x,y,z]`, body→ECEF. Body +Z = boresight, body +X = azimuth-zero reference | dimensionless (unit norm) | norm within 1e-3 of 1.0 | When omitted, azimuth-zero uses the Earth-Z/East cross-product heuristic, which is **discontinuous** near boresight ∥ Earth-Z (switches when `\|z_z\| ≥ 0.99`, i.e. within ≈8.1° of Earth Z, `coordinates_3d.rs:402,427`) — this was finding #5b in the 2026-06-10 review |
@@ -95,7 +110,8 @@ at `:1180`), but it is a standing trap for **any new endpoint or example that co
 | `normalize_azimuth_deg` output always in [0°, 360°) | Yes — `test_normalize_azimuth_deg_boundaries` (added with this contract) |
 | `squint_corrected_direction(op,pt)` == `apply_beam_squint_correction(pt,op)` (arg-order contract) | Yes — `test_squint_corrected_direction_frequency_argument_order` (added with this contract) |
 | Elevation/E-cone (polar angle) is always in [0°, 180°], never negative | Partially — `apply_beam_squint_correction` guards `≥ 0` via `debug_assert!` (`coordinates_3d.rs:775`) **and** a release-mode `.abs()` (`:781`); `antenna_frame_to_spherical` relies on `acos` range (mathematically [0,π]), not asserted at the boundary |
-| GEO-altitude geodetic positions round-trip through the API without misclassifying as ECEF, when `coordinate_system` is set explicitly | Yes — `test_explicit_coordinate_system_overrides_detection` (`schemas.rs:1180`) |
+| GEO-altitude geodetic positions round-trip through the API without misclassifying as ECEF | Yes — `schemas.rs::the_declared_frame_is_the_frame_at_any_magnitude` and, end-to-end over HTTP, `status_code_matrix_tests::geo_altitude_geodetic_emitter_is_accepted_when_tagged` |
+| A position with no `coordinate_system` is rejected, never guessed at, on every compute endpoint | Yes — `status_code_matrix_tests::a_position_without_coordinate_system_is_rejected_with_400` (400 per field, per endpoint) |
 | A quaternion passed as `vehicle_attitude` must be unit-norm; `quaternion_rotate` preserves vector length only for unit-norm input | Yes — `quaternion_rotate` doc states the assumption (`coordinates_3d.rs:368`); confirm `validate_gain_request`/`validate_h3_link_budget_request` reject non-unit quaternions |
 | Reflector boresight position must not coincide with vehicle position | Yes — enforced with an error (`coordinates_3d.rs:513-515,600-602`) |
 | `vehicle_position` ≡ reflector vertex (single antenna-frame origin, no offset modeled) | No executable test — a documented modeling assumption (see frame table); future code must not add a vehicle-to-vertex offset without a contract change |
