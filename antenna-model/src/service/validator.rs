@@ -19,8 +19,8 @@
 //!   - Feed ID exists for specified antenna
 
 use crate::api::schemas::{
-    BatchGainRequest, CoordinateSystem, GainRequest, GridConfig, H3LinkBudgetRequest,
-    HeatmapRequest, Position3D, RangeConfig,
+    BatchGainRequest, GainRequest, GridConfig, H3LinkBudgetRequest, HeatmapRequest, Position3D,
+    RangeConfig,
 };
 use crate::data::repository::CalibrationRepository;
 use crate::error::{BatchValidationError, ValidationError, ValidationResult};
@@ -269,7 +269,8 @@ pub fn validate_h3_link_budget_request(req: &H3LinkBudgetRequest) -> ValidationR
 
 /// Validate a 3D position (ECEF or Geodetic).
 ///
-/// Automatically detects coordinate system and applies appropriate validation.
+/// Applies the range rules for the frame the position declares in its required
+/// `coordinate_system` tag.
 fn validate_position(position: &Position3D, param_name: &str) -> ValidationResult<()> {
     // Check for NaN or Inf
     if !position.x.is_finite() {
@@ -291,7 +292,7 @@ fn validate_position(position: &Position3D, param_name: &str) -> ValidationResul
         });
     }
 
-    // Validate based on detected coordinate system
+    // Validate against the declared coordinate system
     if position.is_ecef() {
         validate_ecef_position(position, param_name)
     } else {
@@ -301,7 +302,8 @@ fn validate_position(position: &Position3D, param_name: &str) -> ValidationResul
 
 /// Validate ECEF coordinates.
 ///
-/// Ensures coordinates are within reasonable Earth vicinity (< 10,000 km from center).
+/// Ensures each component is within `MAX_ECEF_MAGNITUDE_M` (400,000 km) of Earth's
+/// centre, which admits HEO satellites.
 fn validate_ecef_position(position: &Position3D, param_name: &str) -> ValidationResult<()> {
     if position.x.abs() > MAX_ECEF_MAGNITUDE_M {
         return Err(ValidationError::InvalidValue {
@@ -504,55 +506,14 @@ fn validate_quaternion_norm(
 }
 
 // ============================================================================
-// Coordinate Ambiguity Warning
+// Coordinate ambiguity — removed by C8 stage 2
 // ============================================================================
-
-/// Altitude threshold above which a geodetic position is considered ambiguous (100 km).
-///
-/// Positions auto-detected as geodetic with |z| > this value could plausibly be ECEF
-/// and should carry an explicit `coordinate_system` tag to prevent misclassification.
-const GEODETIC_AMBIGUITY_ALTITUDE_M: f64 = 100_000.0;
-
-/// Emit a warning if a position is auto-detected as geodetic but has suspiciously
-/// high altitude (> 100 km), which could indicate an ECEF position near the
-/// threshold or a legitimate high-altitude geodetic position (e.g. GEO orbit).
-///
-/// If the caller has set an explicit `coordinate_system`, no warning is emitted.
-fn warn_if_ambiguous(pos: &Position3D, name: &str, warnings: &mut Vec<String>) {
-    if pos.coordinate_system.is_none() {
-        if let CoordinateSystem::Geodetic = pos.coordinate_system() {
-            if pos.z.abs() > GEODETIC_AMBIGUITY_ALTITUDE_M {
-                warnings.push(format!(
-                    "{name}: auto-detected as geodetic with altitude {:.0} km; \
-                     set coordinate_system explicitly to avoid ECEF misclassification",
-                    pos.z / 1000.0
-                ));
-            }
-        }
-    }
-}
-
-/// Return ambiguity warnings for all positions in a `GainRequest`.
-///
-/// These are non-fatal advisories: they do not block processing but indicate
-/// positions where auto-detection may produce incorrect results. Callers should
-/// merge these into the response warnings list.
-pub fn coordinate_ambiguity_warnings(request: &GainRequest) -> Vec<String> {
-    let mut warnings = Vec::new();
-    warn_if_ambiguous(&request.vehicle_position, "vehicle_position", &mut warnings);
-    warn_if_ambiguous(
-        &request.reflector_boresight,
-        "reflector_boresight",
-        &mut warnings,
-    );
-    warn_if_ambiguous(
-        &request.feed_pointing_location,
-        "feed_pointing_location",
-        &mut warnings,
-    );
-    warn_if_ambiguous(&request.emitter_position, "emitter_position", &mut warnings);
-    warnings
-}
+//
+// `warn_if_ambiguous` / `coordinate_ambiguity_warnings` used to advise callers whose
+// untagged high-altitude geodetic positions might have been auto-detected as ECEF.
+// `Position3D.coordinate_system` is now required (`api/schemas.rs`), so no position can
+// be ambiguous and there is nothing left to warn about. Per-system range validation
+// above is unaffected.
 
 // ============================================================================
 // Grid Configuration Validation
@@ -683,7 +644,6 @@ fn validate_range_config(range: &RangeConfig, dimension: &str) -> ValidationResu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::schemas::CoordinateSystem;
     use crate::data::repository::CalibrationRepository;
 
     // Helper to create a test repository with sample data
@@ -692,61 +652,49 @@ mod tests {
     }
 
     // ========================================================================
-    // Coordinate Ambiguity Warning Tests
+    // Frames are declared, never inferred (C8 stage 2)
     // ========================================================================
+    //
+    // These replace the former ambiguity-warning tests. The warnings existed to flag
+    // positions the magnitude heuristic might classify wrongly; the heuristic is gone,
+    // so the property worth pinning is that the *same numbers* validate differently
+    // depending on the frame the caller declared — which is only possible because the
+    // frame is now stated rather than guessed.
 
     #[test]
-    fn test_warn_if_ambiguous_high_altitude_no_tag() {
-        // z = 200 km altitude, no explicit tag → warning expected
-        let pos = Position3D::new(0.0, 0.0, 200_000.0);
-        let mut warnings = Vec::new();
-        warn_if_ambiguous(&pos, "test_position", &mut warnings);
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("test_position"));
-        assert!(warnings[0].contains("200 km"));
-        assert!(warnings[0].contains("coordinate_system"));
+    fn geo_altitude_geodetic_position_is_validated_as_geodetic() {
+        // A GEO satellite's altitude (35,786 km) used to exceed the 6400 km ECEF
+        // detection threshold, so an untagged position here silently validated — and
+        // then evaluated — as near-Earth-centre ECEF. Declared geodetic, it validates
+        // against the lon/lat/alt rules and passes.
+        let geo = Position3D::geodetic(0.0, 0.0, 35_786_000.0);
+        assert!(validate_position(&geo, "emitter_position").is_ok());
     }
 
     #[test]
-    fn test_warn_if_ambiguous_high_altitude_with_explicit_tag() {
-        // Same position but with explicit Geodetic tag → no warning
-        let mut pos = Position3D::new(0.0, 0.0, 200_000.0);
-        pos.coordinate_system = Some(CoordinateSystem::Geodetic);
-        let mut warnings = Vec::new();
-        warn_if_ambiguous(&pos, "test_position", &mut warnings);
-        assert!(warnings.is_empty());
+    fn the_same_numbers_validate_differently_per_declared_frame() {
+        // lon=6,500,000° is nonsense as geodetic and fine as ECEF. The declared tag is
+        // what decides, so one of these must fail and the other must pass.
+        let as_ecef = Position3D::ecef(6_500_000.0, 0.0, 0.0);
+        let as_geodetic = Position3D::geodetic(6_500_000.0, 0.0, 0.0);
+        assert!(validate_position(&as_ecef, "p").is_ok());
+        assert!(
+            validate_position(&as_geodetic, "p").is_err(),
+            "6,500,000 declared as a longitude must be rejected, not reinterpreted as ECEF"
+        );
     }
 
     #[test]
-    fn test_warn_if_ambiguous_low_altitude_no_warning() {
-        // z = 100 m, well below threshold → no warning
-        let pos = Position3D::new(-118.0, 34.0, 100.0);
-        let mut warnings = Vec::new();
-        warn_if_ambiguous(&pos, "test_position", &mut warnings);
-        assert!(warnings.is_empty());
-    }
-
-    #[test]
-    fn test_coordinate_ambiguity_warnings_full_request() {
-        // Build a GainRequest where emitter is at 500 km altitude (geodetic) — no explicit tag.
-        // At 500 km, auto-detection says Geodetic (500_000 < 6_400_000), but altitude is
-        // > 100 km, so it triggers the ambiguity warning.
-        let request = GainRequest {
-            antenna_id: "test".to_string(),
-            feed_id: "feed".to_string(),
-            vehicle_position: Position3D::new(-118.0, 34.0, 100.0),
-            reflector_boresight: Position3D::new(-118.0, 34.0, 110.0),
-            feed_pointing_location: Position3D::new(-118.0, 34.0, 105.0),
-            // LEO altitude in geodetic form, no tag — ambiguous
-            emitter_position: Position3D::new(0.0, 0.0, 500_000.0),
-            frequency_mhz: 8400.0,
-            pointing_frequency_mhz: None,
-            include_reference: false,
-            vehicle_attitude: None,
-        };
-        let warnings = coordinate_ambiguity_warnings(&request);
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("emitter_position"));
+    fn a_position_without_a_coordinate_system_does_not_deserialize() {
+        // The wire-level half of the same contract: there is no default and no
+        // inference, so the tag cannot be omitted.
+        let untagged = r#"{"x": 0.0, "y": 0.0, "z": 35786000.0}"#;
+        let err = serde_json::from_str::<Position3D>(untagged)
+            .expect_err("an untagged position must not deserialize");
+        assert!(
+            err.to_string().contains("coordinate_system"),
+            "the error must name the missing field, got: {err}"
+        );
     }
 
     // ========================================================================
@@ -755,13 +703,13 @@ mod tests {
 
     #[test]
     fn test_validate_ecef_position_valid() {
-        let pos = Position3D::new(6_500_000.0, 100_000.0, 200_000.0);
+        let pos = Position3D::ecef(6_500_000.0, 100_000.0, 200_000.0);
         assert!(validate_position(&pos, "test_pos").is_ok());
     }
 
     #[test]
     fn test_validate_ecef_position_exceeds_max() {
-        let pos = Position3D::new(450_000_000.0, 0.0, 0.0);
+        let pos = Position3D::ecef(450_000_000.0, 0.0, 0.0);
         let result = validate_position(&pos, "test_pos");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("exceeds maximum"));
@@ -769,13 +717,13 @@ mod tests {
 
     #[test]
     fn test_validate_geodetic_position_valid() {
-        let pos = Position3D::new(-118.1234, 34.5678, 100.0);
+        let pos = Position3D::geodetic(-118.1234, 34.5678, 100.0);
         assert!(validate_position(&pos, "test_pos").is_ok());
     }
 
     #[test]
     fn test_validate_geodetic_position_invalid_longitude() {
-        let pos = Position3D::new(-200.0, 34.0, 100.0);
+        let pos = Position3D::geodetic(-200.0, 34.0, 100.0);
         let result = validate_position(&pos, "test_pos");
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
@@ -784,7 +732,7 @@ mod tests {
 
     #[test]
     fn test_validate_geodetic_position_invalid_latitude() {
-        let pos = Position3D::new(-118.0, 100.0, 100.0);
+        let pos = Position3D::geodetic(-118.0, 100.0, 100.0);
         let result = validate_position(&pos, "test_pos");
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
@@ -793,7 +741,7 @@ mod tests {
 
     #[test]
     fn test_validate_geodetic_position_invalid_altitude() {
-        let pos = Position3D::new(-118.0, 34.0, 420_000_000.0);
+        let pos = Position3D::ecef(-118.0, 34.0, 420_000_000.0);
         let result = validate_position(&pos, "test_pos");
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
@@ -802,7 +750,7 @@ mod tests {
 
     #[test]
     fn test_validate_position_nan() {
-        let pos = Position3D::new(f64::NAN, 0.0, 0.0);
+        let pos = Position3D::geodetic(f64::NAN, 0.0, 0.0);
         let result = validate_position(&pos, "test_pos");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not finite"));
@@ -810,7 +758,7 @@ mod tests {
 
     #[test]
     fn test_validate_position_infinity() {
-        let pos = Position3D::new(f64::INFINITY, 0.0, 0.0);
+        let pos = Position3D::geodetic(f64::INFINITY, 0.0, 0.0);
         let result = validate_position(&pos, "test_pos");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not finite"));
@@ -1007,9 +955,9 @@ mod tests {
         H3LinkBudgetRequest {
             antenna_id: "antenna_1".to_string(),
             feed_id: "feed_0".to_string(),
-            vehicle_position: Position3D::new(-118.0, 34.0, 100.0),
-            reflector_boresight: Position3D::new(-118.1, 34.1, 200.0),
-            feed_pointing_location: Position3D::new(-118.0, 34.0, 150.0),
+            vehicle_position: Position3D::geodetic(-118.0, 34.0, 100.0),
+            reflector_boresight: Position3D::geodetic(-118.1, 34.1, 200.0),
+            feed_pointing_location: Position3D::geodetic(-118.0, 34.0, 150.0),
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: None,
             n_rings: 3,
@@ -1074,7 +1022,7 @@ mod tests {
     #[test]
     fn test_h3_request_invalid_vehicle_position() {
         let mut req = valid_h3_request();
-        req.vehicle_position = Position3D::new(f64::NAN, 0.0, 0.0);
+        req.vehicle_position = Position3D::geodetic(f64::NAN, 0.0, 0.0);
         let result = validate_h3_link_budget_request(&req);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("vehicle_position"));
@@ -1083,7 +1031,7 @@ mod tests {
     #[test]
     fn test_h3_request_invalid_reflector_boresight() {
         let mut req = valid_h3_request();
-        req.reflector_boresight = Position3D::new(-200.0, 34.0, 100.0);
+        req.reflector_boresight = Position3D::geodetic(-200.0, 34.0, 100.0);
         let result = validate_h3_link_budget_request(&req);
         assert!(result.is_err());
         assert!(result
@@ -1095,7 +1043,7 @@ mod tests {
     #[test]
     fn test_h3_request_invalid_feed_pointing_location() {
         let mut req = valid_h3_request();
-        req.feed_pointing_location = Position3D::new(-118.0, 100.0, 150.0);
+        req.feed_pointing_location = Position3D::geodetic(-118.0, 100.0, 150.0);
         let result = validate_h3_link_budget_request(&req);
         assert!(result.is_err());
         assert!(result
@@ -1202,10 +1150,10 @@ mod tests {
         GainRequest {
             antenna_id: "test_antenna".to_string(),
             feed_id: "test_feed".to_string(),
-            vehicle_position: Position3D::new(-118.0, 34.0, 100.0),
-            reflector_boresight: Position3D::new(-118.1, 34.1, 200.0),
-            feed_pointing_location: Position3D::new(-118.0, 34.0, 150.0),
-            emitter_position: Position3D::new(-118.0, 34.0, 35_786_000.0),
+            vehicle_position: Position3D::geodetic(-118.0, 34.0, 100.0),
+            reflector_boresight: Position3D::geodetic(-118.1, 34.1, 200.0),
+            feed_pointing_location: Position3D::geodetic(-118.0, 34.0, 150.0),
+            emitter_position: Position3D::ecef(-118.0, 34.0, 35_786_000.0),
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: None,
             include_reference: false,
@@ -1302,10 +1250,10 @@ mod tests {
             evaluations.push(GainRequest {
                 antenna_id: "test".to_string(),
                 feed_id: "test_feed".to_string(),
-                vehicle_position: Position3D::new(0.0, 0.0, 0.0),
-                reflector_boresight: Position3D::new(0.0, 0.0, 0.0),
-                feed_pointing_location: Position3D::new(0.0, 0.0, 0.0),
-                emitter_position: Position3D::new(0.0, 0.0, 0.0),
+                vehicle_position: Position3D::geodetic(0.0, 0.0, 0.0),
+                reflector_boresight: Position3D::geodetic(0.0, 0.0, 0.0),
+                feed_pointing_location: Position3D::geodetic(0.0, 0.0, 0.0),
+                emitter_position: Position3D::geodetic(0.0, 0.0, 0.0),
                 frequency_mhz: 8400.0,
                 pointing_frequency_mhz: None,
                 include_reference: false,

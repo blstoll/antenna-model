@@ -236,7 +236,7 @@ fn create_error_response(request: &GainRequest, error: AntennaModelError) -> Gai
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::schemas::{CoordinateSystem, Position3D};
+    use crate::api::schemas::Position3D;
     use crate::data::types::{
         AntennaCalibration, CalibrationMetadata, FeedParameters, MeshParameters,
         PhysicalAntennaConfig, ReflectorGeometry, ValidityRanges,
@@ -295,16 +295,13 @@ mod tests {
 
     fn create_test_request(antenna_id: &str, feed_id: &str) -> GainRequest {
         // Use ECEF coordinates for GEO satellite scenario (similar to evaluator tests).
-        // Equatorial ground station (6378 km) is below the 6400 km auto-detect threshold, so
-        // set explicit ECEF to preserve correct coordinate interpretation.
-        let mut emitter = Position3D::new(6_378_137.0, 0.0, 0.0); // Ground station at equator
-        emitter.coordinate_system = Some(CoordinateSystem::ECEF);
+        let emitter = Position3D::ecef(6_378_137.0, 0.0, 0.0); // Ground station at equator
         GainRequest {
             antenna_id: antenna_id.to_string(),
             feed_id: feed_id.to_string(),
-            vehicle_position: Position3D::new(42_164_137.0, 0.0, 0.0), // GEO at (lon=0, lat=0)
-            reflector_boresight: Position3D::new(42_164_127.0, 0.0, 0.0), // 10m toward Earth
-            feed_pointing_location: Position3D::new(42_164_132.0, 0.0, 0.0), // Feed at ~5m from vehicle (near focus)
+            vehicle_position: Position3D::ecef(42_164_137.0, 0.0, 0.0), // GEO at (lon=0, lat=0)
+            reflector_boresight: Position3D::ecef(42_164_127.0, 0.0, 0.0), // 10m toward Earth
+            feed_pointing_location: Position3D::ecef(42_164_132.0, 0.0, 0.0), // Feed at ~5m from vehicle (near focus)
             emitter_position: emitter,
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: None,

@@ -75,9 +75,9 @@ fn compute_endpoints() -> Vec<Endpoint> {
             valid: json!({
                 "antenna_id": "test_simple",
                 "feed_id": "primary",
-                "vehicle_position": {"x": -118.1234, "y": 34.5678, "z": 100.0},
-                "reflector_boresight": {"x": -118.1234, "y": 34.5679, "z": 110.0},
-                "feed_pointing_location": {"x": -118.124, "y": 34.568, "z": 105.0},
+                "vehicle_position": {"x": -118.1234, "y": 34.5678, "z": 100.0, "coordinate_system": "geodetic"},
+                "reflector_boresight": {"x": -118.1234, "y": 34.5679, "z": 110.0, "coordinate_system": "geodetic"},
+                "feed_pointing_location": {"x": -118.124, "y": 34.568, "z": 105.0, "coordinate_system": "geodetic"},
                 "frequency_mhz": 8400.0,
                 "n_rings": 1,
                 "h3_resolution": 7
@@ -509,6 +509,132 @@ async fn legacy_feed_position_key_is_rejected_with_400() {
             error.message
         );
     }
+
+    server.shutdown().await;
+}
+
+/// Every `Position3D` field on the request body, per endpoint. `/gain` is the only
+/// one carrying `emitter_position`; the other three derive their emitters from the
+/// grid.
+fn position_fields(path: &str) -> &'static [&'static str] {
+    match path {
+        "/api/v1/gain" | "/api/v1/gain/batch" => &[
+            "vehicle_position",
+            "reflector_boresight",
+            "feed_pointing_location",
+            "emitter_position",
+        ],
+        _ => &[
+            "vehicle_position",
+            "reflector_boresight",
+            "feed_pointing_location",
+        ],
+    }
+}
+
+/// C8 stage 2 made `Position3D.coordinate_system` **required**, deleting the
+/// magnitude-based auto-detection that guessed the frame. An untagged position is
+/// therefore a missing required field — unparseable, so 400 under C2's policy, with a
+/// message naming the field.
+///
+/// Stripped one position at a time, on every endpoint, because each request type
+/// declares its positions independently: a `#[serde(default)]` or a re-added
+/// heuristic on any single field would restore the exact silent-misparse hazard this
+/// unit removed, and a one-field guard would wave the rest through.
+#[tokio::test]
+async fn a_position_without_coordinate_system_is_rejected_with_400() {
+    let server = TestServer::start().await.unwrap();
+
+    for endpoint in compute_endpoints() {
+        for field in position_fields(endpoint.path) {
+            let mut body = endpoint.valid.clone();
+            let target = if endpoint.nested {
+                &mut body["evaluations"][0]
+            } else {
+                &mut body
+            };
+            let position = target
+                .get_mut(field)
+                .and_then(Value::as_object_mut)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{}: the valid body has no `{field}` object — this guard is \
+                         testing nothing",
+                        endpoint.path
+                    )
+                });
+            assert!(
+                position.remove("coordinate_system").is_some(),
+                "{}: the valid body's `{field}` carries no `coordinate_system`, so \
+                 removing it changes nothing — the tag stopped being serialized",
+                endpoint.path
+            );
+
+            let error = assert_rejected(
+                &server,
+                endpoint.path,
+                &format!("{field} without coordinate_system"),
+                body.to_string(),
+                400,
+                "invalid_request_body",
+            )
+            .await;
+
+            assert!(
+                error.message.contains("coordinate_system"),
+                "{}: the 400 for an untagged `{field}` must name the missing field, \
+                 got message: {}",
+                endpoint.path,
+                error.message
+            );
+        }
+    }
+
+    server.shutdown().await;
+}
+
+/// The reason the tag was made required: a GEO satellite's geodetic altitude
+/// (~35,786 km) exceeded the old 6400 km ECEF threshold, so an untagged GEO emitter
+/// silently misparsed as a near-Earth-centre ECEF point and returned a confidently
+/// wrong gain under HTTP 200. Tagged `geodetic`, the same numbers are now read as
+/// intended and the request succeeds.
+///
+/// This is the acceptance half of the pair above: without it, "reject everything
+/// untagged" would pass just as well if tagged GEO input were broken too.
+#[tokio::test]
+async fn geo_altitude_geodetic_emitter_is_accepted_when_tagged() {
+    let server = TestServer::start().await.unwrap();
+
+    let mut body = serde_json::to_value(builders::simple_gain_request_geodetic()).unwrap();
+    body["emitter_position"] = json!({
+        "x": -118.0,
+        "y": 0.0,
+        "z": 35_786_000.0,
+        "coordinate_system": "geodetic"
+    });
+
+    let response = server
+        .client
+        .post(format!("{}/api/v1/gain", server.base_url))
+        .header("content-type", "application/json")
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+
+    let status = response.status().as_u16();
+    let raw = response.text().await.expect("readable body");
+    assert_eq!(
+        status, 200,
+        "a tagged GEO-altitude geodetic emitter must be accepted, got {status}: {raw}"
+    );
+
+    let gain: GainResponse = serde_json::from_str(&raw).expect("a GainResponse");
+    assert!(
+        gain.gain_db.is_finite(),
+        "expected a finite gain for a tagged GEO emitter, got {}",
+        gain.gain_db
+    );
 
     server.shutdown().await;
 }

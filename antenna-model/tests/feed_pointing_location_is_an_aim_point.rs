@@ -20,12 +20,12 @@ const REFLECTOR_DIAMETER_M: f64 = 10.0; // f/D = 0.5
 #[test]
 fn feed_pointing_location_resolves_relative_to_vehicle_not_absolute() {
     // Fixed Earth aim points (geodetic: lon°, lat°, alt m).
-    let feed_pointing = Position3D::new(0.2, 0.1, 0.0);
-    let reflector_pointing = Position3D::new(0.0, 0.0, 0.0);
+    let feed_pointing = Position3D::geodetic(0.2, 0.1, 0.0);
+    let reflector_pointing = Position3D::geodetic(0.0, 0.0, 0.0);
 
     // Two distinct vehicle positions (700 km altitude), differing in longitude.
-    let vehicle_a = Position3D::new(0.0, 0.0, 700_000.0);
-    let vehicle_b = Position3D::new(0.5, 0.0, 700_000.0);
+    let vehicle_a = Position3D::geodetic(0.0, 0.0, 700_000.0);
+    let vehicle_b = Position3D::geodetic(0.5, 0.0, 700_000.0);
 
     let phys_a = compute_feed_position_from_pointing(
         &feed_pointing,

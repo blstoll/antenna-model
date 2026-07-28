@@ -3,8 +3,8 @@
 //! Generates 2D loss heatmaps across antenna field of view.
 
 use crate::api::schemas::{
-    CalibrationStatusInfo, CoordinateSystem, GainRequest, GridConfig, GridData, HeatmapMetadata,
-    HeatmapRequest, HeatmapResponse, Position3D, RangeConfig,
+    CalibrationStatusInfo, GainRequest, GridConfig, GridData, HeatmapMetadata, HeatmapRequest,
+    HeatmapResponse, Position3D, RangeConfig,
 };
 use crate::data::repository::CalibrationRepository;
 use crate::error::{AntennaModelError, Result};
@@ -401,10 +401,7 @@ fn compute_emitter_position_from_angles(
     let dy = rot[0][1] * e + rot[1][1] * n + rot[2][1] * u;
     let dz = rot[0][2] * e + rot[1][2] * n + rot[2][2] * u;
 
-    // Tag as ECEF explicitly: Earth-surface values are ~2–6 Mm which is below
-    // the 6400 km auto-detect threshold and would otherwise misclassify as Geodetic.
-    let mut pos = Position3D::new(vx + dx, vy + dy, vz + dz);
-    pos.coordinate_system = Some(CoordinateSystem::ECEF);
+    let pos = Position3D::ecef(vx + dx, vy + dy, vz + dz);
     Ok(pos)
 }
 
@@ -473,7 +470,7 @@ mod tests {
     #[test]
     fn test_compute_emitter_position_zenith_north_pole() {
         // North Pole: lon=0, lat=90, alt=0
-        let vehicle_pos = Position3D::new(0.0, 90.0, 0.0);
+        let vehicle_pos = Position3D::geodetic(0.0, 90.0, 0.0);
         let emitter = compute_emitter_position_from_angles(&vehicle_pos, 0.0, 90.0).unwrap();
 
         // Zenith at north pole points in +Z direction (ECEF).
@@ -500,7 +497,7 @@ mod tests {
     /// an emitter mostly in the ECEF +X direction.
     #[test]
     fn test_compute_emitter_position_zenith_equator() {
-        let vehicle_pos = Position3D::new(0.0, 0.0, 0.0); // lon=0, lat=0, alt=0
+        let vehicle_pos = Position3D::geodetic(0.0, 0.0, 0.0); // lon=0, lat=0, alt=0
         let emitter = compute_emitter_position_from_angles(&vehicle_pos, 0.0, 90.0).unwrap();
 
         // Zenith at (lon=0, lat=0) points in +X direction (ECEF).
@@ -526,7 +523,7 @@ mod tests {
     /// in the ECEF +Z direction (north is up in ECEF at equator, prime meridian).
     #[test]
     fn test_compute_emitter_position_north_at_equator() {
-        let vehicle_pos = Position3D::new(0.0, 0.0, 0.0);
+        let vehicle_pos = Position3D::geodetic(0.0, 0.0, 0.0);
         let emitter = compute_emitter_position_from_angles(&vehicle_pos, 0.0, 0.0).unwrap();
 
         // North at (lon=0, lat=0) in ENU → +Z in ECEF
@@ -543,7 +540,7 @@ mod tests {
     #[test]
     fn test_compute_emitter_position_ecef_vehicle_zenith() {
         // GEO satellite at equator, prime meridian: (42164137, 0, 0)
-        let vehicle_pos = Position3D::new(42164137.0, 0.0, 0.0);
+        let vehicle_pos = Position3D::ecef(42164137.0, 0.0, 0.0);
         let emitter = compute_emitter_position_from_angles(&vehicle_pos, 0.0, 90.0).unwrap();
 
         // Zenith at equator prime meridian → +X in ECEF
@@ -557,18 +554,20 @@ mod tests {
         );
     }
 
-    /// Emitter result is always in ECEF (detectable by magnitude > 6.4M for Earth-surface orbit).
+    /// Emitter result is always tagged ECEF, with an Earth-surface-orbit magnitude.
     #[test]
     fn test_compute_emitter_position_returns_ecef() {
         // Geodetic vehicle at 0 altitude, equator: ECEF radius ≈ 6378137
-        let vehicle_pos = Position3D::new(0.0, 0.0, 0.0);
+        let vehicle_pos = Position3D::geodetic(0.0, 0.0, 0.0);
         let emitter = compute_emitter_position_from_angles(&vehicle_pos, 0.0, 90.0).unwrap();
 
-        // Result magnitude should be Earth radius + 400km ≈ 6778137 > 6.4M → ECEF
+        assert!(emitter.is_ecef(), "emitter must be tagged ECEF");
+
+        // Result magnitude should be Earth radius + 400 km ≈ 6,778,137 m
         let magnitude = (emitter.x.powi(2) + emitter.y.powi(2) + emitter.z.powi(2)).sqrt();
         assert!(
             magnitude > 6_400_000.0,
-            "Expected ECEF magnitude > 6.4M, got {}",
+            "Expected an Earth-surface-orbit magnitude > 6.4M m, got {}",
             magnitude
         );
     }
@@ -595,9 +594,9 @@ mod tests {
         let request = HeatmapRequest {
             antenna_id: "test_antenna".to_string(),
             feed_id: "test_feed".to_string(),
-            vehicle_position: Position3D::new(0.0, 0.0, 0.0),
-            reflector_boresight: Position3D::new(0.0, 0.0, 10.0),
-            feed_pointing_location: Position3D::new(0.0, 0.0, 23.6),
+            vehicle_position: Position3D::geodetic(0.0, 0.0, 0.0),
+            reflector_boresight: Position3D::geodetic(0.0, 0.0, 10.0),
+            feed_pointing_location: Position3D::geodetic(0.0, 0.0, 23.6),
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: None,
             grid_config,
@@ -710,9 +709,9 @@ mod tests {
         let request = HeatmapRequest {
             antenna_id: "nonexistent_antenna".to_string(),
             feed_id: "test_feed".to_string(),
-            vehicle_position: Position3D::new(0.0, 0.0, 0.0),
-            reflector_boresight: Position3D::new(0.0, 0.0, 10.0),
-            feed_pointing_location: Position3D::new(0.0, 0.0, 23.6),
+            vehicle_position: Position3D::geodetic(0.0, 0.0, 0.0),
+            reflector_boresight: Position3D::geodetic(0.0, 0.0, 10.0),
+            feed_pointing_location: Position3D::geodetic(0.0, 0.0, 23.6),
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: None,
             grid_config,
@@ -814,9 +813,9 @@ mod tests {
         let mut repository = CalibrationRepository::new();
         repository.add_calibration(calibration);
 
-        let vehicle_position = Position3D::new(0.0, 0.0, 0.0); // geodetic: equator, prime meridian
-        let reflector_boresight = Position3D::new(0.0, 0.0, 10.0);
-        let feed_pointing_location = Position3D::new(0.0, 0.0, 10.0); // focused (unsteered) feed
+        let vehicle_position = Position3D::geodetic(0.0, 0.0, 0.0); // geodetic: equator, prime meridian
+        let reflector_boresight = Position3D::geodetic(0.0, 0.0, 10.0);
+        let feed_pointing_location = Position3D::geodetic(0.0, 0.0, 10.0); // focused (unsteered) feed
         let frequency_mhz = 8400.0;
         let azimuth_deg = 30.0;
         let elevation_deg = 20.0;

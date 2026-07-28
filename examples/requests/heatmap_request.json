@@ -4,17 +4,20 @@
   "vehicle_position": {
     "x": 6500000.0,
     "y": 0.0,
-    "z": 0.0
+    "z": 0.0,
+    "coordinate_system": "ecef"
   },
   "reflector_boresight": {
     "x": 6500010.0,
     "y": 0.0,
-    "z": 0.0
+    "z": 0.0,
+    "coordinate_system": "ecef"
   },
   "feed_pointing_location": {
     "x": 6500005.0,
     "y": 0.0,
-    "z": 0.0
+    "z": 0.0,
+    "coordinate_system": "ecef"
   },
   "frequency_mhz": 8250.0,
   "grid_config": {

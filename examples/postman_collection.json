@@ -23,8 +23,12 @@
             "header": [],
             "url": {
               "raw": "{{baseUrl}}/health",
-              "host": ["{{baseUrl}}"],
-              "path": ["health"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "health"
+              ]
             },
             "description": "Liveness probe - returns 200 OK if service is responsive"
           }
@@ -36,8 +40,12 @@
             "header": [],
             "url": {
               "raw": "{{baseUrl}}/ready",
-              "host": ["{{baseUrl}}"],
-              "path": ["ready"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "ready"
+              ]
             },
             "description": "Readiness probe - returns 200 OK when ready to accept requests, 503 during startup"
           }
@@ -49,8 +57,12 @@
             "header": [],
             "url": {
               "raw": "{{baseUrl}}/status",
-              "host": ["{{baseUrl}}"],
-              "path": ["status"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "status"
+              ]
             },
             "description": "Detailed service status including version, uptime, loaded antennas, and memory usage"
           }
@@ -67,8 +79,14 @@
             "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/v1/antennas",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "v1", "antennas"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "antennas"
+              ]
             },
             "description": "Get list of all available antennas with basic metadata"
           }
@@ -80,8 +98,15 @@
             "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/v1/antennas/dsn_34m_uncalibrated",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "v1", "antennas", "dsn_34m_uncalibrated"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "antennas",
+                "dsn_34m_uncalibrated"
+              ]
             },
             "description": "Get comprehensive information about a specific antenna"
           }
@@ -93,8 +118,16 @@
             "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/v1/antennas/dsn_34m_uncalibrated/feeds",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "v1", "antennas", "dsn_34m_uncalibrated", "feeds"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "antennas",
+                "dsn_34m_uncalibrated",
+                "feeds"
+              ]
             },
             "description": "List all feeds available for a specific antenna"
           }
@@ -106,8 +139,17 @@
             "header": [],
             "url": {
               "raw": "{{baseUrl}}/api/v1/antennas/dsn_34m_uncalibrated/feeds/x_band",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "v1", "antennas", "dsn_34m_uncalibrated", "feeds", "x_band"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "antennas",
+                "dsn_34m_uncalibrated",
+                "feeds",
+                "x_band"
+              ]
             },
             "description": "Get detailed information about a specific feed"
           }
@@ -129,12 +171,18 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"antenna_id\": \"dsn_34m_uncalibrated\",\n  \"feed_id\": \"x_band\",\n  \"vehicle_position\": {\n    \"x\": 6500000.0,\n    \"y\": 100000.0,\n    \"z\": 200000.0\n  },\n  \"vehicle_attitude\": [1.0, 0.0, 0.0, 0.0],\n  \"reflector_boresight\": {\n    \"x\": 6500010.0,\n    \"y\": 100000.0,\n    \"z\": 200000.0\n  },\n  \"feed_pointing_location\": {\n    \"x\": 6500005.0,\n    \"y\": 100000.0,\n    \"z\": 200000.0\n  },\n  \"emitter_position\": {\n    \"x\": 7000000.0,\n    \"y\": 500000.0,\n    \"z\": 1000000.0\n  },\n  \"frequency_mhz\": 8450.0,\n  \"include_reference\": true\n}"
+              "raw": "{\n  \"antenna_id\": \"dsn_34m_uncalibrated\",\n  \"feed_id\": \"x_band\",\n  \"vehicle_position\": {\n    \"x\": 6500000.0,\n    \"y\": 100000.0,\n    \"z\": 200000.0,\n    \"coordinate_system\": \"ecef\"\n  },\n  \"vehicle_attitude\": [\n    1.0,\n    0.0,\n    0.0,\n    0.0\n  ],\n  \"reflector_boresight\": {\n    \"x\": 6500010.0,\n    \"y\": 100000.0,\n    \"z\": 200000.0,\n    \"coordinate_system\": \"ecef\"\n  },\n  \"feed_pointing_location\": {\n    \"x\": 6500005.0,\n    \"y\": 100000.0,\n    \"z\": 200000.0,\n    \"coordinate_system\": \"ecef\"\n  },\n  \"emitter_position\": {\n    \"x\": 7000000.0,\n    \"y\": 500000.0,\n    \"z\": 1000000.0,\n    \"coordinate_system\": \"ecef\"\n  },\n  \"frequency_mhz\": 8450.0,\n  \"include_reference\": true\n}"
             },
             "url": {
               "raw": "{{baseUrl}}/api/v1/gain",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "v1", "gain"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "gain"
+              ]
             },
             "description": "Compute antenna gain using ECEF coordinates and quaternion attitude"
           }
@@ -151,12 +199,18 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"antenna_id\": \"gs_3.7m_uncalibrated\",\n  \"feed_id\": \"x_band_feed\",\n  \"vehicle_position\": {\n    \"x\": -118.0,\n    \"y\": 34.0,\n    \"z\": 500.0\n  },\n  \"vehicle_attitude\": [1.0, 0.0, 0.0, 0.0],\n  \"reflector_boresight\": {\n    \"x\": -118.0,\n    \"y\": 34.0,\n    \"z\": 510.0\n  },\n  \"feed_pointing_location\": {\n    \"x\": -118.0,\n    \"y\": 34.0,\n    \"z\": 505.0\n  },\n  \"emitter_position\": {\n    \"x\": -100.0,\n    \"y\": 35.0,\n    \"z\": 500000.0\n  },\n  \"frequency_mhz\": 8200.0,\n  \"include_reference\": false\n}"
+              "raw": "{\n  \"antenna_id\": \"gs_3.7m_uncalibrated\",\n  \"feed_id\": \"x_band_feed\",\n  \"vehicle_position\": {\n    \"x\": -118.0,\n    \"y\": 34.0,\n    \"z\": 500.0,\n    \"coordinate_system\": \"geodetic\"\n  },\n  \"vehicle_attitude\": [\n    1.0,\n    0.0,\n    0.0,\n    0.0\n  ],\n  \"reflector_boresight\": {\n    \"x\": -118.0,\n    \"y\": 34.0,\n    \"z\": 510.0,\n    \"coordinate_system\": \"geodetic\"\n  },\n  \"feed_pointing_location\": {\n    \"x\": -118.0,\n    \"y\": 34.0,\n    \"z\": 505.0,\n    \"coordinate_system\": \"geodetic\"\n  },\n  \"emitter_position\": {\n    \"x\": -100.0,\n    \"y\": 35.0,\n    \"z\": 500000.0,\n    \"coordinate_system\": \"geodetic\"\n  },\n  \"frequency_mhz\": 8200.0,\n  \"include_reference\": false\n}"
             },
             "url": {
               "raw": "{{baseUrl}}/api/v1/gain",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "v1", "gain"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "gain"
+              ]
             },
             "description": "Compute antenna gain using Geodetic coordinates and quaternion attitude"
           }
@@ -173,12 +227,19 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"evaluations\": [\n    {\n      \"antenna_id\": \"dsn_34m_uncalibrated\",\n      \"feed_id\": \"x_band\",\n      \"vehicle_position\": {\"x\": 6500000.0, \"y\": 0.0, \"z\": 0.0},\n      \"vehicle_attitude\": [1.0, 0.0, 0.0, 0.0],\n      \"reflector_boresight\": {\"x\": 6500010.0, \"y\": 0.0, \"z\": 0.0},\n      \"feed_pointing_location\": {\"x\": 6500005.0, \"y\": 0.0, \"z\": 0.0},\n      \"emitter_position\": {\"x\": 7000000.0, \"y\": 0.0, \"z\": 500000.0},\n      \"frequency_mhz\": 8450.0,\n      \"include_reference\": false\n    },\n    {\n      \"antenna_id\": \"dsn_34m_uncalibrated\",\n      \"feed_id\": \"s_band\",\n      \"vehicle_position\": {\"x\": 6500000.0, \"y\": 0.0, \"z\": 0.0},\n      \"vehicle_attitude\": [1.0, 0.0, 0.0, 0.0],\n      \"reflector_boresight\": {\"x\": 6500010.0, \"y\": 0.0, \"z\": 0.0},\n      \"feed_pointing_location\": {\"x\": 6500005.0, \"y\": 0.0, \"z\": 0.0},\n      \"emitter_position\": {\"x\": 7000000.0, \"y\": 0.0, \"z\": 500000.0},\n      \"frequency_mhz\": 2250.0,\n      \"include_reference\": false\n    },\n    {\n      \"antenna_id\": \"gs_3.7m_uncalibrated\",\n      \"feed_id\": \"x_band_feed\",\n      \"vehicle_position\": {\"x\": 6500000.0, \"y\": 0.0, \"z\": 0.0},\n      \"vehicle_attitude\": [1.0, 0.0, 0.0, 0.0],\n      \"reflector_boresight\": {\"x\": 6500010.0, \"y\": 0.0, \"z\": 0.0},\n      \"feed_pointing_location\": {\"x\": 6500005.0, \"y\": 0.0, \"z\": 0.0},\n      \"emitter_position\": {\"x\": 7000000.0, \"y\": 0.0, \"z\": 500000.0},\n      \"frequency_mhz\": 7500.0,\n      \"include_reference\": false\n    }\n  ]\n}"
+              "raw": "{\n  \"evaluations\": [\n    {\n      \"antenna_id\": \"dsn_34m_uncalibrated\",\n      \"feed_id\": \"x_band\",\n      \"vehicle_position\": {\n        \"x\": 6500000.0,\n        \"y\": 0.0,\n        \"z\": 0.0,\n        \"coordinate_system\": \"ecef\"\n      },\n      \"vehicle_attitude\": [\n        1.0,\n        0.0,\n        0.0,\n        0.0\n      ],\n      \"reflector_boresight\": {\n        \"x\": 6500010.0,\n        \"y\": 0.0,\n        \"z\": 0.0,\n        \"coordinate_system\": \"ecef\"\n      },\n      \"feed_pointing_location\": {\n        \"x\": 6500005.0,\n        \"y\": 0.0,\n        \"z\": 0.0,\n        \"coordinate_system\": \"ecef\"\n      },\n      \"emitter_position\": {\n        \"x\": 7000000.0,\n        \"y\": 0.0,\n        \"z\": 500000.0,\n        \"coordinate_system\": \"ecef\"\n      },\n      \"frequency_mhz\": 8450.0,\n      \"include_reference\": false\n    },\n    {\n      \"antenna_id\": \"dsn_34m_uncalibrated\",\n      \"feed_id\": \"s_band\",\n      \"vehicle_position\": {\n        \"x\": 6500000.0,\n        \"y\": 0.0,\n        \"z\": 0.0,\n        \"coordinate_system\": \"ecef\"\n      },\n      \"vehicle_attitude\": [\n        1.0,\n        0.0,\n        0.0,\n        0.0\n      ],\n      \"reflector_boresight\": {\n        \"x\": 6500010.0,\n        \"y\": 0.0,\n        \"z\": 0.0,\n        \"coordinate_system\": \"ecef\"\n      },\n      \"feed_pointing_location\": {\n        \"x\": 6500005.0,\n        \"y\": 0.0,\n        \"z\": 0.0,\n        \"coordinate_system\": \"ecef\"\n      },\n      \"emitter_position\": {\n        \"x\": 7000000.0,\n        \"y\": 0.0,\n        \"z\": 500000.0,\n        \"coordinate_system\": \"ecef\"\n      },\n      \"frequency_mhz\": 2250.0,\n      \"include_reference\": false\n    },\n    {\n      \"antenna_id\": \"gs_3.7m_uncalibrated\",\n      \"feed_id\": \"x_band_feed\",\n      \"vehicle_position\": {\n        \"x\": 6500000.0,\n        \"y\": 0.0,\n        \"z\": 0.0,\n        \"coordinate_system\": \"ecef\"\n      },\n      \"vehicle_attitude\": [\n        1.0,\n        0.0,\n        0.0,\n        0.0\n      ],\n      \"reflector_boresight\": {\n        \"x\": 6500010.0,\n        \"y\": 0.0,\n        \"z\": 0.0,\n        \"coordinate_system\": \"ecef\"\n      },\n      \"feed_pointing_location\": {\n        \"x\": 6500005.0,\n        \"y\": 0.0,\n        \"z\": 0.0,\n        \"coordinate_system\": \"ecef\"\n      },\n      \"emitter_position\": {\n        \"x\": 7000000.0,\n        \"y\": 0.0,\n        \"z\": 500000.0,\n        \"coordinate_system\": \"ecef\"\n      },\n      \"frequency_mhz\": 7500.0,\n      \"include_reference\": false\n    }\n  ]\n}"
             },
             "url": {
               "raw": "{{baseUrl}}/api/v1/gain/batch",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "v1", "gain", "batch"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "gain",
+                "batch"
+              ]
             },
             "description": "Process multiple gain computation requests in parallel (up to 1000 per batch)"
           }
@@ -200,12 +261,18 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"antenna_id\": \"test_simple\",\n  \"feed_id\": \"primary\",\n  \"vehicle_position\": {\n    \"x\": 6500000.0,\n    \"y\": 0.0,\n    \"z\": 0.0\n  },\n  \"reflector_boresight\": {\n    \"x\": 6500010.0,\n    \"y\": 0.0,\n    \"z\": 0.0\n  },\n  \"feed_pointing_location\": {\n    \"x\": 6500005.0,\n    \"y\": 0.0,\n    \"z\": 0.0\n  },\n  \"frequency_mhz\": 8250.0,\n  \"grid_config\": {\n    \"grid_type\": \"rectangular\",\n    \"azimuth_range_deg\": {\n      \"min\": 0.0,\n      \"max\": 10.0,\n      \"step\": 1.0\n    },\n    \"elevation_range_deg\": {\n      \"min\": 0.0,\n      \"max\": 10.0,\n      \"step\": 1.0\n    }\n  }\n}"
+              "raw": "{\n  \"antenna_id\": \"test_simple\",\n  \"feed_id\": \"primary\",\n  \"vehicle_position\": {\n    \"x\": 6500000.0,\n    \"y\": 0.0,\n    \"z\": 0.0,\n    \"coordinate_system\": \"ecef\"\n  },\n  \"reflector_boresight\": {\n    \"x\": 6500010.0,\n    \"y\": 0.0,\n    \"z\": 0.0,\n    \"coordinate_system\": \"ecef\"\n  },\n  \"feed_pointing_location\": {\n    \"x\": 6500005.0,\n    \"y\": 0.0,\n    \"z\": 0.0,\n    \"coordinate_system\": \"ecef\"\n  },\n  \"frequency_mhz\": 8250.0,\n  \"grid_config\": {\n    \"grid_type\": \"rectangular\",\n    \"azimuth_range_deg\": {\n      \"min\": 0.0,\n      \"max\": 10.0,\n      \"step\": 1.0\n    },\n    \"elevation_range_deg\": {\n      \"min\": 0.0,\n      \"max\": 10.0,\n      \"step\": 1.0\n    }\n  }\n}"
             },
             "url": {
               "raw": "{{baseUrl}}/api/v1/heatmap",
-              "host": ["{{baseUrl}}"],
-              "path": ["api", "v1", "heatmap"]
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "heatmap"
+              ]
             },
             "description": "Generate a 2D loss heatmap across antenna field of view using rectangular grid"
           }

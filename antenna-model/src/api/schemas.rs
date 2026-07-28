@@ -5,9 +5,13 @@
 //!
 //! # 3D Coordinate System Support
 //!
-//! All 3D positions support automatic coordinate system detection:
-//! - **ECEF** (Earth-Centered Earth-Fixed): Detected when |x|, |y|, or |z| > 1000 km
-//! - **Geodetic**: Otherwise (x=longitude degrees, y=latitude degrees, z=altitude meters)
+//! Every 3D position states its frame explicitly via the required `coordinate_system`
+//! field:
+//! - **ECEF** (Earth-Centered Earth-Fixed): x, y, z in meters from Earth's centre
+//! - **Geodetic**: x = longitude degrees, y = latitude degrees, z = altitude meters
+//!
+//! There is no magnitude-based auto-detection (removed by roadmap unit C8 stage 2): a
+//! request that omits the tag is rejected rather than guessed at.
 //!
 //! # Multi-Feed Support
 //!
@@ -56,46 +60,46 @@ mod nan_as_null {
 // Core Types
 // ============================================================================
 
-/// 3D position with automatic coordinate system detection.
+/// 3D position in an explicitly named coordinate system.
 ///
-/// Supports two coordinate systems:
-/// - **ECEF** (Earth-Centered Earth-Fixed): When |x| > 6400 km OR |y| > 6400 km OR |z| > 6400 km
-///   - x, y, z in meters
-/// - **Geodetic**: Otherwise
+/// Supports two coordinate systems, selected by the **required** `coordinate_system`
+/// field:
+/// - **ECEF** (Earth-Centered Earth-Fixed), `"ecef"`
+///   - x, y, z in meters from Earth's centre of mass
+/// - **Geodetic** (WGS84), `"geodetic"`
 ///   - x = longitude in degrees (-180 to 180)
 ///   - y = latitude in degrees (-90 to 90)
-///   - z = altitude in meters (above WGS84 ellipsoid)
+///   - z = altitude in meters (above the WGS84 ellipsoid)
 ///
-/// # Detection threshold
+/// # Why the tag is required
 ///
-/// The 6400 km (6,400,000 m) threshold aligns with Earth's radius (~6371 km):
-/// - Geodetic: lon ≤ 180°, lat ≤ 90°, alt up to ~400,000 km for HEO/GEO satellites
-/// - ECEF on/above Earth surface: minimum polar radius ~6357 km, so any ECEF component on
-///   the surface exceeds the threshold.
-///
-/// Note: geodetic altitudes above 6400 km are legal (GEO orbit ~35,786 km). Use the
-/// `coordinate_system` field to provide an explicit override and avoid ambiguity.
+/// Until roadmap unit C8 stage 2 the field was optional and the frame was inferred from
+/// coordinate magnitude (ECEF above a 6400 km threshold, geodetic below). That heuristic
+/// is not decidable: a geodetic GEO satellite at `z = 35,786,000` m and an ECEF position
+/// are indistinguishable by magnitude, so untagged GEO positions silently misparsed as
+/// near-Earth-centre ECEF and returned a confidently wrong gain. The frame is now stated,
+/// never guessed — a body that omits `coordinate_system` is rejected with a 400 naming the
+/// field.
 ///
 /// # Examples
 ///
 /// ```
 /// # use antenna_model::api::schemas::{CoordinateSystem, Position3D};
-/// // ECEF coordinates above the 6400 km threshold auto-detect correctly
-/// let ecef = Position3D::new(6_500_000.0, 0.0, 0.0);
-/// assert_eq!(ecef.coordinate_system(), CoordinateSystem::ECEF);
+/// // ECEF, meters from Earth's centre
+/// let ecef = Position3D::ecef(6_500_000.0, 0.0, 0.0);
+/// assert_eq!(ecef.coordinate_system, CoordinateSystem::ECEF);
+/// assert!(ecef.is_ecef());
 ///
-/// // Earth-surface ECEF (equatorial radius 6378 km < 6400 km threshold): needs explicit tag
-/// let mut ecef_surface = Position3D::new(6_378_137.0, 0.0, 100_000.0);
-/// ecef_surface.coordinate_system = Some(CoordinateSystem::ECEF);
-/// assert_eq!(ecef_surface.coordinate_system(), CoordinateSystem::ECEF);
+/// // Earth-surface ECEF is stated, not inferred from its magnitude
+/// let ecef_surface = Position3D::ecef(6_378_137.0, 0.0, 100_000.0);
+/// assert!(ecef_surface.is_ecef());
 ///
-/// // Geodetic coordinates (lon, lat degrees, alt meters)
-/// let geodetic = Position3D::new(-118.1234, 34.5678, 100.0);
-/// assert_eq!(geodetic.coordinate_system(), CoordinateSystem::Geodetic);
+/// // Geodetic (lon, lat degrees, alt meters)
+/// let geodetic = Position3D::geodetic(-118.1234, 34.5678, 100.0);
+/// assert_eq!(geodetic.coordinate_system, CoordinateSystem::Geodetic);
 ///
-/// // High-altitude geodetic (GEO satellite) - set explicit tag to prevent misclassification
-/// let mut geo = Position3D::new(0.0, 0.0, 35_786_000.0);
-/// geo.coordinate_system = Some(CoordinateSystem::Geodetic);
+/// // A GEO satellite's altitude no longer competes with the ECEF threshold
+/// let geo = Position3D::geodetic(0.0, 0.0, 35_786_000.0);
 /// assert!(geo.is_geodetic());
 /// ```
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -106,62 +110,40 @@ pub struct Position3D {
     pub y: f64,
     /// Z coordinate: ECEF Z (meters) OR altitude (meters)
     pub z: f64,
-    /// Optional explicit coordinate system override. When `None`, auto-detected by magnitude.
-    /// Set this field to avoid ambiguity for high-altitude geodetic positions (e.g. GEO orbit).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub coordinate_system: Option<CoordinateSystem>,
+    /// Required frame tag naming how to read `x`, `y`, `z`. There is no default and no
+    /// magnitude-based inference; omitting it is a deserialization error.
+    pub coordinate_system: CoordinateSystem,
 }
 
 impl Position3D {
-    /// Threshold for ECEF auto-detection (6400 km in meters).
-    ///
-    /// Geodetic coordinates use degrees for lon/lat (max ±180/±90) and meters for altitude.
-    /// ECEF coordinates are in meters from Earth's center (polar radius ~6357 km, equatorial ~6378 km).
-    /// Using 6400 km threshold aligns with Earth's radius:
-    /// - Geodetic: lon/lat in degrees (≤ 180/90), alt can legally be hundreds of thousands of km
-    /// - ECEF on/above Earth surface: at least one component ≥ Earth's minimum polar radius (~6357 km)
-    ///
-    /// High-altitude geodetic positions (e.g. GEO satellite at z=35,786,000 m) can exceed this
-    /// threshold and will be misclassified without an explicit `coordinate_system` override.
-    pub const ECEF_THRESHOLD_M: f64 = 6_400_000.0;
-
-    /// Create a new Position3D with auto-detection enabled (coordinate_system = None).
-    pub fn new(x: f64, y: f64, z: f64) -> Self {
+    /// Create an ECEF position (x, y, z in meters from Earth's centre).
+    pub fn ecef(x: f64, y: f64, z: f64) -> Self {
         Self {
             x,
             y,
             z,
-            coordinate_system: None,
+            coordinate_system: CoordinateSystem::ECEF,
         }
     }
 
-    /// Determine the coordinate system for this position.
-    ///
-    /// If `coordinate_system` is set explicitly, that value is returned.
-    /// Otherwise, auto-detection is performed: returns `CoordinateSystem::ECEF` if any
-    /// coordinate magnitude exceeds `ECEF_THRESHOLD_M` (6400 km), otherwise `CoordinateSystem::Geodetic`.
-    pub fn coordinate_system(&self) -> CoordinateSystem {
-        if let Some(cs) = self.coordinate_system {
-            return cs;
-        }
-        if self.x.abs() > Self::ECEF_THRESHOLD_M
-            || self.y.abs() > Self::ECEF_THRESHOLD_M
-            || self.z.abs() > Self::ECEF_THRESHOLD_M
-        {
-            CoordinateSystem::ECEF
-        } else {
-            CoordinateSystem::Geodetic
+    /// Create a geodetic (WGS84) position: longitude °E, latitude °N, altitude meters.
+    pub fn geodetic(longitude_deg: f64, latitude_deg: f64, altitude_m: f64) -> Self {
+        Self {
+            x: longitude_deg,
+            y: latitude_deg,
+            z: altitude_m,
+            coordinate_system: CoordinateSystem::Geodetic,
         }
     }
 
     /// Check if this position uses ECEF coordinates
     pub fn is_ecef(&self) -> bool {
-        self.coordinate_system() == CoordinateSystem::ECEF
+        self.coordinate_system == CoordinateSystem::ECEF
     }
 
     /// Check if this position uses Geodetic coordinates
     pub fn is_geodetic(&self) -> bool {
-        self.coordinate_system() == CoordinateSystem::Geodetic
+        self.coordinate_system == CoordinateSystem::Geodetic
     }
 }
 
@@ -226,7 +208,7 @@ pub struct GainRequest {
     /// Feed identifier (for multi-feed antennas)
     pub feed_id: String,
 
-    /// Vehicle position (ECEF or Geodetic, auto-detected)
+    /// Vehicle position (ECEF or Geodetic, per its `coordinate_system`)
     pub vehicle_position: Position3D,
 
     /// Reflector boresight position (ECEF or Geodetic)
@@ -594,7 +576,7 @@ pub struct H3LinkBudgetRequest {
     /// Feed identifier (for multi-feed antennas)
     pub feed_id: String,
 
-    /// Vehicle position (ECEF or Geodetic, auto-detected)
+    /// Vehicle position (ECEF or Geodetic, per its `coordinate_system`)
     pub vehicle_position: Position3D,
 
     /// Reflector boresight position (ECEF or Geodetic)
@@ -1218,111 +1200,66 @@ mod tests {
     // Position3D Tests
     // ========================================================================
 
+    // The tests below replace the pre-C8-stage-2 auto-detection suite
+    // (`test_position3d_{ecef,geodetic,boundary}_detection`,
+    // `test_detection_threshold_is_6400km`,
+    // `test_explicit_coordinate_system_overrides_detection`,
+    // `test_position3d_backward_compatible_deserialization`,
+    // `test_position3d_no_coordinate_system_not_serialized`). They assert the required-field
+    // contract that took the heuristic's place rather than being dropped: the frame is
+    // whatever the caller declared, at any magnitude, in both directions.
+
     #[test]
-    fn test_position3d_ecef_detection() {
-        // ECEF coordinates at high-altitude satellite (components > 6400 km auto-detect)
-        let ecef = Position3D::new(10_000_000.0, 5_000_000.0, 2_000_000.0);
-        assert_eq!(ecef.coordinate_system(), CoordinateSystem::ECEF);
-        assert!(ecef.is_ecef());
-        assert!(!ecef.is_geodetic());
+    fn the_declared_frame_is_the_frame_at_any_magnitude() {
+        // Values that the old 6400 km heuristic would have classified as ECEF...
+        let big_geodetic = Position3D::geodetic(6_500_000.0, 0.0, 35_786_000.0);
+        assert!(big_geodetic.is_geodetic());
+        assert!(!big_geodetic.is_ecef());
 
-        // Earth-surface ECEF: component just above 6400 km auto-detects correctly
-        let ecef2 = Position3D::new(6_401_000.0, 0.0, 0.0);
-        assert_eq!(ecef2.coordinate_system(), CoordinateSystem::ECEF);
+        // ...and values it would have classified as geodetic.
+        let small_ecef = Position3D::ecef(100.0, 100.0, 100.0);
+        assert!(small_ecef.is_ecef());
+        assert!(!small_ecef.is_geodetic());
 
-        // Real Earth-surface ECEF points (equatorial radius 6378 km < threshold) need
-        // explicit tag for correct detection — set it to preserve intent
-        let mut ecef_surface = Position3D::new(6_378_137.0, 0.0, 0.0); // equator, prime meridian
-        ecef_surface.coordinate_system = Some(CoordinateSystem::ECEF);
-        assert!(ecef_surface.is_ecef());
-        assert!(!ecef_surface.is_geodetic());
-
-        // Explicit tag also works for typical mid-latitude ECEF surface points
-        let mut ecef_la = Position3D::new(-2_500_000.0, -4_500_000.0, 3_600_000.0); // ~LA area
-        ecef_la.coordinate_system = Some(CoordinateSystem::ECEF);
-        assert!(ecef_la.is_ecef());
+        // Earth-surface ECEF (6378 km equatorial radius) sat just under the old threshold
+        // and was the heuristic's most common misclassification. It is now unremarkable.
+        assert!(Position3D::ecef(6_378_137.0, 0.0, 0.0).is_ecef());
+        assert_eq!(
+            Position3D::ecef(-2_500_000.0, -4_500_000.0, 3_600_000.0).coordinate_system,
+            CoordinateSystem::ECEF
+        );
     }
 
     #[test]
-    fn test_position3d_geodetic_detection() {
-        // Geodetic coordinates (small magnitude)
-        let geodetic = Position3D::new(-118.1234, 34.5678, 100.0);
-        assert_eq!(geodetic.coordinate_system(), CoordinateSystem::Geodetic);
-        assert!(!geodetic.is_ecef());
-        assert!(geodetic.is_geodetic());
-    }
-
-    #[test]
-    fn test_position3d_boundary_detection() {
-        // Just below threshold (6400 km = 6,400,000 m) - should be Geodetic
-        let below = Position3D::new(6_399_000.0, 0.0, 0.0);
-        assert_eq!(below.coordinate_system(), CoordinateSystem::Geodetic);
-
-        // Just above threshold - should be ECEF
-        let above = Position3D::new(6_401_000.0, 0.0, 0.0);
-        assert_eq!(above.coordinate_system(), CoordinateSystem::ECEF);
-
-        // Negative coordinates
-        let negative = Position3D::new(-6_401_000.0, 0.0, 0.0);
-        assert_eq!(negative.coordinate_system(), CoordinateSystem::ECEF);
-    }
-
-    #[test]
-    fn test_detection_threshold_is_6400km() {
-        assert!(!Position3D::new(6_399_000.0, 0.0, 0.0).is_ecef());
-        assert!(Position3D::new(6_401_000.0, 0.0, 0.0).is_ecef());
-    }
-
-    #[test]
-    fn test_explicit_coordinate_system_overrides_detection() {
-        // GEO altitude in geodetic form - explicit override forces Geodetic
-        let mut pos = Position3D::new(0.0, 0.0, 35_786_000.0);
-        pos.coordinate_system = Some(CoordinateSystem::Geodetic);
-        assert!(pos.is_geodetic());
-
-        // Small values normally Geodetic - explicit ECEF override forces ECEF
-        let mut pos2 = Position3D::new(100.0, 100.0, 100.0);
-        pos2.coordinate_system = Some(CoordinateSystem::ECEF);
-        assert!(pos2.is_ecef());
-    }
-
-    #[test]
-    fn test_position3d_backward_compatible_deserialization() {
-        // Bare JSON without coordinate_system should deserialize fine (backward compat)
+    fn a_position_without_a_coordinate_system_is_rejected() {
+        // Was `test_position3d_backward_compatible_deserialization`, which asserted the
+        // opposite. C8 stage 2 is the sanctioned break: there is no default, so an
+        // untagged body fails to parse instead of being guessed at.
         let json = r#"{"x":1.0,"y":2.0,"z":3.0}"#;
-        let pos: Position3D = serde_json::from_str(json).unwrap();
-        assert_eq!(pos.x, 1.0);
-        assert_eq!(pos.y, 2.0);
-        assert_eq!(pos.z, 3.0);
-        assert_eq!(pos.coordinate_system, None);
-    }
-
-    #[test]
-    fn test_position3d_explicit_coordinate_system_round_trip() {
-        let mut pos = Position3D::new(1.0, 2.0, 3.0);
-        pos.coordinate_system = Some(CoordinateSystem::ECEF);
-        let json = serde_json::to_string(&pos).unwrap();
-        let deserialized: Position3D = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.coordinate_system, Some(CoordinateSystem::ECEF));
-    }
-
-    #[test]
-    fn test_position3d_no_coordinate_system_not_serialized() {
-        // coordinate_system: None should NOT appear in serialized JSON
-        let pos = Position3D::new(1.0, 2.0, 3.0);
-        let json = serde_json::to_string(&pos).unwrap();
-        assert!(!json.contains("coordinate_system"));
+        let err = serde_json::from_str::<Position3D>(json)
+            .expect_err("an untagged position must not deserialize");
+        assert!(
+            err.to_string().contains("coordinate_system"),
+            "the parse error must name the missing field, got: {err}"
+        );
     }
 
     #[test]
     fn test_position3d_serialization() {
-        let pos = Position3D::new(1.0, 2.0, 3.0);
-        let json = serde_json::to_string(&pos).unwrap();
-        let deserialized: Position3D = serde_json::from_str(&json).unwrap();
-        assert_eq!(pos.x, deserialized.x);
-        assert_eq!(pos.y, deserialized.y);
-        assert_eq!(pos.z, deserialized.z);
-        assert_eq!(deserialized.coordinate_system, None);
+        for pos in [
+            Position3D::geodetic(1.0, 2.0, 3.0),
+            Position3D::ecef(1.0, 2.0, 3.0),
+        ] {
+            let json = serde_json::to_string(&pos).unwrap();
+            // The tag is always on the wire — it is no longer skipped when absent,
+            // because it can no longer be absent.
+            assert!(
+                json.contains("coordinate_system"),
+                "serialized position must carry its frame: {json}"
+            );
+            let deserialized: Position3D = serde_json::from_str(&json).unwrap();
+            assert_eq!(pos, deserialized);
+        }
     }
 
     // ========================================================================
@@ -1354,22 +1291,10 @@ mod tests {
         let request = GainRequest {
             antenna_id: "antenna_1".to_string(),
             feed_id: "x_band_feed".to_string(),
-            vehicle_position: Position3D {
-                coordinate_system: Some(CoordinateSystem::ECEF),
-                ..Position3D::new(4510731.123, 4510731.456, 3488865.789)
-            },
-            reflector_boresight: Position3D {
-                coordinate_system: Some(CoordinateSystem::ECEF),
-                ..Position3D::new(4510732.0, 4510732.0, 3488950.0)
-            },
-            feed_pointing_location: Position3D {
-                coordinate_system: Some(CoordinateSystem::ECEF),
-                ..Position3D::new(4510731.5, 4510731.5, 3488870.0)
-            },
-            emitter_position: Position3D {
-                coordinate_system: Some(CoordinateSystem::ECEF),
-                ..Position3D::new(4520000.0, 4520000.0, 3500000.0)
-            },
+            vehicle_position: Position3D::ecef(4510731.123, 4510731.456, 3488865.789),
+            reflector_boresight: Position3D::ecef(4510732.0, 4510732.0, 3488950.0),
+            feed_pointing_location: Position3D::ecef(4510731.5, 4510731.5, 3488870.0),
+            emitter_position: Position3D::ecef(4520000.0, 4520000.0, 3500000.0),
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: Some(8450.0),
             include_reference: true,
@@ -1387,10 +1312,10 @@ mod tests {
         let request = GainRequest {
             antenna_id: "antenna_1".to_string(),
             feed_id: "x_band_feed".to_string(),
-            vehicle_position: Position3D::new(-118.1234, 34.5678, 100.0),
-            reflector_boresight: Position3D::new(-118.1234, 34.5679, 110.0), // 10m above vehicle
-            feed_pointing_location: Position3D::new(-118.124, 34.568, 105.0),
-            emitter_position: Position3D::new(-117.0, 35.0, 400000.0),
+            vehicle_position: Position3D::geodetic(-118.1234, 34.5678, 100.0),
+            reflector_boresight: Position3D::geodetic(-118.1234, 34.5679, 110.0), // 10m above vehicle
+            feed_pointing_location: Position3D::geodetic(-118.124, 34.568, 105.0),
+            emitter_position: Position3D::geodetic(-117.0, 35.0, 400000.0),
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: None,
             include_reference: false,
@@ -1617,10 +1542,10 @@ mod tests {
         let request = GainRequest {
             antenna_id: "antenna_1".to_string(),
             feed_id: "x_band_feed".to_string(),
-            vehicle_position: Position3D::new(0.0, 0.0, 0.0),
-            reflector_boresight: Position3D::new(0.0, 0.0, 10.0), // 10m above vehicle
-            feed_pointing_location: Position3D::new(0.0, 0.0, 23.6), // 10m + 13.6m focal length
-            emitter_position: Position3D::new(100.0, 100.0, 100.0),
+            vehicle_position: Position3D::geodetic(0.0, 0.0, 0.0),
+            reflector_boresight: Position3D::geodetic(0.0, 0.0, 10.0), // 10m above vehicle
+            feed_pointing_location: Position3D::geodetic(0.0, 0.0, 23.6), // 10m + 13.6m focal length
+            emitter_position: Position3D::geodetic(100.0, 100.0, 100.0),
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: None,
             include_reference: false,
@@ -1953,18 +1878,9 @@ mod tests {
         let request = H3LinkBudgetRequest {
             antenna_id: "antenna_1".to_string(),
             feed_id: "x_band_feed".to_string(),
-            vehicle_position: Position3D {
-                coordinate_system: Some(CoordinateSystem::ECEF),
-                ..Position3D::new(4510731.0, 4510731.0, 3488865.0)
-            },
-            reflector_boresight: Position3D {
-                coordinate_system: Some(CoordinateSystem::ECEF),
-                ..Position3D::new(4510732.0, 4510732.0, 3488950.0)
-            },
-            feed_pointing_location: Position3D {
-                coordinate_system: Some(CoordinateSystem::ECEF),
-                ..Position3D::new(4510731.5, 4510731.5, 3488870.0)
-            },
+            vehicle_position: Position3D::ecef(4510731.0, 4510731.0, 3488865.0),
+            reflector_boresight: Position3D::ecef(4510732.0, 4510732.0, 3488950.0),
+            feed_pointing_location: Position3D::ecef(4510731.5, 4510731.5, 3488870.0),
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: Some(8450.0),
             n_rings: 3,

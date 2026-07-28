@@ -57,7 +57,7 @@ fn heavy_off_axis_gain_request() -> GainRequest {
         x,
         y,
         z,
-        coordinate_system: Some(CoordinateSystem::ECEF),
+        coordinate_system: CoordinateSystem::ECEF,
     };
     req
 }

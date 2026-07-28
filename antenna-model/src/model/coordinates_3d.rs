@@ -69,11 +69,11 @@ const MAX_ECEF_M: f64 = WGS84_A + MAX_ALTITUDE_M;
 // Coordinate System Detection
 // ============================================================================
 
-/// Detect coordinate system from Position3D magnitude.
+/// Report whether a position is in the ECEF frame.
 ///
-/// Returns true if coordinates are ECEF, false if Geodetic.
-///
-/// Detection logic: If |x| > 6400 km OR |y| > 6400 km OR |z| > 6400 km → ECEF
+/// Reads the position's required `coordinate_system` tag. Before C8 stage 2 this
+/// inferred the frame from coordinate magnitude (|x|, |y| or |z| above 6400 km → ECEF);
+/// nothing is inferred now.
 pub fn is_ecef_coordinates(pos: &Position3D) -> bool {
     pos.is_ecef()
 }
@@ -904,30 +904,36 @@ mod tests {
     }
 
     // ========================================================================
-    // Coordinate System Detection
+    // Coordinate System Frame Tag
     // ========================================================================
 
     #[test]
     fn test_coordinate_detection_ecef() {
-        let ecef = Position3D::new(6_500_000.0, 100_000.0, 200_000.0);
+        let ecef = Position3D::ecef(6_500_000.0, 100_000.0, 200_000.0);
         assert!(is_ecef_coordinates(&ecef));
     }
 
     #[test]
     fn test_coordinate_detection_geodetic() {
-        let geodetic = Position3D::new(-118.0, 34.0, 100.0);
+        let geodetic = Position3D::geodetic(-118.0, 34.0, 100.0);
         assert!(!is_ecef_coordinates(&geodetic));
     }
 
     #[test]
-    fn test_coordinate_detection_boundary() {
-        // Just below threshold (6400 km = 6,400,000 m)
-        let below = Position3D::new(6_399_000.0, 0.0, 0.0);
-        assert!(!is_ecef_coordinates(&below));
-
-        // Just above threshold
-        let above = Position3D::new(6_401_000.0, 0.0, 0.0);
-        assert!(is_ecef_coordinates(&above));
+    fn test_frame_tag_is_read_not_inferred_from_magnitude() {
+        // Was `test_coordinate_detection_boundary`, which pinned the old 6400 km
+        // threshold. The same two values now follow their declared tags instead, in
+        // both directions — the straddling magnitude is irrelevant.
+        assert!(is_ecef_coordinates(&Position3D::ecef(
+            6_399_000.0,
+            0.0,
+            0.0
+        )));
+        assert!(!is_ecef_coordinates(&Position3D::geodetic(
+            6_401_000.0,
+            0.0,
+            0.0
+        )));
     }
 
     // ========================================================================
@@ -1300,13 +1306,13 @@ mod tests {
     #[test]
     fn test_full_pipeline_geodetic_to_spherical() {
         // Vehicle at equator, prime meridian
-        let vehicle = Position3D::new(0.0, 0.0, 42_000_000.);
+        let vehicle = Position3D::ecef(0.0, 0.0, 42_000_000.);
 
         // Boresight pointing to GEO altitude (defines antenna Z-axis)
-        let boresight = Position3D::new(10.0, 15.0, 0.0);
+        let boresight = Position3D::geodetic(10.0, 15.0, 0.0);
 
         // Emitter in front of antenna, along boresight direction
-        let emitter = Position3D::new(10.5, 15.0, 100.0);
+        let emitter = Position3D::geodetic(10.5, 15.0, 100.0);
 
         // Compute direction - this should work without error
         let (azimuth, elevation) =
@@ -1338,9 +1344,9 @@ mod tests {
     fn test_emitter_azimuth_normalized_to_0_360() {
         // Raw atan2 azimuth for this geometry is ≈ -170.60° (verified empirically);
         // after normalization it must land in (180, 360), proving the wrap occurred.
-        let vehicle = Position3D::new(0.0, 0.0, 42_000_000.0);
-        let boresight = Position3D::new(0.0, 0.0, 0.0);
-        let emitter = Position3D::new(-1.0, -1.0, 100.0);
+        let vehicle = Position3D::ecef(0.0, 0.0, 42_000_000.0);
+        let boresight = Position3D::geodetic(0.0, 0.0, 0.0);
+        let emitter = Position3D::geodetic(-1.0, -1.0, 100.0);
         let (az, _el) = compute_emitter_direction(&emitter, &vehicle, &boresight).unwrap();
         assert!((0.0..360.0).contains(&az), "az={az} outside [0, 360)");
         assert!(
@@ -1476,9 +1482,9 @@ mod tests {
 
     #[test]
     fn test_attitude_defines_azimuth_zero() {
-        let vehicle = Position3D::new(7_000_000.0, 0.0, 0.0);
-        let boresight = Position3D::new(8_000_000.0, 0.0, 0.0);
-        let emitter = Position3D::new(8_000_000.0, 50_000.0, 0.0);
+        let vehicle = Position3D::ecef(7_000_000.0, 0.0, 0.0);
+        let boresight = Position3D::ecef(8_000_000.0, 0.0, 0.0);
+        let emitter = Position3D::ecef(8_000_000.0, 50_000.0, 0.0);
         // body Z (boresight) → ECEF +X, body X → ECEF +Y:
         let q_a = quaternion_from_axes((0.0, 1.0, 0.0), (1.0, 0.0, 0.0)); // (body_x_in_ecef, body_z_in_ecef)
         let (az_a, _el) =
@@ -1498,9 +1504,9 @@ mod tests {
     #[test]
     fn test_attitude_none_matches_original_behaviour() {
         // Verify the None path is exactly equivalent to compute_emitter_direction.
-        let emitter = Position3D::new(-1.0, -1.0, 100.0);
-        let vehicle = Position3D::new(0.0, 0.0, 42_000_000.0);
-        let boresight = Position3D::new(0.0, 0.0, 0.0);
+        let emitter = Position3D::geodetic(-1.0, -1.0, 100.0);
+        let vehicle = Position3D::ecef(0.0, 0.0, 42_000_000.0);
+        let boresight = Position3D::geodetic(0.0, 0.0, 0.0);
         let (az1, el1) = compute_emitter_direction(&emitter, &vehicle, &boresight).unwrap();
         let (az2, el2) =
             compute_emitter_direction_with_attitude(&emitter, &vehicle, &boresight, None).unwrap();
@@ -1511,9 +1517,9 @@ mod tests {
     #[test]
     fn test_attitude_degenerate_body_x_parallel_to_boresight() {
         // body Z → ECEF +X, body X → ECEF +X (same as boresight!) → degenerate
-        let vehicle = Position3D::new(7_000_000.0, 0.0, 0.0);
-        let boresight = Position3D::new(8_000_000.0, 0.0, 0.0);
-        let emitter = Position3D::new(8_000_000.0, 50_000.0, 0.0);
+        let vehicle = Position3D::ecef(7_000_000.0, 0.0, 0.0);
+        let boresight = Position3D::ecef(8_000_000.0, 0.0, 0.0);
+        let emitter = Position3D::ecef(8_000_000.0, 50_000.0, 0.0);
         // Use a valid quaternion where body X ∥ boresight: body X = ECEF +X, body Z = ECEF +Y
         // (vehicle→boresight is ECEF +X, so body X = ECEF +X → projection onto ⊥boresight = 0)
         let q_deg = quaternion_from_axes((1.0, 0.0, 0.0), (0.0, 1.0, 0.0));

@@ -238,11 +238,11 @@ def main():
                 result = client.compute_gain(
                     antenna_id=antenna_id,
                     feed_id=feed_id,
-                    vehicle_position={"x": 6500000.0, "y": 0.0, "z": 0.0},
+                    vehicle_position={"x": 6500000.0, "y": 0.0, "z": 0.0, "coordinate_system": "ecef"},
                     vehicle_attitude=[1.0, 0.0, 0.0, 0.0],
-                    reflector_boresight={"x": 6500010.0, "y": 0.0, "z": 0.0},
-                    feed_pointing_location={"x": 6500005.0, "y": 0.0, "z": 0.0},
-                    emitter_position={"x": 7000000.0, "y": 0.0, "z": 500000.0},
+                    reflector_boresight={"x": 6500010.0, "y": 0.0, "z": 0.0, "coordinate_system": "ecef"},
+                    feed_pointing_location={"x": 6500005.0, "y": 0.0, "z": 0.0, "coordinate_system": "ecef"},
+                    emitter_position={"x": 7000000.0, "y": 0.0, "z": 500000.0, "coordinate_system": "ecef"},
                     frequency_mhz=8450.0,
                     include_reference=True,
                 )
@@ -262,11 +262,11 @@ def main():
                         {
                             "antenna_id": antenna_id,
                             "feed_id": feed_id,
-                            "vehicle_position": {"x": 6500000.0, "y": 0.0, "z": 0.0},
+                            "vehicle_position": {"x": 6500000.0, "y": 0.0, "z": 0.0, "coordinate_system": "ecef"},
                             "vehicle_attitude": [1.0, 0.0, 0.0, 0.0],
-                            "reflector_boresight": {"x": 6500010.0, "y": 0.0, "z": 0.0},
-                            "feed_pointing_location": {"x": 6500005.0, "y": 0.0, "z": 0.0},
-                            "emitter_position": {"x": 7000000.0, "y": y, "z": 500000.0},
+                            "reflector_boresight": {"x": 6500010.0, "y": 0.0, "z": 0.0, "coordinate_system": "ecef"},
+                            "feed_pointing_location": {"x": 6500005.0, "y": 0.0, "z": 0.0, "coordinate_system": "ecef"},
+                            "emitter_position": {"x": 7000000.0, "y": y, "z": 500000.0, "coordinate_system": "ecef"},
                             "frequency_mhz": 8450.0,
                             "include_reference": False,
                         }

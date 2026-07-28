@@ -4,23 +4,27 @@
   "vehicle_position": {
     "x": -118.0,
     "y": 34.0,
-    "z": 500.0
+    "z": 500.0,
+    "coordinate_system": "geodetic"
   },
   "vehicle_attitude": [1.0, 0.0, 0.0, 0.0],
   "reflector_boresight": {
     "x": -118.0,
     "y": 34.0,
-    "z": 510.0
+    "z": 510.0,
+    "coordinate_system": "geodetic"
   },
   "feed_pointing_location": {
     "x": -118.0,
     "y": 34.0,
-    "z": 505.0
+    "z": 505.0,
+    "coordinate_system": "geodetic"
   },
   "emitter_position": {
     "x": -100.0,
     "y": 35.0,
-    "z": 500000.0
+    "z": 500000.0,
+    "coordinate_system": "geodetic"
   },
   "frequency_mhz": 8200.0,
   "include_reference": false

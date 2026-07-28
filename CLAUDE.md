@@ -112,7 +112,7 @@ antenna-model/           # Cargo workspace root
    ```
 
    **Step-by-step:**
-   - Parse request with 3D positions (ECEF or Geodetic, auto-detected)
+   - Parse request with 3D positions (ECEF or Geodetic, per each position's required `coordinate_system` tag)
    - Transform to antenna frame using vehicle position/attitude (`model/coordinates.rs`)
    - Compute emitter direction (azimuth, elevation) from geometry
    - Evaluate **physics model** (`model/pattern.rs`):
@@ -194,9 +194,15 @@ The `calibrate` tool processes measurement data:
 
 ### Physics Model Implementation
 
-1. **Coordinate System Auto-Detection** (`model/coordinates.rs`)
-   - If `|x|, |y|, or |z| > 6400 km` → ECEF coordinates
-   - Otherwise → Geodetic (lon, lat degrees; alt meters)
+1. **Coordinate Systems Are Declared, Never Inferred** (`api/schemas.rs`)
+   - `Position3D.coordinate_system` is **required**: `"ecef"` (x,y,z meters from Earth's
+     centre) or `"geodetic"` (lon°, lat°, alt m). Omitting it is a 400 naming the field.
+   - Construct in Rust with `Position3D::ecef(...)` / `Position3D::geodetic(...)`; there is
+     no `new()` that picks a frame for you.
+   - The former magnitude heuristic (>6400 km → ECEF) was removed by roadmap unit C8 stage 2
+     (2026-07-27). **Do not reintroduce a default or a fallback** — it could not tell a
+     geodetic GEO satellite from an ECEF point, and silently returned a wrong gain when it
+     guessed. See `docs/domain-contract.md`, "Resolved by design 2026-07-27".
 
 2. **Multi-Feed Support**
    - Antennas can have multiple feeds
@@ -259,7 +265,7 @@ Active hardening and debt work is tracked in `docs/roadmap-2026-07.md` and
 
 ## Common Pitfalls
 
-1. **Coordinate System Confusion**: See `docs/domain-contract.md` for the frame table and known gotchas (ENU axis direction, GEO-altitude auto-detection, antenna-frame origin, `feed_pointing_location` = pointing target not physical offset) before touching coordinate transforms.
+1. **Coordinate System Confusion**: See `docs/domain-contract.md` for the frame table and known gotchas (ENU axis direction, the removed GEO-altitude auto-detection, antenna-frame origin, `feed_pointing_location` = pointing target not physical offset) before touching coordinate transforms.
 
 2. **A wrong oscillatory integrator is not obviously wrong** — it returns a plausible number. Any change to `integration.rs` or `bessel.rs` must be cross-checked at angles whose answers are independently known, spanning the full θ range **and both Bessel branches** (small-argument and asymptotic): a P10-era spike was confidently wrong by 22 dB at θ=0 while looking flawless at θ=90°, because special-function bugs fail branch-locally. The validation protocol lives in `antenna-model/tests/reference_validation.rs` (anchors, independent Hankel oracle, physicality sweeps) — run it, and never validate at a single angle. Performance note: the integrator is O(D/λ) per point, cheap near boresight; the remaining hot case is wide-angle Ka on offset-feed (coma) antennas — see roadmap unit P10-perf before "optimizing" anything by reducing sample density.
 

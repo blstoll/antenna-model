@@ -44,11 +44,11 @@ curl -X POST http://localhost:3000/api/v1/gain \
   -d '{
     "antenna_id": "dsn_34m_uncalibrated",
     "feed_id": "x_band",
-    "vehicle_position": {"x": 6500000.0, "y": 0.0, "z": 0.0},
+    "vehicle_position": {"x": 6500000.0, "y": 0.0, "z": 0.0, "coordinate_system": "ecef"},
     "vehicle_attitude": [1.0, 0.0, 0.0, 0.0],
-    "reflector_boresight": {"x": 6500010.0, "y": 0.0, "z": 0.0},
-    "feed_pointing_location": {"x": 6500005.0, "y": 0.0, "z": 0.0},
-    "emitter_position": {"x": 7000000.0, "y": 0.0, "z": 500000.0},
+    "reflector_boresight": {"x": 6500010.0, "y": 0.0, "z": 0.0, "coordinate_system": "ecef"},
+    "feed_pointing_location": {"x": 6500005.0, "y": 0.0, "z": 0.0, "coordinate_system": "ecef"},
+    "emitter_position": {"x": 7000000.0, "y": 0.0, "z": 500000.0, "coordinate_system": "ecef"},
     "frequency_mhz": 8450.0,
     "include_reference": true
   }' | jq
@@ -64,11 +64,11 @@ response = requests.post(
     json={
         "antenna_id": "dsn_34m_uncalibrated",
         "feed_id": "x_band",
-        "vehicle_position": {"x": 6500000.0, "y": 0.0, "z": 0.0},
+        "vehicle_position": {"x": 6500000.0, "y": 0.0, "z": 0.0, "coordinate_system": "ecef"},
         "vehicle_attitude": [1.0, 0.0, 0.0, 0.0],
-        "reflector_boresight": {"x": 6500010.0, "y": 0.0, "z": 0.0},
-        "feed_pointing_location": {"x": 6500005.0, "y": 0.0, "z": 0.0},
-        "emitter_position": {"x": 7000000.0, "y": 0.0, "z": 500000.0},
+        "reflector_boresight": {"x": 6500010.0, "y": 0.0, "z": 0.0, "coordinate_system": "ecef"},
+        "feed_pointing_location": {"x": 6500005.0, "y": 0.0, "z": 0.0, "coordinate_system": "ecef"},
+        "emitter_position": {"x": 7000000.0, "y": 0.0, "z": 500000.0, "coordinate_system": "ecef"},
         "frequency_mhz": 8450.0,
         "include_reference": True
     }
@@ -93,25 +93,28 @@ python examples/python_examples.py
 
 ## Coordinate Systems
 
-The API auto-detects coordinate systems:
+Every position states its frame in the required `coordinate_system` field. Omitting it is
+a 400 — the API never guesses which frame you meant.
 
 ### ECEF (Earth-Centered Earth-Fixed)
-Used when any coordinate exceeds 6400 km:
+x, y, z in meters from Earth's centre:
 ```json
 {
   "x": 6500000.0,
   "y": 100000.0,
-  "z": 200000.0
+  "z": 200000.0,
+  "coordinate_system": "ecef"
 }
 ```
 
 ### Geodetic
-Used otherwise (longitude, latitude in degrees, altitude in meters):
+Longitude and latitude in degrees, altitude in meters:
 ```json
 {
   "x": -118.0,
   "y": 34.0,
-  "z": 500.0
+  "z": 500.0,
+  "coordinate_system": "geodetic"
 }
 ```
 

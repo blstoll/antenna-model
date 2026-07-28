@@ -126,5 +126,6 @@ All examples have been tested against the running service:
 - All antennas are currently uncalibrated, using design specifications
 - Uncalibrated antennas have ±3 dB absolute gain accuracy and ±2 dB loss accuracy
 - Queries return calibration status information showing accuracy estimates
-- ECEF coordinates must be within 10,000 km to avoid validation errors
-- The service auto-detects ECEF vs Geodetic based on coordinate magnitude
+- ECEF coordinates must be within 400,000 km of Earth's centre to pass validation
+- Every position must carry `"coordinate_system": "ecef"` or `"geodetic"`; the service
+  does not infer the frame, and an untagged position is a 400

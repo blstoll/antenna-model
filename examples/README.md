@@ -107,14 +107,14 @@ curl http://localhost:3000/api/v1/antennas/dsn_34m_uncalibrated/feeds/x_band
 
 ### ECEF Coordinates Example
 
-The service supports ECEF (Earth-Centered Earth-Fixed) coordinates for positions exceeding 6400 km:
+The service supports ECEF (Earth-Centered Earth-Fixed) coordinates — tag them `"coordinate_system": "ecef"`:
 
 ```json
 {
   "antenna_id": "dsn_34m_uncalibrated",
   "feed_id": "x_band",
-  "vehicle_position": {"x": 6500000.0, "y": 0.0, "z": 0.0},
-  "emitter_position": {"x": 7000000.0, "y": 0.0, "z": 500000.0},
+  "vehicle_position": {"x": 6500000.0, "y": 0.0, "z": 0.0, "coordinate_system": "ecef"},
+  "emitter_position": {"x": 7000000.0, "y": 0.0, "z": 500000.0, "coordinate_system": "ecef"},
   "frequency_mhz": 8450.0
 }
 ```
@@ -127,8 +127,8 @@ Geodetic coordinates (longitude, latitude in degrees; altitude in meters) are au
 {
   "antenna_id": "gs_3.7m_uncalibrated",
   "feed_id": "x_band_feed",
-  "vehicle_position": {"x": -118.0, "y": 34.0, "z": 500.0},
-  "emitter_position": {"x": -100.0, "y": 35.0, "z": 500000.0},
+  "vehicle_position": {"x": -118.0, "y": 34.0, "z": 500.0, "coordinate_system": "geodetic"},
+  "emitter_position": {"x": -100.0, "y": 35.0, "z": 500000.0, "coordinate_system": "geodetic"},
   "frequency_mhz": 8200.0
 }
 ```

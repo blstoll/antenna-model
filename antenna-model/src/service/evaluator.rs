@@ -79,7 +79,6 @@ use crate::model::{
     compute_emitter_direction_with_attitude, compute_feed_position_from_pointing, compute_gain_db,
     evaluate_correction, squint_corrected_direction, AntennaConfiguration, IntegrationParams,
 };
-use crate::service::validator::coordinate_ambiguity_warnings;
 use std::time::{Duration, Instant};
 
 /// Compute antenna gain from a gain request
@@ -117,9 +116,6 @@ pub fn compute_gain_from_request_with_budget(
 ) -> Result<GainResponse> {
     let start = Instant::now();
     let mut warnings = Vec::new();
-
-    // Emit ambiguity warnings for positions that may be misclassified by auto-detection
-    warnings.extend(coordinate_ambiguity_warnings(request));
 
     let (emitter_az, emitter_el) = compute_emitter_direction_with_attitude(
         &request.emitter_position,
@@ -728,7 +724,7 @@ pub(crate) fn ray_trace_stub_warning(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::schemas::{CoordinateSystem, Position3D};
+    use crate::api::schemas::Position3D;
     use crate::data::types::{
         AntennaCalibration, CalibrationCoverage, CalibrationMetadata, CalibrationStatus,
         FeedParameters, MeshParameters, PhysicalAntennaConfig, ReflectorGeometry, ValidityRanges,
@@ -806,17 +802,14 @@ mod tests {
     }
 
     fn create_test_request() -> GainRequest {
-        // Emitter is a LEO satellite at 400 km geodetic altitude. Set explicit
-        // coordinate_system to prevent ambiguity warnings in tests that assert
-        // response.warnings.is_empty().
-        let mut emitter = Position3D::new(-117.0, 35.0, 400_000.0);
-        emitter.coordinate_system = Some(CoordinateSystem::Geodetic);
+        // Emitter is a LEO satellite at 400 km geodetic altitude.
+        let emitter = Position3D::geodetic(-117.0, 35.0, 400_000.0);
         GainRequest {
             antenna_id: "test_antenna".to_string(),
             feed_id: "test_feed".to_string(),
-            vehicle_position: Position3D::new(-118.0, 34.0, 100.0),
-            reflector_boresight: Position3D::new(-117.99, 34.01, 110.0), // 10m from vehicle
-            feed_pointing_location: Position3D::new(-117.99, 34.01, 123.6), // Feed at focal point
+            vehicle_position: Position3D::geodetic(-118.0, 34.0, 100.0),
+            reflector_boresight: Position3D::geodetic(-117.99, 34.01, 110.0), // 10m from vehicle
+            feed_pointing_location: Position3D::geodetic(-117.99, 34.01, 123.6), // Feed at focal point
             emitter_position: emitter,
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: None,
@@ -1587,11 +1580,7 @@ mod tests {
         let (emit_x, emit_y, emit_z) = geodetic_to_ecef(-117.0, 35.0, 400_000.0).unwrap();
         let (feed_x, feed_y, feed_z) = geodetic_to_ecef(-118.124, 34.568, 105.0).unwrap();
 
-        let ecef = |x: f64, y: f64, z: f64| {
-            let mut p = Position3D::new(x, y, z);
-            p.coordinate_system = Some(CoordinateSystem::ECEF);
-            p
-        };
+        let ecef = |x: f64, y: f64, z: f64| Position3D::ecef(x, y, z);
 
         GainRequest {
             antenna_id: "test_antenna".to_string(),
@@ -1618,9 +1607,7 @@ mod tests {
         use crate::model::coordinates_3d::geodetic_to_ecef;
         let ecef = |lon: f64, lat: f64, alt: f64| {
             let (x, y, z) = geodetic_to_ecef(lon, lat, alt).unwrap();
-            let mut p = Position3D::new(x, y, z);
-            p.coordinate_system = Some(CoordinateSystem::ECEF);
-            p
+            Position3D::ecef(x, y, z)
         };
         let mut request = create_large_offset_request();
         // Feed aimed at the boresight target → feed at focus → StandardPhysicalOptics.

@@ -44,9 +44,10 @@ G1 ─┬─ G2 ── G3
     ├─ C3 ─ C4 ─ C2 ─ C9 ─ C8 ─ C7           │
     │  C9 DONE 2026-07-26 (loss_db now peak- │
     │      referenced on both heatmaps)      │
-    │  C8 STAGE 1 OF 4 DONE 2026-07-26 (the  │
-    │      aim-point field renames; stages   │
-    │      2–4 remain before C7 can freeze)  │
+    │  C8 STAGES 1-2 OF 4 DONE (aim-point    │
+    │      renames 07-26; required           │
+    │      coordinate_system 07-27; stages   │
+    │      3–4 remain before C7 can freeze)  │
     │  C12, C13, C14 filed 2026-07-26 out of │
     │      C8 stage 1's findings — none are  │
     │      stage 1's to fix (each moves a    │
@@ -1060,9 +1061,11 @@ pointer (now `:911`/`:752`/`:981` post-P10). Docs-only change; no code touched.
 The warn-everywhere + `strict_coordinates` design existed only because breaking the API was
 assumed off-limits. With pre-production confirmed, C8 stage 2 makes `coordinate_system`
 **required**, eliminating the auto-detection ambiguity instead of warning about it. Do not
-implement this unit. The stale threshold comments this unit would have fixed
-(`schemas.rs:9` says 1000 km, constant is 6400 km; `validator.rs:266` says 10,000 km,
-constant is 400,000 km) move into C8 stage 2.
+implement this unit. **✅ Discharged by C8 stage 2, 2026-07-27**: the tag is required, the
+heuristic and the `coordinate_ambiguity_warnings` plumbing are deleted, and both stale
+threshold comments this unit would have fixed (`schemas.rs:9` said 1000 km against a 6400 km
+constant — deleted with the machinery; `validator.rs` said 10,000 km against a 400,000 km
+constant — corrected) are gone.
 
 ### S1b — Close the chunked-encoding bypass of the 413 — Effort: S
 
@@ -1894,8 +1897,9 @@ deliberately kept its diff to "renames, no value moves" so that property stayed 
 
 ### C8 — v1 contract finalization (the one sanctioned breaking pass) — Effort: L
 **[DECIDED 2026-07-08 — pre-production confirmed: no consumers exist; break once now, then freeze]**
-**[✅ STAGE 1 OF 4 DONE 2026-07-26 — branch `feat/c8-stage1-aim-point-field-rename`. Stages 2, 3
-and 4 remain, then C7.]**
+**[✅ STAGES 1 AND 2 OF 4 DONE — stage 1 2026-07-26 (`feat/c8-stage1-aim-point-field-rename`),
+stage 2 2026-07-27 (`feat/c8-stage2-required-coordinate-system`). Stages 3 and 4 remain,
+then C7.]**
 
 **Stage 1, as landed.** The three field renames only — `feed_position` →
 `feed_pointing_location` on all three request types, `GeometryInfo.feed_offset_meters` →
@@ -1913,8 +1917,32 @@ rather than fixed, per standing rule 5 and stage 1's no-value-moves charter: **C
 omitted `rmse_db`/`r_squared`), **C13** (`design_feed_offset_m` origin, vertex vs focus), and
 **C14** (openapi feed-listing drift).
 
-**Still open: stages 2–4** (required `coordinate_system`, typed warnings, endpoint coherence +
-spec completeness) — the contract is **not** finalized, and C7's freeze is not yet due.
+**Stage 2, as landed (2026-07-27).** `Position3D.coordinate_system` is a required field of
+type `CoordinateSystem` (no `Option`, no `#[serde(default)]`); the `ECEF_THRESHOLD_M` constant,
+the `coordinate_system()` heuristic method, and the whole `coordinate_ambiguity_warnings` /
+`warn_if_ambiguous` path (with its `evaluator.rs` call site) are deleted. Per-frame range
+validation is untouched — it now dispatches on the declared tag, so the same three numbers can
+pass as ECEF and fail as geodetic (pinned). `Position3D::new` was replaced by
+`Position3D::ecef(x,y,z)` and `Position3D::geodetic(lon,lat,alt)`: a constructor that silently
+picks a frame is the same trap one layer down. An untagged position is a **400** naming
+`coordinate_system`, pinned per position field × per endpoint by
+`status_code_matrix_tests::a_position_without_coordinate_system_is_rejected_with_400`, with
+`::geo_altitude_geodetic_emitter_is_accepted_when_tagged` as the acceptance half so the guard
+cannot pass by rejecting everything. **No computed value moved** — all 606 unit tests' numeric
+assertions are unchanged; the ~125 call-site conversions each took the frame the old heuristic
+would have chosen.
+
+**Finding, fixed in-unit:** tagging the published examples exposed that the heuristic was
+*already* misreading them in production. The example literally named `ecef_coordinates` in
+`openapi.yaml` — and its four siblings in `examples/api_requests.json`, plus the same family in
+`docs/api-documentation.md`, `docs/architecture.md` and `docs/calibration-workflow-guide.md`,
+25 positions in all — used Earth-surface ECEF values (~4.5 Mm) that sit *below* the 6400 km
+boundary, so every one of them was being served as geodetic. Corrected to `ecef` while
+tagging. This is a documentation fix, not a computed-value move: no test asserted on those
+examples' numbers.
+
+**Still open: stages 3–4** (typed warnings, endpoint coherence + spec completeness) — the
+contract is **not** finalized, and C7's freeze is not yet due.
 
 - **Rationale (recorded):** The maintainer confirmed nothing consumes this API yet
   (no remote, no shipped `.bin` artifacts, only uncalibrated design-spec antennas enabled). Breaking cost is
@@ -1940,7 +1968,7 @@ spec completeness) — the contract is **not** finalized, and C7's freeze is not
 - Exit: grep for `feed_position` finds zero hits outside historical docs
   (`review-findings-*.md`, superpowers plans) and the contract's changelog note.
 
-**Stage 2 — Make `coordinate_system` required (remove auto-detection).**
+**Stage 2 — Make `coordinate_system` required (remove auto-detection). ✅ DONE 2026-07-27** (see the "as landed" note above).
 - `Position3D.coordinate_system` becomes a required field; missing → deserialization/
   validation error naming the exact field path. Delete the magnitude-based auto-detection
   (`Position3D::coordinate_system()` heuristic, `ECEF_THRESHOLD_M` at `schemas.rs:126`) and

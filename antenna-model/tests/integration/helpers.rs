@@ -296,27 +296,25 @@ pub mod builders {
                 x: veh_x,
                 y: veh_y,
                 z: veh_z,
-                // Earth-surface ECEF values are ~2-6 Mm, below 6400 km threshold;
-                // set explicit tag so they are not misclassified as Geodetic.
-                coordinate_system: Some(CoordinateSystem::ECEF),
+                coordinate_system: CoordinateSystem::ECEF,
             },
             reflector_boresight: Position3D {
                 x: emit_x,
                 y: emit_y,
                 z: emit_z,
-                coordinate_system: Some(CoordinateSystem::ECEF),
+                coordinate_system: CoordinateSystem::ECEF,
             },
             feed_pointing_location: Position3D {
                 x: feed_x,
                 y: feed_y,
                 z: feed_z,
-                coordinate_system: Some(CoordinateSystem::ECEF),
+                coordinate_system: CoordinateSystem::ECEF,
             },
             emitter_position: Position3D {
                 x: emit_x,
                 y: emit_y,
                 z: emit_z,
-                coordinate_system: Some(CoordinateSystem::ECEF),
+                coordinate_system: CoordinateSystem::ECEF,
             },
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: None,
@@ -330,30 +328,10 @@ pub mod builders {
         GainRequest {
             antenna_id: "test_simple".to_string(),
             feed_id: "primary".to_string(),
-            vehicle_position: Position3D {
-                x: -118.1234,
-                y: 34.5678,
-                z: 100.0,
-                coordinate_system: None,
-            },
-            reflector_boresight: Position3D {
-                x: -117.0,
-                y: 35.0,
-                z: 400000.0,
-                coordinate_system: None,
-            },
-            feed_pointing_location: Position3D {
-                x: -118.124,
-                y: 34.568,
-                z: 105.0,
-                coordinate_system: None,
-            },
-            emitter_position: Position3D {
-                x: -117.0,
-                y: 35.0,
-                z: 400000.0,
-                coordinate_system: None,
-            },
+            vehicle_position: Position3D::geodetic(-118.1234, 34.5678, 100.0),
+            reflector_boresight: Position3D::geodetic(-117.0, 35.0, 400000.0),
+            feed_pointing_location: Position3D::geodetic(-118.124, 34.568, 105.0),
+            emitter_position: Position3D::geodetic(-117.0, 35.0, 400000.0),
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: Some(8450.0),
             include_reference: true,
@@ -386,21 +364,19 @@ pub mod builders {
                 x: veh_x,
                 y: veh_y,
                 z: veh_z,
-                // Earth-surface ECEF values are ~2-6 Mm, below 6400 km threshold;
-                // set explicit tag so they are not misclassified as Geodetic.
-                coordinate_system: Some(CoordinateSystem::ECEF),
+                coordinate_system: CoordinateSystem::ECEF,
             },
             reflector_boresight: Position3D {
                 x: veh_x + 100.0, // Slightly offset for boresight direction
                 y: veh_y + 100.0,
                 z: veh_z + 1000.0,
-                coordinate_system: Some(CoordinateSystem::ECEF),
+                coordinate_system: CoordinateSystem::ECEF,
             },
             feed_pointing_location: Position3D {
                 x: feed_x,
                 y: feed_y,
                 z: feed_z,
-                coordinate_system: Some(CoordinateSystem::ECEF),
+                coordinate_system: CoordinateSystem::ECEF,
             },
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: None,
