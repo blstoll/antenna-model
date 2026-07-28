@@ -199,7 +199,8 @@
         ],
         "metadata": {
           "total_computation_time_ms": 25.3,
-          "count": 2
+          "count": 2,
+          "failure_count": 0
         }
       }
     },
@@ -213,7 +214,6 @@
           "y": 4510731.456,
           "z": 3488865.789
         },
-        "vehicle_attitude": [1.0, 0.0, 0.0, 0.0],
         "reflector_boresight": {
           "x": 4510732.0,
           "y": 4510732.0,
@@ -251,7 +251,6 @@
           "y": 4510731.456,
           "z": 3488865.789
         },
-        "vehicle_attitude": [1.0, 0.0, 0.0, 0.0],
         "reflector_boresight": {
           "x": 4510732.0,
           "y": 4510732.0,
@@ -291,6 +290,7 @@
         "warnings": ["Some points extrapolated"],
         "metadata": {
           "points_evaluated": 3276,
+          "failed_points": 0,
           "computation_time_ms": 1245.6,
           "peak_gain_db": 43.5
         }
@@ -314,6 +314,7 @@
         "warnings": [],
         "metadata": {
           "points_evaluated": 5120,
+          "failed_points": 0,
           "computation_time_ms": 2845.2,
           "peak_gain_db": 43.5
         }

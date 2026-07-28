@@ -1845,6 +1845,53 @@ renamed field by hand, which is what stage 1 did.
 
 **Found** 2026-07-26 while mirroring the C8 stage 1 renames into `openapi.yaml` (Task 4).
 
+### C15 — Client-visible surfaces that no drift guard covers — Effort: S/M
+
+**The gap.** Four guards exist, and between them they cover less of the published contract than
+their presence suggests:
+
+| guard | covers |
+|---|---|
+| `antenna-model/tests/example_requests_deserialize.rs` (G3) | `examples/requests/*.json` |
+| `antenna-model/tests/doc_examples_deserialize.rs` (C11) | marked blocks in `docs/api-documentation.md` **only** — `CONTRACT_DOCS` is a one-element array |
+| `antenna-model/tests/example_responses_deserialize.rs` (C8 stage 1) | `examples/responses/*.json` |
+| the compiler | Rust call sites |
+
+Nothing covers: `openapi.yaml`; `examples/api_requests.json` (18 request/response examples);
+`examples/postman_collection.json`; `examples/python_examples.py` (not even syntax-checked in
+CI); `examples/QUICKSTART.md`, `examples/TESTING.md`, `examples/README*.md`; or any `docs/*.md`
+other than `api-documentation.md`.
+
+**This is not theoretical — C8 stage 1 produced the evidence three times.**
+1. `docs/partial-calibration-design.md` carried a renamed field and appeared in **no** task
+   inventory; the stage would have failed its own exit criterion had a reviewer not found it.
+2. `openapi.yaml`'s `FeedInfo` spelled the field `position`, so the exit grep for
+   `position_offset` **passed by luck** rather than by correctness (see C14).
+3. `examples/api_requests.json` sat one directory away from the examples C8 stage 1 repaired and
+   kept the identical drift — missing required `failed_points` / `failure_count`, and an
+   undeclared `vehicle_attitude` on two `HeatmapRequest` bodies. Stage 1 fixed these on its way
+   past, but only because a whole-branch review went looking; no test would have said a word.
+
+**Options:**
+1. **Extend the existing pattern to `examples/api_requests.json`** — cheapest high-value close.
+   The file is `{examples: {<name>: {description, request|response}}}`, so it drops into the
+   `example_responses_deserialize.rs` shape with a name→schema match arm and a panicking
+   unmapped arm. This alone would have caught (3) automatically.
+2. **Ratchet `CONTRACT_DOCS`** (`doc_examples_deserialize.rs`) to cover more of `docs/` as D5
+   makes each file true — C11 already anticipated this; adding a file is one line.
+3. **Promote C7's optional stretch goal** (validate example files against the openapi component
+   schemas) to required, which is the only mechanism that would cover `openapi.yaml` itself.
+
+**Sequencing.** This is C7's charter — the point of a freeze is that what is frozen is checked.
+Doing (1) and (2) *before* C7 means the freeze ratifies verified surfaces rather than assumed
+ones, which is the same argument that put C11 ahead of C8 and the response guard ahead of the
+C8 stage 1 renames.
+
+**Why it was not fixed in C8 stage 1.** Building new guards is not a field rename, and stage 1
+deliberately kept its diff to "renames, no value moves" so that property stayed reviewable.
+
+**Found** 2026-07-27 by the whole-branch review of C8 stage 1.
+
 ### C8 — v1 contract finalization (the one sanctioned breaking pass) — Effort: L
 **[DECIDED 2026-07-08 — pre-production confirmed: no consumers exist; break once now, then freeze]**
 **[✅ STAGE 1 OF 4 DONE 2026-07-26 — branch `feat/c8-stage1-aim-point-field-rename`. Stages 2, 3
@@ -1946,6 +1993,13 @@ spec completeness) — the contract is **not** finalized, and C7's freeze is not
   openapi component schemas. A note in docs about the guard.
 - **Assumptions:** migrating to poem-openapi codegen is **out of scope** — register it as a
   possible future item in the roadmap doc, not part of this unit.
+- **Coordinate with C15** (filed 2026-07-27): the path+method assertion above covers routes,
+  not payload shapes, and C15 inventories the client-visible surfaces that **no** guard covers
+  today — `openapi.yaml`'s own schemas, `examples/api_requests.json`, the postman collection,
+  the Python examples, and every `docs/*.md` except `api-documentation.md`. C15's option 3 is
+  this unit's stretch goal; if C15 does not land first, promoting that stretch goal to required
+  is what keeps the freeze from ratifying unchecked surfaces. C14's two mismatches are concrete
+  instances the path+method check would miss.
 - **Depends on:** C8 (the contract must be finalized first — this guard is what freezes it).
 
 ---
