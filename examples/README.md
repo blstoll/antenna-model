@@ -212,7 +212,10 @@ For antennas calibrated with boresight measurements only:
     }
   },
   "warnings": [
-    "Antenna 'gs_7.3m_boresight' is partially calibrated. Accuracy estimate: ±1.5 dB"
+    {
+      "code": "partially_calibrated",
+      "message": "Antenna 'gs_7.3m_boresight' is partially calibrated. Accuracy estimate: ±1.5 dB"
+    }
   ],
   "metadata": {
     "computation_time_ms": 1.5,
@@ -252,8 +255,14 @@ When query is outside the calibrated region:
     }
   },
   "warnings": [
-    "Antenna 'gs_7.3m_boresight' is partially calibrated. Accuracy estimate: ±1.5 dB",
-    "Query is outside calibrated region - using physics model extrapolation"
+    {
+      "code": "partially_calibrated",
+      "message": "Antenna 'gs_7.3m_boresight' is partially calibrated. Accuracy estimate: ±1.5 dB"
+    },
+    {
+      "code": "out_of_coverage",
+      "message": "Query is outside calibrated region - using physics model extrapolation"
+    }
   ],
   "metadata": {
     "computation_time_ms": 1.8,
@@ -286,7 +295,10 @@ For antennas using design specifications only (no measurements):
     "parameters_source": "design_specifications"
   },
   "warnings": [
-    "Antenna 'gs_3.7m_uncalibrated' is uncalibrated (using design specifications). Absolute gain accuracy: ±4.0 dB, Loss accuracy: ±2.0 dB"
+    {
+      "code": "uncalibrated",
+      "message": "Antenna 'gs_3.7m_uncalibrated' is uncalibrated (using design specifications). Absolute gain accuracy: ±4.0 dB, Loss accuracy: ±2.0 dB"
+    }
   ],
   "metadata": {
     "computation_time_ms": 1.2,

@@ -79,6 +79,7 @@ use crate::model::{
     compute_emitter_direction_with_attitude, compute_feed_position_from_pointing, compute_gain_db,
     evaluate_correction, squint_corrected_direction, AntennaConfiguration, IntegrationParams,
 };
+use crate::warnings::{ApiWarning, WarningCode};
 use std::time::{Duration, Instant};
 
 /// Compute antenna gain from a gain request
@@ -415,6 +416,9 @@ pub fn compute_gain_from_request_with_budget(
                 None
             },
         },
+        // A single-gain failure is an HTTP error, never a 200 body carrying a
+        // reason — only `service::batch` populates this field.
+        error: None,
         warnings,
         metadata: ComputationMetadata {
             computation_time_ms: start.elapsed().as_secs_f64() * 1000.0,
@@ -466,7 +470,7 @@ fn generate_calibration_warnings(
     azimuth_deg: f64,
     elevation_deg: f64,
     correction_applied: bool,
-) -> Vec<String> {
+) -> Vec<ApiWarning> {
     let mut warnings = Vec::new();
 
     // Get calibration status (default to FullyCalibrated if not specified for backward compatibility)
@@ -477,20 +481,20 @@ fn generate_calibration_warnings(
             accuracy_estimate_db,
             loss_accuracy_estimate_db,
         }) => {
-            warnings.push(format!(
+            warnings.push(WarningCode::Uncalibrated.with(format!(
                 "Antenna '{}' is uncalibrated (using design specifications). \
                  Absolute gain accuracy: ±{:.1} dB, Loss accuracy: ±{:.1} dB",
                 calibration.antenna_id, accuracy_estimate_db, loss_accuracy_estimate_db
-            ));
+            )));
         }
         Some(CalibrationStatus::PartiallyCalibrated {
             accuracy_estimate_db,
             coverage,
         }) => {
-            warnings.push(format!(
+            warnings.push(WarningCode::PartiallyCalibrated.with(format!(
                 "Antenna '{}' is partially calibrated. Accuracy estimate: ±{:.1} dB",
                 calibration.antenna_id, accuracy_estimate_db
-            ));
+            )));
 
             // Check if query is outside calibrated spatial region (azimuth/elevation)
             let in_spatial_coverage = azimuth_deg >= coverage.azimuth_range.0
@@ -499,10 +503,9 @@ fn generate_calibration_warnings(
                 && elevation_deg <= coverage.elevation_range.1;
 
             if !in_spatial_coverage {
-                warnings.push(
-                    "Query is outside calibrated region - using physics model extrapolation"
-                        .to_string(),
-                );
+                warnings.push(WarningCode::OutOfCoverage.with(
+                    "Query is outside calibrated region - using physics model extrapolation",
+                ));
             }
         }
         Some(CalibrationStatus::FullyCalibrated { .. }) | None => {
@@ -512,7 +515,10 @@ fn generate_calibration_warnings(
 
     // Warn if correction surface exists but wasn't applied
     if !correction_applied && calibration.correction_surface.is_some() {
-        warnings.push("Correction surface not applied (out of coverage)".to_string());
+        warnings.push(
+            WarningCode::CorrectionNotApplied
+                .with("Correction surface not applied (out of coverage)"),
+        );
     }
 
     warnings
@@ -565,15 +571,18 @@ const OFF_AXIS_FIRST_NULL_MULTIPLE: f64 = 3.0;
 ///
 /// The message is intentionally constant per (antenna, frequency) — it must
 /// not embed the query angle, so that heatmap/H3 warning aggregation
-/// deduplicates it to a single entry across grid points.
+/// deduplicates it to a single entry across grid points. Aggregation dedupes on
+/// `(code, message)`, so this remains load-bearing after C8 stage 3 typed the
+/// warning: a per-angle message would yield one array entry per grid point even
+/// though every entry carried the same code.
 ///
-/// C8 stage 3 converts this string warning to typed code
-/// `off_axis_unvalidated`.
+/// Carries [`WarningCode::OffAxisUnvalidated`] (typed by C8 stage 3,
+/// 2026-07-27).
 pub(crate) fn off_axis_unvalidated_warning(
     calibration: &crate::data::types::AntennaCalibration,
     off_boresight_deg: f64,
     frequency_mhz: f64,
-) -> Option<String> {
+) -> Option<ApiWarning> {
     if !calibration.physics_is_uncorrected() {
         return None;
     }
@@ -592,7 +601,7 @@ pub(crate) fn off_axis_unvalidated_warning(
         return None;
     }
 
-    Some(format!(
+    Some(WarningCode::OffAxisUnvalidated.with(format!(
         "Antenna '{}' is uncalibrated and this query is more than {:.2}° off boresight \
          (3× the first-null angle ≈ 1.6·λ/D at {:.0} MHz) — beyond the validated main-beam \
          region. The off-axis gain returned here is numerically converged (the P10 Hankel / \
@@ -605,7 +614,7 @@ pub(crate) fn off_axis_unvalidated_warning(
          adjacent-satellite analysis, use calibration data or a regulatory envelope such \
          as the ITU-R S.580 mask.",
         calibration.antenna_id, threshold_deg, frequency_mhz
-    ))
+    )))
 }
 
 /// Rear-hemisphere hard-invalidity warning (roadmap unit P10-tail, maintainer
@@ -640,13 +649,16 @@ pub(crate) fn off_axis_unvalidated_warning(
 /// query angle — so heatmap/H3 warning aggregation deduplicates it to a single
 /// entry across grid points (the P8 convention).
 ///
-/// C8 will later convert this string warning to a typed code (e.g.
-/// `rear_hemisphere_invalid`).
+/// Carries [`WarningCode::RearHemisphereInvalid`] (typed by C8 stage 3,
+/// 2026-07-27). Both wording branches share the one code: the distinction they
+/// draw — statistical floor vs raw PO extrapolation — is *what was served*, which
+/// a client reads from `calibration_status`, not a different reason to distrust
+/// the number.
 pub(crate) fn rear_hemisphere_warning(
     calibration: &crate::data::types::AntennaCalibration,
     off_boresight_deg: f64,
     frequency_mhz: f64,
-) -> Option<String> {
+) -> Option<ApiWarning> {
     // Gate at exactly θ=90°: the aperture formulation is meaningless the moment
     // the observation direction has a backward component.
     if off_boresight_deg.abs() <= 90.0 {
@@ -656,7 +668,7 @@ pub(crate) fn rear_hemisphere_warning(
     if calibration.physics_is_uncorrected() {
         // F7 redesign (2026-07-16): on uncorrected-physics antennas the rear value IS
         // the statistical floor (PO excluded behind the dish).
-        Some(format!(
+        Some(WarningCode::RearHemisphereInvalid.with(format!(
             "Antenna '{}' query at {:.0} MHz is in the REAR HEMISPHERE (more than 90° off \
              boresight). The returned value is the statistical sidelobe floor ONLY — a \
              best-estimate median wide-angle level (NTIA 84-164) scaled by this antenna's \
@@ -667,9 +679,9 @@ pub(crate) fn rear_hemisphere_warning(
              regulatory envelope (e.g. an ITU-R rear-lobe mask) for any rear-hemisphere \
              analysis.",
             calibration.antenna_id, frequency_mhz
-        ))
+        )))
     } else {
-        Some(format!(
+        Some(WarningCode::RearHemisphereInvalid.with(format!(
             "Antenna '{}' query at {:.0} MHz is in the REAR HEMISPHERE (more than 90° off \
              boresight). The aperture-integration model has NO physical validity behind the \
              reflector: the returned value is a numerical extrapolation of an idealised, \
@@ -678,7 +690,7 @@ pub(crate) fn rear_hemisphere_warning(
              of which are modeled here. Use measured data or a regulatory envelope (e.g. an \
              ITU-R rear-lobe mask) for any rear-hemisphere analysis.",
             calibration.antenna_id, frequency_mhz
-        ))
+        )))
     }
 }
 
@@ -708,14 +720,14 @@ pub(crate) fn rear_hemisphere_warning(
 /// deduplicates it to a single entry.
 pub(crate) fn ray_trace_stub_warning(
     config: &crate::model::geometry::AntennaConfiguration,
-) -> Option<String> {
+) -> Option<ApiWarning> {
     let focal_length = config.reflector.focal_length;
     if focal_length <= 0.0 {
         return None;
     }
     let offset_ratio = config.feed.position.displacement_from_focus(focal_length) / focal_length;
     if offset_ratio > crate::model::edge_cases::SEVERE_OFFSET_THRESHOLD {
-        Some(crate::model::pattern::RAY_TRACING_STUB_WARNING.to_string())
+        Some(crate::model::pattern::ray_trace_stub_warning())
     } else {
         None
     }
@@ -729,6 +741,19 @@ mod tests {
         AntennaCalibration, CalibrationCoverage, CalibrationMetadata, CalibrationStatus,
         FeedParameters, MeshParameters, PhysicalAntennaConfig, ReflectorGeometry, ValidityRanges,
     };
+
+    /// The warning codes [`generate_calibration_warnings`] can emit.
+    ///
+    /// Tests that assert "this response carries no calibration-status warnings"
+    /// select on this set. Before C8 stage 3 they instead *excluded* the two known
+    /// convergence phrases by substring, which passed for any warning class that
+    /// was neither — including new ones nobody had considered.
+    const CALIBRATION_WARNING_CODES: &[WarningCode] = &[
+        WarningCode::Uncalibrated,
+        WarningCode::PartiallyCalibrated,
+        WarningCode::OutOfCoverage,
+        WarningCode::CorrectionNotApplied,
+    ];
 
     fn create_test_calibration(status: CalibrationStatus) -> AntennaCalibration {
         let metadata = CalibrationMetadata::builder()
@@ -898,9 +923,11 @@ mod tests {
         let warnings = generate_calibration_warnings(&calibration, 180.0, 45.0, false);
 
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("uncalibrated"));
-        assert!(warnings[0].contains("±3.0 dB"));
-        assert!(warnings[0].contains("±2.0 dB"));
+        assert_eq!(warnings[0].code, WarningCode::Uncalibrated);
+        // The accuracy figures are interpolated into the message, so they stay
+        // message assertions — the code says *which* warning, not what it carries.
+        assert!(warnings[0].message.contains("±3.0 dB"));
+        assert!(warnings[0].message.contains("±2.0 dB"));
     }
 
     #[test]
@@ -922,8 +949,8 @@ mod tests {
         let warnings = generate_calibration_warnings(&calibration, 180.0, 45.0, true);
 
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("partially calibrated"));
-        assert!(warnings[0].contains("±1.5 dB"));
+        assert_eq!(warnings[0].code, WarningCode::PartiallyCalibrated);
+        assert!(warnings[0].message.contains("±1.5 dB"));
     }
 
     #[test]
@@ -955,10 +982,14 @@ mod tests {
 
         let warnings = generate_calibration_warnings(&calibration, 180.0, 45.0, false);
 
-        assert_eq!(warnings.len(), 3);
-        assert!(warnings[0].contains("partially calibrated"));
-        assert!(warnings[1].contains("outside calibrated region"));
-        assert!(warnings[2].contains("Correction surface not applied"));
+        assert_eq!(
+            warnings.iter().map(|w| w.code).collect::<Vec<_>>(),
+            vec![
+                WarningCode::PartiallyCalibrated,
+                WarningCode::OutOfCoverage,
+                WarningCode::CorrectionNotApplied,
+            ]
+        );
     }
 
     #[test]
@@ -992,7 +1023,7 @@ mod tests {
         let warnings = generate_calibration_warnings(&calibration, 180.0, 45.0, false);
 
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("Correction surface not applied"));
+        assert_eq!(warnings[0].code, WarningCode::CorrectionNotApplied);
     }
 
     // ------------------------------------------------------------------
@@ -1011,7 +1042,12 @@ mod tests {
         });
 
         let warning = off_axis_unvalidated_warning(&calibration, 2.0, 8400.0);
-        let msg = warning.expect("2.0° off boresight > ~0.98° threshold must warn");
+        let warning = warning.expect("2.0° off boresight > ~0.98° threshold must warn");
+        assert_eq!(warning.code, WarningCode::OffAxisUnvalidated);
+        // The rest of this test pins the honest *wording*, which is the point of the
+        // P8/F7 warning — the code alone would not catch a message that regressed to
+        // a stale or dishonest claim.
+        let msg = &warning.message;
         assert!(msg.contains("beyond the validated main-beam region"));
         assert!(msg.contains("ITU-R S.580"));
         // Post-P10 honesty (2026-07-15): the P10 integrator landed, so the
@@ -1140,10 +1176,13 @@ mod tests {
 
         // (b) Off-axis honesty warning fires beyond threshold (~0.98° at 8400 MHz).
         let warning = off_axis_unvalidated_warning(&calibration, 2.0, 8400.0);
-        let msg = warning.expect(
+        let warning = warning.expect(
             "surfaceless PartiallyCalibrated antenna must get the off-axis honesty warning",
         );
-        assert!(msg.contains("beyond the validated main-beam region"));
+        assert_eq!(warning.code, WarningCode::OffAxisUnvalidated);
+        assert!(warning
+            .message
+            .contains("beyond the validated main-beam region"));
 
         // And stays silent inside the main beam (gate is the same, threshold intact).
         assert!(off_axis_unvalidated_warning(&calibration, 0.0, 8400.0).is_none());
@@ -1180,8 +1219,10 @@ mod tests {
         assert!(rear_hemisphere_warning(&calibration, 90.0, 8400.0).is_none());
 
         // Fires the moment there is any backward component (and uses |angle|).
-        let msg =
+        let warning =
             rear_hemisphere_warning(&calibration, 90.001, 8400.0).expect("just past 90° must warn");
+        assert_eq!(warning.code, WarningCode::RearHemisphereInvalid);
+        let msg = &warning.message;
         assert!(msg.contains("REAR HEMISPHERE"));
         assert!(msg.contains("no physical validity") || msg.contains("NO physical validity"));
         assert!(rear_hemisphere_warning(&calibration, 120.0, 8400.0).is_some());
@@ -1250,8 +1291,9 @@ mod tests {
 
         let msg = rear_hemisphere_warning(&calibration, 120.0, 8400.0)
             .expect("rear hemisphere must warn on uncorrected-physics antennas");
-        assert!(msg.contains("REAR HEMISPHERE"));
-        assert!(msg.contains("statistical sidelobe floor ONLY"));
+        assert_eq!(msg.code, WarningCode::RearHemisphereInvalid);
+        assert!(msg.message.contains("REAR HEMISPHERE"));
+        assert!(msg.message.contains("statistical sidelobe floor ONLY"));
     }
 
     /// F7 redesign (2026-07-16): an antenna WITH a correction surface
@@ -1268,8 +1310,9 @@ mod tests {
 
         let msg = rear_hemisphere_warning(&calibration, 120.0, 8400.0)
             .expect("rear hemisphere must warn regardless of calibration status");
-        assert!(msg.contains("REAR HEMISPHERE"));
-        assert!(msg.contains("numerical extrapolation"));
+        assert_eq!(msg.code, WarningCode::RearHemisphereInvalid);
+        assert!(msg.message.contains("REAR HEMISPHERE"));
+        assert!(msg.message.contains("numerical extrapolation"));
     }
 
     /// The correction surface must be evaluated at the calibration's
@@ -1298,7 +1341,10 @@ mod tests {
         let response = compute_gain_from_request(&request, &repo).unwrap();
 
         assert!(
-            !response.warnings.iter().any(|w| w.contains("temperature")),
+            !response
+                .warnings
+                .iter()
+                .any(|w| w.message.contains("temperature")),
             "no temperature extrapolation warning expected, got: {:?}",
             response.warnings
         );
@@ -1330,7 +1376,10 @@ mod tests {
 
         // Should have warning about uncalibrated
         assert!(!response.warnings.is_empty());
-        assert!(response.warnings.iter().any(|w| w.contains("uncalibrated")));
+        assert!(response
+            .warnings
+            .iter()
+            .any(|w| w.is(WarningCode::Uncalibrated)));
     }
 
     /// Evaluate a boresight-pointed request (emitter and feed both aimed along the
@@ -1768,11 +1817,13 @@ mod tests {
 
         // Should NOT have calibration-related warnings (fully calibrated).
         // Integration convergence warnings are acceptable and unrelated to
-        // calibration status.
+        // calibration status. Post-C8-stage-3 this selects the calibration class by
+        // code rather than excluding two convergence phrases by substring — the
+        // old form also passed for any *new* unrelated warning class.
         let calibration_warnings: Vec<_> = response
             .warnings
             .iter()
-            .filter(|w| !w.contains("did not converge") && !w.contains("aperture integration"))
+            .filter(|w| CALIBRATION_WARNING_CODES.contains(&w.code))
             .collect();
         assert!(
             calibration_warnings.is_empty(),
@@ -1817,7 +1868,7 @@ mod tests {
         assert!(response
             .warnings
             .iter()
-            .any(|w| w.contains("partially calibrated")));
+            .any(|w| w.is(WarningCode::PartiallyCalibrated)));
     }
 
     #[test]
@@ -2063,11 +2114,13 @@ mod tests {
 
         // Should not have calibration warnings (treated as fully calibrated).
         // Integration convergence warnings are acceptable and unrelated to
-        // calibration status.
+        // calibration status. Post-C8-stage-3 this selects the calibration class by
+        // code rather than excluding two convergence phrases by substring — the
+        // old form also passed for any *new* unrelated warning class.
         let calibration_warnings: Vec<_> = response
             .warnings
             .iter()
-            .filter(|w| !w.contains("did not converge") && !w.contains("aperture integration"))
+            .filter(|w| CALIBRATION_WARNING_CODES.contains(&w.code))
             .collect();
         assert!(
             calibration_warnings.is_empty(),

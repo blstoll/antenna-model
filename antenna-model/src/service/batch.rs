@@ -200,14 +200,25 @@ pub fn evaluate_batch_with_budget(
 
 /// Create an error response for a failed gain request.
 ///
-/// This helper function converts an error into a GainResponse with error information
-/// in the warnings field, allowing batch processing to continue even when individual
-/// requests fail.
+/// Converts an error into a `GainResponse` carrying a typed [`GainError`], so batch
+/// processing continues when individual items fail.
+///
+/// **Roadmap C8 stage 3** moved the reason out of `warnings` and into the dedicated
+/// `error` field. Before, a failed item was `gain_db: null` plus a
+/// `"Computation failed: …"` string among the quality warnings — the shape unit C2
+/// flagged: a client that did not read every item's prose could not distinguish a
+/// failure from an extrapolation caveat, and both arrived under HTTP 200.
+///
+/// The code comes from [`service_status`], the same mapping the HTTP error bodies
+/// use, so the *class* of failure survives into the item: an item that blew the
+/// integration budget reports `computation_budget_exceeded`, not a flattened
+/// "computation failed". `warnings` is left empty — a failed evaluation produced no
+/// result to qualify.
 fn create_error_response(request: &GainRequest, error: AntennaModelError) -> GainResponse {
-    use crate::api::schemas::{ComputationMetadata, GeometryInfo, Vector3D};
+    use crate::api::schemas::{ComputationMetadata, GainError, GeometryInfo, Vector3D};
 
-    // Create a response with NaN gain to indicate error
-    // Include error message in warnings
+    let (_, code) = crate::api::error_response::service_status(&error);
+
     GainResponse {
         antenna_id: request.antenna_id.clone(),
         feed_id: request.feed_id.clone(),
@@ -220,7 +231,8 @@ fn create_error_response(request: &GainRequest, error: AntennaModelError) -> Gai
             emitter_elevation_deg: 0.0,
             beam_squint_deg: None,
         },
-        warnings: vec![format!("Computation failed: {}", error)],
+        error: Some(GainError::new(code, error.to_string())),
+        warnings: Vec::new(),
         metadata: ComputationMetadata {
             computation_time_ms: 0.0,
             coordinate_transform_ms: None,
@@ -420,11 +432,23 @@ mod tests {
         assert!(!response.results[0].gain_db.is_nan());
         assert!(!response.results[2].gain_db.is_nan());
 
-        // Second and fourth should fail (NaN gain with error in warnings)
-        assert!(response.results[1].gain_db.is_nan());
-        assert!(!response.results[1].warnings.is_empty());
-        assert!(response.results[3].gain_db.is_nan());
-        assert!(!response.results[3].warnings.is_empty());
+        // Second and fourth should fail: null gain plus a typed `error` naming the
+        // class (C8 stage 3 — before, the reason was a string among the warnings).
+        for idx in [1, 3] {
+            let failed = &response.results[idx];
+            assert!(failed.gain_db.is_nan(), "item {idx} should have failed");
+            // The repository looks up the (antenna, feed) pair as a unit, so an
+            // unknown antenna surfaces as `feed_not_found` on this in-process path.
+            // Over HTTP the C2 pre-check catches the unknown antenna first and
+            // answers 404 `antenna_not_found`; this direct-call path is permissive
+            // by design (see `evaluate_batch`'s note).
+            assert_eq!(
+                failed.error.as_ref().map(|e| e.code.as_str()),
+                Some(crate::api::schemas::error_codes::FEED_NOT_FOUND),
+                "item {idx} should report a not-found lookup: {:?}",
+                failed.error
+            );
+        }
 
         // failure_count must match the number of NaN results
         let nan_count = response
@@ -470,10 +494,14 @@ mod tests {
         let response = evaluate_batch(&request, &repo).unwrap();
         assert_eq!(response.results.len(), 3);
 
-        // All should fail
+        // All should fail, each carrying a typed error rather than a warning string.
         for result in &response.results {
             assert!(result.gain_db.is_nan());
-            assert!(!result.warnings.is_empty());
+            let err = result
+                .error
+                .as_ref()
+                .expect("failed item must carry an error");
+            assert_eq!(err.code, crate::api::schemas::error_codes::FEED_NOT_FOUND);
         }
     }
 
@@ -509,8 +537,22 @@ mod tests {
         assert_eq!(response.antenna_id, "test_antenna");
         assert_eq!(response.feed_id, "test_feed");
         assert!(response.gain_db.is_nan());
-        assert!(!response.warnings.is_empty());
-        assert!(response.warnings[0].contains("Computation failed"));
+
+        // C8 stage 3: the reason lives in the typed `error` field, not among the
+        // quality warnings, and it names the failure CLASS rather than flattening
+        // every cause into "Computation failed".
+        let err = response.error.expect("a failed item must carry an error");
+        assert_eq!(err.code, crate::api::schemas::error_codes::FEED_NOT_FOUND);
+        assert!(
+            err.message.contains("test_feed"),
+            "message should name the missing feed: {}",
+            err.message
+        );
+        assert!(
+            response.warnings.is_empty(),
+            "a failed evaluation has no result to qualify: {:?}",
+            response.warnings
+        );
     }
 
     #[test]

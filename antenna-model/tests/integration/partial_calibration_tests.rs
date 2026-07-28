@@ -67,7 +67,7 @@ async fn test_uncalibrated_antenna_warnings() {
     let has_uncalibrated_warning = response
         .warnings
         .iter()
-        .any(|w| w.to_lowercase().contains("uncalibrated"));
+        .any(|w| w.is(WarningCode::Uncalibrated));
 
     assert!(
         has_uncalibrated_warning,

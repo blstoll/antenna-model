@@ -11,6 +11,7 @@ use crate::error::{AntennaModelError, Result};
 use crate::model::coordinates_3d::{ecef_to_enu_rotation, ecef_to_geodetic, geodetic_to_ecef};
 use crate::model::integration::DEFAULT_INTEGRATION_BUDGET;
 use crate::service::evaluator::compute_gain_from_request_with_budget;
+use crate::warnings::{ApiWarning, WarningCode};
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -103,7 +104,7 @@ pub fn generate_heatmap_with_budget(
     // Evaluate gain at each grid point (in parallel if large enough).
     // Returns (az, el, gain_db, warnings, is_failed).
     // Failed points use f64::NEG_INFINITY as gain (never NaN to avoid serialization issues).
-    let results: Vec<(f64, f64, f64, Vec<String>, bool)> =
+    let results: Vec<(f64, f64, f64, Vec<ApiWarning>, bool)> =
         if grid_points.len() >= PARALLEL_THRESHOLD {
             grid_points
                 .par_iter()
@@ -150,31 +151,38 @@ pub fn generate_heatmap_with_budget(
         })
         .collect();
 
-    // Aggregate warnings (deduplicate)
-    let all_warnings: HashSet<String> = results
+    // Aggregate warnings (deduplicate on the whole warning, code and message).
+    let all_warnings: HashSet<ApiWarning> = results
         .iter()
         .flat_map(|(_, _, _, warnings, _)| warnings.clone())
         .collect();
-    let mut warnings: Vec<String> = all_warnings.into_iter().collect();
+    let mut warnings: Vec<ApiWarning> = all_warnings.into_iter().collect();
     warnings.sort();
 
-    // Check for extrapolated points
+    // Count points whose gain was extrapolated rather than interpolated.
+    //
+    // Before C8 stage 3 this read `w.contains("extrapolat") || w.contains("out of
+    // range")` — a substring test against prose owned by two other modules, which
+    // silently depended on their spelling (and on the second phrase, which no
+    // producer had emitted for some time). The typed codes make the predicate say
+    // what it means: the correction surface was extrapolated, or the query fell
+    // outside a partially calibrated antenna's measured region.
     let extrapolated_count = results
         .iter()
         .filter(|(_, _, _, warns, _)| {
             warns
                 .iter()
-                .any(|w| w.contains("extrapolat") || w.contains("out of range"))
+                .any(|w| w.is(WarningCode::Extrapolated) || w.is(WarningCode::OutOfCoverage))
         })
         .count();
     if extrapolated_count > 0 {
         warnings.insert(
             0,
-            format!(
+            WarningCode::PointsExtrapolated.with(format!(
                 "{} out of {} points were extrapolated",
                 extrapolated_count,
                 grid_points.len()
-            ),
+            )),
         );
     }
 
@@ -303,7 +311,7 @@ fn evaluate_grid_point(
     azimuth_deg: f64,
     elevation_deg: f64,
     time_budget: Duration,
-) -> (f64, f64, f64, Vec<String>, bool) {
+) -> (f64, f64, f64, Vec<ApiWarning>, bool) {
     // Convert azimuth/elevation to emitter position using proper ECEF/ENU transformation
     let emitter_position = match compute_emitter_position_from_angles(
         &request.vehicle_position,
@@ -316,7 +324,8 @@ fn evaluate_grid_point(
                 azimuth_deg,
                 elevation_deg,
                 f64::NEG_INFINITY,
-                vec!["Failed to compute emitter position for this point".to_string()],
+                vec![WarningCode::PointComputationFailed
+                    .with("Failed to compute emitter position for this point")],
                 true,
             )
         }
@@ -349,7 +358,7 @@ fn evaluate_grid_point(
             azimuth_deg,
             elevation_deg,
             f64::NEG_INFINITY,
-            vec!["Computation failed for this point".to_string()],
+            vec![WarningCode::PointComputationFailed.with("Computation failed for this point")],
             true,
         ),
     }

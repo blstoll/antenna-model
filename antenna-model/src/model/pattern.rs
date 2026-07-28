@@ -27,29 +27,55 @@ use std::f64::consts::{FRAC_PI_2, PI};
 
 use num_complex::Complex64;
 
-/// Warning message emitted when the aperture integration loop exhausts its
-/// iteration budget without meeting the convergence criterion.  Extracted as a
-/// constant so the text stays consistent across all four gain-computation helpers
-/// and the existing test can rely on `.contains("did not converge")`.
+/// Message text for [`crate::warnings::WarningCode::NonConvergence`], emitted when
+/// the aperture integration loop exhausts its iteration budget without meeting the
+/// convergence criterion. Extracted as a constant so the text stays consistent
+/// across all four gain-computation helpers.
 ///
-/// `pub` since roadmap unit C10: `/h3-heatmap` re-emits this string from the
+/// `pub` since roadmap unit C10: `/h3-heatmap` re-emits this warning from the
 /// convergence flag carried on its cached gain values
 /// ([`crate::service::CachedGain`]), because the cache hit that serves a
 /// non-converged value is exactly the path that never runs the integration that
-/// would raise the warning here.
+/// would raise the warning here. Text identity matters there for a second reason
+/// after C8 stage 3: warning aggregation dedupes on `(code, message)`, so a
+/// re-emission whose text drifted would produce two array entries for one cause.
+///
+/// Prefer [`nonconvergence_warning`] over building the [`crate::warnings::ApiWarning`]
+/// by hand.
 pub const INTEGRATION_NONCONVERGENCE_WARNING: &str =
     "aperture integration did not converge; gain accuracy may be degraded";
 
-/// Warning message emitted when a feed offset exceeds the severe threshold
-/// (> 0.5·f) and gain is computed by the acknowledged ray-tracing stub
-/// (`ray_trace.rs`; real ray tracing is gated as feature F2). Extracted as a
-/// `pub` constant (roadmap unit P3) so the honest "not fully implemented" text
-/// stays byte-identical across the model dispatch that pushes it here and the
-/// service-layer re-emission that surfaces it on `/h3-heatmap` cache hits
-/// (`service::evaluator::ray_trace_stub_warning`).
+/// Message text for [`crate::warnings::WarningCode::RayTraceDegraded`], emitted when
+/// a feed offset exceeds the severe threshold (> 0.5·f) and gain is computed by the
+/// acknowledged ray-tracing stub (`ray_trace.rs`; real ray tracing is gated as
+/// feature F2). Extracted as a `pub` constant (roadmap unit P3) so the honest "not
+/// fully implemented" text stays byte-identical across the model dispatch that
+/// pushes it here and the service-layer re-emission that surfaces it on
+/// `/h3-heatmap` cache hits (`service::evaluator::ray_trace_stub_warning`).
+///
+/// Prefer [`ray_trace_stub_warning`] over building the
+/// [`crate::warnings::ApiWarning`] by hand.
 pub const RAY_TRACING_STUB_WARNING: &str =
     "WARNING: Ray tracing for large feed offsets (>0.5f) is not fully implemented; \
      gain accuracy may be degraded.";
+
+/// The canonical non-convergence warning, code and message together.
+///
+/// The single constructor for [`crate::warnings::WarningCode::NonConvergence`], so
+/// the model path and the `/h3-heatmap` cache-hit re-emission cannot drift apart in
+/// either field and defeat warning deduplication.
+pub fn nonconvergence_warning() -> ApiWarning {
+    WarningCode::NonConvergence.with(INTEGRATION_NONCONVERGENCE_WARNING)
+}
+
+/// The canonical ray-tracing-stub warning, code and message together.
+///
+/// The single constructor for [`crate::warnings::WarningCode::RayTraceDegraded`];
+/// see [`crate::service::evaluator::ray_trace_stub_warning`] for the service-layer
+/// re-emission that keeps it alive across `/h3-heatmap` cache hits.
+pub fn ray_trace_stub_warning() -> ApiWarning {
+    WarningCode::RayTraceDegraded.with(RAY_TRACING_STUB_WARNING)
+}
 
 use crate::error::{ComputationError, ComputationResult};
 use crate::model::{
@@ -62,6 +88,7 @@ use crate::model::{
     ray_trace::compute_gain_ray_trace,
     wavelength_from_frequency,
 };
+use crate::warnings::{ApiWarning, WarningCode};
 
 /// Result of gain computation including warnings
 ///
@@ -73,7 +100,7 @@ pub struct GainComputationResult {
     pub gain: f64,
 
     /// Warnings from edge case analysis and computation
-    pub warnings: Vec<String>,
+    pub warnings: Vec<ApiWarning>,
 
     /// Physical spillover loss (dB, negative) folded into `gain` when
     /// `IntegrationParams::apply_spillover` was set; `None` otherwise.
@@ -365,7 +392,7 @@ pub fn compute_gain(
         ComputationMode::RayTracing => {
             // Ray tracing is a stub: aperture sampling is used but true spillover and
             // geometric ray-reflector intersection are not fully implemented.
-            warnings.push(RAY_TRACING_STUB_WARNING.to_string());
+            warnings.push(ray_trace_stub_warning());
             compute_gain_ray_tracing(
                 theta,
                 phi,
@@ -481,7 +508,7 @@ fn compute_gain_standard(
     frequency_hz: f64,
     wavelength: f64,
     params: &IntegrationParams,
-    warnings: &mut Vec<String>,
+    warnings: &mut Vec<ApiWarning>,
 ) -> ComputationResult<f64> {
     // Select integration parameters (adaptive near nulls)
     let effective_params = select_integration_params(theta, phi, config, params);
@@ -491,7 +518,7 @@ fn compute_gain_standard(
     let result = integrate_aperture(theta, phi, config, frequency_hz, &effective_params)?;
 
     if !result.converged {
-        warnings.push(INTEGRATION_NONCONVERGENCE_WARNING.to_string());
+        warnings.push(nonconvergence_warning());
     }
 
     absolute_gain_from_integral(result.field, theta, config, wavelength, &effective_params)
@@ -512,7 +539,7 @@ fn compute_gain_ray_tracing(
     frequency_hz: f64,
     wavelength: f64,
     params: &IntegrationParams,
-    warnings: &mut Vec<String>,
+    warnings: &mut Vec<ApiWarning>,
 ) -> ComputationResult<f64> {
     // Compute gain using ray tracing (relative pattern)
     let ray_gain_relative = compute_gain_ray_trace(config, theta, phi, wavelength);
@@ -532,7 +559,7 @@ fn compute_gain_ray_tracing(
     let on_axis = integrate_aperture(0.0, 0.0, config, frequency_hz, params)?;
 
     if !on_axis.converged {
-        warnings.push(INTEGRATION_NONCONVERGENCE_WARNING.to_string());
+        warnings.push(nonconvergence_warning());
     }
 
     // theta = 0.0: this is the BORESIGHT anchor for the ray-traced relative pattern
@@ -1087,7 +1114,7 @@ mod tests {
             result
                 .warnings
                 .iter()
-                .any(|w| w.contains("did not converge")),
+                .any(|w| w.is(WarningCode::NonConvergence)),
             "compute_gain must propagate the non-convergence warning end-to-end; got {:?}",
             result.warnings
         );
@@ -1587,10 +1614,11 @@ mod tests {
         );
 
         // Check that warning mentions feed offset
-        let has_offset_warning = result
-            .warnings
-            .iter()
-            .any(|w| w.contains("offset") || w.contains("aberration"));
+        let has_offset_warning = result.warnings.iter().any(|w| {
+            w.is(WarningCode::SevereFeedOffset)
+                || w.is(WarningCode::FeedOffsetSpilloverUnmodeled)
+                || w.is(WarningCode::RayTraceDegraded)
+        });
         assert!(
             has_offset_warning,
             "Expected warning about feed offset or aberrations, got: {:?}",

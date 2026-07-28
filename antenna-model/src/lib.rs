@@ -19,11 +19,15 @@ pub mod data;
 pub mod error;
 pub mod model;
 pub mod service;
+pub mod warnings;
 
 // Re-export commonly used types for convenience
 pub use data::{AntennaCalibration, BSplineModel4D, CalibrationMetadata, ValidityRanges};
 
 pub use config::{AntennaConfig, ServiceConfig};
+
+// Re-export the response-warning vocabulary (roadmap C8 stage 3)
+pub use warnings::{ApiWarning, WarningCode};
 
 // Re-export error types from error module
 pub use error::{

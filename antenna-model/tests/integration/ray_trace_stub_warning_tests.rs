@@ -23,14 +23,18 @@
 use crate::integration::helpers::*;
 use antenna_model::api::schemas::*;
 
-/// Stable substring of the ray-tracing stub warning
-/// (`model::pattern::RAY_TRACING_STUB_WARNING`). "not fully implemented" is the
-/// load-bearing honesty flag and is specific to this warning (distinct from the
-/// advisory "Ray tracing recommended" edge-case warning).
-const RAY_TRACE_STUB_MARKER: &str = "not fully implemented";
+/// The typed code for the ray-tracing stub warning (roadmap C8 stage 3,
+/// 2026-07-27), replacing the `"not fully implemented"` substring marker.
+///
+/// The old marker existed to separate this warning from the advisory
+/// `"Ray tracing recommended"` edge-case warning, whose message also names ray
+/// tracing. That separation is now structural: this is
+/// [`WarningCode::RayTraceDegraded`] ("the stub computed your gain") and the
+/// advisory is [`WarningCode::SevereFeedOffset`] ("the offset is severe").
+const RAY_TRACE_STUB_CODE: WarningCode = WarningCode::RayTraceDegraded;
 
-fn has_ray_trace_stub_warning(warnings: &[String]) -> bool {
-    warnings.iter().any(|w| w.contains(RAY_TRACE_STUB_MARKER))
+fn has_ray_trace_stub_warning(warnings: &[ApiWarning]) -> bool {
+    warnings.iter().any(|w| w.is(RAY_TRACE_STUB_CODE))
 }
 
 /// A request whose feed is aimed far off the reflector boresight, producing a
@@ -183,7 +187,7 @@ async fn test_heatmap_large_feed_offset_warns() {
         response
             .warnings
             .iter()
-            .filter(|w| w.contains(RAY_TRACE_STUB_MARKER))
+            .filter(|w| w.is(RAY_TRACE_STUB_CODE))
             .count(),
         1,
         "ray-tracing stub warning must deduplicate across grid points, got: {:?}",

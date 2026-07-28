@@ -25,6 +25,7 @@
 
 use crate::data::types::BSplineModel4D;
 use crate::error::{ComputationError, Result};
+use crate::warnings::{ApiWarning, WarningCode};
 
 /// Result of correction surface evaluation.
 #[derive(Debug, Clone, PartialEq)]
@@ -33,7 +34,7 @@ pub struct CorrectionResult {
     pub correction_db: f64,
 
     /// Warnings generated during evaluation
-    pub warnings: Vec<String>,
+    pub warnings: Vec<ApiWarning>,
 
     /// Whether any input was out of range (extrapolated)
     pub extrapolated: bool,
@@ -49,8 +50,8 @@ impl CorrectionResult {
         }
     }
 
-    /// Add a warning message
-    pub fn with_warning(mut self, warning: String) -> Self {
+    /// Add a warning
+    pub fn with_warning(mut self, warning: ApiWarning) -> Self {
         self.warnings.push(warning);
         self
     }
@@ -205,10 +206,10 @@ pub fn evaluate_correction(
             out_of_range_dims.push(format!("temperature ({:.1} K)", temperature_k));
         }
 
-        result = result.with_warning(format!(
+        result = result.with_warning(WarningCode::Extrapolated.with(format!(
             "Correction surface extrapolated for: {}",
             out_of_range_dims.join(", ")
-        ));
+        )));
     }
 
     Ok(result)
@@ -453,7 +454,7 @@ mod tests {
     #[test]
     fn test_correction_result_builder() {
         let result = CorrectionResult::new(2.5)
-            .with_warning("Test warning".to_string())
+            .with_warning(WarningCode::Extrapolated.with("Test warning"))
             .with_extrapolation();
 
         assert_eq!(result.correction_db, 2.5);
@@ -531,7 +532,8 @@ mod tests {
         // Should be marked as extrapolated with warning
         assert!(result.extrapolated);
         assert!(!result.warnings.is_empty());
-        assert!(result.warnings[0].contains("azimuth"));
+        assert_eq!(result.warnings[0].code, WarningCode::Extrapolated);
+        assert!(result.warnings[0].message.contains("azimuth"));
     }
 
     #[test]

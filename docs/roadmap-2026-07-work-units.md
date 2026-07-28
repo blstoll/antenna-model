@@ -735,7 +735,8 @@ warning tested per endpoint (`tests/integration/off_axis_warning_tests.rs`,
 incl. boresight negative case + heatmap dedup assertion), no existing test
 modified, contract/api-documentation/openapi updated. Message deliberately
 constant per (antenna, frequency) — no per-query angle — so heatmap/H3 warning
-aggregation dedups it; C8 stage 3 owns the typed-code conversion.
+aggregation dedups it; C8 stage 3 did the typed-code conversion (2026-07-27) — and note
+the dedup key is now `(code, message)`, so the constant-message requirement still holds.
 
 - **Rationale (as filed):** the model's off-axis (sidelobe) gain was systematically optimistic
   (~8–13 dB below the ITU-R S.580 mask; see the contract's "Off-axis pattern / sidelobe
@@ -758,8 +759,8 @@ aggregation dedups it; C8 stage 3 owns the typed-code conversion.
   3. Message points consumers at the ITU mask / calibration data for off-axis use
      (mirror the contract's language: sidelobe levels are optimistic; shape is validated,
      levels are not).
-  4. String warning now; C8 stage 3 converts it to typed code `off_axis_unvalidated`
-     (already added to C8's enumerated list).
+  4. String warning at the time; C8 stage 3 converted it to typed code
+     `off_axis_unvalidated` (2026-07-27).
 - **Exit criteria:** warning appears on all four compute endpoints for a large-θ
   uncalibrated query (test per endpoint); no warning inside the main beam; existing tests
   untouched; `docs/api-documentation.md` accuracy-caveat section updated; openapi.yaml
@@ -1420,7 +1421,8 @@ Shipped as decided, all three calls. What is worth knowing beyond the decision r
   and had their `400` descriptions corrected; `ErrorResponse.error`'s status caveat was
   replaced with the settled rule. api-documentation.md and architecture.md §6.3 likewise.
 - **Untouched, as scoped:** the per-item batch response *shape* (`gain_db: null` + a
-  warning string for compute-class failures) remains C8 stage 3. Routing-level 404/405/415
+  warning string for compute-class failures) was C8 stage 3's — ✅ landed 2026-07-27 as a
+  typed `GainResponse.error`. Routing-level 404/405/415
   remain framework-shaped `text/plain` — that needs new error codes, which is C8's call, so
   the "a 404 can arrive in either shape" caveat C4 documented still stands.
 
@@ -1482,7 +1484,7 @@ understated it):**
   non-validation ones); the matrix test is the net that catches a missed one. Don't touch
   error *bodies* here (C3/C4 own those). The per-item batch *shape* — an explicit
   `{code, message}` instead of `NaN` + a warning string (`batch.rs:199-227`) — is a
-  response-shape break and belongs to **C8 stage 3**, not here; C2 only stops
+  response-shape break and belonged to **C8 stage 3** (✅ done 2026-07-27), not here; C2 only stops
   validation-class failures from reaching that path.
 - **Depends on:** C3, C4 (land after, to avoid triple-editing the same lines).
 
@@ -1897,9 +1899,9 @@ deliberately kept its diff to "renames, no value moves" so that property stayed 
 
 ### C8 — v1 contract finalization (the one sanctioned breaking pass) — Effort: L
 **[DECIDED 2026-07-08 — pre-production confirmed: no consumers exist; break once now, then freeze]**
-**[✅ STAGES 1 AND 2 OF 4 DONE — stage 1 2026-07-26 (`feat/c8-stage1-aim-point-field-rename`),
-stage 2 2026-07-27 (`feat/c8-stage2-required-coordinate-system`). Stages 3 and 4 remain,
-then C7.]**
+**[✅ STAGES 1–3 OF 4 DONE — stage 1 2026-07-26 (`feat/c8-stage1-aim-point-field-rename`),
+stage 2 2026-07-27 (`feat/c8-stage2-required-coordinate-system`), stage 3 2026-07-27
+(`feat/c8-stage3-typed-warnings`). Stage 4 remains, then C7.]**
 
 **Stage 1, as landed.** The three field renames only — `feed_position` →
 `feed_pointing_location` on all three request types, `GeometryInfo.feed_offset_meters` →
@@ -1941,8 +1943,38 @@ boundary, so every one of them was being served as geodetic. Corrected to `ecef`
 tagging. This is a documentation fix, not a computed-value move: no test asserted on those
 examples' numbers.
 
-**Still open: stages 3–4** (typed warnings, endpoint coherence + spec completeness) — the
-contract is **not** finalized, and C7's freeze is not yet due.
+**Stage 3, as landed (2026-07-27).** `warnings` is `Vec<ApiWarning>` (`{code, message}`) on
+all three response types, with a **closed** 14-variant `WarningCode` enum in a new
+`warnings.rs` — a peer of `error.rs`, not an `api::` member, because the model layer
+produces warnings and does not otherwise depend on the API layer. Every producer emits a
+code; `service::heatmap`'s `w.contains("extrapolat") || w.contains("out of range")`
+predicate (a substring test against prose owned by two other modules, whose second phrase
+matched nothing any producer still emitted) became a code check. The two integration-test
+"stable substring markers" became code constants; wording assertions that pin the *honesty*
+of the P8/F7 messages were kept, moved to `.message`, and left with the unit tests that own
+them. New `tests/warning_code_vocabulary.rs` mirrors `error_code_vocabulary.rs`: openapi's
+`ApiWarning.code` enum and the api-documentation table must match `WarningCode::ALL`
+exactly. **No computed value moved** (910 workspace tests, numeric assertions unchanged).
+
+Stage 3 also discharged the per-item batch shape **C2 deferred into it**: a failed item
+carries `error: {code, message}` instead of `gain_db: null` plus a `"Computation failed: …"`
+string among its warnings. The code comes from `service_status` — the same vocabulary the
+HTTP error bodies use — so an item that blew the integration budget reports
+`computation_budget_exceeded` rather than a flattened generic failure.
+
+Two of the unit's suggested code names had no producer and were **not** minted:
+`spillover_applied` (P1 reports spillover as `metadata.spillover_loss_db`, a number) and
+`higher_order_heuristic` (P2 removed the emitting mode on 2026-07-16). Full detail:
+`docs/plan-c8-stage3-typed-warnings.md`.
+
+**Finding, fixed in-unit:** `examples/api_requests.json` and `docs/architecture.md` both
+documented a warning no producer has ever emitted —
+`"Beam squint correction applied (pointing_freq != operating_freq)"` — alongside the
+`geometry.beam_squint_deg` field that actually reports it. Removed rather than given a
+code. Both files are in **C15**'s uncovered-surface inventory, which is why it survived.
+
+**Still open: stage 4** (endpoint coherence + spec completeness) — the contract is **not**
+finalized, and C7's freeze is not yet due.
 
 - **Rationale (recorded):** The maintainer confirmed nothing consumes this API yet
   (no remote, no shipped `.bin` artifacts, only uncalibrated design-spec antennas enabled). Breaking cost is
@@ -1985,7 +2017,7 @@ contract is **not** finalized, and C7's freeze is not yet due.
   detection unit tests must be rewritten to assert the new required-field behavior, not
   deleted wholesale.
 
-**Stage 3 — Typed warnings.**
+**Stage 3 — Typed warnings. ✅ DONE 2026-07-27** (see the "as landed" note above).
 - `warnings: Vec<String>` → `Vec<ApiWarning> { code, message }` on all response types
   (currently at `schemas.rs:307,511,691`). Enumerate the code set from existing producers
   (grep `warnings.push` / warning constructors): expect at least `extrapolated`,

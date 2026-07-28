@@ -225,7 +225,16 @@ The `calibrate` tool processes measurement data:
 - **Never use `unwrap()` or `expect()` in production code** - use proper error propagation
 - Use `thiserror` for error types (`src/error.rs`)
 - Return actionable error messages specifying which field/parameter failed
-- Generate warnings (not errors) for extrapolation or edge cases
+- Generate warnings (not errors) for extrapolation or edge cases. Response warnings are
+  **typed**: `ApiWarning { code: WarningCode, message: String }` (roadmap C8 stage 3,
+  2026-07-27). `WarningCode` is a **closed** enum in `src/warnings.rs` — a peer of
+  `error.rs`, since the model layer produces warnings too. Adding a producer means adding
+  a variant, updating `WarningCode::ALL`, `openapi.yaml` and `docs/api-documentation.md`;
+  `tests/warning_code_vocabulary.rs` fails otherwise. **`code` is the contract, `message`
+  is not** — never branch on message text (the substring test that C8 stage 3 deleted from
+  `service/heatmap.rs` is why). Heatmap/H3 aggregation dedupes on `(code, message)`, so a
+  warning meant to appear once per response must keep its message constant across grid
+  points.
 
 ### Testing Philosophy
 
