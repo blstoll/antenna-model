@@ -101,7 +101,10 @@ All examples have been tested against the running service:
     "emitter_elevation_deg": 45.0
   },
   "warnings": [
-    "Antenna 'dsn_34m_uncalibrated' is uncalibrated (using design specifications). Absolute gain accuracy: ±3.0 dB, Loss accuracy: ±2.0 dB"
+    {
+      "code": "uncalibrated",
+      "message": "Antenna 'dsn_34m_uncalibrated' is uncalibrated (using design specifications). Absolute gain accuracy: ±3.0 dB, Loss accuracy: ±2.0 dB"
+    }
   ],
   "calibration_status": {
     "status": "uncalibrated",

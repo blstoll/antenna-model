@@ -23,7 +23,7 @@ use crate::data::types::AntennaCalibration;
 use crate::error::{AntennaModelError, Result};
 use crate::model::compute_gain_db;
 use crate::model::integration::DEFAULT_INTEGRATION_BUDGET;
-use crate::model::pattern::INTEGRATION_NONCONVERGENCE_WARNING;
+use crate::model::pattern::nonconvergence_warning;
 use crate::model::{
     analyze_edge_cases, compute_emitter_direction_with_attitude,
     compute_feed_position_from_pointing, ecef_to_geodetic, evaluate_correction, geodetic_to_ecef,
@@ -32,6 +32,7 @@ use crate::model::{
     ReflectorGeometry as ModelReflector,
 };
 use crate::service::{CachedGain, GainCache, GainCacheKey};
+use crate::warnings::{ApiWarning, WarningCode};
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -164,7 +165,7 @@ fn compute_cell_gain(
     cache: &GainCache,
     integration_params: &IntegrationParams,
     frequency_hz: f64,
-) -> Result<(f64, f64, f64, Vec<String>, bool)> {
+) -> Result<(f64, f64, f64, Vec<ApiWarning>, bool)> {
     // The cell centre, in ECEF.
     let cell_pos = Position3D::ecef(cell_ecef.0, cell_ecef.1, cell_ecef.2);
 
@@ -232,19 +233,19 @@ fn compute_cell_gain(
             !result
                 .warnings
                 .iter()
-                .any(|w| w == INTEGRATION_NONCONVERGENCE_WARNING),
+                .any(|w| w.is(WarningCode::NonConvergence)),
         ))
     })?;
     let physics_gain_db = cached.value;
 
-    let mut captured_warnings: Vec<String> = Vec::new();
+    let mut captured_warnings: Vec<ApiWarning> = Vec::new();
 
     // Non-convergence of the aperture integral that produced this number. Derived
     // from the cached flag rather than from the closure's warnings, so it surfaces
     // identically on a hit and a miss — a served value whose integration did not
     // converge is never silent (the P10 self-check's whole purpose).
     if !cached.converged {
-        captured_warnings.push(INTEGRATION_NONCONVERGENCE_WARNING.to_string());
+        captured_warnings.push(nonconvergence_warning());
     }
 
     // Apply correction surface (post-cache). Uses the same gating logic as
@@ -294,7 +295,7 @@ fn compute_cell_gain(
 
     // Ray-tracing stub degraded-accuracy warning (P3): fires when the feed offset
     // exceeds 0.5·f. Emitted here, OUTSIDE the cache closure, so it surfaces on
-    // cache hits too — the model pushes the identical string only inside the
+    // cache hits too — the model pushes the identical warning only inside the
     // miss closure (into `result.warnings` above), which the shared, persistent
     // `GainCache` would otherwise drop on a hit. On a miss both are present; the
     // caller's warning-set aggregation deduplicates them to one entry.
@@ -422,53 +423,54 @@ pub fn compute_h3_link_budget_with_budget(
     //    separate boresight reference evaluation any more: the reference is one of the cells.
     const PARALLEL_THRESHOLD: usize = 20;
 
-    let results: Vec<Result<(CellGain, Vec<String>, bool)>> = if cells.len() >= PARALLEL_THRESHOLD {
-        cells
-            .par_iter()
-            .map(|&cell| {
-                compute_cell_result(
-                    cell,
-                    request,
-                    calibration,
-                    &antenna_config,
-                    feed_x,
-                    feed_y,
-                    feed_z,
-                    cache,
-                    &integration_params,
-                    frequency_hz,
-                    vehicle_ex,
-                    vehicle_ey,
-                    vehicle_ez,
-                )
-            })
-            .collect()
-    } else {
-        cells
-            .iter()
-            .map(|&cell| {
-                compute_cell_result(
-                    cell,
-                    request,
-                    calibration,
-                    &antenna_config,
-                    feed_x,
-                    feed_y,
-                    feed_z,
-                    cache,
-                    &integration_params,
-                    frequency_hz,
-                    vehicle_ex,
-                    vehicle_ey,
-                    vehicle_ez,
-                )
-            })
-            .collect()
-    };
+    let results: Vec<Result<(CellGain, Vec<ApiWarning>, bool)>> =
+        if cells.len() >= PARALLEL_THRESHOLD {
+            cells
+                .par_iter()
+                .map(|&cell| {
+                    compute_cell_result(
+                        cell,
+                        request,
+                        calibration,
+                        &antenna_config,
+                        feed_x,
+                        feed_y,
+                        feed_z,
+                        cache,
+                        &integration_params,
+                        frequency_hz,
+                        vehicle_ex,
+                        vehicle_ey,
+                        vehicle_ez,
+                    )
+                })
+                .collect()
+        } else {
+            cells
+                .iter()
+                .map(|&cell| {
+                    compute_cell_result(
+                        cell,
+                        request,
+                        calibration,
+                        &antenna_config,
+                        feed_x,
+                        feed_y,
+                        feed_z,
+                        cache,
+                        &integration_params,
+                        frequency_hz,
+                        vehicle_ex,
+                        vehicle_ey,
+                        vehicle_ez,
+                    )
+                })
+                .collect()
+        };
 
     // 7. Separate successes and failures; track whether correction was applied to any cell.
     let mut cell_gains: Vec<CellGain> = Vec::with_capacity(cells.len());
-    let mut warnings_set: HashSet<String> = HashSet::new();
+    let mut warnings_set: HashSet<ApiWarning> = HashSet::new();
     let mut failed_count = 0usize;
     let mut any_correction_applied = false;
 
@@ -494,7 +496,10 @@ pub fn compute_h3_link_budget_with_budget(
             }
             Err(e) => {
                 failed_count += 1;
-                warnings_set.insert(format!("Cell computation failed: {}", e));
+                warnings_set.insert(
+                    WarningCode::PointComputationFailed
+                        .with(format!("Cell computation failed: {}", e)),
+                );
             }
         }
     }
@@ -550,7 +555,7 @@ pub fn compute_h3_link_budget_with_budget(
         })
         .collect();
 
-    let mut warnings: Vec<String> = warnings_set.into_iter().collect();
+    let mut warnings: Vec<ApiWarning> = warnings_set.into_iter().collect();
     warnings.sort();
 
     let computation_time_ms = start_time.elapsed().as_secs_f64() * 1000.0;
@@ -619,7 +624,7 @@ fn compute_cell_result(
     vehicle_ex: f64,
     vehicle_ey: f64,
     vehicle_ez: f64,
-) -> Result<(CellGain, Vec<String>, bool)> {
+) -> Result<(CellGain, Vec<ApiWarning>, bool)> {
     // Get cell center lat/lon
     let latlng = h3o::LatLng::from(cell);
     let lat_deg = latlng.lat();

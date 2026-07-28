@@ -21,6 +21,14 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::data::types::{CalibrationCoverage, CalibrationStatus};
 
+/// The response-warning vocabulary (roadmap unit C8 stage 3).
+///
+/// Defined in [`crate::warnings`] rather than here because the model layer
+/// produces warnings too and does not otherwise depend on the API layer — the
+/// same reason [`crate::error`] is a root module. Re-exported so the wire types
+/// a client cares about all resolve under `api::schemas`.
+pub use crate::warnings::{ApiWarning, WarningCode};
+
 /// Coordinate system type for 3D positions
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -285,8 +293,28 @@ pub struct GainResponse {
     /// Computed geometry information
     pub geometry: GeometryInfo,
 
-    /// Warnings (e.g., extrapolation, beam squint applied)
-    pub warnings: Vec<String>,
+    /// Why this evaluation produced no gain, when `gain_db` is `null`.
+    ///
+    /// Present **only** on a failed item inside a `/api/v1/gain/batch` response:
+    /// `/api/v1/gain` reports a failure as an HTTP error instead, so a 200 body
+    /// from it never carries this field. Absent on every successful evaluation.
+    ///
+    /// Introduced by roadmap unit **C8 stage 3**, closing the hazard unit C2
+    /// recorded: a failed batch item used to be a `gain_db: null` plus a
+    /// `"Computation failed: …"` string in `warnings`, so a client that did not
+    /// inspect every item's prose could not tell a failure from a quality caveat.
+    /// `code` is one of [`error_codes::ALL`] — the same vocabulary the HTTP error
+    /// bodies use, so the *reason* survives (a timed-out item reports
+    /// `computation_budget_exceeded`, not a generic failure).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<GainError>,
+
+    /// Warnings about result quality (extrapolation, off-axis validity, …).
+    ///
+    /// Each entry carries a stable [`WarningCode`] and a human-readable message;
+    /// branch on `code`, display `message`. See [`crate::warnings`] for the
+    /// vocabulary and its stability contract.
+    pub warnings: Vec<ApiWarning>,
 
     /// Computation metadata (timing, flags)
     pub metadata: ComputationMetadata,
@@ -503,8 +531,13 @@ pub struct HeatmapResponse {
     /// Grid data (rectangular or H3)
     pub grid: GridData,
 
-    /// Warnings (e.g., some points extrapolated)
-    pub warnings: Vec<String>,
+    /// Aggregated, deduplicated warnings across all grid points.
+    ///
+    /// Each entry carries a stable [`WarningCode`] and a human-readable message.
+    /// Deduplication is on the whole warning (code **and** message), so a warning
+    /// whose message varies per point would appear once per point — producers of
+    /// grid-safe warnings keep their messages constant per (antenna, frequency).
+    pub warnings: Vec<ApiWarning>,
 
     /// Heatmap metadata
     pub metadata: HeatmapMetadata,
@@ -700,8 +733,11 @@ pub struct H3LinkBudgetResponse {
     /// Per-cell results
     pub cells: Vec<H3CellResult>,
 
-    /// Warnings (e.g., extrapolated cells, out-of-range queries)
-    pub warnings: Vec<String>,
+    /// Aggregated, deduplicated warnings across all cells.
+    ///
+    /// Each entry carries a stable [`WarningCode`] and a human-readable message;
+    /// see [`HeatmapResponse::warnings`] for the deduplication rule.
+    pub warnings: Vec<ApiWarning>,
 
     /// Computation metadata
     pub metadata: HeatmapMetadata,
@@ -1145,6 +1181,35 @@ pub mod error_codes {
         SERVICE_OVERLOADED,
         INTERNAL_ERROR,
     ];
+}
+
+/// Why a single evaluation inside a batch produced no gain.
+///
+/// Carried by [`GainResponse::error`]; see that field for when it is present.
+/// Structurally a two-field subset of [`ErrorResponse`] — same `code` vocabulary
+/// ([`error_codes::ALL`]), no `field`/`details`, because a batch item failure is
+/// reported per item rather than as the HTTP outcome.
+///
+/// The field is named `code` (not `error`, as in [`ErrorResponse`]) because it sits
+/// inside a member already named `error`; `"error": {"error": …}` reads as a
+/// mistake.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct GainError {
+    /// Machine-readable failure class, one of [`error_codes::ALL`].
+    pub code: String,
+
+    /// Human-readable explanation.
+    pub message: String,
+}
+
+impl GainError {
+    /// Create a per-item error from a code and message.
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
 }
 
 /// Standardized error response.
@@ -1815,6 +1880,7 @@ mod tests {
                 emitter_elevation_deg: 45.0,
                 beam_squint_deg: None,
             },
+            error: None,
             warnings: vec![],
             metadata: ComputationMetadata {
                 computation_time_ms: 50.0,

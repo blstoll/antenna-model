@@ -13,6 +13,7 @@
 use tracing::info;
 
 use crate::model::geometry::AntennaConfiguration;
+use crate::warnings::{ApiWarning, WarningCode};
 use std::f64::consts::PI;
 
 /// Threshold for severe feed offset requiring ray tracing (fraction of focal length)
@@ -69,7 +70,7 @@ pub struct EdgeCaseAnalysis {
     pub spillover_fraction: f64,
 
     /// Warnings for the user
-    pub warnings: Vec<String>,
+    pub warnings: Vec<ApiWarning>,
 }
 
 /// Detect edge cases and recommend computation mode
@@ -107,27 +108,27 @@ pub fn analyze_edge_cases(
     let mut warnings = Vec::new();
 
     if offset_ratio > SEVERE_OFFSET_THRESHOLD {
-        warnings.push(format!(
+        warnings.push(WarningCode::SevereFeedOffset.with(format!(
             "Feed offset ({:.2}f = {:.3} m) exceeds severe threshold ({:.1}f). Ray tracing recommended.",
             offset_ratio, offset_mag, SEVERE_OFFSET_THRESHOLD
-        ));
+        )));
     } else if offset_ratio > SPILLOVER_MAX_OFFSET_RATIO {
         // Moderate-offset band (0.3f–0.5f). Post-P2 these route through
         // StandardPhysicalOptics (exact coma phase), but spillover efficiency is not
         // modeled beyond 0.3f (estimate_spillover's offset extrapolation is unvalidated
         // there — see the spillover gate in pattern.rs), so flag the degraded accuracy.
-        warnings.push(format!(
+        warnings.push(WarningCode::FeedOffsetSpilloverUnmodeled.with(format!(
             "Feed offset ({:.2}f = {:.3} m) exceeds {:.1}f: spillover efficiency is not modeled \
              in this regime and off-axis accuracy may be degraded.",
             offset_ratio, offset_mag, SPILLOVER_MAX_OFFSET_RATIO
-        ));
+        )));
     }
 
     if spillover > 0.1 {
-        warnings.push(format!(
+        warnings.push(WarningCode::SpilloverSignificant.with(format!(
             "Estimated spillover {:.1}% may reduce aperture efficiency.",
             spillover * 100.0
-        ));
+        )));
     }
 
     EdgeCaseAnalysis {
@@ -366,22 +367,26 @@ mod tests {
         assert_eq!(analysis.mode, ComputationMode::StandardPhysicalOptics);
         assert!(analysis.feed_offset_ratio > 0.3);
         assert!(analysis.feed_offset_ratio < SEVERE_OFFSET_THRESHOLD);
-        // The removed HigherOrderAberrations warning must NOT reappear. Match
-        // case-insensitively: the old text was "Higher-order aberrations included."
-        // (capital H), so a case-sensitive `contains("higher-order")` guard would be
-        // vacuous. Also assert no ray-tracing warning (offset is below the severe
-        // threshold).
+        // The removed HigherOrderAberrations warning must NOT reappear. Its text was
+        // "Higher-order aberrations included." and it never had a code, so post-C8-
+        // stage-3 the guard is simply that no code outside the expected set appears —
+        // a reintroduced mode would have to add a variant to be emitted at all. Also
+        // assert no severe-offset warning (offset is below the severe threshold).
         assert!(!analysis
             .warnings
             .iter()
-            .any(|w| w.to_lowercase().contains("higher-order") || w.contains("Ray tracing")));
+            .any(|w| w.message.to_lowercase().contains("higher-order")));
+        assert!(!analysis
+            .warnings
+            .iter()
+            .any(|w| w.is(WarningCode::SevereFeedOffset)));
         // ...but the 0.3f–0.5f band DOES carry an honest degraded-accuracy warning
         // (spillover unmodeled beyond 0.3f), so the pattern.rs / domain-contract claim
         // that these cases "already carry degraded-accuracy warnings" holds.
         assert!(analysis
             .warnings
             .iter()
-            .any(|w| w.contains("spillover efficiency is not modeled")));
+            .any(|w| w.is(WarningCode::FeedOffsetSpilloverUnmodeled)));
     }
 
     #[test]
@@ -392,7 +397,10 @@ mod tests {
 
         assert_eq!(analysis.mode, ComputationMode::RayTracing);
         assert!(analysis.feed_offset_ratio > SEVERE_OFFSET_THRESHOLD);
-        assert!(analysis.warnings.iter().any(|w| w.contains("Ray tracing")));
+        assert!(analysis
+            .warnings
+            .iter()
+            .any(|w| w.is(WarningCode::SevereFeedOffset)));
     }
 
     #[test]

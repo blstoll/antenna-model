@@ -89,9 +89,7 @@
           "emitter_elevation_deg": 32.1,
           "beam_squint_deg": 0.15
         },
-        "warnings": [
-          "Beam squint correction applied (pointing_freq != operating_freq)"
-        ],
+        "warnings": [],
         "metadata": {
           "computation_time_ms": 2.8,
           "coordinate_transform_ms": 0.3,
@@ -309,7 +307,12 @@
             [1.5, 1.7, 2.2, 2.6]
           ]
         },
-        "warnings": ["Some points extrapolated"],
+        "warnings": [
+          {
+            "code": "points_extrapolated",
+            "message": "Some points extrapolated"
+          }
+        ],
         "metadata": {
           "points_evaluated": 3276,
           "failed_points": 0,

@@ -304,8 +304,10 @@ the gain pipeline (batch/heatmap inherit) and from the H3 per-cell path. Design
 constraints honored: uncalibrated-only (calibrated/partially-calibrated
 out-of-coverage queries already get the extrapolation warning — no stacking), and
 the message is constant per (antenna, frequency) so heatmap/H3 aggregation
-deduplicates it. C8 stage 3 converts the string to typed code
-`off_axis_unvalidated`. **As of the F7 redesign (2026-07-16/17) the warning's wording is the
+deduplicates it — still load-bearing after C8 stage 3 (2026-07-27) gave the warning the
+typed code `off_axis_unvalidated`, because aggregation dedupes on `(code, message)`, so a
+message that embedded the query angle would yield one entry per grid point regardless of
+the shared code. **As of the F7 redesign (2026-07-16/17) the warning's wording is the
 current truth:** the off-axis value is numerically converged/correct (the P10 integrator
 replaced the aliasing quadrature) and is served as the incoherent power sum of that idealised
 physical-optics value and the F7 statistical sidelobe floor (ON); the warning states the

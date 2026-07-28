@@ -727,9 +727,7 @@ There is no magnitude-based auto-detection; the pre-2026-07-27 heuristic is desc
     "emitter_elevation_deg": 32.1,
     "beam_squint_deg": 0.15
   },
-  "warnings": [
-    "Beam squint correction applied (pointing_freq != operating_freq)"
-  ],
+  "warnings": [],
   "metadata": {
     "computation_time_ms": 2.8,
     "coordinate_transform_ms": 0.3,
@@ -763,7 +761,10 @@ There is no magnitude-based auto-detection; the pre-2026-07-27 heuristic is desc
   "loss_db": 3.3,
   "geometry": { ... },
   "warnings": [
-    "Antenna 'antenna_3' is uncalibrated (using design specifications). Absolute gain accuracy: ±3.0 dB, Loss accuracy: ±2.0 dB"
+    {
+      "code": "uncalibrated",
+      "message": "Antenna 'antenna_3' is uncalibrated (using design specifications). Absolute gain accuracy: ±3.0 dB, Loss accuracy: ±2.0 dB"
+    }
   ],
   "metadata": {
     "computation_time_ms": 1.5,
@@ -952,7 +953,9 @@ There is no magnitude-based auto-detection; the pre-2026-07-27 heuristic is desc
       ...
     ]
   },
-  "warnings": ["Some points extrapolated"],
+  "warnings": [
+    { "code": "points_extrapolated", "message": "12 out of 3276 points were extrapolated" }
+  ],
   "metadata": {
     "points_evaluated": 3276,
     "computation_time_ms": 1245.6,

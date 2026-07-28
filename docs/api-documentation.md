@@ -289,7 +289,9 @@ supplies `temperature_k`. That temperature is a pure passthrough — the service
 antenna noise temperature of its own.
 
 **Warnings.** Cell warnings are deduplicated into one response-level `warnings` array, so
-a warning that fires for many cells appears once. The set does not depend on how much of
+a warning that fires for many cells appears once. Deduplication is on the whole warning —
+`code` **and** `message` — so a message that varied per cell would defeat it; the
+per-antenna honesty warnings are deliberately constant per (antenna, frequency). The set does not depend on how much of
 the request the internal gain cache could serve: repeating an identical request returns an
 identical `warnings` array. One difference from `/api/v1/gain` remains — the
 calibration-status warning is not emitted here, because the response carries the
@@ -385,7 +387,12 @@ from it. `loss_db` is referenced to that peak, so it is non-negative everywhere)
       "g_over_t_db": 12.847616052544133
     }
   ],
-  "warnings": ["Estimated spillover 21.2% may reduce aperture efficiency."],
+  "warnings": [
+    {
+      "code": "spillover_significant",
+      "message": "Estimated spillover 21.2% may reduce aperture efficiency."
+    }
+  ],
   "metadata": {
     "points_evaluated": 19,
     "computation_time_ms": 1.214708,
@@ -457,7 +464,7 @@ All successful gain computation responses include:
 - **reference_gain_db**: Optional reference gain for ideal case
 - **loss_db**: Optional loss (reference - actual)
 - **geometry**: Computed geometric parameters (feed offset, emitter direction)
-- **warnings**: Array of warning messages
+- **warnings**: Array of `{code, message}` objects — see [Warning codes](#warning-codes)
 - **metadata**: Computation metadata (timing, extrapolation flag)
 - **calibration_status**: Calibration status with accuracy estimates
 
@@ -477,8 +484,14 @@ Example response:
     "emitter_elevation_deg": 32.1
   },
   "warnings": [
-    "Antenna 'antenna_2' is partially calibrated. Accuracy estimate: ±1.5 dB",
-    "Query is outside calibrated region - using physics model extrapolation"
+    {
+      "code": "partially_calibrated",
+      "message": "Antenna 'antenna_2' is partially calibrated. Accuracy estimate: ±1.5 dB"
+    },
+    {
+      "code": "out_of_coverage",
+      "message": "Query is outside calibrated region - using physics model extrapolation"
+    }
   ],
   "metadata": {
     "computation_time_ms": 2.8,
@@ -566,6 +579,63 @@ emission site, so a code cannot be introduced by a typo.
 | `service_overloaded` | 503 | Admission control rejected the request; a `Retry-After` header accompanies it. |
 | `internal_error` | 500 | An unexpected server-side failure. |
 
+### Warning codes
+
+Warnings are not errors: the response is a successful computation that carries a caveat,
+and the HTTP status is unaffected. Every entry in a `warnings` array is an object:
+
+```json
+{ "code": "off_axis_unvalidated", "message": "Antenna 'gs_3.7m_uncalibrated' is …" }
+```
+
+**`code` is the contract; `message` is not.** Branch on the code. Display the message,
+but do not parse it — several messages interpolate query-specific values (thresholds,
+angles, percentages) and the wording may change in any release.
+
+This is the complete vocabulary; the service emits no other value in `code`. It is a
+closed enum in `warnings.rs`, checked against this table and against `openapi.yaml` by a
+CI drift test, so a code cannot reach a client undocumented.
+
+| Code | Meaning |
+|---|---|
+| `extrapolated` | The correction surface was evaluated outside its knot range in at least one dimension, so the correction is an extrapolation. The message names the offending dimensions and values. |
+| `out_of_coverage` | The query falls outside the region a partially calibrated antenna was measured over; the physics model is being extrapolated into it. |
+| `correction_not_applied` | The antenna has a correction surface but it was not applied to this query, because the query fell outside the recorded coverage. The returned gain is raw physics. |
+| `uncalibrated` | The antenna is modelled from design specifications, not measurements. The message carries the absolute-gain and loss accuracy estimates. |
+| `partially_calibrated` | The antenna's calibration covers only part of its operating envelope. The message carries the accuracy estimate. |
+| `off_axis_unvalidated` | The query is more than ~3× the first-null angle (≈1.6·λ/D — beamwidth-relative, not a fixed angle) off boresight on an antenna served with uncorrected physics. See the note below. |
+| `rear_hemisphere_invalid` | The query is more than 90° off boresight. Fires for **any** antenna, calibrated or not. See the note below. |
+| `non_convergence` | The aperture integration exhausted its iteration budget without meeting the convergence criterion; gain accuracy may be degraded. Never silent — this is the P10 self-check reporting. |
+| `ray_trace_degraded` | The feed offset exceeds 0.5·f, so gain came from the acknowledged ray-tracing stub rather than a full ray trace. Real ray tracing is gated as feature F2. |
+| `severe_feed_offset` | Edge-case analysis found the feed displaced more than 0.5·f from the focus. Reports the *geometry*; `ray_trace_degraded` reports what the model did about it. |
+| `feed_offset_spillover_unmodeled` | The feed offset is in the 0.3·f–0.5·f band, where the exact coma phase still applies but spillover efficiency is not modelled. |
+| `spillover_significant` | Estimated feed spillover exceeds 10% of radiated power, enough to reduce aperture efficiency materially. |
+| `points_extrapolated` | `/api/v1/heatmap` grid summary: how many evaluated points carried `extrapolated` or `out_of_coverage`. |
+| `point_computation_failed` | At least one grid point (`/api/v1/heatmap`) or cell (`/api/v1/h3-heatmap`) could not be evaluated. Those are counted in `metadata.failed_points` and carry the failure sentinel rather than a gain. |
+
+**`off_axis_unvalidated` in detail.** Beyond the validated main-beam region the returned
+value is *numerically* converged — the Hankel / azimuthal-mode integrator computes the
+physical-optics pattern correctly at all angles — but the physical-optics term is
+**idealised**: it omits blockage, feed/strut scatter, and aperture-edge diffraction. The
+served value combines that term with a statistical Ruze sidelobe floor as an incoherent
+power sum, giving a best-estimate **median** wide-angle level tracking measured
+earth-station statistics (NTIA 84-164), not a precise per-antenna prediction. For
+sidelobe, interference, off-axis-EIRP, or adjacent-satellite analysis, use calibration
+data or a regulatory envelope such as the ITU-R S.580 mask.
+
+**`rear_hemisphere_invalid` in detail.** The aperture-integration model has no physical
+validity behind the reflector, and a forward-hemisphere correction surface says nothing
+about back lobes — which is why this fires for calibrated antennas too. On antennas
+served with uncorrected physics the returned value is the statistical sidelobe floor
+only (the physical-optics term is excluded there); on antennas with a correction surface
+it is a numerical extrapolation, not a prediction. Real rear-hemisphere levels are set by
+feed spillover past the rim, aperture-edge diffraction, and mesh leakage — none of which
+are modelled individually. Use measured data or a regulatory rear-lobe envelope.
+
+**Aggregation.** `/api/v1/heatmap` and `/api/v1/h3-heatmap` evaluate many points and
+return the deduplicated union of their warnings, sorted. Deduplication is on the whole
+object (code **and** message), so one cause yields one entry.
+
 ### Status policy
 
 One rule, applied identically on `/api/v1/gain`, `/api/v1/gain/batch`,
@@ -600,6 +670,41 @@ returning **200** with `"gain_db": null` per bad item and the reason in that ite
 `warnings` — so a client checking the status code saw success. An empty `evaluations`
 array likewise returned **200** with zero results and is now **422**. The `error` codes
 themselves did not change.
+
+**Changed in this release (roadmap unit C8 stage 3).** The per-item *shape* C2 left
+behind is now fixed too. A failed batch item carries a typed `error` object instead of a
+prose string among its warnings:
+
+<!-- api-example: GainResponse -->
+```json
+{
+  "antenna_id": "gs_3.7m_uncalibrated",
+  "feed_id": "s_band_feed",
+  "gain_db": null,
+  "geometry": {
+    "physical_feed_offset_m": { "x": 0.0, "y": 0.0, "z": 0.0 },
+    "emitter_azimuth_deg": 0.0,
+    "emitter_elevation_deg": 0.0
+  },
+  "error": {
+    "code": "computation_budget_exceeded",
+    "message": "aperture integration exceeded the configured budget"
+  },
+  "warnings": [],
+  "metadata": {
+    "computation_time_ms": 0.0,
+    "extrapolated": false
+  }
+}
+```
+
+The geometry and metadata blocks are zero-filled: the evaluation failed before either
+was computed. `calibration_status` is omitted for the same reason.
+
+`error.code` is drawn from the same vocabulary as the HTTP error bodies, so the failure
+class survives into the item rather than flattening to a generic "computation failed".
+The field is absent on every successful evaluation, and `/api/v1/gain` never sends it —
+a single-gain failure is an HTTP error, not a 200 body carrying a reason.
 
 ### Request Body Size Limit
 

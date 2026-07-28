@@ -19,10 +19,14 @@ use crate::integration::helpers::*;
 use antenna_model::api::schemas::*;
 use antenna_model::model::coordinates_3d::geodetic_to_ecef;
 
-/// Stable substring of the P8 warning message asserted by every test here.
-/// (C8 stage 3 will convert this string warning to typed code
-/// `off_axis_unvalidated`; update these tests to assert the code then.)
-const OFF_AXIS_WARNING_MARKER: &str = "beyond the validated main-beam region";
+/// The typed code every test here asserts (roadmap C8 stage 3, 2026-07-27).
+///
+/// Previously a substring of the message ("beyond the validated main-beam
+/// region"), which coupled these tests to prose that P8, P10 and F7 each rewrote.
+/// The message wording itself is still pinned — deliberately, since the honesty
+/// claim is the point — but by the unit tests in `service::evaluator`, which own
+/// it, rather than by every endpoint test.
+const OFF_AXIS_WARNING_CODE: WarningCode = WarningCode::OffAxisUnvalidated;
 
 /// A gain request on the uncalibrated 3.7 m test antenna whose emitter sits
 /// tens of degrees off boresight — far beyond the ~2.8° warning threshold
@@ -43,8 +47,8 @@ fn off_axis_uncalibrated_gain_request() -> GainRequest {
     req
 }
 
-fn has_off_axis_warning(warnings: &[String]) -> bool {
-    warnings.iter().any(|w| w.contains(OFF_AXIS_WARNING_MARKER))
+fn has_off_axis_warning(warnings: &[ApiWarning]) -> bool {
+    warnings.iter().any(|w| w.is(OFF_AXIS_WARNING_CODE))
 }
 
 /// Gain endpoint: large-θ query on an uncalibrated antenna warns.
@@ -146,7 +150,7 @@ async fn test_heatmap_off_axis_uncalibrated_warns() {
         response
             .warnings
             .iter()
-            .filter(|w| w.contains(OFF_AXIS_WARNING_MARKER))
+            .filter(|w| w.is(OFF_AXIS_WARNING_CODE))
             .count(),
         1,
         "off-axis warning must deduplicate across grid points, got: {:?}",

@@ -213,8 +213,10 @@ paths:
                       emitter_elevation_deg: 32.1
                       beam_squint_deg: 0.15
                     warnings:
-                      - "Antenna 'antenna_2' is partially calibrated. Accuracy estimate: ±1.5 dB"
-                      - "Query is outside calibrated region - using physics model extrapolation"
+                      - code: "partially_calibrated"
+                        message: "Antenna 'antenna_2' is partially calibrated. Accuracy estimate: ±1.5 dB"
+                      - code: "out_of_coverage"
+                        message: "Query is outside calibrated region - using physics model extrapolation"
                     metadata:
                       computation_time_ms: 2.8
                       extrapolated: true
@@ -245,7 +247,8 @@ paths:
                       emitter_azimuth_deg: 45.2
                       emitter_elevation_deg: 78.9
                     warnings:
-                      - "Antenna 'antenna_3' is uncalibrated (using design specifications). Absolute gain accuracy: ±3.0 dB, Loss accuracy: ±2.0 dB"
+                      - code: "uncalibrated"
+                        message: "Antenna 'antenna_3' is uncalibrated (using design specifications). Absolute gain accuracy: ±3.0 dB, Loss accuracy: ±2.0 dB"
                     metadata:
                       computation_time_ms: 1.5
                       extrapolated: false
@@ -1174,34 +1177,21 @@ components:
           nullable: true
         geometry:
           $ref: '#/components/schemas/GeometryInfo'
+        error:
+          allOf:
+            - $ref: '#/components/schemas/GainError'
+          description: >
+            Why this evaluation produced no gain, present only when gain_db is null.
+            Only /api/v1/gain/batch items carry it: /api/v1/gain reports a failure as
+            an HTTP error instead, so a 200 body from it never has this field.
         warnings:
           type: array
           description: >
-            Human-readable warnings about result quality. Classes include:
-            uncalibrated / partially-calibrated accuracy estimates,
-            outside-calibrated-region extrapolation, correction surface not
-            applied (out of coverage), degraded-accuracy large feed offsets
-            (ray-trace stub), aperture-integration non-convergence, and the
-            off-axis honesty warning — emitted when a query on an UNCALIBRATED
-            antenna falls beyond ~3x the first-null angle (~1.6*lambda/D,
-            beamwidth-relative): off-axis values on such antennas combine
-            idealised physical optics with a statistical Ruze sidelobe floor
-            as an incoherent power sum (a best-estimate median wide-angle level
-            tracking measured earth-station statistics, NTIA 84-164 — not a
-            precise per-antenna prediction) and must not be used in place of
-            calibrated data for interference / off-axis-EIRP analysis; and the
-            REAR-HEMISPHERE warning — emitted for ANY antenna (calibrated or
-            not) when a query is more than 90 degrees off boresight: the
-            aperture-integration model has no physical validity behind the
-            reflector: on antennas served with uncorrected physics the returned
-            value is the statistical sidelobe floor only (the physical-optics
-            term is excluded there); on antennas with a correction surface it
-            is a numerical extrapolation, not a prediction (real rear
-            levels come from feed spillover, edge diffraction, and mesh
-            leakage, none of which are modeled). Use measured data or a
-            regulatory rear-lobe envelope for rear-hemisphere analysis.
+            Warnings about result quality. Each entry is a {code, message} object:
+            branch on the stable code, display the message. See the ApiWarning schema
+            for the full vocabulary.
           items:
-            type: string
+            $ref: '#/components/schemas/ApiWarning'
         metadata:
           $ref: '#/components/schemas/ComputationMetadata'
         calibration_status:
@@ -1510,23 +1500,11 @@ components:
         warnings:
           type: array
           description: >
-            Aggregated, deduplicated warnings across all cells (e.g.,
-            extrapolated cells, out-of-range queries, the off-axis honesty
-            warning for uncalibrated antennas when cells fall beyond ~3x the
-            first-null angle ~1.6*lambda/D — values there combine idealised
-            physical optics with a statistical Ruze sidelobe floor as an
-            incoherent power sum (best-estimate median, not a precise
-            per-antenna prediction) — the rear-hemisphere warning for ANY
-            antenna when cells fall more than
-            90 degrees off boresight, where the aperture-integration model has
-            no physical validity (on antennas served with uncorrected physics
-            the returned value there is the statistical sidelobe floor only;
-            on antennas with a correction surface it remains a numerical
-            extrapolation), and the degraded-accuracy warning for large feed
-            offsets (> 0.5*f, routed through the acknowledged ray-tracing stub;
-            real ray tracing is gated as feature F2)).
+            Aggregated, deduplicated warnings across all cells. Deduplication is on
+            the whole warning (code AND message), so a warning that fires at many
+            cells appears once. See the ApiWarning schema for the vocabulary.
           items:
-            type: string
+            $ref: '#/components/schemas/ApiWarning'
         metadata:
           type: object
           description: Computation metadata
@@ -1665,24 +1643,12 @@ components:
         warnings:
           type: array
           description: >
-            Aggregated, deduplicated warnings across all grid points (e.g.,
-            extrapolated points, the off-axis honesty warning for
-            uncalibrated antennas when grid points fall beyond ~3x the
-            first-null angle ~1.6*lambda/D — values there combine idealised
-            physical optics with a statistical Ruze sidelobe floor as an
-            incoherent power sum (best-estimate median, not a precise
-            per-antenna prediction) — the rear-hemisphere warning for ANY
-            antenna when grid points fall more
-            than 90 degrees off boresight, where the aperture-integration
-            model has no physical validity (on antennas served with
-            uncorrected physics the returned value there is the statistical
-            sidelobe floor only; on antennas with a correction surface it
-            remains a numerical extrapolation), and the degraded-accuracy
-            warning for large feed offsets (> 0.5*f, routed through the
-            acknowledged ray-tracing stub; real ray tracing is gated as
-            feature F2)).
+            Aggregated, deduplicated warnings across all grid points. Deduplication is
+            on the whole warning (code AND message), so a warning that fires at many
+            points appears once; points_extrapolated additionally summarises how many
+            points were extrapolated. See the ApiWarning schema for the vocabulary.
           items:
-            type: string
+            $ref: '#/components/schemas/ApiWarning'
         metadata:
           type: object
           properties:
@@ -1900,6 +1866,136 @@ components:
         memory_usage_mb:
           type: number
           nullable: true
+
+    ApiWarning:
+      type: object
+      description: |
+        A warning about result quality. Warnings never change the HTTP status: the
+        response is a successful computation that carries a caveat.
+
+        `code` is the contract and is safe to branch on; `message` is for humans and
+        may be reworded in any release. Several messages interpolate query-specific
+        values (thresholds, angles, percentages) — do not parse them.
+
+        On `/heatmap` and `/h3-heatmap` warnings are aggregated across all evaluated
+        points and deduplicated on the whole object (code AND message).
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+          description: |
+            Stable machine-readable warning code, always snake_case and always one of
+            the enumerated values — the service emits no other code (it is a closed
+            enum in `warnings.rs`, checked against this list by a CI drift test).
+
+            * `extrapolated` — the correction surface was evaluated outside its knot
+              range in at least one dimension; the correction is an extrapolation.
+            * `out_of_coverage` — the query falls outside the region a partially
+              calibrated antenna was measured over; the physics model is being
+              extrapolated into it.
+            * `correction_not_applied` — the antenna has a correction surface but it
+              was not applied to this query; the returned gain is raw physics.
+            * `uncalibrated` — modelled from design specifications, not measurements.
+              The message carries the accuracy estimates.
+            * `partially_calibrated` — calibration covers only part of the operating
+              envelope. The message carries the accuracy estimate.
+            * `off_axis_unvalidated` — the query is beyond ~3x the first-null angle
+              (~1.6*lambda/D, beamwidth-relative) on an antenna served with
+              uncorrected physics. Values there combine idealised physical optics
+              (no blockage, strut scatter, or edge diffraction) with a statistical
+              Ruze sidelobe floor as an incoherent power sum: a best-estimate MEDIAN
+              wide-angle level tracking measured earth-station statistics (NTIA
+              84-164), not a precise per-antenna prediction. Do not use in place of
+              calibrated data for interference or off-axis-EIRP analysis; prefer a
+              regulatory envelope such as the ITU-R S.580 mask.
+            * `rear_hemisphere_invalid` — the query is more than 90 degrees off
+              boresight. Fires for ANY antenna, calibrated or not: a
+              forward-hemisphere correction surface says nothing about back lobes.
+              The aperture-integration model has no physical validity behind the
+              reflector. On antennas served with uncorrected physics the returned
+              value is the statistical sidelobe floor only (the physical-optics term
+              is excluded there); on antennas with a correction surface it is a
+              numerical extrapolation, not a prediction. Real rear levels come from
+              feed spillover past the rim, edge diffraction, and mesh leakage, none
+              of which are modelled individually.
+            * `non_convergence` — the aperture integration exhausted its iteration
+              budget without meeting the convergence criterion; gain accuracy may be
+              degraded.
+            * `ray_trace_degraded` — the feed offset exceeds 0.5*f, so gain came from
+              the acknowledged ray-tracing stub. Real ray tracing is gated as feature
+              F2.
+            * `severe_feed_offset` — edge-case analysis found the feed displaced more
+              than 0.5*f from the focus. Reports the geometry; `ray_trace_degraded`
+              reports what the model did about it.
+            * `feed_offset_spillover_unmodeled` — the feed offset is in the 0.3*f–0.5*f
+              band, where the exact coma phase still applies but spillover efficiency
+              is not modelled.
+            * `spillover_significant` — estimated feed spillover exceeds 10% of
+              radiated power, enough to reduce aperture efficiency materially.
+            * `points_extrapolated` — `/heatmap` grid summary: how many evaluated
+              points carried `extrapolated` or `out_of_coverage`.
+            * `point_computation_failed` — at least one grid point (`/heatmap`) or
+              cell (`/h3-heatmap`) could not be evaluated. Those points are counted
+              in the response metadata and carry the failure sentinel.
+          enum:
+            - extrapolated
+            - out_of_coverage
+            - correction_not_applied
+            - uncalibrated
+            - partially_calibrated
+            - off_axis_unvalidated
+            - rear_hemisphere_invalid
+            - non_convergence
+            - ray_trace_degraded
+            - severe_feed_offset
+            - feed_offset_spillover_unmodeled
+            - spillover_significant
+            - points_extrapolated
+            - point_computation_failed
+        message:
+          type: string
+          description: >
+            Human-readable explanation. Not part of the stability contract — display
+            it, do not parse it.
+
+    GainError:
+      type: object
+      description: |
+        Why a single evaluation inside a batch produced no gain.
+
+        Carried by `GainResponse.error` on failed `/api/v1/gain/batch` items only. A
+        two-field subset of `ErrorResponse` drawing on the same `code` vocabulary, so
+        the failure class survives into the item: an item that blew the integration
+        budget reports `computation_budget_exceeded`, not a generic failure.
+
+        The field is `code` rather than `error` because it sits inside a member
+        already named `error`.
+      required:
+        - code
+        - message
+      properties:
+        code:
+          type: string
+          description: >
+            Machine-readable failure class, drawn from the same vocabulary as
+            ErrorResponse.error.
+          enum:
+            - antenna_not_found
+            - feed_not_found
+            - validation_error
+            - invalid_coordinate
+            - invalid_request_body
+            - not_implemented
+            - payload_too_large
+            - request_timeout
+            - computation_budget_exceeded
+            - service_overloaded
+            - internal_error
+        message:
+          type: string
+          description: Human-readable explanation.
 
     ErrorResponse:
       type: object

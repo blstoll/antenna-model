@@ -14,7 +14,10 @@
     "emitter_elevation_deg": 51.32655062386467
   },
   "warnings": [
-    "Antenna 'dsn_34m_uncalibrated' is uncalibrated (using design specifications). Absolute gain accuracy: ±3.0 dB, Loss accuracy: ±2.0 dB"
+    {
+      "code": "uncalibrated",
+      "message": "Antenna 'dsn_34m_uncalibrated' is uncalibrated (using design specifications). Absolute gain accuracy: ±3.0 dB, Loss accuracy: ±2.0 dB"
+    }
   ],
   "metadata": {
     "computation_time_ms": 0.0050420000000000005,
