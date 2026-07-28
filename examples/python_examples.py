@@ -81,7 +81,7 @@ class AntennaModelClient:
         vehicle_position: Dict[str, float],
         vehicle_attitude: List[float],
         reflector_boresight: Dict[str, float],
-        feed_position: Dict[str, float],
+        feed_pointing_location: Dict[str, float],
         emitter_position: Dict[str, float],
         frequency_mhz: float,
         pointing_frequency_mhz: float = None,
@@ -96,7 +96,7 @@ class AntennaModelClient:
             vehicle_position: Vehicle position dict with x, y, z
             vehicle_attitude: Normalized quaternion as a [w, x, y, z] list
             reflector_boresight: Reflector boresight position dict with x, y, z
-            feed_position: Feed position dict with x, y, z
+            feed_pointing_location: Earth location the beam is aimed at, dict with x, y, z
             emitter_position: Emitter position dict with x, y, z
             frequency_mhz: Operating frequency in MHz
             pointing_frequency_mhz: Optional pointing frequency for beam squint
@@ -111,7 +111,7 @@ class AntennaModelClient:
             "vehicle_position": vehicle_position,
             "vehicle_attitude": vehicle_attitude,
             "reflector_boresight": reflector_boresight,
-            "feed_position": feed_position,
+            "feed_pointing_location": feed_pointing_location,
             "emitter_position": emitter_position,
             "frequency_mhz": frequency_mhz,
             "include_reference": include_reference,
@@ -149,7 +149,7 @@ class AntennaModelClient:
         feed_id: str,
         vehicle_position: Dict[str, float],
         reflector_boresight: Dict[str, float],
-        feed_position: Dict[str, float],
+        feed_pointing_location: Dict[str, float],
         frequency_mhz: float,
         grid_config: Dict[str, Any],
         pointing_frequency_mhz: float = None,
@@ -162,7 +162,7 @@ class AntennaModelClient:
             feed_id: Feed identifier
             vehicle_position: Vehicle position dict with x, y, z
             reflector_boresight: Reflector boresight position dict
-            feed_position: Feed position dict
+            feed_pointing_location: Earth location the beam is aimed at, dict with x, y, z
             frequency_mhz: Operating frequency in MHz
             grid_config: Grid configuration dict
             pointing_frequency_mhz: Optional pointing frequency
@@ -175,7 +175,7 @@ class AntennaModelClient:
             "feed_id": feed_id,
             "vehicle_position": vehicle_position,
             "reflector_boresight": reflector_boresight,
-            "feed_position": feed_position,
+            "feed_pointing_location": feed_pointing_location,
             "frequency_mhz": frequency_mhz,
             "grid_config": grid_config,
         }
@@ -241,7 +241,7 @@ def main():
                     vehicle_position={"x": 6500000.0, "y": 0.0, "z": 0.0},
                     vehicle_attitude=[1.0, 0.0, 0.0, 0.0],
                     reflector_boresight={"x": 6500010.0, "y": 0.0, "z": 0.0},
-                    feed_position={"x": 6500005.0, "y": 0.0, "z": 0.0},
+                    feed_pointing_location={"x": 6500005.0, "y": 0.0, "z": 0.0},
                     emitter_position={"x": 7000000.0, "y": 0.0, "z": 500000.0},
                     frequency_mhz=8450.0,
                     include_reference=True,
@@ -265,7 +265,7 @@ def main():
                             "vehicle_position": {"x": 6500000.0, "y": 0.0, "z": 0.0},
                             "vehicle_attitude": [1.0, 0.0, 0.0, 0.0],
                             "reflector_boresight": {"x": 6500010.0, "y": 0.0, "z": 0.0},
-                            "feed_position": {"x": 6500005.0, "y": 0.0, "z": 0.0},
+                            "feed_pointing_location": {"x": 6500005.0, "y": 0.0, "z": 0.0},
                             "emitter_position": {"x": 7000000.0, "y": y, "z": 500000.0},
                             "frequency_mhz": 8450.0,
                             "include_reference": False,

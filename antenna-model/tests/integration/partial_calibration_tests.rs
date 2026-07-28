@@ -382,7 +382,7 @@ async fn test_uncalibrated_frequency_sweep() {
 
     // All gains should be a valid, finite dB value.
     //
-    // NOTE: The test request geometry places the feed_position near the vehicle
+    // NOTE: The test request geometry places the feed_pointing_location near the vehicle
     // (~5 m altitude offset) while the reflector boresight points to a satellite
     // 400 km away. This large angular offset causes a substantial lateral feed
     // displacement in the antenna frame (~3.4 m for f=1.85 m), well outside the
@@ -391,7 +391,7 @@ async fn test_uncalibrated_frequency_sweep() {
     // spurious defocus term), the gain at these off-axis angles is significantly
     // reduced from the theoretical boresight maximum. The bounds below reflect
     // the physically correct output for this geometry; tighten them only after
-    // the feed_position geometry is corrected to represent a realistic pointing.
+    // the feed_pointing_location geometry is corrected to represent a realistic pointing.
     for gain in &gains {
         assert!(
             gain.is_finite() && *gain > -60.0 && *gain < 65.0,
@@ -459,7 +459,7 @@ async fn test_loss_computation_consistency() {
 
     // Loss should be a valid (finite) dB number and non-negative.
     //
-    // NOTE: The test request geometry places the feed_position near the vehicle
+    // NOTE: The test request geometry places the feed_pointing_location near the vehicle
     // (~5 m altitude offset) while the reflector boresight points to a satellite
     // 400 km away. This near-perpendicular angle causes compute_feed_position_from_pointing
     // to compute a large lateral feed displacement (~3.4–3.7 m for these dishes),
@@ -468,7 +468,7 @@ async fn test_loss_computation_consistency() {
     // The old tight bounds (-1..5 dB simple, 5..25 dB uncal) assumed near-boresight
     // gain, which was only plausible under the wrong defocus phase.
     // These bounds simply verify the computation runs and produces finite results;
-    // tighten after fixing the feed_position geometry to a realistic far-field target.
+    // tighten after fixing the feed_pointing_location geometry to a realistic far-field target.
     assert!(
         simple_loss.is_finite() && (0.0..100.0).contains(&simple_loss),
         "Simple loss {} dB is not a valid loss value",

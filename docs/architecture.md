@@ -646,7 +646,7 @@ All 3D positions support automatic detection of coordinate system based on magni
     "y": 4510732.0,
     "z": 3488950.0
   },
-  "feed_position": {
+  "feed_pointing_location": {
     "x": 4510731.5,
     "y": 4510731.5,
     "z": 3488870.0
@@ -682,7 +682,7 @@ All 3D positions support automatic detection of coordinate system based on magni
     "y": 35.0,
     "z": 400000.0
   },
-  "feed_position": {
+  "feed_pointing_location": {
     "x": -118.124,
     "y": 34.568,
     "z": 105.0
@@ -707,7 +707,7 @@ All 3D positions support automatic detection of coordinate system based on magni
   "reference_gain_db": 43.5,
   "loss_db": 2.3,
   "geometry": {
-    "feed_offset_meters": {
+    "physical_feed_offset_m": {
       "x": 0.05,
       "y": 0.02,
       "z": 0.01
@@ -778,7 +778,7 @@ All 3D positions support automatic detection of coordinate system based on magni
       "vehicle_position": {"x": 4510731.123, "y": 4510731.456, "z": 3488865.789},
       "vehicle_attitude": {"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0},
       "reflector_boresight": {"x": 4510732.0, "y": 4510732.0, "z": 3488950.0},
-      "feed_position": {"x": 4510731.5, "y": 4510731.5, "z": 3488870.0},
+      "feed_pointing_location": {"x": 4510731.5, "y": 4510731.5, "z": 3488870.0},
       "emitter_position": {"x": 4520000.0, "y": 4520000.0, "z": 3500000.0},
       "frequency_mhz": 8400.0,
       "include_reference": false
@@ -789,7 +789,7 @@ All 3D positions support automatic detection of coordinate system based on magni
       "vehicle_position": {"x": -118.1234, "y": 34.5678, "z": 100.0},
       "vehicle_attitude": {"roll_deg": 0.0, "pitch_deg": 0.0, "yaw_deg": 0.0},
       "reflector_boresight": {"x": -117.0, "y": 35.0, "z": 400000.0},
-      "feed_position": {"x": -118.124, "y": 34.568, "z": 105.0},
+      "feed_pointing_location": {"x": -118.124, "y": 34.568, "z": 105.0},
       "emitter_position": {"x": -117.0, "y": 35.0, "z": 400000.0},
       "frequency_mhz": 2200.0,
       "include_reference": false
@@ -807,7 +807,7 @@ All 3D positions support automatic detection of coordinate system based on magni
       "feed_id": "x_band_feed",
       "gain_db": 41.2,
       "geometry": {
-        "feed_offset_meters": {"x": 0.05, "y": 0.02, "z": 0.01},
+        "physical_feed_offset_m": {"x": 0.05, "y": 0.02, "z": 0.01},
         "emitter_azimuth_deg": 185.5,
         "emitter_elevation_deg": 32.1
       },
@@ -821,7 +821,7 @@ All 3D positions support automatic detection of coordinate system based on magni
       "feed_id": "s_band_feed",
       "gain_db": 38.7,
       "geometry": {
-        "feed_offset_meters": {"x": 0.0, "y": 0.0, "z": 0.0},
+        "physical_feed_offset_m": {"x": 0.0, "y": 0.0, "z": 0.0},
         "emitter_azimuth_deg": 45.2,
         "emitter_elevation_deg": 78.9
       },
@@ -859,7 +859,7 @@ All 3D positions support automatic detection of coordinate system based on magni
     "y": 4510732.0,
     "z": 3488950.0
   },
-  "feed_position": {
+  "feed_pointing_location": {
     "x": 4510731.5,
     "y": 4510731.5,
     "z": 3488870.0
@@ -903,7 +903,7 @@ All 3D positions support automatic detection of coordinate system based on magni
     "y": 4510732.0,
     "z": 3488950.0
   },
-  "feed_position": {
+  "feed_pointing_location": {
     "x": 4510731.5,
     "y": 4510731.5,
     "z": 3488870.0

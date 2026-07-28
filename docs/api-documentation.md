@@ -222,7 +222,7 @@ Each antenna can have multiple feeds with independent calibrations. Use composit
 path loss, total path loss, and optionally G/T for every cell.
 
 **Grid placement and size.** The grid is centred on the H3 cell containing
-`feed_position` — the Earth location the beam is *aimed at*, not the feed's physical
+`feed_pointing_location` — the Earth location the beam is *aimed at*, not the feed's physical
 location on the antenna (see `docs/domain-contract.md`) — and extends `n_rings` rings
 outward, giving `1 + 3·n_rings·(n_rings + 1)` cells:
 
@@ -252,7 +252,7 @@ response.
   the peak cell, and can be re-derived from the response's own numbers.
 
   The peak of the *grid* is not necessarily the peak of the *beam*: the grid is centred on
-  `feed_position`, and if the beam peak falls outside the rings you requested, every cell's
+  `feed_pointing_location`, and if the beam peak falls outside the rings you requested, every cell's
   loss is understated by the difference. Widen `n_rings` if you need the true peak in view.
   (`/api/v1/heatmap` carries the same caveat.)
 
@@ -295,7 +295,7 @@ curl -X POST http://localhost:3000/api/v1/gain \
     "vehicle_position": {"x": -118.1234, "y": 34.5678, "z": 100.0},
     "vehicle_attitude": [1.0, 0.0, 0.0, 0.0],
     "reflector_boresight": {"x": -117.0, "y": 35.0, "z": 400000.0},
-    "feed_position": {"x": -118.124, "y": 34.568, "z": 105.0},
+    "feed_pointing_location": {"x": -118.124, "y": 34.568, "z": 105.0},
     "emitter_position": {"x": -117.0, "y": 35.0, "z": 400000.0},
     "frequency_mhz": 8400.0,
     "include_reference": true
@@ -319,7 +319,7 @@ curl -X POST http://localhost:3000/api/v1/h3-heatmap \
     "feed_id": "s_band_feed",
     "vehicle_position": {"x": -116.889, "y": 35.4267, "z": 1036.0, "coordinate_system": "geodetic"},
     "reflector_boresight": {"x": -116.45, "y": 35.4267, "z": 800.0, "coordinate_system": "geodetic"},
-    "feed_position": {"x": -116.45, "y": 35.4267, "z": 800.0, "coordinate_system": "geodetic"},
+    "feed_pointing_location": {"x": -116.45, "y": 35.4267, "z": 800.0, "coordinate_system": "geodetic"},
     "frequency_mhz": 2200.0,
     "n_rings": 2,
     "h3_resolution": 7,
@@ -416,7 +416,7 @@ const response = await fetch('http://localhost:3000/api/v1/heatmap', {
     "vehicle_position": { "x": 4510731.123, "y": 4510731.456, "z": 3488865.789 },
     "vehicle_attitude": [1.0, 0.0, 0.0, 0.0],
     "reflector_boresight": { "x": 4510732.0, "y": 4510732.0, "z": 3488950.0 },
-    "feed_position": { "x": 4510731.5, "y": 4510731.5, "z": 3488870.0 },
+    "feed_pointing_location": { "x": 4510731.5, "y": 4510731.5, "z": 3488870.0 },
     "frequency_mhz": 8400.0,
     "grid_config": {
       "grid_type": "rectangular",
@@ -454,7 +454,7 @@ Example response:
   "reference_gain_db": 43.5,
   "loss_db": 2.3,
   "geometry": {
-    "feed_offset_meters": { "x": 0.05, "y": 0.02, "z": 0.01 },
+    "physical_feed_offset_m": { "x": 0.05, "y": 0.02, "z": 0.01 },
     "emitter_azimuth_deg": 185.5,
     "emitter_elevation_deg": 32.1
   },

@@ -45,3 +45,9 @@ perf.data*
 # Temporary files
 tmp/
 temp/
+
+# Python bytecode. Nothing in CI compiles examples/python_examples.py, but a
+# `python3 -m py_compile` run by hand drops a __pycache__ beside it, and a
+# `git add -A` then tracks the .pyc (it did once, during C8 stage 1).
+__pycache__/
+*.pyc

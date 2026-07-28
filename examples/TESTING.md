@@ -96,7 +96,7 @@ All examples have been tested against the running service:
   "feed_id": "x_band",
   "gain_db": 67.70242948159164,
   "geometry": {
-    "feed_offset_meters": {"x": -5.0, "y": 0.0, "z": 0.0},
+    "physical_feed_offset_m": {"x": -5.0, "y": 0.0, "z": 0.0},
     "emitter_azimuth_deg": 0.0,
     "emitter_elevation_deg": 45.0
   },

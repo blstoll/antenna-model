@@ -100,14 +100,14 @@ fn create_heatmap_request(grid_size: &str) -> HeatmapRequest {
     let reflector_boresight = Position3D::new(0.0, 0.0, 10.0);
 
     // Feed position (at focal point: 10m + 2.0m focal length for test_simple antenna)
-    let feed_position = Position3D::new(0.0, 0.0, 12.0);
+    let feed_pointing_location = Position3D::new(0.0, 0.0, 12.0);
 
     HeatmapRequest {
         antenna_id: "test_simple".to_string(),
         feed_id: "primary".to_string(),
         vehicle_position,
         reflector_boresight,
-        feed_position,
+        feed_pointing_location,
         frequency_mhz: 8400.0,
         pointing_frequency_mhz: None,
         grid_config: create_grid_config(grid_size),

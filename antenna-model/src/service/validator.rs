@@ -86,7 +86,7 @@ pub fn validate_gain_request(
     // Validate all positions
     validate_position(&request.vehicle_position, "vehicle_position")?;
     validate_position(&request.reflector_boresight, "reflector_boresight")?;
-    validate_position(&request.feed_position, "feed_position")?;
+    validate_position(&request.feed_pointing_location, "feed_pointing_location")?;
     validate_position(&request.emitter_position, "emitter_position")?;
 
     // Validate operating frequency
@@ -189,7 +189,7 @@ pub fn validate_heatmap_request(
     // Validate all positions
     validate_position(&request.vehicle_position, "vehicle_position")?;
     validate_position(&request.reflector_boresight, "reflector_boresight")?;
-    validate_position(&request.feed_position, "feed_position")?;
+    validate_position(&request.feed_pointing_location, "feed_pointing_location")?;
 
     // Validate frequency
     validate_frequency(request.frequency_mhz, "frequency_mhz")?;
@@ -220,7 +220,7 @@ pub fn validate_h3_link_budget_request(req: &H3LinkBudgetRequest) -> ValidationR
     // Validate all positions
     validate_position(&req.vehicle_position, "vehicle_position")?;
     validate_position(&req.reflector_boresight, "reflector_boresight")?;
-    validate_position(&req.feed_position, "feed_position")?;
+    validate_position(&req.feed_pointing_location, "feed_pointing_location")?;
 
     // Validate frequency (handles NaN and enforces [100, 50000] MHz range)
     validate_frequency(req.frequency_mhz, "frequency_mhz")?;
@@ -545,7 +545,11 @@ pub fn coordinate_ambiguity_warnings(request: &GainRequest) -> Vec<String> {
         "reflector_boresight",
         &mut warnings,
     );
-    warn_if_ambiguous(&request.feed_position, "feed_position", &mut warnings);
+    warn_if_ambiguous(
+        &request.feed_pointing_location,
+        "feed_pointing_location",
+        &mut warnings,
+    );
     warn_if_ambiguous(&request.emitter_position, "emitter_position", &mut warnings);
     warnings
 }
@@ -732,7 +736,7 @@ mod tests {
             feed_id: "feed".to_string(),
             vehicle_position: Position3D::new(-118.0, 34.0, 100.0),
             reflector_boresight: Position3D::new(-118.0, 34.0, 110.0),
-            feed_position: Position3D::new(-118.0, 34.0, 105.0),
+            feed_pointing_location: Position3D::new(-118.0, 34.0, 105.0),
             // LEO altitude in geodetic form, no tag — ambiguous
             emitter_position: Position3D::new(0.0, 0.0, 500_000.0),
             frequency_mhz: 8400.0,
@@ -1005,7 +1009,7 @@ mod tests {
             feed_id: "feed_0".to_string(),
             vehicle_position: Position3D::new(-118.0, 34.0, 100.0),
             reflector_boresight: Position3D::new(-118.1, 34.1, 200.0),
-            feed_position: Position3D::new(-118.0, 34.0, 150.0),
+            feed_pointing_location: Position3D::new(-118.0, 34.0, 150.0),
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: None,
             n_rings: 3,
@@ -1089,12 +1093,15 @@ mod tests {
     }
 
     #[test]
-    fn test_h3_request_invalid_feed_position() {
+    fn test_h3_request_invalid_feed_pointing_location() {
         let mut req = valid_h3_request();
-        req.feed_position = Position3D::new(-118.0, 100.0, 150.0);
+        req.feed_pointing_location = Position3D::new(-118.0, 100.0, 150.0);
         let result = validate_h3_link_budget_request(&req);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("feed_position"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("feed_pointing_location"));
     }
 
     // --- S6: temperature_k, pointing_frequency_mhz, h3_resolution ---
@@ -1197,7 +1204,7 @@ mod tests {
             feed_id: "test_feed".to_string(),
             vehicle_position: Position3D::new(-118.0, 34.0, 100.0),
             reflector_boresight: Position3D::new(-118.1, 34.1, 200.0),
-            feed_position: Position3D::new(-118.0, 34.0, 150.0),
+            feed_pointing_location: Position3D::new(-118.0, 34.0, 150.0),
             emitter_position: Position3D::new(-118.0, 34.0, 35_786_000.0),
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: None,
@@ -1297,7 +1304,7 @@ mod tests {
                 feed_id: "test_feed".to_string(),
                 vehicle_position: Position3D::new(0.0, 0.0, 0.0),
                 reflector_boresight: Position3D::new(0.0, 0.0, 0.0),
-                feed_position: Position3D::new(0.0, 0.0, 0.0),
+                feed_pointing_location: Position3D::new(0.0, 0.0, 0.0),
                 emitter_position: Position3D::new(0.0, 0.0, 0.0),
                 frequency_mhz: 8400.0,
                 pointing_frequency_mhz: None,

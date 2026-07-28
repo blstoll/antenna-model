@@ -165,7 +165,7 @@ pub async fn status(state: Data<&Arc<AppState>>) -> Json<StatusResponse> {
 /// - feed_id: Feed identifier (for multi-feed antennas)
 /// - vehicle_position: Vehicle position (ECEF or Geodetic, auto-detected)
 /// - reflector_boresight: Reflector boresight position (ECEF or Geodetic)
-/// - feed_position: Feed position (ECEF or Geodetic)
+/// - feed_pointing_location: Earth location the feed's beam is aimed at (ECEF or Geodetic)
 /// - emitter_position: Emitter position (ECEF or Geodetic)
 /// - frequency_mhz: Operating frequency in MHz
 /// - include_reference: Whether to include reference gain in response
@@ -187,7 +187,7 @@ pub async fn status(state: Data<&Arc<AppState>>) -> Json<StatusResponse> {
 ///   "feed_id": "feed_1",
 ///   "vehicle_position": {"x": 6500000.0, "y": 0.0, "z": 0.0},
 ///   "reflector_boresight": {"x": 6500000.0, "y": 0.0, "z": 0.0},
-///   "feed_position": {"x": 6500000.0, "y": 0.0, "z": 0.0},
+///   "feed_pointing_location": {"x": 6500000.0, "y": 0.0, "z": 0.0},
 ///   "emitter_position": {"x": 42164000.0, "y": 0.0, "z": 0.0},
 ///   "frequency_mhz": 11450.0,
 ///   "include_reference": true
@@ -311,7 +311,7 @@ pub async fn compute_gain(
 ///       "feed_id": "feed_1",
 ///       "vehicle_position": {"x": 6500000.0, "y": 0.0, "z": 0.0},
 ///       "reflector_boresight": {"x": 6500000.0, "y": 0.0, "z": 0.0},
-///       "feed_position": {"x": 6500000.0, "y": 0.0, "z": 0.0},
+///       "feed_pointing_location": {"x": 6500000.0, "y": 0.0, "z": 0.0},
 ///       "emitter_position": {"x": 42164000.0, "y": 0.0, "z": 0.0},
 ///       "frequency_mhz": 11450.0,
 ///       "include_reference": false
@@ -419,7 +419,7 @@ pub async fn compute_gain_batch(
 /// - feed_id: Feed identifier
 /// - vehicle_position: 3D position (ECEF or Geodetic)
 /// - reflector_boresight: 3D position (ECEF or Geodetic)
-/// - feed_position: 3D position (ECEF or Geodetic)
+/// - feed_pointing_location: Earth location the feed's beam is aimed at (ECEF or Geodetic)
 /// - frequency_mhz: Operating frequency
 /// - pointing_frequency_mhz: Optional pointing frequency for beam squint
 /// - grid_config: Grid configuration (rectangular or H3)
@@ -448,7 +448,7 @@ pub async fn compute_gain_batch(
 ///   "feed_id": "x_band_feed",
 ///   "vehicle_position": {"x": 6500000.0, "y": 0.0, "z": 0.0},
 ///   "reflector_boresight": {"x": 6500000.0, "y": 0.0, "z": 0.0},
-///   "feed_position": {"x": 6500000.0, "y": 0.0, "z": 0.0},
+///   "feed_pointing_location": {"x": 6500000.0, "y": 0.0, "z": 0.0},
 ///   "frequency_mhz": 8400.0,
 ///   "grid_config": {
 ///     "grid_type": "rectangular",
@@ -674,7 +674,7 @@ pub async fn get_antenna_details(
         if let Some(cal) = state.repository.get_calibration(&antenna_id, feed_id) {
             feeds.push(crate::api::schemas::FeedInfo {
                 id: feed_id.clone(),
-                position_offset: crate::api::schemas::Vector3D {
+                design_feed_offset_m: crate::api::schemas::Vector3D {
                     x: cal.physical_config.feed.position.0,
                     y: cal.physical_config.feed.position.1,
                     z: cal.physical_config.feed.position.2,
@@ -768,7 +768,7 @@ pub async fn get_antenna_details(
 ///   "feeds": [
 ///     {
 ///       "id": "x_band",
-///       "position_offset": {"x": 0.05, "y": 0.02, "z": 0.01},
+///       "design_feed_offset_m": {"x": 0.05, "y": 0.02, "z": 0.01},
 ///       "frequency_range_mhz": [7100.0, 8500.0],
 ///       "q_factor": 8.0
 ///     }
@@ -800,7 +800,7 @@ pub async fn list_antenna_feeds(
         if let Some(cal) = state.repository.get_calibration(&antenna_id, feed_id) {
             feeds.push(crate::api::schemas::FeedInfo {
                 id: feed_id.clone(),
-                position_offset: crate::api::schemas::Vector3D {
+                design_feed_offset_m: crate::api::schemas::Vector3D {
                     x: cal.physical_config.feed.position.0,
                     y: cal.physical_config.feed.position.1,
                     z: cal.physical_config.feed.position.2,
@@ -831,7 +831,7 @@ pub async fn list_antenna_feeds(
 /// # Response
 /// Returns HTTP 200 with JSON body containing:
 /// - id: Feed identifier
-/// - position_offset: Feed position offset from focal point (meters)
+/// - design_feed_offset_m: Feed design offset from focal point (meters)
 /// - frequency_range_mhz: Valid frequency range [min, max] in MHz
 /// - q_factor: Feed pattern q-factor
 ///
@@ -841,7 +841,7 @@ pub async fn list_antenna_feeds(
 /// ```json
 /// {
 ///   "id": "x_band",
-///   "position_offset": {"x": 0.05, "y": 0.02, "z": 0.01},
+///   "design_feed_offset_m": {"x": 0.05, "y": 0.02, "z": 0.01},
 ///   "frequency_range_mhz": [7100.0, 8500.0],
 ///   "q_factor": 8.0
 /// }
@@ -862,7 +862,7 @@ pub async fn get_feed_details(
         Some(cal) => {
             let feed_info = crate::api::schemas::FeedInfo {
                 id: feed_id.clone(),
-                position_offset: crate::api::schemas::Vector3D {
+                design_feed_offset_m: crate::api::schemas::Vector3D {
                     x: cal.physical_config.feed.position.0,
                     y: cal.physical_config.feed.position.1,
                     z: cal.physical_config.feed.position.2,
@@ -919,7 +919,7 @@ pub async fn get_feed_details(
 /// - feed_id: Feed identifier
 /// - vehicle_position: 3D position (ECEF or Geodetic)
 /// - reflector_boresight: 3D position (ECEF or Geodetic)
-/// - feed_position: 3D position (ECEF or Geodetic)
+/// - feed_pointing_location: Earth location the feed's beam is aimed at (ECEF or Geodetic)
 /// - frequency_mhz: Operating frequency in MHz (must be positive)
 /// - n_rings: Number of H3 rings around center cell (max 10)
 /// - h3_resolution: Optional H3 resolution (0-15); derived from frequency when absent

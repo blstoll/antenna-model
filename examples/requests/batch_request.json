@@ -14,7 +14,7 @@
         "y": 0.0,
         "z": 0.0
       },
-      "feed_position": {
+      "feed_pointing_location": {
         "x": 6500005.0,
         "y": 0.0,
         "z": 0.0
@@ -41,7 +41,7 @@
         "y": 0.0,
         "z": 0.0
       },
-      "feed_position": {
+      "feed_pointing_location": {
         "x": 6500005.0,
         "y": 0.0,
         "z": 0.0
@@ -68,7 +68,7 @@
         "y": 0.0,
         "z": 0.0
       },
-      "feed_position": {
+      "feed_pointing_location": {
         "x": 6500005.0,
         "y": 0.0,
         "z": 0.0

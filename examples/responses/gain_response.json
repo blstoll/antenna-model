@@ -5,7 +5,7 @@
   "reference_gain_db": 67.70242948159164,
   "loss_db": 3371052.8196232687,
   "geometry": {
-    "feed_offset_meters": {
+    "physical_feed_offset_m": {
       "x": -5.0,
       "y": 0.0,
       "z": 0.0

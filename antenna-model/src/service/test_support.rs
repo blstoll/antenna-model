@@ -41,7 +41,7 @@ pub(crate) fn rear_hemisphere_request() -> GainRequest {
         vehicle_position: ecef(-118.1234, 34.5678, 100.0),
         reflector_boresight: ecef(-117.0, 35.0, 400_000.0),
         // Feed aimed at boresight target → feed at focus → StandardPhysicalOptics.
-        feed_position: ecef(-117.0, 35.0, 400_000.0),
+        feed_pointing_location: ecef(-117.0, 35.0, 400_000.0),
         emitter_position: ecef(-120.0, 30.0, 0.0),
         frequency_mhz: 8400.0,
         pointing_frequency_mhz: None,

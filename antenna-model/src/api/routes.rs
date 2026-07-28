@@ -914,7 +914,7 @@ mod tests {
         assert_eq!(feed1.get("id").string(), "s_band");
         assert_eq!(feed1.get("q_factor").f64(), 7.0);
 
-        let pos1 = feed1.get("position_offset").object();
+        let pos1 = feed1.get("design_feed_offset_m").object();
         assert_eq!(pos1.get("x").f64(), 0.0);
         assert_eq!(pos1.get("y").f64(), 0.0);
         assert_eq!(pos1.get("z").f64(), 0.0);
@@ -928,7 +928,7 @@ mod tests {
         assert_eq!(feed2.get("id").string(), "x_band");
         assert_eq!(feed2.get("q_factor").f64(), 8.0);
 
-        let pos2 = feed2.get("position_offset").object();
+        let pos2 = feed2.get("design_feed_offset_m").object();
         assert_eq!(pos2.get("x").f64(), 0.05);
         assert_eq!(pos2.get("y").f64(), 0.02);
         assert_eq!(pos2.get("z").f64(), 0.01);
@@ -966,7 +966,7 @@ mod tests {
         assert_eq!(json_value.get("id").string(), "x_band");
         assert_eq!(json_value.get("q_factor").f64(), 8.0);
 
-        let position = json_value.get("position_offset").object();
+        let position = json_value.get("design_feed_offset_m").object();
         assert_eq!(position.get("x").f64(), 0.05);
         assert_eq!(position.get("y").f64(), 0.02);
         assert_eq!(position.get("z").f64(), 0.01);

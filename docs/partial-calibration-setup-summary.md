@@ -178,7 +178,7 @@ curl -X POST http://localhost:3000/api/v1/gain \
     "vehicle_position": {"x": -118.0, "y": 34.0, "z": 100.0},
     "vehicle_attitude": {"w": 1.0, "x": 0.0, "y": 0.0, "z": 0.0},
     "reflector_boresight": {"x": -117.0, "y": 35.0, "z": 400000.0},
-    "feed_position": {"x": -118.0, "y": 34.0, "z": 105.0},
+    "feed_pointing_location": {"x": -118.0, "y": 34.0, "z": 105.0},
     "emitter_position": {"x": -117.0, "y": 35.0, "z": 400000.0},
     "frequency_mhz": 8400.0,
     "include_reference": true

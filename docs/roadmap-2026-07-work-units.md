@@ -44,6 +44,13 @@ G1 ─┬─ G2 ── G3
     ├─ C3 ─ C4 ─ C2 ─ C9 ─ C8 ─ C7           │
     │  C9 DONE 2026-07-26 (loss_db now peak- │
     │      referenced on both heatmaps)      │
+    │  C8 STAGE 1 OF 4 DONE 2026-07-26 (the  │
+    │      aim-point field renames; stages   │
+    │      2–4 remain before C7 can freeze)  │
+    │  C12, C13, C14 filed 2026-07-26 out of │
+    │      C8 stage 1's findings — none are  │
+    │      stage 1's to fix (each moves a    │
+    │      contract or a computed value)     │
     │  C1 DONE 2026-07-25 (did not fold into │
     │      C8; C9 then C8 stage 4 update it) │
     │  C10, C11 DONE 2026-07-25 (both filed  │
@@ -1688,8 +1695,226 @@ as a later feature if a consumer ever needs cross-request comparability.
   (`reference_gain_db − gain_db`, ideal-aperture referenced, `evaluator.rs:336-411`) and is not
   a grid quantity at all.
 
+### C12 — `CalibrationInfo.rmse_db` / `r_squared`: documented as omitted, emitted as `null` — Effort: S
+
+**The defect.** `antenna-model/src/api/schemas.rs:846,850` document these two fields as
+*"(None for uncalibrated antennas)"*, and both carry
+`#[serde(skip_serializing_if = "Option::is_none")]` (`:847,851`) — which reads as "omitted
+from the response body for uncalibrated antennas". **The code cannot do that.** Three
+places have to line up and none of them do:
+
+- `antenna-model/src/data/types.rs:148,151` types the underlying `CalibrationMetadata`
+  fields as plain `f64`, so `None` is not even representable upstream.
+- `antenna-model/src/data/repository.rs:259-260` fills them with `f64::NAN` for design-spec
+  (uncalibrated) antennas — the sentinel the `Option` was supposed to be.
+- `antenna-model/src/api/handlers.rs:701-702` — the only `CalibrationInfo` construction in
+  the repo — wraps them in `Some(...)` unconditionally.
+
+The `skip_serializing_if` attribute therefore never fires, and `GET /api/v1/antennas/{id}`
+emits `"rmse_db": null, "r_squared": null` on every uncalibrated antenna. This is the same
+hazard class C2 called out for `/gain/batch` (a JSON `null` under HTTP 200 for a field the
+schema declares as a number), reached by a different route: `f64::NAN` has no JSON
+encoding, so `serde_json` writes `null`.
+
+**Why it survived.** Nothing pins the *uncalibrated* response shape.
+`antenna-model/src/api/routes.rs:867` asserts `rmse_db` only on the calibrated path, and all
+four `.bin` antennas are `enabled: false` (unit **D9**), so the only shape actually served
+is the one nothing tests.
+
+**Options** (a contract call either way — this is why it is a unit and not a patch):
+1. **Map `NaN` → `None` in `handlers.rs`.** The attribute starts firing, the field is
+   genuinely absent for uncalibrated antennas, and the existing doc comments become true.
+   Cheapest, and it makes the type's intent real; `num_measurements: 0` already carries the
+   "no measurements" signal for a client that needs to branch.
+2. **Delete the two doc comments and the two `skip_serializing_if` attributes**, and declare
+   `"rmse_db": null` the contract for uncalibrated antennas. Also defensible — but then the
+   `null`-under-200 shape must be documented in openapi + `docs/api-documentation.md`
+   deliberately, not by omission.
+
+Either way, add a test that asserts the *uncalibrated* body (the missing coverage above),
+and update `examples/responses/antenna_details_response.json`, whose current `null`s are
+correct today and would become wrong under option 1.
+
+**Why it was not fixed in C8 stage 1.** Both options change the response shape, and stage 1's
+charter is a pure rename that moves no value and no shape. Filed per standing rule 5. Natural
+home is **C8 stage 4** (spec completeness) or a standalone unit before **C7** freezes the
+contract; the decision should be recorded in the register first.
+
+**Found** 2026-07-26 during C8 stage 1 Task 2. The new `examples/responses/` drift guard
+initially misread the *correct* `null`s in `antenna_details_response.json` as stale keys and
+deleted them; that was caught in review and reverted, and the guard now exempts null-valued
+sources for exactly this reason.
+
+### C13 — `design_feed_offset_m`'s origin is producer-dependent (vertex vs focus) — Effort: S/M
+
+**The defect.** The API documents this field as the feed's offset **from the focal point** —
+`antenna-model/src/api/schemas.rs:803` (the `FeedInfo` docstring) and
+`antenna-model/src/api/handlers.rs:834` (the handler docstring). One of the two producers of
+the underlying artifact field disagrees:
+
+- **Design-spec path (focus-relative — matches the doc).**
+  `calibration_data/antennas.yaml` uses `position: [0.0, 0.0, 0.0]` to mean "feed at the
+  focus" (`:118,163,209,265,295`), and `antenna-model/src/data/repository.rs:232-235` maps
+  those three numbers into `FeedParameters.position` verbatim.
+- **`calibrate` path (vertex-relative — contradicts the doc).**
+  `calibrate/src/main.rs:696` writes `feed_position_m: (0.0, 0.0, focal_length_m)` under the
+  comment *"On-axis configuration: feed at the focal point."* Same intent, different origin.
+
+Consuming code assumes the design-spec convention. `antenna-model/src/service/evaluator.rs:170-174`
+adds `design_pos` to a steering position that is **already vertex-origin** —
+`compute_feed_position_from_pointing` → `to_feed_position_with_bdf`, which returns
+`(dx, dy, focal_length + dz)` (`antenna-model/src/model/coordinates.rs:250`) — and the sum is
+converted to focus-relative once, by the single `− focal_length_m` at `evaluator.rs:181`. A
+`.bin`-calibrated antenna would therefore land at z ≈ 2f and report
+`GeometryInfo.physical_feed_offset_m.z ≈ f` instead of ≈ 0: a focal-length-sized phantom
+axial defocus on every request, plus a `FeedInfo.design_feed_offset_m` that means something
+different depending on which tool produced the artifact.
+
+**Latent only.** All four antennas that reference a `.bin` artifact are `enabled: false`, so
+no served response takes the `calibrate` path today — cross-reference unit **D9**, which owns
+the artifact-shipping story. D9 and this unit must land together or D9 ships the bug.
+
+**Options:**
+1. **Make `calibrate` focus-relative** (`(0.0, 0.0, 0.0)` for an on-axis feed), matching
+   `antennas.yaml`, the API docstrings, and `evaluator.rs`'s arithmetic. One line plus its
+   comment; nothing in the service moves.
+2. **Make the artifact field vertex-relative** and subtract `f` at the design-spec loader
+   instead. More churn, and it puts the frame conversion in the loader rather than at the one
+   place that already does it.
+
+Whichever is chosen, state the origin in the field's own doc (`data/types.rs`) so a third
+producer cannot guess wrong, and add a test that an on-axis feed from *each* producer yields
+`physical_feed_offset_m ≈ (0,0,0)` at zero steering — the assertion that would have caught this.
+
+**Why it was not fixed in C8 stage 1.** Fixing it moves a computed value
+(`physical_feed_offset_m`, and the gain that depends on the resulting aperture phase), which
+stage 1's charter explicitly forbids: "no number moved" is the property that makes the rename
+pass reviewable.
+
+**Found** 2026-07-26 by the C8 stage 1 Task 4 review, while confirming that the renamed
+response fields describe what the code actually computes.
+
+### C14 — `openapi.yaml`'s feed-listing surface disagrees with the service — Effort: S
+
+**The defect.** Two adjacent, pre-existing mismatches on the feed endpoints. Both predate C8;
+stage 1 corrected only the one field it renamed.
+
+**(a) The `FeedInfo` component (`openapi.yaml:1751`) declares six properties; two are right.**
+Against the Rust type at `antenna-model/src/api/schemas.rs:799-816`:
+
+| openapi declares | service emits | verdict |
+|---|---|---|
+| `feed_id` | `id` | wrong name |
+| `name` | — | no emitter produces it |
+| `design_feed_offset_m` | `design_feed_offset_m` | ✅ (renamed by C8 stage 1) |
+| `q_factor` | `q_factor` | ✅ |
+| `phase_center_offset_m` | — | no emitter produces it |
+| `frequency_range` | `frequency_range_mhz` | wrong name only — the array-of-2 shape is correct |
+
+Both constructions of `FeedInfo` in the repo (`antenna-model/src/api/handlers.rs:801-809` for
+the list endpoint, `:863-871` for the detail endpoint) emit exactly the four Rust fields, so
+a client coding to the spec would look up `feed_id` and `frequency_range` and find neither.
+
+**(b) The list-feeds 200 wrapper (`openapi.yaml:974-981`) declares an `antenna_id` that is
+never sent.** The spec says the body is `{antenna_id, feeds}`; the handler returns
+`Ok(Json(json!({ "feeds": feeds })))` (`antenna-model/src/api/handlers.rs:819`) — `feeds` only.
+
+**What stage 1 left behind, and why it is not enough.** Stage 1 renamed
+`position_offset` → `design_feed_offset_m` in the component and left an in-file `# DRIFT`
+comment on the `FeedInfo` schema (`openapi.yaml:1753-1758`) flagging the rest for the next
+editor. That comment is a stopgap with two known holes: **every YAML parser strips it**, so it
+is invisible to Swagger UI, codegen, and C7's future guard alike; and it documents only (a),
+not the (b) wrapper.
+
+**Options:**
+1. **Fix as part of C8 stage 4** (spec completeness — "openapi.yaml describes every registered
+   route with post-C8 schemas"). This is squarely stage 4's job, and it removes the `# DRIFT`
+   comment rather than leaving a stripped-at-parse-time note in the shipped spec.
+2. **Let C7's drift guard force it.** C7 as scoped asserts the *path+method* set, which would
+   catch neither (a) nor (b); its optional stretch goal (validating example files against the
+   component schemas) would catch both. If (1) is skipped, promote that stretch goal to
+   required, or these mismatches survive the freeze.
+
+Option 1 is preferred: C7's purpose is to freeze a correct contract, not to discover an
+incorrect one.
+
+**Why it was not fixed in C8 stage 1.** Stage 1's charter is the three-field rename; correcting
+`feed_id`/`frequency_range`/`name`/`phase_center_offset_m` and the response wrapper is a
+different (and larger) contract-truthfulness change. Standing rule 4 required mirroring the one
+renamed field by hand, which is what stage 1 did.
+
+**Found** 2026-07-26 while mirroring the C8 stage 1 renames into `openapi.yaml` (Task 4).
+
+### C15 — Client-visible surfaces that no drift guard covers — Effort: S/M
+
+**The gap.** Four guards exist, and between them they cover less of the published contract than
+their presence suggests:
+
+| guard | covers |
+|---|---|
+| `antenna-model/tests/example_requests_deserialize.rs` (G3) | `examples/requests/*.json` |
+| `antenna-model/tests/doc_examples_deserialize.rs` (C11) | marked blocks in `docs/api-documentation.md` **only** — `CONTRACT_DOCS` is a one-element array |
+| `antenna-model/tests/example_responses_deserialize.rs` (C8 stage 1) | `examples/responses/*.json` |
+| the compiler | Rust call sites |
+
+Nothing covers: `openapi.yaml`; `examples/api_requests.json` (18 request/response examples);
+`examples/postman_collection.json`; `examples/python_examples.py` (not even syntax-checked in
+CI); `examples/QUICKSTART.md`, `examples/TESTING.md`, `examples/README*.md`; or any `docs/*.md`
+other than `api-documentation.md`.
+
+**This is not theoretical — C8 stage 1 produced the evidence three times.**
+1. `docs/partial-calibration-design.md` carried a renamed field and appeared in **no** task
+   inventory; the stage would have failed its own exit criterion had a reviewer not found it.
+2. `openapi.yaml`'s `FeedInfo` spelled the field `position`, so the exit grep for
+   `position_offset` **passed by luck** rather than by correctness (see C14).
+3. `examples/api_requests.json` sat one directory away from the examples C8 stage 1 repaired and
+   kept the identical drift — missing required `failed_points` / `failure_count`, and an
+   undeclared `vehicle_attitude` on two `HeatmapRequest` bodies. Stage 1 fixed these on its way
+   past, but only because a whole-branch review went looking; no test would have said a word.
+
+**Options:**
+1. **Extend the existing pattern to `examples/api_requests.json`** — cheapest high-value close.
+   The file is `{examples: {<name>: {description, request|response}}}`, so it drops into the
+   `example_responses_deserialize.rs` shape with a name→schema match arm and a panicking
+   unmapped arm. This alone would have caught (3) automatically.
+2. **Ratchet `CONTRACT_DOCS`** (`doc_examples_deserialize.rs`) to cover more of `docs/` as D5
+   makes each file true — C11 already anticipated this; adding a file is one line.
+3. **Promote C7's optional stretch goal** (validate example files against the openapi component
+   schemas) to required, which is the only mechanism that would cover `openapi.yaml` itself.
+
+**Sequencing.** This is C7's charter — the point of a freeze is that what is frozen is checked.
+Doing (1) and (2) *before* C7 means the freeze ratifies verified surfaces rather than assumed
+ones, which is the same argument that put C11 ahead of C8 and the response guard ahead of the
+C8 stage 1 renames.
+
+**Why it was not fixed in C8 stage 1.** Building new guards is not a field rename, and stage 1
+deliberately kept its diff to "renames, no value moves" so that property stayed reviewable.
+
+**Found** 2026-07-27 by the whole-branch review of C8 stage 1.
+
 ### C8 — v1 contract finalization (the one sanctioned breaking pass) — Effort: L
 **[DECIDED 2026-07-08 — pre-production confirmed: no consumers exist; break once now, then freeze]**
+**[✅ STAGE 1 OF 4 DONE 2026-07-26 — branch `feat/c8-stage1-aim-point-field-rename`. Stages 2, 3
+and 4 remain, then C7.]**
+
+**Stage 1, as landed.** The three field renames only — `feed_position` →
+`feed_pointing_location` on all three request types, `GeometryInfo.feed_offset_meters` →
+`physical_feed_offset_m`, and `FeedInfo.position_offset` → `design_feed_offset_m`, so that no
+response field can be read as the aim point. Clean break, no serde aliases: a body using
+`feed_position` is a 400 naming the new field, pinned by
+`tests/integration/status_code_matrix_tests.rs::legacy_feed_position_key_is_rejected_with_400`.
+**No computed value moved** — the numeric assertions across the workspace are unchanged, which
+is the property that makes the pass reviewable. `docs/domain-contract.md`'s glossary row records
+the old name and the rename date, and cross-references both renamed response fields; the frame
+conversion at `evaluator.rs:181` is called out there as a conversion rather than a third term,
+because the two-offset story invites exactly that misreading. Mirrored into `openapi.yaml`,
+`examples/`, `docs/api-documentation.md` and CLAUDE.md. Three findings surfaced and were filed
+rather than fixed, per standing rule 5 and stage 1's no-value-moves charter: **C12** (null vs
+omitted `rmse_db`/`r_squared`), **C13** (`design_feed_offset_m` origin, vertex vs focus), and
+**C14** (openapi feed-listing drift).
+
+**Still open: stages 2–4** (required `coordinate_system`, typed warnings, endpoint coherence +
+spec completeness) — the contract is **not** finalized, and C7's freeze is not yet due.
 
 - **Rationale (recorded):** The maintainer confirmed nothing consumes this API yet
   (no remote, no shipped `.bin` artifacts, only uncalibrated design-spec antennas enabled). Breaking cost is
@@ -1703,7 +1928,7 @@ as a later feature if a consumer ever needs cross-request comparability.
   `examples/requests/` + `docs/api-documentation.md` updated (G3's example test is the net
   that catches missed examples).
 
-**Stage 1 — Rename the aim-point fields.**
+**Stage 1 — Rename the aim-point fields. ✅ DONE 2026-07-26** (see the "as landed" note above).
 - `feed_position` → `feed_pointing_location` on all three request types (fields at
   `schemas.rs:247,432,590`). Review the two *physical*-offset response fields
   (`GeometryInfo.feed_offset_meters`, `FeedInfo.position_offset`) and align them to one
@@ -1768,6 +1993,13 @@ as a later feature if a consumer ever needs cross-request comparability.
   openapi component schemas. A note in docs about the guard.
 - **Assumptions:** migrating to poem-openapi codegen is **out of scope** — register it as a
   possible future item in the roadmap doc, not part of this unit.
+- **Coordinate with C15** (filed 2026-07-27): the path+method assertion above covers routes,
+  not payload shapes, and C15 inventories the client-visible surfaces that **no** guard covers
+  today — `openapi.yaml`'s own schemas, `examples/api_requests.json`, the postman collection,
+  the Python examples, and every `docs/*.md` except `api-documentation.md`. C15's option 3 is
+  this unit's stretch goal; if C15 does not land first, promoting that stretch goal to required
+  is what keeps the freeze from ratifying unchecked surfaces. C14's two mismatches are concrete
+  instances the path+method check would miss.
 - **Depends on:** C8 (the contract must be finalized first — this guard is what freezes it).
 
 ---

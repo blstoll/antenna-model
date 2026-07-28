@@ -1,7 +1,7 @@
 //! Integration test for feed steering scenarios
 //!
 //! Verifies that the evaluator correctly handles:
-//! 1. Perfect alignment: feed_position == reflector_boresight → maximum gain
+//! 1. Perfect alignment: feed_pointing_location == reflector_boresight → maximum gain
 //! 2. Large feed offset: feed steered away from boresight → reduced gain
 
 use antenna_model::api::schemas::{CoordinateSystem, GainRequest, Position3D};
@@ -80,7 +80,7 @@ fn test_feed_steering_perfect_alignment() {
         feed_id: "x_band".to_string(),
         vehicle_position: ecef(-19_794_863.29, -37_228_723.27, 0.0),
         reflector_boresight: ecef(-2_485_073.18, -4_673_742.90, 3_546_502.48),
-        feed_position: ecef(-2_485_073.18, -4_673_742.90, 3_546_502.48), // Same as boresight
+        feed_pointing_location: ecef(-2_485_073.18, -4_673_742.90, 3_546_502.48), // Same as boresight
         emitter_position: ecef(-2_485_073.18, -4_673_742.90, 3_546_502.48),
         frequency_mhz: 8450.0,
         pointing_frequency_mhz: None,
@@ -143,7 +143,7 @@ fn test_feed_steering_large_offset() {
         feed_id: "x_band".to_string(),
         vehicle_position: ecef(-19_794_863.29, -37_228_723.27, 0.0),
         reflector_boresight: ecef(-2_485_073.18, -4_673_742.90, 3_546_502.48),
-        feed_position: ecef(-4_831_642.29, -1_948_496.21, 3_667_577.84), // ~5° from boresight
+        feed_pointing_location: ecef(-4_831_642.29, -1_948_496.21, 3_667_577.84), // ~5° from boresight
         emitter_position: ecef(-2_225_583.04, -4_185_713.15, 4_252_983.55),
         frequency_mhz: 8450.0,
         pointing_frequency_mhz: None,
@@ -197,7 +197,7 @@ fn test_feed_steering_produces_different_gains() {
         feed_id: "x_band".to_string(),
         vehicle_position: vehicle_pos.clone(),
         reflector_boresight: reflector_boresight.clone(),
-        feed_position: reflector_boresight.clone(), // At boresight
+        feed_pointing_location: reflector_boresight.clone(), // At boresight
         emitter_position: emitter_pos.clone(),
         frequency_mhz: 8450.0,
         pointing_frequency_mhz: None,
@@ -211,7 +211,7 @@ fn test_feed_steering_produces_different_gains() {
         feed_id: "x_band".to_string(),
         vehicle_position: vehicle_pos.clone(),
         reflector_boresight: reflector_boresight.clone(),
-        feed_position: ecef(-4_831_642.29, -1_948_496.21, 3_667_577.84), // Offset
+        feed_pointing_location: ecef(-4_831_642.29, -1_948_496.21, 3_667_577.84), // Offset
         emitter_position: emitter_pos.clone(),
         frequency_mhz: 8450.0,
         pointing_frequency_mhz: None,

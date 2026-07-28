@@ -306,7 +306,7 @@ pub mod builders {
                 z: emit_z,
                 coordinate_system: Some(CoordinateSystem::ECEF),
             },
-            feed_position: Position3D {
+            feed_pointing_location: Position3D {
                 x: feed_x,
                 y: feed_y,
                 z: feed_z,
@@ -342,7 +342,7 @@ pub mod builders {
                 z: 400000.0,
                 coordinate_system: None,
             },
-            feed_position: Position3D {
+            feed_pointing_location: Position3D {
                 x: -118.124,
                 y: 34.568,
                 z: 105.0,
@@ -396,7 +396,7 @@ pub mod builders {
                 z: veh_z + 1000.0,
                 coordinate_system: Some(CoordinateSystem::ECEF),
             },
-            feed_position: Position3D {
+            feed_pointing_location: Position3D {
                 x: feed_x,
                 y: feed_y,
                 z: feed_z,

@@ -143,7 +143,7 @@ paths:
                     x: 4510732.0
                     y: 4510732.0
                     z: 3488950.0
-                  feed_position:
+                  feed_pointing_location:
                     x: 4510731.5
                     y: 4510731.5
                     z: 3488870.0
@@ -167,7 +167,7 @@ paths:
                     x: -117.0
                     y: 35.0
                     z: 400000.0
-                  feed_position:
+                  feed_pointing_location:
                     x: -118.124
                     y: 34.568
                     z: 105.0
@@ -194,7 +194,7 @@ paths:
                     reference_gain_db: 43.5
                     loss_db: 2.3
                     geometry:
-                      feed_offset_meters:
+                      physical_feed_offset_m:
                         x: 0.05
                         y: 0.02
                         z: 0.01
@@ -227,7 +227,7 @@ paths:
                     reference_gain_db: 43.8
                     loss_db: 3.3
                     geometry:
-                      feed_offset_meters:
+                      physical_feed_offset_m:
                         x: 0.0
                         y: 0.0
                         z: 0.0
@@ -567,7 +567,7 @@ paths:
                     x: 4510732.0
                     y: 4510732.0
                     z: 3488950.0
-                  feed_position:
+                  feed_pointing_location:
                     x: 4510731.5
                     y: 4510731.5
                     z: 3488870.0
@@ -723,7 +723,7 @@ paths:
         Computes antenna gain, free-space path loss, total path loss and (optionally) G/T
         for every cell of an H3 hexagonal grid laid over the Earth's surface.
 
-        The grid is centred on the H3 cell containing `feed_position` — the Earth location
+        The grid is centred on the H3 cell containing `feed_pointing_location` — the Earth location
         the feed's beam is aimed at, **not** the feed's physical location on the antenna —
         and covers `n_rings` rings around it, so the response contains
         `1 + 3 * n_rings * (n_rings + 1)` cells: 1, 7, 19, 37, … up to 331 at the maximum
@@ -773,7 +773,7 @@ paths:
                     y: 35.4267
                     z: 800.0
                     coordinate_system: "geodetic"
-                  feed_position:
+                  feed_pointing_location:
                     x: -116.45
                     y: 35.4267
                     z: 800.0
@@ -1074,7 +1074,7 @@ components:
         - feed_id
         - vehicle_position
         - reflector_boresight
-        - feed_position
+        - feed_pointing_location
         - emitter_position
         - frequency_mhz
       properties:
@@ -1088,7 +1088,7 @@ components:
           $ref: '#/components/schemas/Position3D'
         reflector_boresight:
           $ref: '#/components/schemas/Position3D'
-        feed_position:
+        feed_pointing_location:
           allOf:
             - $ref: '#/components/schemas/Position3D'
           description: >-
@@ -1190,13 +1190,21 @@ components:
     GeometryInfo:
       type: object
       properties:
-        feed_offset_meters:
+        physical_feed_offset_m:
           type: object
           description: >
             Physical feed offset from the focal point in the antenna frame (meters).
+
+            This is the TOTAL offset actually used for this request: the antenna's
+            static design offset (reported as FeedInfo.design_feed_offset_m) plus the
+            displacement induced by steering the beam to feed_pointing_location. It
+            is a physical displacement in the antenna frame - NOT an Earth location,
+            and not to be confused with feed_pointing_location. Because it is
+            per-request, it must not be cached across requests.
+
             x and y are the lateral displacement of the feed from the optical axis;
-            z is the axial displacement from the focal point (positive toward the
-            reflector vertex). All three components are ~zero for an on-axis feed.
+            z is the axial displacement from the focal point (positive = AWAY from
+            the reflector vertex). All three components are ~zero for an on-axis feed.
           properties:
             x:
               type: number
@@ -1316,7 +1324,7 @@ components:
         - feed_id
         - vehicle_position
         - reflector_boresight
-        - feed_position
+        - feed_pointing_location
         - frequency_mhz
         - n_rings
       properties:
@@ -1330,7 +1338,7 @@ components:
           $ref: '#/components/schemas/Position3D'
         reflector_boresight:
           $ref: '#/components/schemas/Position3D'
-        feed_position:
+        feed_pointing_location:
           allOf:
             - $ref: '#/components/schemas/Position3D'
           description: >-
@@ -1555,7 +1563,7 @@ components:
         - feed_id
         - vehicle_position
         - reflector_boresight
-        - feed_position
+        - feed_pointing_location
         - frequency_mhz
         - grid_config
       properties:
@@ -1567,7 +1575,7 @@ components:
           $ref: '#/components/schemas/Position3D'
         reflector_boresight:
           $ref: '#/components/schemas/Position3D'
-        feed_position:
+        feed_pointing_location:
           allOf:
             - $ref: '#/components/schemas/Position3D'
           description: >-
@@ -1742,17 +1750,35 @@ components:
 
     FeedInfo:
       type: object
+      # DRIFT (filed, not fixed here — C8 stage 4 / C7): apart from
+      # design_feed_offset_m and q_factor, this schema does not match what the
+      # service serves. The Rust FeedInfo (api/schemas.rs) emits `id` (not
+      # `feed_id`), `frequency_range_mhz` (not `frequency_range`), and no `name`
+      # or `phase_center_offset_m` at all. C8 stage 1 corrected only the field it
+      # renamed; the rest is spec-completeness work for the drift guard.
       properties:
         feed_id:
           type: string
         name:
           type: string
-        position:
-          type: array
-          items:
-            type: number
-          minItems: 3
-          maxItems: 3
+        design_feed_offset_m:
+          type: object
+          description: >
+            The feed's DESIGN offset from the focal point in the antenna frame
+            (meters) - a static property of this antenna's configuration, identical
+            for every request. The per-request total (this design offset plus the
+            beam-steering displacement) is reported as
+            GeometryInfo.physical_feed_offset_m.
+
+            z is positive AWAY from the reflector vertex, matching the phase model's
+            delta_z convention.
+          properties:
+            x:
+              type: number
+            y:
+              type: number
+            z:
+              type: number
         q_factor:
           type: number
         phase_center_offset_m:

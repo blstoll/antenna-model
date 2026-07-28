@@ -89,7 +89,7 @@ use std::time::{Duration, Instant};
 ///
 /// # Arguments
 ///
-/// * `request` - The gain request containing vehicle position, reflector boresight, and feed position
+/// * `request` - The gain request containing vehicle position, reflector boresight, and feed pointing location
 /// * `repository` - The calibration data repository
 ///
 /// # Returns
@@ -153,10 +153,10 @@ pub fn compute_gain_from_request_with_budget(
         .map_err(|e| AntennaModelError::Generic(format!("Failed to build reflector: {}", e)))?;
 
     // Compute physical feed position from API steering parameters
-    // The API's feed_position specifies where the feed is aimed (Earth target location)
+    // The API's feed_pointing_location specifies where the feed is aimed (Earth target location)
     // This computes the corresponding physical feed position in the reflector frame
     let (steer_x, steer_y, steer_z) = compute_feed_position_from_pointing(
-        &request.feed_position,
+        &request.feed_pointing_location,
         &request.reflector_boresight,
         &request.vehicle_position,
         focal_length_m,
@@ -171,7 +171,7 @@ pub fn compute_gain_from_request_with_budget(
     let feed_x = steer_x + design_pos.0;
     let feed_y = steer_y + design_pos.1;
     let feed_z = steer_z + design_pos.2;
-    let feed_position = FeedPosition::new(feed_x, feed_y, feed_z);
+    let physical_feed_position = FeedPosition::new(feed_x, feed_y, feed_z);
 
     // Physical feed offset from the focal point in the antenna frame (meters).
     // feed_z is the z-position relative to the reflector vertex; subtracting focal_length_m
@@ -197,7 +197,7 @@ pub fn compute_gain_from_request_with_budget(
     );
 
     let feed = ModelFeedParams::builder()
-        .position(feed_position)
+        .position(physical_feed_position)
         .q_factor(calibration.physical_config.feed.q_factor)
         .phase_center_offset(calibration.physical_config.feed.phase_center_offset_m)
         .axial_defocus(calibration.physical_config.feed.axial_defocus_m)
@@ -410,7 +410,7 @@ pub fn compute_gain_from_request_with_budget(
         reference_gain_db,
         loss_db,
         geometry: GeometryInfo {
-            feed_offset_meters: feed_offset,
+            physical_feed_offset_m: feed_offset,
             emitter_azimuth_deg: corrected_az,
             emitter_elevation_deg: corrected_el,
             beam_squint_deg: if squint_magnitude_deg > 0.001 {
@@ -816,7 +816,7 @@ mod tests {
             feed_id: "test_feed".to_string(),
             vehicle_position: Position3D::new(-118.0, 34.0, 100.0),
             reflector_boresight: Position3D::new(-117.99, 34.01, 110.0), // 10m from vehicle
-            feed_position: Position3D::new(-117.99, 34.01, 123.6),       // Feed at focal point
+            feed_pointing_location: Position3D::new(-117.99, 34.01, 123.6), // Feed at focal point
             emitter_position: emitter,
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: None,
@@ -1357,7 +1357,7 @@ mod tests {
         repo.add_calibration(calibration);
         let mut request = create_test_request();
         request.emitter_position = request.reflector_boresight.clone();
-        request.feed_position = request.reflector_boresight.clone();
+        request.feed_pointing_location = request.reflector_boresight.clone();
         compute_gain_from_request(&request, &repo).unwrap().gain_db
     }
 
@@ -1397,7 +1397,7 @@ mod tests {
         let mut request = create_test_request();
         // Aim emitter along the boresight direction (on-axis) and feed at boresight (focused):
         request.emitter_position = request.reflector_boresight.clone();
-        request.feed_position = request.reflector_boresight.clone();
+        request.feed_pointing_location = request.reflector_boresight.clone();
         request.include_reference = true;
         let response = compute_gain_from_request(&request, &repo).unwrap();
         let loss = response.loss_db.expect("reference requested");
@@ -1505,7 +1505,7 @@ mod tests {
         let mut boresight_request = create_test_request();
         // Aim emitter along the boresight direction (on-axis) and feed at boresight (focused):
         boresight_request.emitter_position = boresight_request.reflector_boresight.clone();
-        boresight_request.feed_position = boresight_request.reflector_boresight.clone();
+        boresight_request.feed_pointing_location = boresight_request.reflector_boresight.clone();
         boresight_request.include_reference = true;
 
         // Baseline: calibrated (correction surface present) -> apply_spillover is off.
@@ -1598,7 +1598,7 @@ mod tests {
             feed_id: "test_feed".to_string(),
             vehicle_position: ecef(veh_x, veh_y, veh_z),
             reflector_boresight: ecef(emit_x, emit_y, emit_z),
-            feed_position: ecef(feed_x, feed_y, feed_z),
+            feed_pointing_location: ecef(feed_x, feed_y, feed_z),
             emitter_position: ecef(emit_x, emit_y, emit_z),
             frequency_mhz: 8400.0,
             pointing_frequency_mhz: None,
@@ -1624,7 +1624,7 @@ mod tests {
         };
         let mut request = create_large_offset_request();
         // Feed aimed at the boresight target → feed at focus → StandardPhysicalOptics.
-        request.feed_position = request.reflector_boresight.clone();
+        request.feed_pointing_location = request.reflector_boresight.clone();
         // Emitter to a far-off satellite: ~69 deg off the boresight axis (FORWARD
         // hemisphere — verified empirically via `geometry.emitter_elevation_deg`).
         request.emitter_position = ecef(-120.0, 30.0, 400_000.0);
@@ -1907,10 +1907,10 @@ mod tests {
         );
     }
 
-    /// Test that `feed_offset_meters` is ~zero when the feed is aimed at the same Earth
+    /// Test that `physical_feed_offset_m` is ~zero when the feed is aimed at the same Earth
     /// target as the reflector boresight (focused/on-axis configuration).
     ///
-    /// When `feed_position == reflector_boresight`, `compute_feed_position_from_pointing`
+    /// When `feed_pointing_location == reflector_boresight`, `compute_feed_position_from_pointing`
     /// returns (0, 0, focal_length), so the physical offset from the focal point is
     /// (0, 0, focal_length - focal_length) = (0, 0, 0).
     ///
@@ -1928,9 +1928,9 @@ mod tests {
         let mut request = create_test_request();
         // Aim the feed at the same Earth point as the reflector boresight → on-axis feed,
         // so the physical feed offset from the focal point should be ~zero.
-        request.feed_position = request.reflector_boresight.clone();
+        request.feed_pointing_location = request.reflector_boresight.clone();
         let response = compute_gain_from_request(&request, &repo).unwrap();
-        let off = &response.geometry.feed_offset_meters;
+        let off = &response.geometry.physical_feed_offset_m;
         assert!(
             off.x.abs() < 0.05 && off.y.abs() < 0.05 && off.z.abs() < 0.05,
             "expected ~zero physical offset in meters for boresight-aimed feed, got ({}, {}, {})",
@@ -1940,14 +1940,14 @@ mod tests {
         );
     }
 
-    /// Discriminating test: verifies `feed_offset_meters` contains physical meters,
+    /// Discriminating test: verifies `physical_feed_offset_m` contains physical meters,
     /// not angular degrees.
     ///
     /// Strategy: call `compute_feed_position_from_pointing` directly to get the
     /// expected physical feed position (x, y, z) in the antenna frame, then assert
-    /// that `response.geometry.feed_offset_meters` equals (x, y, z - focal_length_m).
+    /// that `response.geometry.physical_feed_offset_m` equals (x, y, z - focal_length_m).
     ///
-    /// The default `create_test_request()` has `feed_position` at a different altitude
+    /// The default `create_test_request()` has `feed_pointing_location` at a different altitude
     /// than `reflector_boresight` (123.6 m vs 110.0 m at the same lon/lat), giving a
     /// non-zero angular offset and therefore a non-zero physical feed displacement.
     ///
@@ -1969,7 +1969,7 @@ mod tests {
         let focal_length_m = 5.0_f64;
         let diameter_m = 10.0_f64;
         let (steer_x, steer_y, steer_z) = compute_feed_position_from_pointing(
-            &request.feed_position,
+            &request.feed_pointing_location,
             &request.reflector_boresight,
             &request.vehicle_position,
             focal_length_m,
@@ -1983,21 +1983,21 @@ mod tests {
         let expected_z_offset = steer_z - focal_length_m;
 
         let response = compute_gain_from_request(&request, &repo).unwrap();
-        let off = &response.geometry.feed_offset_meters;
+        let off = &response.geometry.physical_feed_offset_m;
 
         assert!(
             (off.x - expected_x).abs() < 1e-9,
-            "feed_offset_meters.x should be {expected_x} m (physical), got {}",
+            "physical_feed_offset_m.x should be {expected_x} m (physical), got {}",
             off.x
         );
         assert!(
             (off.y - expected_y).abs() < 1e-9,
-            "feed_offset_meters.y should be {expected_y} m (physical), got {}",
+            "physical_feed_offset_m.y should be {expected_y} m (physical), got {}",
             off.y
         );
         assert!(
             (off.z - expected_z_offset).abs() < 1e-9,
-            "feed_offset_meters.z should be {expected_z_offset} m (z - focal_length), got {}",
+            "physical_feed_offset_m.z should be {expected_z_offset} m (z - focal_length), got {}",
             off.z
         );
 
@@ -2259,9 +2259,9 @@ mod tests {
             phys.reflector.surface_rms_mm / 1000.0,
         )
         .unwrap();
-        // The evaluator's physical feed position: `feed_offset_meters` echoes
+        // The evaluator's physical feed position: `physical_feed_offset_m` echoes
         // (feed_x, feed_y, feed_z - focal), so feed_z = offset.z + focal reproduces it.
-        let fo = &response.geometry.feed_offset_meters;
+        let fo = &response.geometry.physical_feed_offset_m;
         let feed = ModelFeedParams::builder()
             .position(FeedPosition::new(fo.x, fo.y, fo.z + focal))
             .q_factor(phys.feed.q_factor)
@@ -2388,7 +2388,7 @@ mod tests {
 
         let mut boresight_request = create_test_request();
         boresight_request.emitter_position = boresight_request.reflector_boresight.clone();
-        boresight_request.feed_position = boresight_request.reflector_boresight.clone();
+        boresight_request.feed_pointing_location = boresight_request.reflector_boresight.clone();
         boresight_request.include_reference = true;
 
         let mut repo = CalibrationRepository::new();

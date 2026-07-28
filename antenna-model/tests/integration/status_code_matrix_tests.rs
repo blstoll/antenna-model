@@ -77,7 +77,7 @@ fn compute_endpoints() -> Vec<Endpoint> {
                 "feed_id": "primary",
                 "vehicle_position": {"x": -118.1234, "y": 34.5678, "z": 100.0},
                 "reflector_boresight": {"x": -118.1234, "y": 34.5679, "z": 110.0},
-                "feed_position": {"x": -118.124, "y": 34.568, "z": 105.0},
+                "feed_pointing_location": {"x": -118.124, "y": 34.568, "z": 105.0},
                 "frequency_mhz": 8400.0,
                 "n_rings": 1,
                 "h3_resolution": 7
@@ -90,6 +90,12 @@ fn compute_endpoints() -> Vec<Endpoint> {
 /// POST a raw body and assert the status and `error` code, naming the endpoint and
 /// case in every failure message — with four endpoints and four cases, a bare
 /// `assertion failed` would not say which cell broke.
+///
+/// Returns the parsed [`ErrorResponse`] so a caller that also cares about the
+/// *message* (not just the code) can assert on the specific field it means, without
+/// posting the request twice. Deliberately not the raw body: a `raw.contains(..)`
+/// check matches anywhere in the serialized JSON, so it would keep passing if the
+/// text it looks for drifted from `message` into `field` or `details`.
 async fn assert_rejected(
     server: &TestServer,
     path: &str,
@@ -97,7 +103,7 @@ async fn assert_rejected(
     body: String,
     expected_status: u16,
     expected_code: &str,
-) {
+) -> ErrorResponse {
     let response = server
         .client
         .post(format!("{}{}", server.base_url, path))
@@ -121,6 +127,8 @@ async fn assert_rejected(
         parsed.error, expected_code,
         "{path} [{case}]: wrong error code; body: {raw}"
     );
+
+    parsed
 }
 
 // ============================================================================
@@ -435,6 +443,70 @@ async fn valid_batch_still_succeeds() {
             result.gain_db.is_finite(),
             "item {i} should have a real gain, got {}",
             result.gain_db
+        );
+    }
+
+    server.shutdown().await;
+}
+
+// ============================================================================
+// C8 stage 1: the aim-point rename is a clean break, on every request type
+// ============================================================================
+
+/// C8 stage 1 renamed the aim-point field `feed_position` → `feed_pointing_location`
+/// as a **clean break** — no serde alias, no deprecation shim. A body using the old
+/// key is therefore missing a required field, i.e. unparseable, i.e. 400 under C2's
+/// policy, with a message naming the field the client should have sent instead.
+///
+/// Run across the whole matrix, not just `/gain`, because the field is declared
+/// independently on `GainRequest`, `HeatmapRequest` and `H3LinkBudgetRequest`. A
+/// `#[serde(alias = "feed_position")]` added to any one of them is precisely the
+/// well-meaning reintroduction of backwards compatibility that the C8 decision
+/// rejected, and a single-endpoint guard would wave two thirds of it through.
+///
+/// Each body is the endpoint's own *valid* body with that one key renamed, per the
+/// rule at the top of this file: the legacy key must be the only difference. A
+/// hand-rolled literal would assert 400 + `invalid_request_body` against a body that
+/// could equally have gone stale for an unrelated reason — the right answer for the
+/// wrong cause, and the failure mode this file exists to avoid.
+#[tokio::test]
+async fn legacy_feed_position_key_is_rejected_with_400() {
+    let server = TestServer::start().await.unwrap();
+
+    for endpoint in compute_endpoints() {
+        let mut body = endpoint.valid.clone();
+        let target = if endpoint.nested {
+            &mut body["evaluations"][0]
+        } else {
+            &mut body
+        };
+        let fields = target
+            .as_object_mut()
+            .unwrap_or_else(|| panic!("{}: request body must be a JSON object", endpoint.path));
+        let aim = fields.remove("feed_pointing_location").unwrap_or_else(|| {
+            panic!(
+                "{}: the valid body has no `feed_pointing_location` key — the aim-point \
+                 field was renamed again and this guard is now testing nothing",
+                endpoint.path
+            )
+        });
+        fields.insert("feed_position".to_string(), aim);
+
+        let error = assert_rejected(
+            &server,
+            endpoint.path,
+            "legacy feed_position key",
+            body.to_string(),
+            400,
+            "invalid_request_body",
+        )
+        .await;
+
+        assert!(
+            error.message.contains("feed_pointing_location"),
+            "{}: the 400 must name the field the client should send, got message: {}",
+            endpoint.path,
+            error.message
         );
     }
 
