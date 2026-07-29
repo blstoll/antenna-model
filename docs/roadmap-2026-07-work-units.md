@@ -1701,6 +1701,7 @@ as a later feature if a consumer ever needs cross-request comparability.
   a grid quantity at all.
 
 ### C12 — `CalibrationInfo.rmse_db` / `r_squared`: documented as omitted, emitted as `null` — Effort: S
+**[✅ DONE 2026-07-28 — landed alongside C8 stage 4, branch `feat/c8-stage4-endpoint-coherence`, commits `371f2d3` + `2bd734b`]**
 
 **The defect.** `antenna-model/src/api/schemas.rs:846,850` document these two fields as
 *"(None for uncalibrated antennas)"*, and both carry
@@ -1749,6 +1750,15 @@ contract; the decision should be recorded in the register first.
 initially misread the *correct* `null`s in `antenna_details_response.json` as stale keys and
 deleted them; that was caught in review and reverted, and the guard now exempts null-valued
 sources for exactly this reason.
+
+**Resolved: option 2 (declare the `null`), 2026-07-28.** `rmse_db`/`r_squared` became plain
+`f64` with `#[serde(with = "nan_as_null")]`, dropping the `Option` + `skip_serializing_if`
+pair — **the wire output is unchanged** (`null` before, `null` after); only the type and the
+doc comments (plus this file, `docs/domain-contract.md`, and `docs/api-documentation.md`) now
+say so. A test asserting the uncalibrated body has both keys present and JSON `Value::Null`
+closes the missing-coverage gap noted above. `examples/responses/antenna_details_response.json`
+was **not** modified — its `null`s were already correct, which is exactly what motivated
+option 2 over option 1. See `docs/domain-contract.md`, "Resolved by design 2026-07-28 (C12)".
 
 ### C13 — `design_feed_offset_m`'s origin is producer-dependent (vertex vs focus) — Effort: S/M
 
@@ -1800,6 +1810,8 @@ pass reviewable.
 response fields describe what the code actually computes.
 
 ### C14 — `openapi.yaml`'s feed-listing surface disagrees with the service — Effort: S
+**[SUPERSEDED 2026-07-28 by C7 — see the C8 stage 4 "as landed" note above and C7's
+post-generation acceptance checklist below]**
 
 **The defect.** Two adjacent, pre-existing mismatches on the feed endpoints. Both predate C8;
 stage 1 corrected only the one field it renamed.
@@ -1850,6 +1862,18 @@ renamed field by hand, which is what stage 1 did.
 
 **Found** 2026-07-26 while mirroring the C8 stage 1 renames into `openapi.yaml` (Task 4).
 
+**Superseded 2026-07-28 (C8 stage 4 audit).** A full sweep of every schema behind
+`/api/v1/antennas*` found five more components wrong beyond this unit's (a)/(b) —
+`AntennaInfo`, `AntennaDetailsResponse`, `PhysicalParametersInfo`, `ValidityRangesInfo`, and
+`CalibrationInfo` all disagree with their Rust types too, plus `GridData` (used by
+`/heatmap`, outside the `/antennas*` surface but found in the same sweep) still describes
+the pre-Task-1 flat, untagged shape. Hand-fixing eight defects into a spec that was about to
+be regenerated wholesale was rejected as wasted, drift-prone work: **C7 is re-scoped to
+auto-generate `openapi.yaml` from the Rust types via `utoipa`**, which fixes all eight by
+construction instead of by a hand patch that can drift a third time. This unit's fix is
+therefore **not implemented**; its two defects, and the six more found alongside them, are
+preserved as C7's post-generation acceptance checklist (see the C7 section below).
+
 ### C15 — Client-visible surfaces that no drift guard covers — Effort: S/M
 
 **The gap.** Four guards exist, and between them they cover less of the published contract than
@@ -1897,11 +1921,20 @@ deliberately kept its diff to "renames, no value moves" so that property stayed 
 
 **Found** 2026-07-27 by the whole-branch review of C8 stage 1.
 
+**Update 2026-07-28 (C8 stage 4).** C7's re-scope to `utoipa` generation closes the
+`openapi.yaml` row of the table above at the source — a generated spec cannot drift from the
+types it is generated from the way a hand-maintained one can. Stage 4 also **edited**
+`examples/api_requests.json` (removing the two H3 examples Task 1's removal obsoleted), and
+that file remains covered by no guard — option 1 above is now the largest concrete item left
+in this unit's gap list, and the last content change to that file before C7's freeze.
+
 ### C8 — v1 contract finalization (the one sanctioned breaking pass) — Effort: L
 **[DECIDED 2026-07-08 — pre-production confirmed: no consumers exist; break once now, then freeze]**
-**[✅ STAGES 1–3 OF 4 DONE — stage 1 2026-07-26 (`feat/c8-stage1-aim-point-field-rename`),
+**[✅ ALL 4 STAGES DONE — stage 1 2026-07-26 (`feat/c8-stage1-aim-point-field-rename`),
 stage 2 2026-07-27 (`feat/c8-stage2-required-coordinate-system`), stage 3 2026-07-27
-(`feat/c8-stage3-typed-warnings`). Stage 4 remains, then C7.]**
+(`feat/c8-stage3-typed-warnings`), stage 4 2026-07-28
+(`feat/c8-stage4-endpoint-coherence`). C8 is closed; only **C7** remains before the
+contract freezes.]**
 
 **Stage 1, as landed.** The three field renames only — `feed_position` →
 `feed_pointing_location` on all three request types, `GeometryInfo.feed_offset_meters` →
@@ -1973,8 +2006,44 @@ documented a warning no producer has ever emitted —
 `geometry.beam_squint_deg` field that actually reports it. Removed rather than given a
 code. Both files are in **C15**'s uncovered-surface inventory, which is why it survived.
 
-**Still open: stage 4** (endpoint coherence + spec completeness) — the contract is **not**
-finalized, and C7's freeze is not yet due.
+**Stage 4, as landed (2026-07-28, branch `feat/c8-stage4-endpoint-coherence`).** Removed the
+`H3` variants from `GridConfig`/`GridData` entirely — both stay single-variant **tagged**
+enums (`grid_type: "rectangular"` only), keeping the tag on the wire so feature F5 can add a
+variant back without a break; collapsing them into plain structs was considered and rejected
+for exactly that reason. An `h3` grid_type is now an unknown serde variant, which the C2
+status policy resolves to **400 `invalid_request_body`** — not 422, which is what the unit's
+original framing loosely suggested ("unknown grid types become normal validation failures").
+The request cannot be parsed into a known variant at all, so it is unparseable, not
+semantically invalid; C2's 400-vs-422 boundary applies directly, and this was confirmed
+rather than re-litigated. Retired the producerless `error_codes::NOT_IMPLEMENTED` /
+`AntennaModelError::NotImplemented` — its only producer was the stub Task 1 removed, and a
+code with no producer is exactly the defect class C3's drift guard exists to catch; the
+vocabulary is **deleted to 10 codes, not reserved** for a future reintroduction.
+`docs/domain-contract.md`, `docs/architecture.md`, `docs/api-documentation.md` and
+`examples/api_requests.json` were mirrored (two H3 examples removed from the latter — an
+edit C15 still has no guard over). Absorbs **C5** (superseded).
+
+Also landed on this branch, ahead of the endpoint-coherence Task 6: **C12** was resolved in
+favour of **emitting the `null`** — `CalibrationInfo.rmse_db`/`r_squared` became plain `f64`
+with `#[serde(with = "nan_as_null")]` (the same convention `GainResponse.gain_db` already
+used for a failed evaluation), replacing the `Option` + `skip_serializing_if` pair that
+promised an omission the code never performed. The wire output did not change — `null`
+before, `null` after; only the type and the docs now say so. See the C12 section below and
+`docs/domain-contract.md`'s "Resolved by design 2026-07-28 (C12)" entry.
+
+**`openapi.yaml` was deliberately NOT touched by stage 4.** An audit of every schema behind
+`/api/v1/antennas*` (the planned scope of the openapi-reconciliation task) found **all seven
+components wrong** — not just the two C14 filed — which reopened whether hand-fixing a spec
+that had already drifted twice (once before C14, once again to produce this audit) was the
+right mechanism at all. Decision: **C7 is re-scoped from "hand-maintained spec plus a
+path+method drift guard" to "auto-generate `openapi.yaml` from the Rust types with
+`utoipa`."** Hand-editing eight-plus defects into a spec C7 was about to regenerate wholesale
+would have been wasted, drift-prone work with a third window for the same class of bug before
+the freeze. The planned openapi-reconciliation work is therefore **superseded, not executed**
+— see **C14** below. The audit table is preserved as **C7's post-generation acceptance
+checklist** (see the C7 section).
+
+The contract is **not yet frozen** — freeze happens when C7 lands.
 
 - **Rationale (recorded):** The maintainer confirmed nothing consumes this API yet
   (no remote, no shipped `.bin` artifacts, only uncalibrated design-spec antennas enabled). Breaking cost is
@@ -2028,14 +2097,28 @@ finalized, and C7's freeze is not yet due.
 - Exit: every producer emits a code + human message; the code enum documented in
   api-documentation.md + openapi; integration tests assert codes, not string matches.
 
-**Stage 4 — Endpoint coherence + spec completeness.**
+**Stage 4 — Endpoint coherence + spec completeness. ✅ DONE 2026-07-28** (see the "as landed"
+note above).
 - Remove the `/heatmap` H3 grid-type stub variant (`heatmap.rs:168-171,215-218`); unknown
-  grid types become normal validation failures (absorbs old C5).
+  grid types become normal validation failures (absorbs old C5). **Done** — `GridConfig`/
+  `GridData` are single-variant tagged enums; an `h3` grid_type is a 400.
 - `/h3-heatmap` fully documented (absorbs C1 if it hasn't landed; if C1 landed, update it
-  for stages 1–3's changes).
+  for stages 1–3's changes). **Done** — the endpoint's docs in `docs/api-documentation.md`
+  were audited against stages 1–3 and found already current (stage 1/3 had mirrored the
+  field renames and typed warnings in when they landed); the one remaining drift was a
+  `GET /api/v1/antennas` Python example still using pre-C14 field names, fixed in the same
+  pass.
 - Decide-and-document endpoint naming: keep two endpoints (`/heatmap` rectangular,
-  `/h3-heatmap` link budget) — a full merge remains feature F5.
-- Exit: openapi.yaml describes every registered route with post-C8 schemas; ready for C7.
+  `/h3-heatmap` link budget) — a full merge remains feature F5. **Done** — recorded in
+  `docs/api-documentation.md`'s "Why two heatmap endpoints" note and mirrored into
+  `docs/domain-contract.md` and `CLAUDE.md`.
+- Exit: ~~openapi.yaml describes every registered route with post-C8 schemas; ready for
+  C7~~ **amended in-flight (see the "as landed" note):** openapi.yaml is intentionally
+  **not** updated by stage 4 — C7 was re-scoped to auto-generate it, so hand-fixing it here
+  would have been thrown away before it shipped. The **route** parity half of this exit
+  criterion (11 registered routes ↔ 11 openapi path entries) still holds against the
+  existing, schema-drifted spec; the **schema** content inside those 11 entries is now C7's
+  to produce correctly, not stage 4's to patch.
 
 - **Depends on:** C3 → C4 → C2 landed first (error contract settled before the breaking
   pass); G3 (example test); S6 (validation constraints exist to document). **Blocks:** C7.
@@ -2047,12 +2130,23 @@ finalized, and C7's freeze is not yet due.
 ### C7 — OpenAPI drift guard — Effort: M
 
 - **Entrance / read first:** `api/routes.rs` route registration; openapi.yaml paths.
+- **Re-scoped 2026-07-28 (during C8 stage 4).** Originally "hand-maintained spec plus a
+  path+method drift guard." A stage-4 audit of every schema behind `/api/v1/antennas*` found
+  **all seven components wrong** (C14 had filed only two of the resulting eight defects — see
+  below), which made hand-fixing `openapi.yaml` before this unit lands wasted, drift-prone
+  work: the spec would drift a third time before the freeze. **C7 is now scoped to
+  auto-generate `openapi.yaml` from the Rust types with `utoipa`**, fixing every schema
+  defect by construction instead of by a hand-authored patch. C14 and C5's openapi half are
+  superseded by this re-scope; the path+method drift-guard exit criterion below is unaffected
+  by it — a generated spec still needs the same route-coverage assertion.
 - **Exit criteria:** a CI test that parses openapi.yaml (serde_yaml) and asserts the
   path+method set equals the registered route set — failing when a route exists without a
   spec entry or vice versa. Stretch (optional): validate G3's example files against the
   openapi component schemas. A note in docs about the guard.
 - **Assumptions:** migrating to poem-openapi codegen is **out of scope** — register it as a
-  possible future item in the roadmap doc, not part of this unit.
+  possible future item in the roadmap doc, not part of this unit. *(Superseded by the
+  2026-07-28 re-scope above — `utoipa` generation **is** now in scope. Line kept as history,
+  not silently deleted; see standing rule on roadmap docs as a precise record.)*
 - **Coordinate with C15** (filed 2026-07-27): the path+method assertion above covers routes,
   not payload shapes, and C15 inventories the client-visible surfaces that **no** guard covers
   today — `openapi.yaml`'s own schemas, `examples/api_requests.json`, the postman collection,
@@ -2061,6 +2155,40 @@ finalized, and C7's freeze is not yet due.
   is what keeps the freeze from ratifying unchecked surfaces. C14's two mismatches are concrete
   instances the path+method check would miss.
 - **Depends on:** C8 (the contract must be finalized first — this guard is what freezes it).
+  **C8 landed all four stages 2026-07-28 — C7 is unblocked.**
+
+**Post-generation acceptance checklist (2026-07-28 audit, absorbs C14).** All seven
+components behind the four `/api/v1/antennas*` routes disagree with their Rust types; C14 had
+filed only two of the eight resulting defects. After generation, the emitted spec must show
+the right-hand column:
+
+| component | spec said (wrong) | Rust emits (correct) |
+|---|---|---|
+| `AntennaInfo` | `antenna_id`, `feeds` | `id`, `feed_ids` |
+| `AntennaDetailsResponse` | `antenna_id`, `calibration_info`, `calibration_status` as a *string* plus a separate `calibration_status_info`; no `enabled` | `id`, `calibration`, `calibration_status` (object, optional), `enabled` |
+| `FeedInfo` | `feed_id`, `frequency_range`, plus emitterless `name` and `phase_center_offset_m` | `id`, `frequency_range_mhz`, `design_feed_offset_m`, `q_factor` — and nothing else |
+| list-feeds 200 wrapper | `{antenna_id, feeds}` | `{feeds}` only |
+| `PhysicalParametersInfo` | `f_over_d`, a nested `feed` object; no `focal_length_m` | `f_over_d_ratio`, `focal_length_m`, `diameter_m`, `surface_rms_mm`, optional `mesh` |
+| `ValidityRangesInfo` | `azimuth`, `elevation`, `frequency`, `temperature` | `azimuth_deg`, `elevation_deg`, `frequency_mhz`, `temperature_k` |
+| `CalibrationInfo` | `calibration_date`, `format_version`, `data_source`, `parameters_tuned`; no `r_squared` | `date`, `version`, `source`, `rmse_db`, `r_squared`, `num_measurements` |
+| `GridData` | flat untagged object | single-variant tagged enum (`grid_type: rectangular`) |
+
+**Two utoipa migration hazards found while scoping (2026-07-28).**
+
+1. **`nullable` is invisible to utoipa.** Three fields use `#[serde(with = "nan_as_null")]`
+   and serialize `f64::NAN` to JSON `null`: `CalibrationInfo.rmse_db`,
+   `CalibrationInfo.r_squared`, and `GainResponse.gain_db`. utoipa derives `type: number` from the Rust `f64`
+   and cannot see the custom serializer, so the naively generated schema would **forbid** the
+   value the endpoint actually returns. Each site already carries a `// TODO(C7):` marker —
+   `grep -rn 'TODO(C7)' antenna-model/src/` finds all three (`schemas.rs:282,874,882`). They
+   need `#[schema(nullable = true)]`.
+2. **The prose is load-bearing and will not survive generation for free.** `openapi.yaml`'s
+   descriptions are contract documentation accumulated across units C1, C2, C3, C9, and C8
+   stage 3 — the 400-vs-422 rule, C9's grid-peak-vs-beam-peak `loss_db` limitation, the
+   warning-code vocabulary semantics, the failure sentinels. utoipa lifts Rust `///` doc
+   comments into `description`, so this prose must be migrated onto the Rust types or it is
+   lost outright when the hand-maintained file is replaced. Budget for it — it is the real
+   cost of the migration, not the mechanical `#[derive(ToSchema)]` wiring.
 
 ---
 
@@ -2092,6 +2220,13 @@ finalized, and C7's freeze is not yet due.
   `calibration-workflow-guide.md` (recommend: header u32 = container/binary layout version;
   `format_version` = semantic schema version); the loader validates both with clear errors
   on mismatch; one test with a wrong-version fixture. **Do not bump either version.**
+- **Note (2026-07-28, from C12 / C8 stage 4):** `CalibrationMetadata.rmse_db`/`r_squared`
+  stay plain `f64` with a NaN sentinel by decision, not oversight — converting them to
+  `Option<f64>` would change postcard's positional wire encoding, which is an ANTC
+  artifact-format break belonging with this unit's version-axes reconciliation, not the API
+  contract pass. The API-facing `CalibrationInfo` now has the identical `f64` +
+  `nan_as_null` shape, so there is no boundary conversion between the two — see C12 and
+  `docs/domain-contract.md`, "Resolved by design 2026-07-28 (C12)".
 - **Depends on:** D1.
 
 ### D3 — Round-trip test for the 3D→4D correction-surface bridge — Effort: M
@@ -2217,6 +2352,10 @@ finalized, and C7's freeze is not yet due.
 - **Exit criteria:** register row Decided; a documented, once-verified generation path; a
   README quickstart section explaining the empty-by-default state and how `/health` and
   `/status` reflect it.
+- **Note (2026-07-28, from C12 / C8 stage 4):** `CalibrationMetadata.rmse_db`/`r_squared`
+  remain `f64` with a NaN sentinel by decision — making them `Option<f64>` is an ANTC
+  wire-format break and belongs with D2's version-axes work, not this unit or the contract
+  pass. Recorded here because D9 owns the artifact-shipping story this sentinel is part of.
 - **Depends on:** G2, S5 (readiness semantics for the zero-artifact state).
 
 ---

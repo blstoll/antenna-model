@@ -432,10 +432,8 @@ response = requests.get("http://localhost:3000/api/v1/antennas")
 antennas = response.json()
 
 for antenna in antennas["antennas"]:
-    print(f"{antenna['antenna_id']}: {antenna['name']}")
-    print(f"  Feeds: {', '.join(antenna['feeds'])}")
-    if "calibration_status" in antenna:
-        print(f"  Status: {antenna['calibration_status']}")
+    print(f"{antenna['id']}: {antenna['name']} ({'enabled' if antenna['enabled'] else 'disabled'})")
+    print(f"  Feeds ({antenna['feed_count']}): {', '.join(antenna['feed_ids'])}")
 ```
 
 ### JavaScript Example: Heatmap Generation
@@ -477,6 +475,31 @@ All successful gain computation responses include:
 - **warnings**: Array of `{code, message}` objects — see [Warning codes](#warning-codes)
 - **metadata**: Computation metadata (timing, extrapolation flag)
 - **calibration_status**: Calibration status with accuracy estimates
+
+### No-value conventions: `null` vs. omitted
+
+The API uses two different, deliberately distinct ways to say a field has no value
+(roadmap unit C12, 2026-07-28):
+
+- **`null`** — the slot exists but carries no value for this response. `GET
+  /api/v1/antennas/{id}`'s `CalibrationInfo.rmse_db` and `r_squared` are **present and
+  `null`** for an uncalibrated (design-spec) antenna, never omitted: every antenna has a
+  calibration block, an uncalibrated one simply has no fit. This is the same convention
+  `GainResponse.gain_db` uses for a failed batch item (see the typed batch-item `error`
+  example above). Do not treat a `null` `rmse_db`/`r_squared` as "call again to fetch it" —
+  branch on the typed signals that carry the same information instead:
+  `calibration_status.status` (`"uncalibrated"`) or `calibration.num_measurements` (`0`).
+- **Omitted** — the field is structurally absent from the JSON object. Examples:
+  `PhysicalParametersInfo.mesh` is omitted for a solid (non-mesh) reflector,
+  `CalibrationStatusInfo.coverage` is omitted when no region has been measured, and
+  `ComputationMetadata.spillover_loss_db` is omitted on the calibrated path (the correction
+  surface absorbs spillover empirically, so there is nothing to report there).
+
+`null` says "this antenna has this kind of slot and it is empty"; omission says "this kind
+of information does not apply here at all." Do not infer one from the other, and do not add
+`skip_serializing_if` to a field that is declared `null` for a reason — that combination
+(declaring a field optional while a producer always constructs it) is exactly the defect
+C12 closed.
 
 Example response:
 
