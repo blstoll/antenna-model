@@ -18,7 +18,19 @@
 //! the crate version is pinned exactly in `Cargo.toml` because any serialization
 //! change in utoipa is a contract diff.
 
-use utoipa::OpenApi;
+use utoipa::{Modify, OpenApi};
+
+/// Emits the top-level `security: []` the hand-written spec carried — an
+/// explicit "no authentication required (internal service)" declaration.
+/// utoipa's `#[openapi(security(...))]` cannot express an *empty* requirement
+/// list, so it is set here.
+struct NoAuthDeclared;
+
+impl Modify for NoAuthDeclared {
+    fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
+        openapi.security = Some(Vec::new());
+    }
+}
 
 /// The OpenAPI document root. The service-level description prose lives in
 /// `openapi_info.md` (utoipa does not read this doc comment for `info`).
@@ -41,6 +53,7 @@ use utoipa::OpenApi;
         (name = "heatmap", description = "Loss heatmap generation"),
         (name = "antennas", description = "Antenna and feed configuration queries")
     ),
+    modifiers(&NoAuthDeclared),
     paths(
         crate::api::handlers::health,
         crate::api::handlers::ready,

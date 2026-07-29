@@ -22,8 +22,12 @@ likelihood of success.
    (`coordinates.rs` negation + BDF) anywhere, in any unit.
 3. After any change under `antenna-model/src/model/`, run `cargo test --workspace`, not
    just the touched module's tests.
-4. `openapi.yaml` is hand-maintained: any request/response schema change must be mirrored
-   there manually until unit C7's drift guard exists.
+4. `openapi.yaml` is **generated** (unit C7, 2026-07-29) — never hand-edit it. After any
+   request/response schema, handler `#[utoipa::path]`, or `api::openapi` change, run
+   `cargo run -p antenna-model --bin generate_openapi` and commit the diff **as a contract
+   change**; `tests/openapi_spec.rs` fails until the committed file matches the code. The
+   error/warning tables in `docs/api-documentation.md` remain hand-maintained (their own
+   tests pin them).
 5. If a doc and the code disagree and no work unit covers it, **stop and file it as a new
    decision item** — never "fix" code to match a doc.
 6. All paths are relative to the repo root.
@@ -2128,6 +2132,35 @@ note above).
   numeric assertions in tests are the net: they may change *field names*, never *values*).
 
 ### C7 — OpenAPI drift guard — Effort: M
+
+**✅ LANDED 2026-07-29** (branch `feat/c7-utoipa-openapi`, five commits, stages A–E), as
+re-scoped: `openapi.yaml` is **generated** from the Rust types and handler annotations via
+`utoipa 5.5` (pinned `=5.5.0`; `yaml` + `preserve_order`/`preserve_path_order` for
+deterministic emission). As landed:
+
+- **Guards.** `tests/openapi_spec.rs` pins the committed file byte-for-byte to
+  `ApiDoc::openapi().to_yaml()` (regenerate with
+  `cargo run -p antenna-model --bin generate_openapi`); `tests/openapi_routes_match.rs`
+  pins the spec's `(method, path)` set to the `routes.rs` registrations (the original exit
+  criterion), with a parser-honesty probe that exercises every scanned route through the
+  real endpoint stack. The two vocabulary tests were re-aimed at the `$ref`'d
+  `WarningCode`/`ErrorCode` components and survive as utoipa-upgrade canaries; the
+  api-documentation.md halves are unchanged.
+- **Groundwork.** `error_codes` `&str` consts promoted to a closed `ErrorCode` enum
+  (wire format unchanged, pinned); `GET /antennas/{id}/feeds` typed as
+  `FeedListResponse{feeds}` (wire bytes unchanged); the three `nan_as_null` fields carry
+  `#[schema(value_type = Option<f64>, required)]` (hazard 1 below — resolved with a
+  `value_type` override rather than `nullable = true`, same emitted `type: [number, null]`).
+- **Prose.** The load-bearing descriptions (hazard 2 below) were ported verbatim into
+  handler `#[utoipa::path]` attributes and type doc comments; prose shared across endpoints
+  lives once under `src/api/openapi_descriptions/*.md` via `include_str!`. Spec-visible doc
+  comments were curated (no rustdoc doctests or `[`intra-doc`]` link syntax leaks).
+- **Post-generation acceptance checklist: all eight rows verified** in the generated file
+  (see the table below). The spec is now OpenAPI **3.1** (was 3.0.3); docs point 3.1-capable
+  viewers. `security: []` is no longer declared (absence means the same thing).
+- **The contract is now frozen** — post-C8 shapes, behind the generate-and-diff guard.
+- **Stretch goal (validating `examples/*` files against component schemas) remains open**,
+  coordinated with C15 (whose `examples/api_requests.json` guard landed in stage 4).
 
 - **Entrance / read first:** `api/routes.rs` route registration; openapi.yaml paths.
 - **Re-scoped 2026-07-28 (during C8 stage 4).** Originally "hand-maintained spec plus a

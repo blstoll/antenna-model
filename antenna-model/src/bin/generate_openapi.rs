@@ -8,9 +8,7 @@
 use antenna_model::api::openapi::ApiDoc;
 use utoipa::OpenApi;
 
-/// Transitional target while the hand-written `openapi.yaml` is still
-/// authoritative; flips to `openapi.yaml` at the C7 cutover.
-const TARGET_FILE: &str = "openapi.generated.yaml";
+const TARGET_FILE: &str = "openapi.yaml";
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

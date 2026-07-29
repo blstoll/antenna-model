@@ -9,9 +9,7 @@
 use antenna_model::api::openapi::ApiDoc;
 use utoipa::OpenApi;
 
-/// Transitional: points at `openapi.generated.yaml` until the C7 cutover retires
-/// the hand-written `openapi.yaml`; then this becomes `openapi.yaml`.
-const SPEC_FILE: &str = "openapi.generated.yaml";
+const SPEC_FILE: &str = "openapi.yaml";
 
 fn repo_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

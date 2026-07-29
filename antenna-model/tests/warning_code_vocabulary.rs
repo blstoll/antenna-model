@@ -1,15 +1,15 @@
 //! Guards that the served warning-code vocabulary, the OpenAPI spec, and the API
 //! documentation all describe the same set of codes (roadmap unit C8 stage 3).
 //!
-//! The sibling of `error_code_vocabulary.rs`, and deliberately built the same way,
-//! because the two vocabularies have the same failure mode: `WarningCode` is
-//! compiler-enforced at every emission site, while `openapi.yaml` and
-//! `docs/api-documentation.md` are hand-maintained and drift silently.
+//! The sibling of `error_code_vocabulary.rs`, and deliberately built the same way.
+//! `WarningCode` is compiler-enforced at every emission site;
+//! `docs/api-documentation.md` is hand-maintained and pinned here, while
+//! `openapi.yaml` is generated from the enum (C7) and its check doubles as a
+//! utoipa-upgrade canary.
 //!
 //! `WarningCode` being a closed enum does half the job already — a producer cannot
 //! emit a code that is not in the type. These tests do the other half: they stop a
-//! code from being *added* without being documented, which is what C7's freeze will
-//! otherwise ratify.
+//! code from being *added* without being documented.
 
 use antenna_model::warnings::WarningCode;
 use std::path::{Path, PathBuf};
@@ -18,8 +18,15 @@ fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
 }
 
-/// Every code in `WarningCode::ALL` appears in openapi.yaml's `ApiWarning.code`
-/// enum, and the enum contains nothing else.
+/// Every code in `WarningCode::ALL` appears in openapi.yaml's `WarningCode`
+/// enum, the enum contains nothing else, and `ApiWarning.code` references it.
+///
+/// Since the C7 cutover openapi.yaml is *generated* from the same enum, so this
+/// cannot fail through hand-editing drift anymore. It is kept as an upgrade
+/// canary: a utoipa version bump that silently changed enum emission (dropped
+/// variants, stopped `$ref`-ing, renamed the component) would pass the
+/// generate-and-diff test — the file would faithfully match the code — and fail
+/// here.
 #[test]
 fn openapi_warning_enum_matches_the_served_vocabulary() {
     let path = repo_root().join("openapi.yaml");
@@ -28,21 +35,32 @@ fn openapi_warning_enum_matches_the_served_vocabulary() {
     let spec: serde_yaml::Value =
         serde_yaml::from_str(&text).expect("openapi.yaml must be valid YAML");
 
-    let enum_node = spec
+    let schemas = spec
         .get("components")
         .and_then(|n| n.get("schemas"))
-        .and_then(|n| n.get("ApiWarning"))
+        .expect("openapi.yaml must define components.schemas");
+
+    // The wiring: ApiWarning.code must reference the WarningCode component.
+    let code_ref = schemas
+        .get("ApiWarning")
         .and_then(|n| n.get("properties"))
         .and_then(|n| n.get("code"))
+        .and_then(|n| n.get("$ref"))
+        .and_then(|n| n.as_str())
+        .expect("ApiWarning.properties.code must $ref a component");
+    assert_eq!(code_ref, "#/components/schemas/WarningCode");
+
+    let enum_node = schemas
+        .get("WarningCode")
         .and_then(|n| n.get("enum"))
         .and_then(|n| n.as_sequence())
-        .expect("openapi.yaml must define components.schemas.ApiWarning.properties.code.enum");
+        .expect("openapi.yaml must define components.schemas.WarningCode.enum");
 
     let documented: Vec<&str> = enum_node
         .iter()
         .map(|v| {
             v.as_str()
-                .expect("every ApiWarning.code enum entry must be a string")
+                .expect("every WarningCode enum entry must be a string")
         })
         .collect();
 
@@ -50,7 +68,7 @@ fn openapi_warning_enum_matches_the_served_vocabulary() {
         assert!(
             documented.contains(&code.as_str()),
             "warning code {:?} is served but missing from openapi.yaml's \
-             ApiWarning.code enum",
+             WarningCode enum",
             code.as_str()
         );
     }

@@ -748,11 +748,14 @@ Supports rectangular azimuth/elevation grids.
 Loss is computed relative to peak gain for each grid point.
 Maximum grid size: 100,000 points.",
     request_body(content = HeatmapRequest, examples(
+        // The hand-written spec's example carried a `vehicle_attitude` here, but
+        // `HeatmapRequest` has no such field (the C15 class of drift — stage 1
+        // fixed the same stale key in examples/api_requests.json); the generated
+        // schema exposed it via example validation and it is dropped, not ported.
         ("rectangular_grid" = (summary = "Rectangular grid (73x46 = 3358 points)", value = json!({
             "antenna_id": "antenna_1",
             "feed_id": "x_band_feed",
             "vehicle_position": {"x": 4510731.123, "y": 4510731.456, "z": 3488865.789, "coordinate_system": "ecef"},
-            "vehicle_attitude": [1.0, 0.0, 0.0, 0.0],
             "reflector_boresight": {"x": 4510732.0, "y": 4510732.0, "z": 3488950.0, "coordinate_system": "ecef"},
             "feed_pointing_location": {"x": 4510731.5, "y": 4510731.5, "z": 3488870.0, "coordinate_system": "ecef"},
             "frequency_mhz": 8400.0,

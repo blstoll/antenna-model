@@ -8,13 +8,21 @@ The Antenna Model Service provides a REST API for high-accuracy antenna loss mod
 
 The complete API specification is available in `openapi.yaml` at the repository root.
 
+Since roadmap unit C7 (2026-07-29) that file is **generated** from the Rust request/response
+types and handler annotations — never edit it by hand. After a contract-affecting code
+change, regenerate it with `cargo run -p antenna-model --bin generate_openapi` and commit
+the diff; `cargo test` fails until the committed file matches the code. The spec is OpenAPI
+**3.1** (it was 3.0.3 before generation), which affects which viewers can render it — see
+below. The error-code and warning-code tables in this document remain hand-maintained.
+
 ### Viewing the Documentation
 
 There are several ways to view the interactive API documentation:
 
 #### Option 1: Online Swagger Editor (Recommended)
 
-1. Go to https://editor.swagger.io/
+1. Go to https://editor-next.swagger.io/ (the classic https://editor.swagger.io/ does not
+   render OpenAPI 3.1)
 2. Click **File → Import File**
 3. Upload `openapi.yaml` from the repository root
 4. Explore the interactive documentation

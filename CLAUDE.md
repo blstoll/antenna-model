@@ -229,8 +229,12 @@ The `calibrate` tool processes measurement data:
   **typed**: `ApiWarning { code: WarningCode, message: String }` (roadmap C8 stage 3,
   2026-07-27). `WarningCode` is a **closed** enum in `src/warnings.rs` — a peer of
   `error.rs`, since the model layer produces warnings too. Adding a producer means adding
-  a variant, updating `WarningCode::ALL`, `openapi.yaml` and `docs/api-documentation.md`;
-  `tests/warning_code_vocabulary.rs` fails otherwise. **`code` is the contract, `message`
+  a variant, updating `WarningCode::ALL` and `docs/api-documentation.md`, then regenerating
+  `openapi.yaml` (`cargo run -p antenna-model --bin generate_openapi` — the spec is
+  generated since C7, never hand-edited); `tests/warning_code_vocabulary.rs` fails
+  otherwise. The error-code vocabulary is the closed `ErrorCode` enum in `api/schemas.rs`
+  (promoted from `&str` consts by C7) with the same procedure via
+  `tests/error_code_vocabulary.rs`. **`code` is the contract, `message`
   is not** — never branch on message text (the substring test that C8 stage 3 deleted from
   `service/heatmap.rs` is why). Heatmap/H3 aggregation dedupes on `(code, message)`, so a
   warning meant to appear once per response must keep its message constant across grid
