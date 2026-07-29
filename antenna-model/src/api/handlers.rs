@@ -782,7 +782,7 @@ pub async fn get_antenna_details(
 pub async fn list_antenna_feeds(
     state: Data<&Arc<AppState>>,
     antenna_id: poem::web::Path<String>,
-) -> poem::Result<Json<serde_json::Value>> {
+) -> poem::Result<Json<crate::api::schemas::FeedListResponse>> {
     let antenna_id = antenna_id.0;
     info!(antenna_id = %antenna_id, "Antenna feeds list request received");
 
@@ -819,7 +819,7 @@ pub async fn list_antenna_feeds(
         feed_count = feeds.len(),
         "Antenna feeds list request successful"
     );
-    Ok(Json(serde_json::json!({ "feeds": feeds })))
+    Ok(Json(crate::api::schemas::FeedListResponse { feeds }))
 }
 
 /// GET /api/v1/antennas/{id}/feeds/{feed_id} - Get feed details

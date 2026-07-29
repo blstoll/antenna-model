@@ -34,7 +34,1391 @@ servers:
 - url: http://antenna-model-service
   description: Kubernetes cluster internal service
 paths: {}
-components: {}
+components:
+  schemas:
+    AntennaDetailsResponse:
+      type: object
+      description: Detailed information about a specific antenna.
+      required:
+      - id
+      - name
+      - enabled
+      - feeds
+      - validity_ranges
+      - calibration
+      - physical_parameters
+      properties:
+        id:
+          type: string
+          description: Antenna identifier
+        name:
+          type: string
+          description: Human-readable antenna name
+        enabled:
+          type: boolean
+          description: Whether antenna is enabled
+        feeds:
+          type: array
+          items:
+            $ref: '#/components/schemas/FeedInfo'
+          description: List of available feeds
+        validity_ranges:
+          $ref: '#/components/schemas/ValidityRangesInfo'
+          description: Validity ranges for queries
+        calibration:
+          $ref: '#/components/schemas/CalibrationInfo'
+          description: Calibration metadata
+        physical_parameters:
+          $ref: '#/components/schemas/PhysicalParametersInfo'
+          description: Physical parameters
+        calibration_status:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/CalibrationStatusInfo'
+            description: |-
+              Calibration status and accuracy information (v2.0)
+              Optional for backward compatibility - will be populated by service layer in Task 6.8
+    AntennaInfo:
+      type: object
+      description: Information about an antenna.
+      required:
+      - id
+      - name
+      - enabled
+      - feed_count
+      - feed_ids
+      properties:
+        id:
+          type: string
+          description: Antenna identifier
+        name:
+          type: string
+          description: Human-readable antenna name
+        enabled:
+          type: boolean
+          description: Whether antenna is enabled
+        feed_count:
+          type: integer
+          description: Number of feeds available
+          minimum: 0
+        feed_ids:
+          type: array
+          items:
+            type: string
+          description: List of available feed IDs
+    AntennaListResponse:
+      type: object
+      description: Response listing available antennas.
+      required:
+      - antennas
+      properties:
+        antennas:
+          type: array
+          items:
+            $ref: '#/components/schemas/AntennaInfo'
+          description: List of available antennas
+    ApiWarning:
+      type: object
+      description: |-
+        A single response warning: a stable `WarningCode` plus a human-readable
+        message.
+
+        `Ord` is derived (code first, then message) so aggregating endpoints can sort
+        their deduplicated set into a stable order without a bespoke comparator.
+      required:
+      - code
+      - message
+      properties:
+        code:
+          $ref: '#/components/schemas/WarningCode'
+          description: Machine-readable classification. Stable; branch on this.
+        message:
+          type: string
+          description: |-
+            Human-readable explanation. **Not** part of the stability contract — show
+            it, do not parse it.
+    BatchGainRequest:
+      type: object
+      description: |-
+        Request for batch gain computation.
+
+        Process multiple gain requests in parallel for improved throughput.
+      required:
+      - evaluations
+      properties:
+        evaluations:
+          type: array
+          items:
+            $ref: '#/components/schemas/GainRequest'
+          description: List of gain computation requests
+    BatchGainResponse:
+      type: object
+      description: |-
+        Response from batch gain computation.
+
+        Contains results for all evaluations and aggregate metadata.
+      required:
+      - results
+      - metadata
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/GainResponse'
+          description: Results for each evaluation
+        metadata:
+          $ref: '#/components/schemas/BatchMetadata'
+          description: Aggregate metadata
+    BatchMetadata:
+      type: object
+      description: Aggregate metadata for batch computation.
+      required:
+      - total_computation_time_ms
+      - count
+      - failure_count
+      properties:
+        total_computation_time_ms:
+          type: number
+          format: double
+          description: Total computation time for batch in milliseconds
+        count:
+          type: integer
+          description: Number of evaluations
+          minimum: 0
+        failure_count:
+          type: integer
+          description: Number of evaluations that failed (NaN gain_db)
+          minimum: 0
+    CalibrationInfo:
+      type: object
+      description: Calibration information.
+      required:
+      - date
+      - version
+      - source
+      - rmse_db
+      - r_squared
+      - num_measurements
+      properties:
+        date:
+          type: string
+          description: Calibration date (ISO 8601)
+        version:
+          type: string
+          description: Format version
+        source:
+          type: string
+          description: Data source
+        rmse_db:
+          type:
+          - number
+          - 'null'
+          format: double
+          description: |-
+            RMSE of the combined model (physics + correction) in dB.
+
+            Serialized as JSON `null` for uncalibrated (design-spec) antennas, which have no
+            fit — the same "slot exists, value does not" convention `GainResponse.gain_db`
+            uses (roadmap C12, 2026-07-28). It is **present and null**, never omitted;
+            omission is reserved for structurally absent members such as
+            `PhysicalParametersInfo.mesh`. Branch on `calibration_status.status` or
+            `num_measurements`, which carry the same information typed.
+        r_squared:
+          type:
+          - number
+          - 'null'
+          format: double
+          description: |-
+            R² correlation coefficient of the combined model.
+
+            Serialized as JSON `null` for uncalibrated antennas — see `rmse_db`.
+        num_measurements:
+          type: integer
+          description: Number of measurement points
+          minimum: 0
+    CalibrationStatusInfo:
+      type: object
+      description: |-
+        Calibration status information included in API responses.
+
+        Indicates the level of calibration data available and expected accuracy
+        for antenna gain predictions. This information helps users understand
+        the quality and reliability of the returned predictions.
+
+        # Status Levels
+
+        - **fully_calibrated**: Dense measurement grid with full correction surface (±1 dB)
+        - **partially_calibrated**: Limited measurements (boresight or sparse grid) (±1-3 dB)
+        - **uncalibrated**: Design specifications only, no measurements (±3-5 dB absolute, ±2 dB loss)
+      required:
+      - status
+      - accuracy_estimate_db
+      - correction_applied
+      - parameters_source
+      properties:
+        status:
+          type: string
+          description: 'Calibration status: "fully_calibrated", "partially_calibrated", or "uncalibrated"'
+        accuracy_estimate_db:
+          type: number
+          format: double
+          description: Expected accuracy estimate in dB
+        loss_accuracy_estimate_db:
+          type:
+          - number
+          - 'null'
+          format: double
+          description: |-
+            Expected loss (relative gain) accuracy in dB (only for uncalibrated antennas)
+            Better than absolute accuracy due to systematic error cancellation
+        coverage:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/CoverageInfo'
+            description: Measurement coverage information (only for partially calibrated antennas)
+        correction_applied:
+          type: boolean
+          description: Whether correction surface was applied to this result
+        parameters_source:
+          type: string
+          description: 'Source of physical parameters: "measurement_tuned", "design_specifications", or "factory_calibrated"'
+    ComputationMetadata:
+      type: object
+      description: Computation performance metadata.
+      required:
+      - computation_time_ms
+      - extrapolated
+      properties:
+        computation_time_ms:
+          type: number
+          format: double
+          description: Total computation time in milliseconds
+        coordinate_transform_ms:
+          type:
+          - number
+          - 'null'
+          format: double
+          description: Coordinate transformation time in milliseconds
+        physics_model_ms:
+          type:
+          - number
+          - 'null'
+          format: double
+          description: Physics model computation time in milliseconds
+        correction_surface_ms:
+          type:
+          - number
+          - 'null'
+          format: double
+          description: Correction surface interpolation time in milliseconds
+        extrapolated:
+          type: boolean
+          description: Whether the query was extrapolated (outside calibrated range)
+        spillover_loss_db:
+          type:
+          - number
+          - 'null'
+          format: double
+          description: |-
+            Physical spillover loss folded into `gain_db`, in dB (a small **negative**
+            value). **Omitted** — not `null` — when physical spillover was NOT applied,
+            i.e. the antenna has a correction surface, which absorbs spillover
+            empirically so there is no separate term to report. Present only on the
+            uncalibrated path, so consumers can tell which model variant produced the
+            number.
+
+            Omission is correct here under the convention `CalibrationInfo.rmse_db`
+            documents (roadmap C12): a field is omitted when it is *structurally
+            absent*, and serialized as `null` only when the slot exists but has no
+            value. On the calibrated path there is no spillover term at all.
+    CoordinateSystem:
+      type: string
+      description: Coordinate system type for 3D positions
+      enum:
+      - ecef
+      - geodetic
+    CoverageInfo:
+      type: object
+      description: |-
+        Measurement coverage information for partially calibrated antennas.
+
+        Describes the spatial, frequency, and measurement density of calibration data.
+      required:
+      - azimuth_range_deg
+      - elevation_range_deg
+      - frequency_range_mhz
+      - num_measurements
+      - is_boresight_only
+      properties:
+        azimuth_range_deg:
+          type: array
+          items: false
+          prefixItems:
+          - type: number
+            format: double
+          - type: number
+            format: double
+          description: Azimuth coverage range in degrees (min, max)
+        elevation_range_deg:
+          type: array
+          items: false
+          prefixItems:
+          - type: number
+            format: double
+          - type: number
+            format: double
+          description: Elevation coverage range in degrees (min, max)
+        frequency_range_mhz:
+          type: array
+          items: false
+          prefixItems:
+          - type: number
+            format: double
+          - type: number
+            format: double
+          description: Frequency coverage range in MHz (min, max)
+        num_measurements:
+          type: integer
+          description: Total number of measurement points
+          minimum: 0
+        is_boresight_only:
+          type: boolean
+          description: Whether this is boresight-only calibration (single spatial point)
+    ErrorCode:
+      type: string
+      description: |-
+        The canonical error-code vocabulary served in `ErrorResponse.error` and
+        `GainError.code`.
+
+        Every error body the service emits carries one of these codes, and nothing
+        else. Emission sites use these variants rather than string literals, so a
+        typo is a compile error instead of a new undocumented code on the wire
+        (roadmap unit C3). Promoted from a `&str`-const module to a closed enum by
+        roadmap unit C7 so the generated `openapi.yaml` can derive the enum — the
+        wire representation (`snake_case` strings) is unchanged.
+
+        The set is also mirrored in `docs/api-documentation.md` (the error-code
+        table), which is **not** compiler-checked — keep it in step when adding a
+        code; `tests/error_code_vocabulary.rs` fails otherwise.
+
+        An earlier `PascalCase` set existed only as unused `ErrorResponse`
+        convenience constructors and never reached the wire; it was deleted in C3.
+
+        The status noted on each code is the one it always carries. Which status a
+        given *error* gets is decided in `api::error_response`
+        (`validation_status` / `service_status`), not here — this enum owns the names.
+      enum:
+      - antenna_not_found
+      - feed_not_found
+      - validation_error
+      - invalid_coordinate
+      - invalid_request_body
+      - payload_too_large
+      - request_timeout
+      - computation_budget_exceeded
+      - service_overloaded
+      - internal_error
+    ErrorResponse:
+      type: object
+      description: |-
+        Standardized error response.
+
+        Returned for all error conditions with appropriate HTTP status codes.
+        The `error` field always carries one of the codes in the `ErrorCode` schema.
+      required:
+      - error
+      - message
+      properties:
+        error:
+          $ref: '#/components/schemas/ErrorCode'
+          description: Error type/category
+        message:
+          type: string
+          description: Human-readable error message
+        field:
+          type:
+          - string
+          - 'null'
+          description: Field that caused the error (if applicable)
+        details:
+          type:
+          - string
+          - 'null'
+          description: Additional error details
+    FeedInfo:
+      type: object
+      description: Information about a feed.
+      required:
+      - id
+      - design_feed_offset_m
+      - frequency_range_mhz
+      - q_factor
+      properties:
+        id:
+          type: string
+          description: Feed identifier
+        design_feed_offset_m:
+          $ref: '#/components/schemas/Vector3D'
+          description: |-
+            The feed's **design** offset from the focal point in the antenna frame
+            (meters) — a static property of this antenna's configuration, identical
+            for every request. It is a physical displacement, *not* an Earth location:
+            it is not the aim point `feed_pointing_location`. The per-request total
+            (design offset + beam-steering displacement) is reported as
+            `GeometryInfo.physical_feed_offset_m`.
+        frequency_range_mhz:
+          type: array
+          items: false
+          prefixItems:
+          - type: number
+            format: double
+          - type: number
+            format: double
+          description: Frequency range in MHz
+        q_factor:
+          type: number
+          format: double
+          description: Feed pattern q-factor
+    FeedListResponse:
+      type: object
+      description: |-
+        Response listing a specific antenna's feeds (`GET /api/v1/antennas/{id}/feeds`).
+
+        The body is `{"feeds": [...]}` — exactly what the service has always emitted.
+        Typed by roadmap unit C7: the handler previously built untyped `serde_json`
+        output, which a generated spec cannot describe. The C14 audit confirmed the
+        wire shape carries no `antenna_id` (the hand-written spec wrongly declared
+        one), so this type does not add one.
+      required:
+      - feeds
+      properties:
+        feeds:
+          type: array
+          items:
+            $ref: '#/components/schemas/FeedInfo'
+          description: The antenna's feeds.
+    GainError:
+      type: object
+      description: |-
+        Why a single evaluation inside a batch produced no gain.
+
+        Carried by `GainResponse.error`; see that field for when it is present.
+        Structurally a two-field subset of `ErrorResponse` — same `code` vocabulary
+        (the `ErrorCode` schema), no `field`/`details`, because a batch item failure is
+        reported per item rather than as the HTTP outcome.
+
+        The field is named `code` (not `error`, as in `ErrorResponse`) because it sits
+        inside a member already named `error`; `"error": {"error": …}` reads as a
+        mistake.
+      required:
+      - code
+      - message
+      properties:
+        code:
+          $ref: '#/components/schemas/ErrorCode'
+          description: Machine-readable failure class.
+        message:
+          type: string
+          description: Human-readable explanation.
+    GainRequest:
+      type: object
+      description: |-
+        Request for antenna gain computation from 3D geometry.
+
+        Computes antenna gain given 3D positions of vehicle, reflector boresight,
+        feed, and emitter, along with operating frequency.
+
+        # Coordinate Systems
+
+        Every `Position3D` field declares its own frame in its required
+        `coordinate_system` tag (there is no auto-detection). Mix-and-match is
+        allowed (e.g., vehicle in Geodetic, emitter in ECEF).
+
+        # Multi-Feed Support
+
+        Use composite identifier `(antenna_id, feed_id)` to specify which feed
+        configuration to use.
+
+        # Beam Squint Correction
+
+        If `pointing_frequency_mhz` differs from `frequency_mhz`, beam squint
+        correction is applied to account for frequency-dependent beam pointing.
+
+        # Orientation
+
+        The `reflector_boresight` position establishes the dish pointing direction.
+        The vector from `vehicle_position` to `reflector_boresight` defines the
+        boresight axis of the antenna coordinate frame.
+      required:
+      - antenna_id
+      - feed_id
+      - vehicle_position
+      - reflector_boresight
+      - feed_pointing_location
+      - emitter_position
+      - frequency_mhz
+      properties:
+        antenna_id:
+          type: string
+          description: Antenna identifier
+        feed_id:
+          type: string
+          description: Feed identifier (for multi-feed antennas)
+        vehicle_position:
+          $ref: '#/components/schemas/Position3D'
+          description: Vehicle position (ECEF or Geodetic, per its `coordinate_system`)
+        reflector_boresight:
+          $ref: '#/components/schemas/Position3D'
+          description: |-
+            Reflector boresight position (ECEF or Geodetic)
+
+            This position, together with `vehicle_position`, establishes the dish
+            pointing direction. The vector from vehicle to boresight defines the
+            antenna Z-axis.
+        feed_pointing_location:
+          $ref: '#/components/schemas/Position3D'
+          description: |-
+            Feed pointing target (ECEF or Geodetic).
+
+            **This is the Earth location the feed's beam is aimed at — NOT the
+            feed's physical location on the antenna.** The service converts the
+            angular offset between this aim point and `reflector_boresight` into a
+            physical feed displacement in the antenna frame (including the beam
+            deviation factor). To model an unsteered (focused) feed, set this equal
+            to `reflector_boresight`.
+        emitter_position:
+          $ref: '#/components/schemas/Position3D'
+          description: Emitter position (ECEF or Geodetic)
+        frequency_mhz:
+          type: number
+          format: double
+          description: Operating frequency in MHz
+        pointing_frequency_mhz:
+          type:
+          - number
+          - 'null'
+          format: double
+          description: Pointing frequency in MHz (for beam squint correction, optional)
+        include_reference:
+          type: boolean
+          description: 'Include reference gain computation (ideal: feed at focus, pointing at emitter)'
+        vehicle_attitude:
+          type:
+          - array
+          - 'null'
+          items:
+            type: number
+            format: double
+          description: |-
+            Optional vehicle attitude as a unit quaternion `[w, x, y, z]` (body → ECEF).
+
+            Body axes convention: body +Z = antenna boresight direction, body +X = azimuth-zero
+            (E-clock zero) reference. When supplied, the antenna-frame X-axis is derived from
+            body +X rotated into ECEF and projected perpendicular to the boresight, giving a
+            **deterministic, calibration-consistent** azimuth reference.
+
+            When omitted, azimuth zero is derived from the Earth-Z / East cross-product heuristic
+            (approximate and discontinuous near boresight ∥ Earth-Z); see
+            `compute_emitter_direction` for details.
+
+            The quaternion must be normalised to unit length (norm within 1e-3 of 1.0).
+          maxItems: 4
+          minItems: 4
+    GainResponse:
+      type: object
+      description: |-
+        Response from antenna gain computation.
+
+        Contains computed gain, optional reference gain and loss, geometry information,
+        warnings, calibration status, and performance metadata.
+      required:
+      - antenna_id
+      - feed_id
+      - gain_db
+      - geometry
+      - warnings
+      - metadata
+      properties:
+        antenna_id:
+          type: string
+          description: Antenna identifier
+        feed_id:
+          type: string
+          description: Feed identifier
+        gain_db:
+          type:
+          - number
+          - 'null'
+          format: double
+          description: Computed gain in dB (serialized as null when NaN for failed evaluations)
+        reference_gain_db:
+          type:
+          - number
+          - 'null'
+          format: double
+          description: Reference gain in dB (if include_reference=true)
+        loss_db:
+          type:
+          - number
+          - 'null'
+          format: double
+          description: Loss in dB (reference - actual, if reference computed)
+        geometry:
+          $ref: '#/components/schemas/GeometryInfo'
+          description: Computed geometry information
+        error:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/GainError'
+            description: |-
+              Why this evaluation produced no gain, when `gain_db` is `null`.
+
+              Present **only** on a failed item inside a `/api/v1/gain/batch` response:
+              `/api/v1/gain` reports a failure as an HTTP error instead, so a 200 body
+              from it never carries this field. Absent on every successful evaluation.
+
+              Introduced by roadmap unit **C8 stage 3**, closing the hazard unit C2
+              recorded: a failed batch item used to be a `gain_db: null` plus a
+              `"Computation failed: …"` string in `warnings`, so a client that did not
+              inspect every item's prose could not tell a failure from a quality caveat.
+              `code` is one of the `ErrorCode` vocabulary — the same one the HTTP error
+              bodies use, so the *reason* survives (a timed-out item reports
+              `computation_budget_exceeded`, not a generic failure).
+        warnings:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApiWarning'
+          description: |-
+            Warnings about result quality (extrapolation, off-axis validity, …).
+
+            Each entry carries a stable `WarningCode` and a human-readable message;
+            branch on `code`, display `message`. See the `WarningCode` schema for the
+            vocabulary; codes are stable, messages are not.
+        metadata:
+          $ref: '#/components/schemas/ComputationMetadata'
+          description: Computation metadata (timing, flags)
+        calibration_status:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/CalibrationStatusInfo'
+            description: |-
+              Calibration status and accuracy information (v2.0)
+              Optional for backward compatibility - will be populated by service layer in Task 6.8
+    GeometryInfo:
+      type: object
+      description: |-
+        Computed geometry information.
+
+        Details about the geometric configuration computed from 3D positions.
+      required:
+      - physical_feed_offset_m
+      - emitter_azimuth_deg
+      - emitter_elevation_deg
+      properties:
+        physical_feed_offset_m:
+          $ref: '#/components/schemas/Vector3D'
+          description: |-
+            Physical feed offset from the focal point in the antenna frame (meters).
+
+            This is the **total** offset actually used for this request: the antenna's
+            static design offset (reported as `FeedInfo.design_feed_offset_m`) plus the
+            displacement induced by steering the beam to `feed_pointing_location`.
+            It is a physical displacement in the antenna frame — *not* an Earth
+            location, and not to be confused with `feed_pointing_location`.
+
+            `x` and `y` are the lateral displacement of the feed from the optical axis;
+            `z` is the axial displacement from the focal point (**positive = away from
+            the reflector vertex**, matching the phase model's `delta_z` convention).
+            For an on-axis (boresight-aimed) feed all three components are ~zero.
+        emitter_azimuth_deg:
+          type: number
+          format: double
+          description: Emitter azimuth in antenna frame (degrees)
+        emitter_elevation_deg:
+          type: number
+          format: double
+          description: Emitter elevation in antenna frame (degrees)
+        beam_squint_deg:
+          type:
+          - number
+          - 'null'
+          format: double
+          description: Beam squint correction applied in degrees (if applicable)
+    GridConfig:
+      oneOf:
+      - type: object
+        description: Rectangular azimuth/elevation grid
+        required:
+        - azimuth_range_deg
+        - elevation_range_deg
+        - grid_type
+        properties:
+          azimuth_range_deg:
+            $ref: '#/components/schemas/RangeConfig'
+            description: Azimuth range configuration
+          elevation_range_deg:
+            $ref: '#/components/schemas/RangeConfig'
+            description: Elevation range configuration
+          grid_type:
+            type: string
+            enum:
+            - rectangular
+      description: |-
+        Grid configuration for heatmap generation.
+
+        A **single-variant tagged enum by design**: `grid_type` stays in the wire contract so a
+        second grid family can be added later without a breaking change (feature F5 would merge
+        `/api/v1/h3-heatmap` back in here). Do not collapse this into a plain struct.
+
+        The `H3` variant that lived here until C8 stage 4 (2026-07-28) was a not-implemented
+        stub — it parsed and validated, then failed. The real H3 grid is the separate
+        `POST /api/v1/h3-heatmap` endpoint. An `h3` tag is now an unknown variant → 400.
+    GridData:
+      oneOf:
+      - type: object
+        description: Rectangular grid data
+        required:
+        - azimuth_values
+        - elevation_values
+        - loss_db
+        - grid_type
+        properties:
+          azimuth_values:
+            type: array
+            items:
+              type: number
+              format: double
+            description: Azimuth values in degrees
+          elevation_values:
+            type: array
+            items:
+              type: number
+              format: double
+            description: Elevation values in degrees
+          loss_db:
+            type: array
+            items:
+              type: array
+              items:
+                type: number
+                format: double
+            description: 'Loss values in dB (2D array: rows are elevation, columns are azimuth)'
+          grid_type:
+            type: string
+            enum:
+            - rectangular
+      description: |-
+        Grid data for heatmap.
+
+        Single-variant tagged enum for the same reason as `GridConfig` — `grid_type` stays on
+        the wire. The `H3` variant was removed by C8 stage 4 (2026-07-28).
+    H3CellResult:
+      type: object
+      description: Per-cell link budget result for a single H3 cell.
+      required:
+      - cell_id
+      - center_lon
+      - center_lat
+      - azimuth_deg
+      - elevation_deg
+      - distance_km
+      - gain_db
+      - loss_db
+      - free_space_path_loss_db
+      - total_path_loss_db
+      properties:
+        cell_id:
+          type: string
+          description: H3 cell index (string representation)
+        center_lon:
+          type: number
+          format: double
+          description: Cell center longitude in degrees
+        center_lat:
+          type: number
+          format: double
+          description: Cell center latitude in degrees
+        azimuth_deg:
+          type: number
+          format: double
+          description: Azimuth to cell center in antenna frame (degrees)
+        elevation_deg:
+          type: number
+          format: double
+          description: Elevation to cell center in antenna frame (degrees)
+        distance_km:
+          type: number
+          format: double
+          description: Distance from vehicle to cell center in km
+        gain_db:
+          type: number
+          format: double
+          description: Antenna gain toward cell center in dB
+        loss_db:
+          type: number
+          format: double
+          description: |-
+            Gain relative to the grid peak, in dB — always ≥ 0, and exactly 0 at the peak cell.
+
+            Computed as `metadata.peak_gain_db - gain_db`, where `peak_gain_db` is the highest
+            gain over the cells **actually evaluated** (roadmap C9). This is the same rule
+            `/api/v1/heatmap` applies, so the field means one thing on both heatmap endpoints,
+            and the response is internally re-derivable from the values it reports.
+
+            The peak of the *grid* is not necessarily the peak of the *beam*: a grid that does
+            not contain the beam peak understates loss for every cell in it.
+
+            Both gains are on the same basis by construction — the reference *is* one of the
+            cells. A grid can still straddle two bases where it leaves calibration coverage
+            (in-coverage cells corrected, out-of-coverage cells physics-only), as on
+            `/api/v1/heatmap`.
+        free_space_path_loss_db:
+          type: number
+          format: double
+          description: Free-space path loss in dB
+        total_path_loss_db:
+          type: number
+          format: double
+          description: |-
+            Total path loss in dB: `free_space_path_loss_db + loss_db`. Since `loss_db` is
+            referenced to the grid peak it is never negative, so this is never below the
+            free-space path loss.
+        g_over_t_db:
+          type:
+          - number
+          - 'null'
+          format: double
+          description: G/T (Gain-over-Temperature) in dB/K (present only when temperature_k was provided)
+    H3LinkBudgetRequest:
+      type: object
+      description: |-
+        Request for H3-based link budget computation.
+
+        Computes per-cell link budget across a hexagonal grid of H3 cells
+        centered on the antenna boresight projection, covering `n_rings` rings.
+      required:
+      - antenna_id
+      - feed_id
+      - vehicle_position
+      - reflector_boresight
+      - feed_pointing_location
+      - frequency_mhz
+      - n_rings
+      properties:
+        antenna_id:
+          type: string
+          description: Antenna identifier
+        feed_id:
+          type: string
+          description: Feed identifier (for multi-feed antennas)
+        vehicle_position:
+          $ref: '#/components/schemas/Position3D'
+          description: Vehicle position (ECEF or Geodetic, per its `coordinate_system`)
+        reflector_boresight:
+          $ref: '#/components/schemas/Position3D'
+          description: Reflector boresight position (ECEF or Geodetic)
+        feed_pointing_location:
+          $ref: '#/components/schemas/Position3D'
+          description: |-
+            Feed pointing target (ECEF or Geodetic).
+
+            **This is the Earth location the feed's beam is aimed at — NOT the
+            feed's physical location on the antenna.** The service converts the
+            angular offset between this aim point and `reflector_boresight` into a
+            physical feed displacement in the antenna frame (including the beam
+            deviation factor). To model an unsteered (focused) feed, set this equal
+            to `reflector_boresight`.
+        frequency_mhz:
+          type: number
+          format: double
+          description: Operating frequency in MHz
+        pointing_frequency_mhz:
+          type:
+          - number
+          - 'null'
+          format: double
+          description: Pointing frequency in MHz (for beam squint correction, optional)
+        n_rings:
+          type: integer
+          format: int32
+          description: Number of H3 rings around the center cell
+          minimum: 0
+        h3_resolution:
+          type:
+          - integer
+          - 'null'
+          format: int32
+          description: H3 resolution (0-15, higher = finer). Uses a default when absent.
+          minimum: 0
+        temperature_k:
+          type:
+          - number
+          - 'null'
+          format: double
+          description: System noise temperature in Kelvin (used for G/T computation)
+        vehicle_attitude:
+          type:
+          - array
+          - 'null'
+          items:
+            type: number
+            format: double
+          description: |-
+            Optional vehicle attitude as a unit quaternion `[w, x, y, z]` (body → ECEF).
+
+            Body axes convention: body +Z = antenna boresight direction, body +X = azimuth-zero
+            (E-clock zero) reference. When supplied, the antenna-frame X-axis is derived from
+            body +X rotated into ECEF and projected perpendicular to the boresight, giving a
+            **deterministic, calibration-consistent** azimuth reference.
+
+            When omitted, azimuth zero is derived from the Earth-Z / East cross-product heuristic
+            (approximate and discontinuous near boresight ∥ Earth-Z); see
+            `compute_emitter_direction` for details.
+
+            The quaternion must be normalised to unit length (norm within 1e-3 of 1.0).
+          maxItems: 4
+          minItems: 4
+    H3LinkBudgetResponse:
+      type: object
+      description: Response from H3-based link budget computation.
+      required:
+      - antenna_id
+      - feed_id
+      - frequency_mhz
+      - center_cell_id
+      - h3_resolution
+      - cells
+      - warnings
+      - metadata
+      properties:
+        antenna_id:
+          type: string
+          description: Antenna identifier
+        feed_id:
+          type: string
+          description: Feed identifier
+        frequency_mhz:
+          type: number
+          format: double
+          description: Operating frequency in MHz
+        center_cell_id:
+          type: string
+          description: H3 cell index of the center cell (string representation)
+        h3_resolution:
+          type: integer
+          format: int32
+          description: H3 resolution used
+          minimum: 0
+        cells:
+          type: array
+          items:
+            $ref: '#/components/schemas/H3CellResult'
+          description: Per-cell results
+        warnings:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApiWarning'
+          description: |-
+            Aggregated, deduplicated warnings across all cells.
+
+            Each entry carries a stable `WarningCode` and a human-readable message;
+            see `HeatmapResponse.warnings` for the deduplication rule.
+        metadata:
+          $ref: '#/components/schemas/HeatmapMetadata'
+          description: Computation metadata
+        calibration_status:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/CalibrationStatusInfo'
+            description: Calibration status and accuracy information (optional)
+        beam_squint_deg:
+          type:
+          - number
+          - 'null'
+          format: double
+          description: |-
+            Beam squint magnitude applied (degrees), when the pointing frequency differs from
+            the operating frequency. Omitted when no squint is applied.
+    HealthResponse:
+      type: object
+      description: |-
+        Health check response (liveness probe).
+
+        Returns 200 when service is responsive.
+      required:
+      - status
+      properties:
+        status:
+          type: string
+          description: Health status - "healthy" when operational
+    HeatmapMetadata:
+      type: object
+      description: Heatmap computation metadata.
+      required:
+      - points_evaluated
+      - computation_time_ms
+      - peak_gain_db
+      - failed_points
+      properties:
+        points_evaluated:
+          type: integer
+          description: Number of grid points evaluated
+          minimum: 0
+        computation_time_ms:
+          type: number
+          format: double
+          description: Total computation time in milliseconds
+        peak_gain_db:
+          type: number
+          format: double
+          description: |-
+            Highest gain in dB over the grid points (or H3 cells) that evaluated successfully.
+            This is the reference every `loss_db` in the response is measured against.
+
+            When *no* point evaluated successfully there is no peak, and the sentinel
+            `-999999.0` is reported (never `null`); `failed_points` then equals
+            `points_evaluated`.
+        failed_points:
+          type: integer
+          description: |-
+            Number of grid points that failed to compute (loss replaced with sentinel 999999.0).
+            On `/api/v1/h3-heatmap` a failed cell is omitted from `cells` entirely, so this is
+            the only place it is reported.
+          minimum: 0
+    HeatmapRequest:
+      type: object
+      description: |-
+        Request for loss heatmap generation.
+
+        Generates a 2D grid of loss values across antenna field of view, over a
+        rectangular (azimuth/elevation) grid. For a per-cell link budget over an H3
+        hexagonal grid on the Earth's surface, use `POST /api/v1/h3-heatmap` instead.
+      required:
+      - antenna_id
+      - feed_id
+      - vehicle_position
+      - reflector_boresight
+      - feed_pointing_location
+      - frequency_mhz
+      - grid_config
+      properties:
+        antenna_id:
+          type: string
+          description: Antenna identifier
+        feed_id:
+          type: string
+          description: Feed identifier
+        vehicle_position:
+          $ref: '#/components/schemas/Position3D'
+          description: Vehicle position (ECEF or Geodetic)
+        reflector_boresight:
+          $ref: '#/components/schemas/Position3D'
+          description: Reflector boresight position (ECEF or Geodetic)
+        feed_pointing_location:
+          $ref: '#/components/schemas/Position3D'
+          description: |-
+            Feed pointing target (ECEF or Geodetic).
+
+            **This is the Earth location the feed's beam is aimed at — NOT the
+            feed's physical location on the antenna.** The service converts the
+            angular offset between this aim point and `reflector_boresight` into a
+            physical feed displacement in the antenna frame (including the beam
+            deviation factor). To model an unsteered (focused) feed, set this equal
+            to `reflector_boresight`.
+        frequency_mhz:
+          type: number
+          format: double
+          description: Operating frequency in MHz
+        pointing_frequency_mhz:
+          type:
+          - number
+          - 'null'
+          format: double
+          description: Pointing frequency in MHz (for beam squint correction, optional)
+        grid_config:
+          $ref: '#/components/schemas/GridConfig'
+          description: Grid configuration (rectangular)
+    HeatmapResponse:
+      type: object
+      description: Response from heatmap generation.
+      required:
+      - antenna_id
+      - feed_id
+      - frequency_mhz
+      - grid
+      - warnings
+      - metadata
+      properties:
+        antenna_id:
+          type: string
+          description: Antenna identifier
+        feed_id:
+          type: string
+          description: Feed identifier
+        frequency_mhz:
+          type: number
+          format: double
+          description: Operating frequency in MHz
+        grid:
+          $ref: '#/components/schemas/GridData'
+          description: Grid data (rectangular)
+        warnings:
+          type: array
+          items:
+            $ref: '#/components/schemas/ApiWarning'
+          description: |-
+            Aggregated, deduplicated warnings across all grid points.
+
+            Each entry carries a stable `WarningCode` and a human-readable message.
+            Deduplication is on the whole warning (code **and** message), so a warning
+            whose message varies per point would appear once per point — producers of
+            grid-safe warnings keep their messages constant per (antenna, frequency).
+        metadata:
+          $ref: '#/components/schemas/HeatmapMetadata'
+          description: Heatmap metadata
+        calibration_status:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/CalibrationStatusInfo'
+            description: |-
+              Calibration status and accuracy information (v2.0)
+              Optional for backward compatibility - will be populated by service layer in Task 6.8
+    MeshInfo:
+      type: object
+      description: Mesh reflector information.
+      required:
+      - mesh_spacing_mm
+      - wire_diameter_mm
+      properties:
+        mesh_spacing_mm:
+          type: number
+          format: double
+          description: Mesh spacing in millimeters
+        wire_diameter_mm:
+          type: number
+          format: double
+          description: Wire diameter in millimeters
+    PhysicalParametersInfo:
+      type: object
+      description: Physical parameters information.
+      required:
+      - diameter_m
+      - focal_length_m
+      - f_over_d_ratio
+      - surface_rms_mm
+      properties:
+        diameter_m:
+          type: number
+          format: double
+          description: Dish diameter in meters
+        focal_length_m:
+          type: number
+          format: double
+          description: Focal length in meters
+        f_over_d_ratio:
+          type: number
+          format: double
+          description: f/D ratio
+        surface_rms_mm:
+          type: number
+          format: double
+          description: Surface RMS error in millimeters
+        mesh:
+          oneOf:
+          - type: 'null'
+          - $ref: '#/components/schemas/MeshInfo'
+            description: Mesh parameters (if mesh reflector)
+    Position3D:
+      type: object
+      description: |
+        3D position in an explicitly named coordinate system.
+
+        Supports two coordinate systems, selected by the **required** `coordinate_system`
+        field:
+        - **ECEF** (Earth-Centered Earth-Fixed), `"ecef"`
+          - x, y, z in meters from Earth's centre of mass
+        - **Geodetic** (WGS84), `"geodetic"`
+          - x = longitude in degrees (-180 to 180)
+          - y = latitude in degrees (-90 to 90)
+          - z = altitude in meters (above the WGS84 ellipsoid)
+
+        # Why the tag is required
+
+        Until roadmap unit C8 stage 2 the field was optional and the frame was inferred from
+        coordinate magnitude (ECEF above a 6400 km threshold, geodetic below). That heuristic
+        is not decidable: a geodetic GEO satellite at `z = 35,786,000` m and an ECEF position
+        are indistinguishable by magnitude, so untagged GEO positions silently misparsed as
+        near-Earth-centre ECEF and returned a confidently wrong gain. The frame is now stated,
+        never guessed — a body that omits `coordinate_system` is rejected with a 400 naming the
+        field.
+      required:
+      - x
+      - y
+      - z
+      - coordinate_system
+      properties:
+        x:
+          type: number
+          format: double
+          description: 'X coordinate: ECEF X (meters) OR longitude (degrees)'
+        y:
+          type: number
+          format: double
+          description: 'Y coordinate: ECEF Y (meters) OR latitude (degrees)'
+        z:
+          type: number
+          format: double
+          description: 'Z coordinate: ECEF Z (meters) OR altitude (meters)'
+        coordinate_system:
+          $ref: '#/components/schemas/CoordinateSystem'
+          description: |-
+            Required frame tag naming how to read `x`, `y`, `z`. There is no default and no
+            magnitude-based inference; omitting it is a deserialization error.
+    RangeConfig:
+      type: object
+      description: Range configuration for rectangular grid.
+      required:
+      - min
+      - max
+      - step
+      properties:
+        min:
+          type: number
+          format: double
+          description: Minimum value in degrees
+        max:
+          type: number
+          format: double
+          description: Maximum value in degrees
+        step:
+          type: number
+          format: double
+          description: Step size in degrees
+    StatusResponse:
+      type: object
+      description: |-
+        Status endpoint response (readiness probe).
+
+        Returns detailed service status including loaded antennas,
+        uptime, version, and operational status.
+      required:
+      - status
+      - version
+      - uptime_seconds
+      properties:
+        status:
+          type: string
+          description: Service status - "ok" when operational
+        version:
+          type: string
+          description: Application version from Cargo.toml
+        uptime_seconds:
+          type: integer
+          format: int64
+          description: Uptime in seconds since server start
+          minimum: 0
+        antenna_count:
+          type:
+          - integer
+          - 'null'
+          description: Number of loaded antennas
+          minimum: 0
+        antenna_ids:
+          type:
+          - array
+          - 'null'
+          items:
+            type: string
+          description: List of loaded antenna IDs
+        memory_bytes:
+          type:
+          - integer
+          - 'null'
+          format: int64
+          description: Memory usage in bytes (if available)
+          minimum: 0
+    ValidityRangesInfo:
+      type: object
+      description: Validity ranges information.
+      required:
+      - azimuth_deg
+      - elevation_deg
+      - frequency_mhz
+      - temperature_k
+      properties:
+        azimuth_deg:
+          type: array
+          items: false
+          prefixItems:
+          - type: number
+            format: double
+          - type: number
+            format: double
+          description: Azimuth range in degrees (min, max)
+        elevation_deg:
+          type: array
+          items: false
+          prefixItems:
+          - type: number
+            format: double
+          - type: number
+            format: double
+          description: Elevation range in degrees (min, max)
+        frequency_mhz:
+          type: array
+          items: false
+          prefixItems:
+          - type: number
+            format: double
+          - type: number
+            format: double
+          description: Frequency range in MHz (min, max)
+        temperature_k:
+          type: number
+          format: double
+          description: Temperature in Kelvin
+    Vector3D:
+      type: object
+      description: 3D vector (used for feed offsets, etc.)
+      required:
+      - x
+      - y
+      - z
+      properties:
+        x:
+          type: number
+          format: double
+          description: X component
+        y:
+          type: number
+          format: double
+          description: Y component
+        z:
+          type: number
+          format: double
+          description: Z component
+    WarningCode:
+      type: string
+      description: |-
+        Machine-readable classification of a response warning.
+
+        Serializes as the snake_case string shown on each variant. See the module
+        documentation for the stability contract (codes are frozen, messages are not).
+      enum:
+      - extrapolated
+      - out_of_coverage
+      - correction_not_applied
+      - uncalibrated
+      - partially_calibrated
+      - off_axis_unvalidated
+      - rear_hemisphere_invalid
+      - non_convergence
+      - ray_trace_degraded
+      - severe_feed_offset
+      - feed_offset_spillover_unmodeled
+      - spillover_significant
+      - points_extrapolated
+      - point_computation_failed
 tags:
 - name: health
   description: Health check and service status endpoints
