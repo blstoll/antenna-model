@@ -521,32 +521,30 @@ fn validate_quaternion_norm(
 
 /// Validate grid configuration for heatmap generation.
 fn validate_grid_config(grid_config: &GridConfig) -> ValidationResult<()> {
-    match grid_config {
-        GridConfig::Rectangular {
-            azimuth_range_deg,
-            elevation_range_deg,
-        } => {
-            validate_range_config(azimuth_range_deg, "azimuth_range_deg")?;
-            validate_range_config(elevation_range_deg, "elevation_range_deg")?;
+    let GridConfig::Rectangular {
+        azimuth_range_deg,
+        elevation_range_deg,
+    } = grid_config;
 
-            // Check total grid points
-            let total_points = azimuth_range_deg.num_points() * elevation_range_deg.num_points();
-            if total_points > MAX_HEATMAP_POINTS {
-                return Err(ValidationError::InvalidGrid {
-                    dimension: "rectangular".to_string(),
-                    reason: format!(
-                        "total grid points {} exceeds maximum {} ({}x{} grid)",
-                        total_points,
-                        MAX_HEATMAP_POINTS,
-                        azimuth_range_deg.num_points(),
-                        elevation_range_deg.num_points()
-                    ),
-                });
-            }
+    validate_range_config(azimuth_range_deg, "azimuth_range_deg")?;
+    validate_range_config(elevation_range_deg, "elevation_range_deg")?;
 
-            Ok(())
-        }
+    // Check total grid points
+    let total_points = azimuth_range_deg.num_points() * elevation_range_deg.num_points();
+    if total_points > MAX_HEATMAP_POINTS {
+        return Err(ValidationError::InvalidGrid {
+            dimension: "rectangular".to_string(),
+            reason: format!(
+                "total grid points {} exceeds maximum {} ({}x{} grid)",
+                total_points,
+                MAX_HEATMAP_POINTS,
+                azimuth_range_deg.num_points(),
+                elevation_range_deg.num_points()
+            ),
+        });
     }
+
+    Ok(())
 }
 
 /// Validate a range configuration.

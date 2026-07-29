@@ -548,8 +548,7 @@ pub struct HeatmapResponse {
 /// Grid data for heatmap.
 ///
 /// Single-variant tagged enum for the same reason as [`GridConfig`] — `grid_type` stays on
-/// the wire. The `H3` variant was removed by C8 stage 4 (2026-07-28); it had no producer,
-/// because the only `GridConfig` that could have selected it was the `NotImplemented` stub.
+/// the wire. The `H3` variant was removed by C8 stage 4 (2026-07-28).
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(tag = "grid_type", rename_all = "lowercase")]
 pub enum GridData {

@@ -650,7 +650,7 @@ async fn geo_altitude_geodetic_emitter_is_accepted_when_tagged() {
 /// i.e. an unparseable body: 400 `invalid_request_body` under C2's policy, not the
 /// 422/`not_implemented` the stub used to return.
 #[tokio::test]
-async fn h3_grid_type_on_heatmap_is_400_not_implemented_stub_removed() {
+async fn h3_grid_type_on_heatmap_is_rejected_with_400() {
     let server = TestServer::start().await.unwrap();
 
     let mut body = serde_json::to_value(builders::simple_heatmap_request()).unwrap();
