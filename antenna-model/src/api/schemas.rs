@@ -379,10 +379,16 @@ pub struct ComputationMetadata {
     pub extrapolated: bool,
 
     /// Physical spillover loss folded into `gain_db`, in dB (a small **negative**
-    /// value). `null` when physical spillover was NOT applied — i.e. the antenna
-    /// has a correction surface (which absorbs spillover empirically). Present only
-    /// on the uncalibrated path, so consumers can tell which model variant produced
-    /// the number.
+    /// value). **Omitted** — not `null` — when physical spillover was NOT applied,
+    /// i.e. the antenna has a correction surface, which absorbs spillover
+    /// empirically so there is no separate term to report. Present only on the
+    /// uncalibrated path, so consumers can tell which model variant produced the
+    /// number.
+    ///
+    /// Omission is correct here under the convention `CalibrationInfo.rmse_db`
+    /// documents (roadmap C12): a field is omitted when it is *structurally
+    /// absent*, and serialized as `null` only when the slot exists but has no
+    /// value. On the calibrated path there is no spillover term at all.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spillover_loss_db: Option<f64>,
 }
