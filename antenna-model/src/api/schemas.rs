@@ -429,8 +429,9 @@ pub struct BatchMetadata {
 
 /// Request for loss heatmap generation.
 ///
-/// Generates a 2D grid of loss values across antenna field of view.
-/// Supports rectangular (azimuth/elevation) or H3 hexagonal grids.
+/// Generates a 2D grid of loss values across antenna field of view, over a
+/// rectangular (azimuth/elevation) grid. For a per-cell link budget over an H3
+/// hexagonal grid on the Earth's surface, use `POST /api/v1/h3-heatmap` instead.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct HeatmapRequest {
     /// Antenna identifier
