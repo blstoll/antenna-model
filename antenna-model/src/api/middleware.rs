@@ -11,7 +11,7 @@
 //! - **RequestSizeTracker**: Tracks request and response body sizes
 
 use crate::api::error_response::json_error;
-use crate::api::schemas::{error_codes, ErrorResponse};
+use crate::api::schemas::{ErrorCode, ErrorResponse};
 use poem::{Endpoint, IntoResponse, Middleware, Request, Response, Result};
 use std::time::{Duration, Instant};
 use tracing::{error, info, warn};
@@ -286,8 +286,7 @@ impl<E: Endpoint> Endpoint for ErrorHandlerImpl<E> {
                 // standard JSON shape; see the type-level docs for why this is
                 // scoped to 400-and-not-ours.
                 if !err.is_from_response() && err.status() == poem::http::StatusCode::BAD_REQUEST {
-                    let body =
-                        ErrorResponse::new(error_codes::INVALID_REQUEST_BODY, err.to_string());
+                    let body = ErrorResponse::new(ErrorCode::InvalidRequestBody, err.to_string());
                     return Err(json_error(poem::http::StatusCode::BAD_REQUEST, &body));
                 }
 
@@ -392,7 +391,7 @@ impl<E> RequestSizeTrackerImpl<E> {
     /// arms, so a chunked client and a `content-length` client see the same
     /// error code and body shape.
     fn too_large_error(&self, message: String) -> poem::Error {
-        let body = ErrorResponse::new(error_codes::PAYLOAD_TOO_LARGE, message);
+        let body = ErrorResponse::new(ErrorCode::PayloadTooLarge, message);
         json_error(poem::http::StatusCode::PAYLOAD_TOO_LARGE, &body)
     }
 }
@@ -483,7 +482,7 @@ impl<E: Endpoint> Endpoint for RequestSizeTrackerImpl<E> {
                     );
 
                     let body = ErrorResponse::new(
-                        error_codes::INVALID_REQUEST_BODY,
+                        ErrorCode::InvalidRequestBody,
                         format!("Failed to read request body: {read_err}"),
                     );
                     return Err(json_error(poem::http::StatusCode::BAD_REQUEST, &body));
@@ -608,7 +607,7 @@ impl<E: Endpoint> Endpoint for RequestTimeoutImpl<E> {
                     "Request exceeded the configured timeout; responding with 504"
                 );
                 let body = ErrorResponse::new(
-                    error_codes::REQUEST_TIMEOUT,
+                    ErrorCode::RequestTimeout,
                     format!(
                         "Request processing exceeded the configured timeout of {} ms",
                         self.timeout.as_millis()
@@ -763,7 +762,7 @@ impl<E: Endpoint> Endpoint for ConcurrencyLimitImpl<E> {
                 );
 
                 let body = ErrorResponse::new(
-                    error_codes::SERVICE_OVERLOADED,
+                    ErrorCode::ServiceOverloaded,
                     format!(
                         "Server is at its concurrent heavy-request limit ({}); retry after {} s",
                         self.limit, self.retry_after_secs
@@ -912,7 +911,7 @@ mod tests {
         let body = response.0.into_body().into_string().await.unwrap();
         let err: ErrorResponse = serde_json::from_str(&body)
             .unwrap_or_else(|e| panic!("expected a JSON error body ({e}), got {body:?}"));
-        assert_eq!(err.error, error_codes::INVALID_REQUEST_BODY);
+        assert_eq!(err.error, ErrorCode::InvalidRequestBody);
         assert!(
             err.message.contains("line 1 column 3"),
             "the parse location must survive normalization, got {:?}",
@@ -938,7 +937,7 @@ mod tests {
                 "/test",
                 poem::endpoint::make_sync(|_req: Request| {
                     let body = ErrorResponse::new(
-                        error_codes::PAYLOAD_TOO_LARGE,
+                        ErrorCode::PayloadTooLarge,
                         "a service-built 400 with a code of its own",
                     );
                     Err::<String, _>(json_error(StatusCode::BAD_REQUEST, &body))
@@ -956,7 +955,7 @@ mod tests {
         let err: ErrorResponse = serde_json::from_str(&body).unwrap();
         assert_eq!(
             err.error,
-            error_codes::PAYLOAD_TOO_LARGE,
+            ErrorCode::PayloadTooLarge,
             "a service-built 400 must keep its own code, not be rewritten as a \
              body-parse failure"
         );

@@ -443,8 +443,8 @@ mod tests {
             // answers 404 `antenna_not_found`; this direct-call path is permissive
             // by design (see `evaluate_batch`'s note).
             assert_eq!(
-                failed.error.as_ref().map(|e| e.code.as_str()),
-                Some(crate::api::schemas::error_codes::FEED_NOT_FOUND),
+                failed.error.as_ref().map(|e| e.code),
+                Some(crate::api::schemas::ErrorCode::FeedNotFound),
                 "item {idx} should report a not-found lookup: {:?}",
                 failed.error
             );
@@ -501,7 +501,7 @@ mod tests {
                 .error
                 .as_ref()
                 .expect("failed item must carry an error");
-            assert_eq!(err.code, crate::api::schemas::error_codes::FEED_NOT_FOUND);
+            assert_eq!(err.code, crate::api::schemas::ErrorCode::FeedNotFound);
         }
     }
 
@@ -542,7 +542,7 @@ mod tests {
         // quality warnings, and it names the failure CLASS rather than flattening
         // every cause into "Computation failed".
         let err = response.error.expect("a failed item must carry an error");
-        assert_eq!(err.code, crate::api::schemas::error_codes::FEED_NOT_FOUND);
+        assert_eq!(err.code, crate::api::schemas::ErrorCode::FeedNotFound);
         assert!(
             err.message.contains("test_feed"),
             "message should name the missing feed: {}",

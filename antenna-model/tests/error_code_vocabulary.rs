@@ -1,7 +1,7 @@
 //! Guards that the served error-code vocabulary, the OpenAPI spec, and the API
 //! documentation all describe the same set of codes (roadmap unit C3).
 //!
-//! `api::schemas::error_codes` is the source of truth and is compiler-enforced at
+//! `api::schemas::ErrorCode` is the source of truth and is compiler-enforced at
 //! every emission site. The spec and the docs are hand-maintained, so they are
 //! pinned here instead — adding a code without documenting it fails the build.
 //!
@@ -9,7 +9,7 @@
 //! each one is served with. Roadmap unit C2 owns the statuses, and unit C7 adds the
 //! general path/method drift guard.
 
-use antenna_model::api::schemas::error_codes;
+use antenna_model::api::schemas::ErrorCode;
 use std::path::{Path, PathBuf};
 
 fn repo_root() -> PathBuf {
@@ -41,7 +41,7 @@ fn spec_enum<'a>(spec: &'a serde_yaml::Value, schema: &str, property: &str) -> V
         .collect()
 }
 
-/// Every code in `error_codes::ALL` appears in openapi.yaml's `ErrorResponse.error`
+/// Every code in `ErrorCode::ALL` appears in openapi.yaml's `ErrorResponse.error`
 /// enum **and** in `GainError.code`, and neither enum contains anything else.
 ///
 /// Both are checked because both are hand-maintained copies of the same vocabulary.
@@ -60,16 +60,16 @@ fn openapi_error_enum_matches_the_served_vocabulary() {
     for (schema, property) in [("ErrorResponse", "error"), ("GainError", "code")] {
         let documented = spec_enum(&spec, schema, property);
 
-        for code in error_codes::ALL {
+        for code in ErrorCode::ALL {
             assert!(
-                documented.contains(code),
+                documented.contains(&code.as_str()),
                 "error code {code:?} is served but missing from openapi.yaml's \
                  {schema}.{property} enum"
             );
         }
         for code in &documented {
             assert!(
-                error_codes::ALL.contains(code),
+                ErrorCode::ALL.iter().any(|c| c.as_str() == *code),
                 "openapi.yaml's {schema}.{property} enum documents error code {code:?}, \
                  which the service never emits"
             );
@@ -89,7 +89,7 @@ fn every_error_code_is_documented_in_the_api_docs() {
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
 
-    for code in error_codes::ALL {
+    for code in ErrorCode::ALL {
         let row = format!("| `{code}` |");
         assert!(
             text.contains(&row),
@@ -132,7 +132,7 @@ fn no_pascal_case_error_codes_remain_in_the_published_contract() {
                 assert!(
                     !value.starts_with(char::is_uppercase),
                     "{file}:{} advertises PascalCase error code {value:?}; the served \
-                     vocabulary is snake_case (see api/schemas.rs, mod error_codes)",
+                     vocabulary is snake_case (see api/schemas.rs, enum ErrorCode)",
                     lineno + 1
                 );
             }

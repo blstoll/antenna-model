@@ -6,7 +6,7 @@ use crate::api::error_response::{
     batch_validation_error, json_error, service_error, validation_error,
 };
 use crate::api::schemas::{
-    error_codes, BatchGainRequest, BatchGainResponse, CalibrationStatusInfo, ErrorResponse,
+    BatchGainRequest, BatchGainResponse, CalibrationStatusInfo, ErrorCode, ErrorResponse,
     GainRequest, GainResponse, H3LinkBudgetRequest, H3LinkBudgetResponse, HealthResponse,
     HeatmapRequest, HeatmapResponse, StatusResponse,
 };
@@ -236,7 +236,7 @@ pub async fn compute_gain(
     .map_err(|join_err| {
         error!(error = %join_err, "Gain compute task failed to join");
         let error_response = ErrorResponse::new(
-            error_codes::INTERNAL_ERROR,
+            ErrorCode::InternalError,
             format!("Gain computation task failed: {join_err}"),
         );
         json_error(StatusCode::INTERNAL_SERVER_ERROR, &error_response)
@@ -369,7 +369,7 @@ pub async fn compute_gain_batch(
     .map_err(|join_err| {
         error!(error = %join_err, "Batch compute task failed to join");
         let error_response = ErrorResponse::new(
-            error_codes::INTERNAL_ERROR,
+            ErrorCode::InternalError,
             format!("Batch computation task failed: {join_err}"),
         );
         json_error(StatusCode::INTERNAL_SERVER_ERROR, &error_response)
@@ -501,7 +501,7 @@ pub async fn generate_heatmap_endpoint(
     .map_err(|join_err| {
         error!(error = %join_err, "Heatmap compute task failed to join");
         let error_response = ErrorResponse::new(
-            error_codes::INTERNAL_ERROR,
+            ErrorCode::InternalError,
             format!("Heatmap computation task failed: {join_err}"),
         );
         json_error(StatusCode::INTERNAL_SERVER_ERROR, &error_response)
@@ -640,7 +640,7 @@ pub async fn get_antenna_details(
     if feed_ids.is_empty() {
         warn!(antenna_id = %antenna_id, "Antenna not found");
         let error_response = ErrorResponse::new(
-            error_codes::ANTENNA_NOT_FOUND,
+            ErrorCode::AntennaNotFound,
             format!("Antenna '{}' not found", antenna_id),
         );
         return Err(json_error(StatusCode::NOT_FOUND, &error_response));
@@ -664,7 +664,7 @@ pub async fn get_antenna_details(
             json_error(
                 StatusCode::NOT_FOUND,
                 &ErrorResponse::new(
-                    error_codes::FEED_NOT_FOUND,
+                    ErrorCode::FeedNotFound,
                     format!("Feed '{first_feed_id}' not found for antenna '{antenna_id}'"),
                 )
                 .with_field("feed_id"),
@@ -791,7 +791,7 @@ pub async fn list_antenna_feeds(
     if feed_ids.is_empty() {
         warn!(antenna_id = %antenna_id, "Antenna not found");
         let error_response = ErrorResponse::new(
-            error_codes::ANTENNA_NOT_FOUND,
+            ErrorCode::AntennaNotFound,
             format!("Antenna '{}' not found", antenna_id),
         );
         return Err(json_error(StatusCode::NOT_FOUND, &error_response));
@@ -887,12 +887,12 @@ pub async fn get_feed_details(
 
             let (error_type, error_msg) = if antenna_exists {
                 (
-                    error_codes::FEED_NOT_FOUND,
+                    ErrorCode::FeedNotFound,
                     format!("Feed '{}' not found for antenna '{}'", feed_id, antenna_id),
                 )
             } else {
                 (
-                    error_codes::ANTENNA_NOT_FOUND,
+                    ErrorCode::AntennaNotFound,
                     format!("Antenna '{}' not found", antenna_id),
                 )
             };
@@ -997,7 +997,7 @@ pub async fn h3_link_budget(
             return Err(json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 &ErrorResponse::new(
-                    error_codes::INTERNAL_ERROR,
+                    ErrorCode::InternalError,
                     "calibration lookup failed after a successful existence check",
                 ),
             ));
@@ -1028,7 +1028,7 @@ pub async fn h3_link_budget(
     .map_err(|join_err| {
         error!(error = %join_err, "H3 link budget compute task failed to join");
         let error_response = ErrorResponse::new(
-            error_codes::INTERNAL_ERROR,
+            ErrorCode::InternalError,
             format!("H3 link budget computation task failed: {join_err}"),
         );
         json_error(StatusCode::INTERNAL_SERVER_ERROR, &error_response)

@@ -305,7 +305,7 @@ pub struct GainResponse {
     /// recorded: a failed batch item used to be a `gain_db: null` plus a
     /// `"Computation failed: …"` string in `warnings`, so a client that did not
     /// inspect every item's prose could not tell a failure from a quality caveat.
-    /// `code` is one of [`error_codes::ALL`] — the same vocabulary the HTTP error
+    /// `code` is one of [`ErrorCode::ALL`] — the same vocabulary the HTTP error
     /// bodies use, so the *reason* survives (a timed-out item reports
     /// `computation_budget_exceeded`, not a generic failure).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1123,81 +1123,129 @@ impl StatusResponse {
 // Error Response
 // ============================================================================
 
-/// The canonical error-code vocabulary served in `ErrorResponse.error`.
+/// The canonical error-code vocabulary served in `ErrorResponse.error` and
+/// `GainError.code`.
 ///
 /// Every error body the service emits carries one of these codes, and nothing
-/// else. Emission sites reference these constants rather than repeating string
-/// literals, so a typo is a compile error instead of a new undocumented code on
-/// the wire (roadmap unit C3).
+/// else. Emission sites use these variants rather than string literals, so a
+/// typo is a compile error instead of a new undocumented code on the wire
+/// (roadmap unit C3). Promoted from a `&str`-const module to a closed enum by
+/// roadmap unit C7 so the generated `openapi.yaml` can derive the enum — the
+/// wire representation (`snake_case` strings) is unchanged.
 ///
-/// The set is mirrored in two places that are **not** compiler-checked — keep
-/// them in step when adding a code:
+/// The set is also mirrored in `docs/api-documentation.md` (the error-code
+/// table), which is **not** compiler-checked — keep it in step when adding a
+/// code; `tests/error_code_vocabulary.rs` fails otherwise.
 ///
-/// - `openapi.yaml` (the `ErrorResponse` schema's `error` enum), and
-/// - `docs/api-documentation.md` (the error-code table).
+/// An earlier `PascalCase` set existed only as unused `ErrorResponse`
+/// convenience constructors and never reached the wire; it was deleted in C3.
 ///
-/// Codes are `snake_case`. An earlier `PascalCase` set existed only as unused
-/// `ErrorResponse` convenience constructors and never reached the wire; it was
-/// deleted in C3.
-///
-/// The status noted on each code is the one it always carries. Which status a given
-/// *error* gets is decided in `api::error_response`
-/// (`validation_status` / `service_status`), not here — this module owns the names.
-pub mod error_codes {
-    /// The named antenna does not exist in the calibration repository (404).
-    pub const ANTENNA_NOT_FOUND: &str = "antenna_not_found";
+/// The status noted on each code is the one it always carries. Which status a
+/// given *error* gets is decided in `api::error_response`
+/// (`validation_status` / `service_status`), not here — this enum owns the names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCode {
+    /// `antenna_not_found` — the named antenna does not exist in the calibration
+    /// repository (404).
+    AntennaNotFound,
 
-    /// The antenna exists but the named feed does not (404).
-    pub const FEED_NOT_FOUND: &str = "feed_not_found";
+    /// `feed_not_found` — the antenna exists but the named feed does not (404).
+    FeedNotFound,
 
-    /// The request deserialized but is semantically invalid (422, from either the
-    /// pre-check or the service layer — roadmap C2 made the two agree).
-    pub const VALIDATION_ERROR: &str = "validation_error";
+    /// `validation_error` — the request deserialized but is semantically invalid
+    /// (422, from either the pre-check or the service layer — roadmap C2 made the
+    /// two agree).
+    ValidationError,
 
-    /// A position or coordinate value is out of range or untransformable (422).
-    pub const INVALID_COORDINATE: &str = "invalid_coordinate";
+    /// `invalid_coordinate` — a position or coordinate value is out of range or
+    /// untransformable (422).
+    InvalidCoordinate,
 
-    /// The request body could not be read or parsed (400).
-    pub const INVALID_REQUEST_BODY: &str = "invalid_request_body";
+    /// `invalid_request_body` — the request body could not be read or parsed (400).
+    InvalidRequestBody,
 
-    /// The request body exceeds `server.max_body_size_bytes` (413).
-    pub const PAYLOAD_TOO_LARGE: &str = "payload_too_large";
+    /// `payload_too_large` — the request body exceeds
+    /// `server.max_body_size_bytes` (413).
+    PayloadTooLarge,
 
-    /// The request exceeded `server.request_timeout_secs` (504).
-    pub const REQUEST_TIMEOUT: &str = "request_timeout";
+    /// `request_timeout` — the request exceeded `server.request_timeout_secs` (504).
+    RequestTimeout,
 
-    /// A single aperture integration exceeded
+    /// `computation_budget_exceeded` — a single aperture integration exceeded
     /// `performance.integration_budget_ms` (504).
-    pub const COMPUTATION_BUDGET_EXCEEDED: &str = "computation_budget_exceeded";
+    ComputationBudgetExceeded,
 
-    /// Admission control rejected the request; a `Retry-After` header
-    /// accompanies it (503).
-    pub const SERVICE_OVERLOADED: &str = "service_overloaded";
+    /// `service_overloaded` — admission control rejected the request; a
+    /// `Retry-After` header accompanies it (503).
+    ServiceOverloaded,
 
-    /// An unexpected server-side failure (500).
-    pub const INTERNAL_ERROR: &str = "internal_error";
+    /// `internal_error` — an unexpected server-side failure (500).
+    InternalError,
+}
 
-    /// Every code above, in the order documented. Used by the drift test and
-    /// available to consumers that need to enumerate the vocabulary.
-    pub const ALL: &[&str] = &[
-        ANTENNA_NOT_FOUND,
-        FEED_NOT_FOUND,
-        VALIDATION_ERROR,
-        INVALID_COORDINATE,
-        INVALID_REQUEST_BODY,
-        PAYLOAD_TOO_LARGE,
-        REQUEST_TIMEOUT,
-        COMPUTATION_BUDGET_EXCEEDED,
-        SERVICE_OVERLOADED,
-        INTERNAL_ERROR,
+impl ErrorCode {
+    /// Every code, in the order documented. Used by the vocabulary drift test and
+    /// available to consumers that need to enumerate the set. Mirrors
+    /// [`crate::warnings::WarningCode::ALL`].
+    pub const ALL: &'static [ErrorCode] = &[
+        ErrorCode::AntennaNotFound,
+        ErrorCode::FeedNotFound,
+        ErrorCode::ValidationError,
+        ErrorCode::InvalidCoordinate,
+        ErrorCode::InvalidRequestBody,
+        ErrorCode::PayloadTooLarge,
+        ErrorCode::RequestTimeout,
+        ErrorCode::ComputationBudgetExceeded,
+        ErrorCode::ServiceOverloaded,
+        ErrorCode::InternalError,
     ];
+
+    /// The wire representation, identical to what `serde` emits.
+    ///
+    /// Kept as a hand-written match rather than derived from the serde attribute so
+    /// that adding a variant fails to compile here too, not just in [`Self::ALL`].
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ErrorCode::AntennaNotFound => "antenna_not_found",
+            ErrorCode::FeedNotFound => "feed_not_found",
+            ErrorCode::ValidationError => "validation_error",
+            ErrorCode::InvalidCoordinate => "invalid_coordinate",
+            ErrorCode::InvalidRequestBody => "invalid_request_body",
+            ErrorCode::PayloadTooLarge => "payload_too_large",
+            ErrorCode::RequestTimeout => "request_timeout",
+            ErrorCode::ComputationBudgetExceeded => "computation_budget_exceeded",
+            ErrorCode::ServiceOverloaded => "service_overloaded",
+            ErrorCode::InternalError => "internal_error",
+        }
+    }
+}
+
+impl std::fmt::Display for ErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Lets existing assertions compare a typed code against its wire string
+/// (`assert_eq!(err.error, "antenna_not_found")`) without restating the enum.
+impl PartialEq<&str> for ErrorCode {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<ErrorCode> for &str {
+    fn eq(&self, other: &ErrorCode) -> bool {
+        *self == other.as_str()
+    }
 }
 
 /// Why a single evaluation inside a batch produced no gain.
 ///
 /// Carried by [`GainResponse::error`]; see that field for when it is present.
 /// Structurally a two-field subset of [`ErrorResponse`] — same `code` vocabulary
-/// ([`error_codes::ALL`]), no `field`/`details`, because a batch item failure is
+/// ([`ErrorCode::ALL`]), no `field`/`details`, because a batch item failure is
 /// reported per item rather than as the HTTP outcome.
 ///
 /// The field is named `code` (not `error`, as in [`ErrorResponse`]) because it sits
@@ -1205,8 +1253,8 @@ pub mod error_codes {
 /// mistake.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct GainError {
-    /// Machine-readable failure class, one of [`error_codes::ALL`].
-    pub code: String,
+    /// Machine-readable failure class.
+    pub code: ErrorCode,
 
     /// Human-readable explanation.
     pub message: String,
@@ -1214,9 +1262,9 @@ pub struct GainError {
 
 impl GainError {
     /// Create a per-item error from a code and message.
-    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
         Self {
-            code: code.into(),
+            code,
             message: message.into(),
         }
     }
@@ -1225,11 +1273,11 @@ impl GainError {
 /// Standardized error response.
 ///
 /// Returned for all error conditions with appropriate HTTP status codes.
-/// The `error` field always carries one of [`error_codes::ALL`].
+/// The `error` field always carries one of [`ErrorCode::ALL`].
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ErrorResponse {
     /// Error type/category
-    pub error: String,
+    pub error: ErrorCode,
 
     /// Human-readable error message
     pub message: String,
@@ -1245,9 +1293,9 @@ pub struct ErrorResponse {
 
 impl ErrorResponse {
     /// Create a new error response
-    pub fn new(error: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn new(error: ErrorCode, message: impl Into<String>) -> Self {
         Self {
-            error: error.into(),
+            error,
             message: message.into(),
             field: None,
             details: None,
@@ -1544,8 +1592,8 @@ mod tests {
 
     #[test]
     fn test_error_response_basic() {
-        let error = ErrorResponse::new("TestError", "Test message");
-        assert_eq!(error.error, "TestError");
+        let error = ErrorResponse::new(ErrorCode::ValidationError, "Test message");
+        assert_eq!(error.error, ErrorCode::ValidationError);
         assert_eq!(error.message, "Test message");
         assert!(error.field.is_none());
         assert!(error.details.is_none());
@@ -1553,13 +1601,15 @@ mod tests {
 
     #[test]
     fn test_error_response_with_field() {
-        let error = ErrorResponse::new("TestError", "Test message").with_field("test_field");
+        let error =
+            ErrorResponse::new(ErrorCode::ValidationError, "Test message").with_field("test_field");
         assert_eq!(error.field, Some("test_field".to_string()));
     }
 
     #[test]
     fn test_error_response_with_details() {
-        let error = ErrorResponse::new("TestError", "Test message").with_details("More info");
+        let error = ErrorResponse::new(ErrorCode::ValidationError, "Test message")
+            .with_details("More info");
         assert_eq!(error.details, Some("More info".to_string()));
     }
 
@@ -1572,25 +1622,43 @@ mod tests {
     fn error_code_vocabulary_is_snake_case_and_unique() {
         use std::collections::HashSet;
 
-        for code in error_codes::ALL {
-            assert!(!code.is_empty(), "error code must not be empty");
+        for code in ErrorCode::ALL {
+            let s = code.as_str();
+            assert!(!s.is_empty(), "error code must not be empty");
             assert!(
-                code.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                s.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
                 "error code {code:?} is not snake_case"
             );
         }
 
-        let unique: HashSet<_> = error_codes::ALL.iter().collect();
+        let unique: HashSet<_> = ErrorCode::ALL.iter().collect();
         assert_eq!(
             unique.len(),
-            error_codes::ALL.len(),
-            "error_codes::ALL contains a duplicate"
+            ErrorCode::ALL.len(),
+            "ErrorCode::ALL contains a duplicate"
         );
+    }
+
+    /// The C7 enum promotion must not move the wire format: `as_str()`, `Display`,
+    /// and the serde representation all agree for every code. Mirrors the same
+    /// pin on `WarningCode`.
+    #[test]
+    fn as_str_matches_serde_for_every_error_code() {
+        for &code in ErrorCode::ALL {
+            let json = serde_json::to_string(&code).expect("code serializes");
+            assert_eq!(
+                json,
+                format!("\"{}\"", code.as_str()),
+                "as_str() and the serde representation disagree for {code:?}"
+            );
+            let parsed: ErrorCode = serde_json::from_str(&json).expect("code round-trips");
+            assert_eq!(parsed, code);
+        }
     }
 
     #[test]
     fn test_error_response_serialization() {
-        let error = ErrorResponse::new("TestError", "Test message")
+        let error = ErrorResponse::new(ErrorCode::ValidationError, "Test message")
             .with_field("test_field")
             .with_details("More info");
 

@@ -12,8 +12,9 @@
 //! `ErrorResponse` into a `poem::Error` — a new error site cannot reintroduce
 //! the `text/plain` bug without going around this module.
 //!
-//! The error-code vocabulary itself lives in [`crate::api::schemas::error_codes`]
-//! (roadmap unit C3); this module owns the transport, not the taxonomy.
+//! The error-code vocabulary itself lives in [`crate::api::schemas::ErrorCode`]
+//! (roadmap unit C3; promoted from `&str` consts to a closed enum by C7); this
+//! module owns the transport, not the taxonomy.
 //!
 //! # Status policy (roadmap unit C2)
 //!
@@ -25,7 +26,7 @@
 //! decision means a handler cannot disagree with its siblings, and adding an error
 //! variant is one edit rather than four.
 
-use crate::api::schemas::{error_codes, ErrorResponse};
+use crate::api::schemas::{ErrorCode, ErrorResponse};
 use crate::error::{
     AntennaModelError, BatchValidationError, ComputationError, DataError, ValidationError,
 };
@@ -34,8 +35,8 @@ use poem::Response;
 
 /// Body used when serializing an [`ErrorResponse`] fails.
 ///
-/// Unreachable in practice: `ErrorResponse` is four owned `String` fields, and
-/// `serde_json` cannot fail on those. It exists because the alternative to a
+/// Unreachable in practice: `ErrorResponse` is a unit enum plus owned `String`
+/// fields, and `serde_json` cannot fail on those. It exists because the alternative to a
 /// fallback is `unwrap()` (banned in production code) or `unwrap_or_default()`,
 /// which would emit an **empty** body under `Content-Type: application/json` —
 /// a parse error on the client for what should be a readable failure. The
@@ -80,18 +81,13 @@ pub fn json_error(status: StatusCode, body: &ErrorResponse) -> poem::Error {
 ///
 /// Never `400`. Under C2 a `400` means only that the body could not be parsed, which
 /// is decided before any validator runs.
-pub fn validation_status(err: &ValidationError) -> (StatusCode, &'static str) {
+pub fn validation_status(err: &ValidationError) -> (StatusCode, ErrorCode) {
     match err {
         ValidationError::AntennaNotFound { .. } => {
-            (StatusCode::NOT_FOUND, error_codes::ANTENNA_NOT_FOUND)
+            (StatusCode::NOT_FOUND, ErrorCode::AntennaNotFound)
         }
-        ValidationError::FeedNotFound { .. } => {
-            (StatusCode::NOT_FOUND, error_codes::FEED_NOT_FOUND)
-        }
-        _ => (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            error_codes::VALIDATION_ERROR,
-        ),
+        ValidationError::FeedNotFound { .. } => (StatusCode::NOT_FOUND, ErrorCode::FeedNotFound),
+        _ => (StatusCode::UNPROCESSABLE_ENTITY, ErrorCode::ValidationError),
     }
 }
 
@@ -116,30 +112,25 @@ pub fn validation_status(err: &ValidationError) -> (StatusCode, &'static str) {
 ///   not the caller's.
 /// - `TimeBudgetExceeded` keeps its **504**; see the `RequestTimeout` middleware for
 ///   the 504-vs-408-vs-503 reasoning.
-pub fn service_status(err: &AntennaModelError) -> (StatusCode, &'static str) {
+pub fn service_status(err: &AntennaModelError) -> (StatusCode, ErrorCode) {
     match err {
         AntennaModelError::Validation(inner) => validation_status(inner),
 
-        AntennaModelError::FeedNotFound { .. } => {
-            (StatusCode::NOT_FOUND, error_codes::FEED_NOT_FOUND)
-        }
+        AntennaModelError::FeedNotFound { .. } => (StatusCode::NOT_FOUND, ErrorCode::FeedNotFound),
         AntennaModelError::Data(DataError::AntennaNotFound { .. }) => {
-            (StatusCode::NOT_FOUND, error_codes::ANTENNA_NOT_FOUND)
+            (StatusCode::NOT_FOUND, ErrorCode::AntennaNotFound)
         }
 
         AntennaModelError::InvalidCoordinate { .. } => (
             StatusCode::UNPROCESSABLE_ENTITY,
-            error_codes::INVALID_COORDINATE,
+            ErrorCode::InvalidCoordinate,
         ),
         AntennaModelError::Computation(ComputationError::TimeBudgetExceeded { .. }) => (
             StatusCode::GATEWAY_TIMEOUT,
-            error_codes::COMPUTATION_BUDGET_EXCEEDED,
+            ErrorCode::ComputationBudgetExceeded,
         ),
 
-        _ => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            error_codes::INTERNAL_ERROR,
-        ),
+        _ => (StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::InternalError),
     }
 }
 
@@ -185,7 +176,7 @@ mod tests {
 
     #[tokio::test]
     async fn carries_the_json_content_type_and_the_exact_serialized_body() {
-        let body = ErrorResponse::new(error_codes::VALIDATION_ERROR, "frequency out of range")
+        let body = ErrorResponse::new(ErrorCode::ValidationError, "frequency out of range")
             .with_field("frequency_mhz");
         let expected = serde_json::to_string(&body).expect("ErrorResponse serializes");
 
@@ -206,7 +197,7 @@ mod tests {
 
     #[test]
     fn preserves_the_status_for_middleware_that_inspects_it() {
-        let body = ErrorResponse::new(error_codes::INTERNAL_ERROR, "boom");
+        let body = ErrorResponse::new(ErrorCode::InternalError, "boom");
         assert_eq!(
             json_error(StatusCode::INTERNAL_SERVER_ERROR, &body).status(),
             StatusCode::INTERNAL_SERVER_ERROR
@@ -228,7 +219,7 @@ mod tests {
     fn service_status_policy_table() {
         use crate::error::ValidationError;
 
-        let cases: Vec<(&str, AntennaModelError, StatusCode, &str)> = vec![
+        let cases: Vec<(&str, AntennaModelError, StatusCode, ErrorCode)> = vec![
             (
                 // The 500-fallthrough that C2 fixes: no `Validation(_)` arm existed
                 // on `/gain`, so this class fell through to INTERNAL_SERVER_ERROR.
@@ -237,7 +228,7 @@ mod tests {
                     frequency_mhz: 0.0,
                 }),
                 StatusCode::UNPROCESSABLE_ENTITY,
-                error_codes::VALIDATION_ERROR,
+                ErrorCode::ValidationError,
             ),
             (
                 // Absence stays absence even when it surfaces one layer down.
@@ -246,7 +237,7 @@ mod tests {
                     antenna_id: "nope".into(),
                 }),
                 StatusCode::NOT_FOUND,
-                error_codes::ANTENNA_NOT_FOUND,
+                ErrorCode::AntennaNotFound,
             ),
             (
                 "service-layer unknown feed",
@@ -256,7 +247,7 @@ mod tests {
                     available: vec!["primary".into()],
                 }),
                 StatusCode::NOT_FOUND,
-                error_codes::FEED_NOT_FOUND,
+                ErrorCode::FeedNotFound,
             ),
             (
                 "evaluator feed lookup miss",
@@ -265,7 +256,7 @@ mod tests {
                     feed_id: "f".into(),
                 },
                 StatusCode::NOT_FOUND,
-                error_codes::FEED_NOT_FOUND,
+                ErrorCode::FeedNotFound,
             ),
             (
                 "repository antenna miss",
@@ -273,7 +264,7 @@ mod tests {
                     antenna_id: "a".into(),
                 }),
                 StatusCode::NOT_FOUND,
-                error_codes::ANTENNA_NOT_FOUND,
+                ErrorCode::AntennaNotFound,
             ),
             (
                 // Was 400 before C2, on a body that parsed perfectly.
@@ -283,7 +274,7 @@ mod tests {
                     reason: "too close to vehicle_position".into(),
                 },
                 StatusCode::UNPROCESSABLE_ENTITY,
-                error_codes::INVALID_COORDINATE,
+                ErrorCode::InvalidCoordinate,
             ),
             (
                 "integration over budget",
@@ -293,7 +284,7 @@ mod tests {
                     budget_ms: 30_000,
                 }),
                 StatusCode::GATEWAY_TIMEOUT,
-                error_codes::COMPUTATION_BUDGET_EXCEEDED,
+                ErrorCode::ComputationBudgetExceeded,
             ),
             (
                 // Distinct from InvalidCoordinate: the input was already accepted as
@@ -303,7 +294,7 @@ mod tests {
                     details: "singular".into(),
                 },
                 StatusCode::INTERNAL_SERVER_ERROR,
-                error_codes::INTERNAL_ERROR,
+                ErrorCode::InternalError,
             ),
             (
                 "numerical instability",
@@ -312,7 +303,7 @@ mod tests {
                     reason: "overflow".into(),
                 }),
                 StatusCode::INTERNAL_SERVER_ERROR,
-                error_codes::INTERNAL_ERROR,
+                ErrorCode::InternalError,
             ),
         ];
 
@@ -365,16 +356,13 @@ mod tests {
                 size: 1001,
                 limit: 1000
             }),
-            (
-                StatusCode::UNPROCESSABLE_ENTITY,
-                error_codes::VALIDATION_ERROR
-            )
+            (StatusCode::UNPROCESSABLE_ENTITY, ErrorCode::ValidationError)
         );
         assert_eq!(
             validation_status(&ValidationError::AntennaNotFound {
                 antenna_id: "a".into()
             }),
-            (StatusCode::NOT_FOUND, error_codes::ANTENNA_NOT_FOUND)
+            (StatusCode::NOT_FOUND, ErrorCode::AntennaNotFound)
         );
     }
 
@@ -400,11 +388,11 @@ mod tests {
     /// `Display` would degrade those lines to the bare status text.
     #[test]
     fn display_is_the_json_payload_not_the_bare_status() {
-        let body = ErrorResponse::new(error_codes::ANTENNA_NOT_FOUND, "Antenna 'x' not found");
+        let body = ErrorResponse::new(ErrorCode::AntennaNotFound, "Antenna 'x' not found");
         let rendered = json_error(StatusCode::NOT_FOUND, &body).to_string();
 
         assert!(
-            rendered.contains(error_codes::ANTENNA_NOT_FOUND),
+            rendered.contains(ErrorCode::AntennaNotFound.as_str()),
             "expected the payload in Display, got {rendered:?}"
         );
         assert!(
