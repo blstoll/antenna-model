@@ -701,8 +701,8 @@ pub async fn get_antenna_details(
         date: calibration.metadata.calibration_date.clone(),
         version: calibration.metadata.format_version.clone(),
         source: calibration.metadata.data_source.clone(),
-        rmse_db: Some(calibration.metadata.rmse_db),
-        r_squared: Some(calibration.metadata.r_squared),
+        rmse_db: calibration.metadata.rmse_db,
+        r_squared: calibration.metadata.r_squared,
         num_measurements: calibration.metadata.num_measurements,
     };
 

@@ -256,6 +256,16 @@ impl CalibrationRepository {
                 calibration_date: "N/A".to_string(),
                 format_version: "2.0".to_string(),
                 data_source: "design_specifications".to_string(),
+                // Sentinel: no calibration was fitted, so there is no error metric.
+                // `CalibrationMetadata` is postcard-serialized into the ANTC artifact
+                // (positional, non-self-describing), so these cannot become `Option`
+                // without a format bump — see roadmap D2. The API surfaces them with
+                // `#[serde(with = "nan_as_null")]`, so this NaN reaches the client as a
+                // deliberate JSON `null` (roadmap C12, 2026-07-28), matching gain_db.
+                //
+                // Note `data/loader.rs:268,275` warns on `rmse_db > 1.0` / `r_squared <
+                // 0.95`; both comparisons are false for NaN, so design-spec antennas load
+                // without a spurious quality warning. That is intended — do not "fix" it.
                 rmse_db: f64::NAN,
                 r_squared: f64::NAN,
                 num_measurements: 0,

@@ -279,6 +279,8 @@ pub struct GainResponse {
     pub feed_id: String,
 
     /// Computed gain in dB (serialized as null when NaN for failed evaluations)
+    // TODO(C7): needs `#[schema(nullable = true)]` when utoipa lands — it derives
+    // `type: number` from f64 and cannot see that nan_as_null emits JSON null.
     #[serde(with = "nan_as_null")]
     pub gain_db: f64,
 
@@ -855,13 +857,26 @@ pub struct CalibrationInfo {
     /// Data source
     pub source: String,
 
-    /// Root mean squared error in dB (None for uncalibrated antennas)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rmse_db: Option<f64>,
+    /// RMSE of the combined model (physics + correction) in dB.
+    ///
+    /// Serialized as JSON `null` for uncalibrated (design-spec) antennas, which have no
+    /// fit — the same "slot exists, value does not" convention `GainResponse.gain_db`
+    /// uses (roadmap C12, 2026-07-28). It is **present and null**, never omitted;
+    /// omission is reserved for structurally absent members such as
+    /// `PhysicalParametersInfo.mesh`. Branch on `calibration_status.status` or
+    /// `num_measurements`, which carry the same information typed.
+    // TODO(C7): needs `#[schema(nullable = true)]` when utoipa lands — it derives
+    // `type: number` from f64 and cannot see that nan_as_null emits JSON null.
+    #[serde(with = "nan_as_null")]
+    pub rmse_db: f64,
 
-    /// R² correlation coefficient (None for uncalibrated antennas)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub r_squared: Option<f64>,
+    /// R² correlation coefficient of the combined model.
+    ///
+    /// Serialized as JSON `null` for uncalibrated antennas — see `rmse_db`.
+    // TODO(C7): needs `#[schema(nullable = true)]` when utoipa lands — it derives
+    // `type: number` from f64 and cannot see that nan_as_null emits JSON null.
+    #[serde(with = "nan_as_null")]
+    pub r_squared: f64,
 
     /// Number of measurement points
     pub num_measurements: usize,
