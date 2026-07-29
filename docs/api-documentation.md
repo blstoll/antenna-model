@@ -68,7 +68,8 @@ docker run -p 8080:8080 \
 
 ### Heatmap Generation
 
-- `POST /api/v1/heatmap` - Generate 2D loss heatmap across antenna field of view
+- `POST /api/v1/heatmap` - Generate 2D loss heatmap across antenna field of view.
+  `grid_config.grid_type` accepts `rectangular` only.
 - `POST /api/v1/h3-heatmap` - Per-cell link budget over an H3 hexagonal grid on the
   Earth's surface (gain, path loss, optional G/T)
 
@@ -238,6 +239,15 @@ Each antenna can have multiple feeds with independent calibrations. Use composit
 `POST /api/v1/h3-heatmap` returns a per-cell link budget over an
 [H3](https://h3geo.org) hexagonal grid laid on the Earth's surface — gain, free-space
 path loss, total path loss, and optionally G/T for every cell.
+
+**Why two heatmap endpoints.** `POST /api/v1/heatmap` returns a *loss surface* over a
+rectangular azimuth/elevation grid in the antenna's own frame. `POST /api/v1/h3-heatmap`
+returns a per-cell *link budget* — gain, free-space path loss, total path loss and G/T —
+over an H3 hexagonal grid laid on the Earth's surface, centred on an Earth location. They
+differ in output, in reference frame and in what the caller must supply, not merely in grid
+shape, so they stay separate endpoints. `/heatmap` carried an `h3` grid type until 2026-07;
+it was a not-implemented stub and was removed (roadmap C8 stage 4). Merging the two is
+tracked as roadmap feature **F5**.
 
 **Grid placement and size.** The grid is centred on the H3 cell containing
 `feed_pointing_location` — the Earth location the beam is *aimed at*, not the feed's physical
@@ -864,7 +874,8 @@ pool once at startup.
 - **Quaternion**: Must be normalized (|q| ≈ 1.0, tolerance 0.01)
 - **Euler Angles**: |angle| < 360 degrees
 - **Batch Size**: Maximum 1000 evaluations
-- **Heatmap Grid**: Maximum 100,000 points
+- **Heatmap Grid**: Maximum 100,000 points; `grid_config.grid_type` accepts `rectangular`
+  only (the H3 hexagonal grid is served by the separate `/api/v1/h3-heatmap` endpoint)
 
 ### H3 Link Budget Request
 

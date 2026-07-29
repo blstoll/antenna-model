@@ -258,39 +258,6 @@
         }
       }
     },
-    "heatmap_request_h3": {
-      "description": "Heatmap generation request with H3 hexagonal grid",
-      "request": {
-        "antenna_id": "antenna_1",
-        "feed_id": "x_band_feed",
-        "vehicle_position": {
-          "x": 4510731.123,
-          "y": 4510731.456,
-          "z": 3488865.789,
-          "coordinate_system": "ecef"
-        },
-        "reflector_boresight": {
-          "x": 4510732.0,
-          "y": 4510732.0,
-          "z": 3488950.0,
-          "coordinate_system": "ecef"
-        },
-        "feed_pointing_location": {
-          "x": 4510731.5,
-          "y": 4510731.5,
-          "z": 3488870.0,
-          "coordinate_system": "ecef"
-        },
-        "frequency_mhz": 8400.0,
-        "grid_config": {
-          "grid_type": "h3",
-          "h3_resolution": 7,
-          "center_azimuth_deg": 180.0,
-          "center_elevation_deg": 45.0,
-          "field_of_view_deg": 30.0
-        }
-      }
-    },
     "heatmap_response_rectangular": {
       "description": "Heatmap response with rectangular grid data",
       "response": {
@@ -317,30 +284,6 @@
           "points_evaluated": 3276,
           "failed_points": 0,
           "computation_time_ms": 1245.6,
-          "peak_gain_db": 43.5
-        }
-      }
-    },
-    "heatmap_response_h3": {
-      "description": "Heatmap response with H3 hexagonal grid data",
-      "response": {
-        "antenna_id": "antenna_1",
-        "feed_id": "x_band_feed",
-        "frequency_mhz": 8400.0,
-        "grid": {
-          "grid_type": "h3",
-          "h3_indices": [
-            "87283082fffffff",
-            "87283080fffffff",
-            "87283081fffffff"
-          ],
-          "loss_db": [1.8, 2.1, 2.3]
-        },
-        "warnings": [],
-        "metadata": {
-          "points_evaluated": 5120,
-          "failed_points": 0,
-          "computation_time_ms": 2845.2,
           "peak_gain_db": 43.5
         }
       }
