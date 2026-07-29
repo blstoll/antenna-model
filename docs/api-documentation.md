@@ -572,7 +572,6 @@ emission site, so a code cannot be introduced by a typo.
 | `validation_error` | 422 | The request parsed but is semantically invalid. |
 | `invalid_coordinate` | 422 | A position or coordinate value is out of range, or the positions are geometrically degenerate. |
 | `invalid_request_body` | 400 | The request body could not be read or parsed. |
-| `not_implemented` | 422 | A recognized but unimplemented option — currently only `/heatmap`'s H3 grid type. |
 | `payload_too_large` | 413 | The body exceeds `server.max_body_size_bytes`. |
 | `request_timeout` | 504 | The request exceeded `server.request_timeout_secs`. |
 | `computation_budget_exceeded` | 504 | One aperture integration exceeded `performance.integration_budget_ms`. |

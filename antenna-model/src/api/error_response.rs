@@ -131,11 +131,6 @@ pub fn service_status(err: &AntennaModelError) -> (StatusCode, &'static str) {
             StatusCode::UNPROCESSABLE_ENTITY,
             error_codes::INVALID_COORDINATE,
         ),
-        AntennaModelError::NotImplemented { .. } => (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            error_codes::NOT_IMPLEMENTED,
-        ),
-
         AntennaModelError::Computation(ComputationError::TimeBudgetExceeded { .. }) => (
             StatusCode::GATEWAY_TIMEOUT,
             error_codes::COMPUTATION_BUDGET_EXCEEDED,
@@ -289,14 +284,6 @@ mod tests {
                 },
                 StatusCode::UNPROCESSABLE_ENTITY,
                 error_codes::INVALID_COORDINATE,
-            ),
-            (
-                "unimplemented option",
-                AntennaModelError::NotImplemented {
-                    feature: "h3 grid".into(),
-                },
-                StatusCode::UNPROCESSABLE_ENTITY,
-                error_codes::NOT_IMPLEMENTED,
             ),
             (
                 "integration over budget",

@@ -644,11 +644,11 @@ async fn geo_altitude_geodetic_emitter_is_accepted_when_tagged() {
 // ============================================================================
 
 /// C8 stage 4 deleted the `GridConfig` variant that used to parse and validate an
-/// `h3` grid_type on `POST /api/v1/heatmap` and then fail with `not_implemented` — a
+/// `h3` grid_type on `POST /api/v1/heatmap` and then fail as unimplemented — a
 /// stub, never an alternative to the separate, fully-implemented
 /// `POST /api/v1/h3-heatmap` endpoint. An `h3` tag is now an unknown serde variant,
 /// i.e. an unparseable body: 400 `invalid_request_body` under C2's policy, not the
-/// 422/`not_implemented` the stub used to return.
+/// 422 the stub used to return.
 #[tokio::test]
 async fn h3_grid_type_on_heatmap_is_rejected_with_400() {
     let server = TestServer::start().await.unwrap();

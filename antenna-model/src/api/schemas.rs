@@ -473,7 +473,7 @@ pub struct HeatmapRequest {
 /// second grid family can be added later without a breaking change (feature F5 would merge
 /// `/api/v1/h3-heatmap` back in here). Do not collapse this into a plain struct.
 ///
-/// The `H3` variant that lived here until C8 stage 4 (2026-07-28) was a `NotImplemented`
+/// The `H3` variant that lived here until C8 stage 4 (2026-07-28) was a not-implemented
 /// stub — it parsed and validated, then failed. The real H3 grid is the separate
 /// `POST /api/v1/h3-heatmap` endpoint. An `h3` tag is now an unknown variant → 400.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -1139,10 +1139,6 @@ pub mod error_codes {
     /// The request body could not be read or parsed (400).
     pub const INVALID_REQUEST_BODY: &str = "invalid_request_body";
 
-    /// A requested option is recognized but unimplemented — currently only the
-    /// `/heatmap` H3 grid-type stub, which C8 stage 4 removes (422).
-    pub const NOT_IMPLEMENTED: &str = "not_implemented";
-
     /// The request body exceeds `server.max_body_size_bytes` (413).
     pub const PAYLOAD_TOO_LARGE: &str = "payload_too_large";
 
@@ -1168,7 +1164,6 @@ pub mod error_codes {
         VALIDATION_ERROR,
         INVALID_COORDINATE,
         INVALID_REQUEST_BODY,
-        NOT_IMPLEMENTED,
         PAYLOAD_TOO_LARGE,
         REQUEST_TIMEOUT,
         COMPUTATION_BUDGET_EXCEEDED,
@@ -1425,7 +1420,7 @@ mod tests {
 
     #[test]
     fn h3_grid_type_is_rejected_as_an_unknown_variant() {
-        // The `h3` grid type on /api/v1/heatmap was a NotImplemented stub until C8
+        // The `h3` grid type on /api/v1/heatmap was a not-implemented stub until C8
         // stage 4 removed it; the real H3 grid is the separate POST /api/v1/h3-heatmap
         // endpoint. An `h3` tag is now an unknown variant — i.e. a body that cannot be
         // parsed, which under roadmap C2's policy is a 400, not a 422.

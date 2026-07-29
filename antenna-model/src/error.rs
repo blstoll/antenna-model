@@ -57,10 +57,6 @@ pub enum AntennaModelError {
     #[error("feed '{feed_id}' not found for antenna '{antenna_id}'")]
     FeedNotFound { antenna_id: String, feed_id: String },
 
-    /// Feature not implemented
-    #[error("feature not implemented: {feature}")]
-    NotImplemented { feature: String },
-
     /// Generic error with context
     #[error("{0}")]
     Generic(String),
@@ -566,9 +562,6 @@ impl From<AntennaModelError> for ApiError {
                 "feed '{}' not found for antenna '{}'",
                 feed_id, antenna_id
             )),
-            AntennaModelError::NotImplemented { feature } => {
-                ApiError::UnprocessableEntity(format!("feature not implemented: {}", feature))
-            }
             AntennaModelError::Data(data_err) => data_err.into(),
             AntennaModelError::Api(api_err) => api_err,
             AntennaModelError::Validation(val_err) => val_err.into(),
