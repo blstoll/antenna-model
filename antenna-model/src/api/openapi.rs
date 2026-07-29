@@ -41,6 +41,19 @@ use utoipa::OpenApi;
         (name = "heatmap", description = "Loss heatmap generation"),
         (name = "antennas", description = "Antenna and feed configuration queries")
     ),
+    paths(
+        crate::api::handlers::health,
+        crate::api::handlers::ready,
+        crate::api::handlers::status,
+        crate::api::handlers::compute_gain,
+        crate::api::handlers::compute_gain_batch,
+        crate::api::handlers::generate_heatmap_endpoint,
+        crate::api::handlers::h3_link_budget,
+        crate::api::handlers::list_antennas,
+        crate::api::handlers::get_antenna_details,
+        crate::api::handlers::list_antenna_feeds,
+        crate::api::handlers::get_feed_details,
+    ),
     components(schemas(
         crate::api::schemas::CoordinateSystem,
         crate::api::schemas::Position3D,

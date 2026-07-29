@@ -33,7 +33,989 @@ servers:
   description: Local development server
 - url: http://antenna-model-service
   description: Kubernetes cluster internal service
-paths: {}
+paths:
+  /health:
+    get:
+      tags:
+      - health
+      summary: Health check (liveness probe)
+      description: |-
+        Always returns 200 while the process is responsive. Used for the Kubernetes liveness
+        probe, so it deliberately never returns a failure status: a restart cannot fix
+        missing calibration data.
+
+        The `status` field reports `healthy` when calibration data is loaded, or `degraded`
+        when the service is running with an empty repository (calibration load failed and
+        `calibration.fail_fast` was off). A degraded instance never becomes ready, so it
+        receives no traffic — see `/ready`.
+      operationId: getHealth
+      responses:
+        '200':
+          description: Service is responsive ("healthy", or "degraded" with no data loaded)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /ready:
+    get:
+      tags:
+      - health
+      summary: Readiness check (readiness probe)
+      description: |-
+        Returns 200 only once the calibration load has completed successfully. Returns 503
+        during startup, when the calibration load failed, and for the whole graceful-shutdown
+        drain window.
+      operationId: getReady
+      responses:
+        '200':
+          description: 'Service is ready to serve requests ({"status": "ready"})'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+        '503':
+          description: |-
+            Not ready — startup, failed calibration load, or shutting down
+            ({"status": "not_ready"}).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+  /status:
+    get:
+      tags:
+      - health
+      summary: Service status and metadata
+      description: Returns comprehensive service information including loaded antennas, uptime, and version.
+      operationId: getStatus
+      responses:
+        '200':
+          description: Service status information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatusResponse'
+  /api/v1/gain:
+    post:
+      tags:
+      - gain
+      summary: Compute antenna gain from 3D geometric configuration
+      description: |-
+        Computes antenna gain for a specific geometric configuration including vehicle position,
+        antenna orientation, feed position, and emitter location. Each position declares
+        its own frame — ECEF or Geodetic — in its required `coordinate_system` field.
+
+        Optionally computes reference gain (ideal case) and loss (reference - actual).
+      operationId: computeGain
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GainRequest'
+            examples:
+              ecef_coordinates:
+                summary: ECEF coordinates example
+                value:
+                  antenna_id: antenna_1
+                  emitter_position:
+                    coordinate_system: ecef
+                    x: 4520000.0
+                    y: 4520000.0
+                    z: 3500000.0
+                  feed_id: x_band_feed
+                  feed_pointing_location:
+                    coordinate_system: ecef
+                    x: 4510731.5
+                    y: 4510731.5
+                    z: 3488870.0
+                  frequency_mhz: 8400.0
+                  include_reference: true
+                  reflector_boresight:
+                    coordinate_system: ecef
+                    x: 4510732.0
+                    y: 4510732.0
+                    z: 3488950.0
+                  vehicle_attitude:
+                  - 1.0
+                  - 0.0
+                  - 0.0
+                  - 0.0
+                  vehicle_position:
+                    coordinate_system: ecef
+                    x: 4510731.123
+                    y: 4510731.456
+                    z: 3488865.789
+              geodetic_coordinates:
+                summary: Geodetic coordinates example
+                value:
+                  antenna_id: antenna_2
+                  emitter_position:
+                    coordinate_system: geodetic
+                    x: -117.0
+                    y: 35.0
+                    z: 400000.0
+                  feed_id: s_band_feed
+                  feed_pointing_location:
+                    coordinate_system: geodetic
+                    x: -118.124
+                    y: 34.568
+                    z: 105.0
+                  frequency_mhz: 2200.0
+                  include_reference: false
+                  reflector_boresight:
+                    coordinate_system: geodetic
+                    x: -117.0
+                    y: 35.0
+                    z: 400000.0
+                  vehicle_attitude:
+                  - 1.0
+                  - 0.0
+                  - 0.0
+                  - 0.0
+                  vehicle_position:
+                    coordinate_system: geodetic
+                    x: -118.1234
+                    y: 34.5678
+                    z: 100.0
+        required: true
+      responses:
+        '200':
+          description: Gain computation successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GainResponse'
+              examples:
+                partially_calibrated:
+                  summary: Partially calibrated antenna response
+                  value:
+                    antenna_id: antenna_2
+                    calibration_status:
+                      accuracy_estimate_db: 1.5
+                      correction_applied: false
+                      coverage:
+                        azimuth_range_deg:
+                        - 0.0
+                        - 0.0
+                        elevation_range_deg:
+                        - 0.0
+                        - 0.0
+                        frequency_range_mhz:
+                        - 7100.0
+                        - 8500.0
+                        is_boresight_only: true
+                        num_measurements: 25
+                      parameters_source: boresight_tuning
+                      status: partially_calibrated
+                    feed_id: x_band_feed
+                    gain_db: 41.2
+                    geometry:
+                      beam_squint_deg: 0.15
+                      emitter_azimuth_deg: 185.5
+                      emitter_elevation_deg: 32.1
+                      physical_feed_offset_m:
+                        x: 0.05
+                        y: 0.02
+                        z: 0.01
+                    loss_db: 2.3
+                    metadata:
+                      computation_time_ms: 2.8
+                      extrapolated: true
+                    reference_gain_db: 43.5
+                    warnings:
+                    - code: partially_calibrated
+                      message: 'Antenna ''antenna_2'' is partially calibrated. Accuracy estimate: ±1.5 dB'
+                    - code: out_of_coverage
+                      message: Query is outside calibrated region - using physics model extrapolation
+                uncalibrated:
+                  summary: Uncalibrated antenna response
+                  value:
+                    antenna_id: antenna_3
+                    calibration_status:
+                      accuracy_estimate_db: 3.0
+                      correction_applied: false
+                      loss_accuracy_estimate_db: 2.0
+                      parameters_source: design_specifications
+                      status: uncalibrated
+                    feed_id: x_band_feed
+                    gain_db: 40.5
+                    geometry:
+                      emitter_azimuth_deg: 45.2
+                      emitter_elevation_deg: 78.9
+                      physical_feed_offset_m:
+                        x: 0.0
+                        y: 0.0
+                        z: 0.0
+                    loss_db: 3.3
+                    metadata:
+                      computation_time_ms: 1.5
+                      extrapolated: false
+                    reference_gain_db: 43.8
+                    warnings:
+                    - code: uncalibrated
+                      message: 'Antenna ''antenna_3'' is uncalibrated (using design specifications). Absolute gain accuracy: ±3.0 dB, Loss accuracy: ±2.0 dB'
+        '400':
+          description: |-
+            The request body could not be parsed. This is the only condition that
+            returns 400 (roadmap C2) — a body that parses but is invalid returns 422.
+
+            Note that a non-finite number lands here rather than in 422: JSON cannot
+            encode `NaN` or `Infinity`, so serializers emit `null`, which does not
+            deserialize into the numeric fields this schema declares.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                unparseable_body:
+                  summary: Malformed JSON
+                  value:
+                    error: invalid_request_body
+                    message: 'parse error: expected value at line 1 column 3'
+        '404':
+          description: |-
+            The request names an antenna or feed that does not exist. Absence is not
+            invalidity: no change to the body will make a missing antenna appear, so
+            this is a 404 rather than a 422 (roadmap C2).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                antenna_not_found:
+                  summary: Antenna not found
+                  value:
+                    error: antenna_not_found
+                    field: antenna_id
+                    message: Antenna 'invalid_antenna' not found
+                feed_not_found:
+                  summary: Feed not found
+                  value:
+                    error: feed_not_found
+                    field: feed_id
+                    message: Feed 'invalid_feed' not found for antenna 'antenna_1'
+        '413':
+          description: |
+            Request body exceeds the configured maximum size
+            (`server.max_body_size_bytes`, default 10 MB).
+
+            Enforced on both framings (roadmap S1b): a declared `content-length` over the
+            limit is rejected before the body is read, and a body sent with
+            `Transfer-Encoding: chunked` is rejected as soon as the bytes read exceed the
+            limit. The chunked path cannot report a byte count in the message, since the
+            size is never declared.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                payload_too_large:
+                  summary: Payload too large
+                  value:
+                    error: payload_too_large
+                    message: Request body of 12000000 bytes exceeds the maximum of 10485760 bytes
+        '422':
+          description: |-
+            The body parsed but is semantically invalid. Applies whether the failure is
+            caught by the request pre-check or surfaces from the service layer — the
+            client cannot tell, and should not have to.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                degenerate_geometry:
+                  summary: Boresight coincident with vehicle position
+                  value:
+                    error: invalid_coordinate
+                    message: 'invalid coordinate for ''reflector_boresight'': Boresight position too close to vehicle position (< 1mm separation)'
+                invalid_frequency:
+                  summary: Frequency out of range
+                  value:
+                    error: validation_error
+                    field: frequency_mhz
+                    message: frequency 0 MHz is outside supported range [100, 50000] MHz
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '504':
+          description: |
+            A server-side wall-clock budget was exceeded. Two distinct budgets map here, told
+            apart by the machine `error` code:
+
+            - `request_timeout` — the whole request exceeded `server.request_timeout_secs`
+              (default 30 s, roadmap S2). The server stops waiting and responds, but the
+              background compute is NOT cancelled and runs to completion.
+            - `computation_budget_exceeded` — a SINGLE aperture integration exceeded
+              `performance.integration_budget_ms` (default 30 000 ms, roadmap S3), aborting
+              that integration cooperatively. This caps one integral, not the whole request;
+              a large fan-out (heatmap/batch) can still spend `budget × points` of background
+              CPU after an S2 504.
+
+            504 (a 5xx) is used rather than 408 because the overrun is server-side and
+            deterministic in the request payload — there is no honest Retry-After; the remedy
+            is a smaller request, not waiting.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                computation_budget_exceeded:
+                  summary: Single integration over budget (S3)
+                  value:
+                    error: computation_budget_exceeded
+                    message: 'computation exceeded time budget in azimuthal_mode_field: 31000 ms > 30000 ms budget'
+                request_timeout:
+                  summary: Whole-request timeout (S2)
+                  value:
+                    error: request_timeout
+                    message: Request processing exceeded the configured timeout of 30000 ms
+  /api/v1/gain/batch:
+    post:
+      tags:
+      - gain
+      summary: Batch gain computation
+      description: |-
+        Processes multiple gain computation requests in a single API call.
+        Automatically uses parallel processing for batches ≥5 requests.
+
+        Maximum batch size: 1000 evaluations.
+      operationId: computeGainBatch
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchGainRequest'
+        required: true
+      responses:
+        '200':
+          description: |-
+            Batch computation successful.
+
+            May still include per-item failures, but only *compute*-class ones — an
+            integration over budget, or one that did not converge — which cannot be
+            predicted before running the integral. Such an item carries a `null`
+            `gain_db` (a NaN, as JSON has no NaN literal) and the reason in its
+            `warnings`. Validation-class failures never reach this response: they reject
+            the whole batch (roadmap C2).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchGainResponse'
+        '400':
+          description: |
+            The request body could not be parsed. See `/api/v1/gain` for the full
+            400-vs-422 rule.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                unparseable_body:
+                  summary: Malformed JSON
+                  value:
+                    error: invalid_request_body
+                    message: 'parse error: expected value at line 1 column 3'
+        '404':
+          description: |-
+            An evaluation names an antenna or feed that does not exist. Rejects the whole
+            batch, with the offending item's path in `field`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                antenna_not_found:
+                  summary: Unknown antenna in one item
+                  value:
+                    error: antenna_not_found
+                    field: evaluations[3]
+                    message: 'evaluations[3]: antenna ''invalid_antenna'' not found'
+        '413':
+          description: |
+            Request body exceeds the configured maximum size
+            (`server.max_body_size_bytes`, default 10 MB).
+
+            Enforced on both framings (roadmap S1b): a declared `content-length` over the
+            limit is rejected before the body is read, and a body sent with
+            `Transfer-Encoding: chunked` is rejected as soon as the bytes read exceed the
+            limit. The chunked path cannot report a byte count in the message, since the
+            size is never declared.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                payload_too_large:
+                  summary: Payload too large
+                  value:
+                    error: payload_too_large
+                    message: Request body of 12000000 bytes exceeds the maximum of 10485760 bytes
+        '422':
+          description: |-
+            The batch parsed but is semantically invalid — empty, over the 1000-item
+            limit, or containing an invalid evaluation.
+
+            Every item is validated before any physics runs, and the first failure
+            rejects the whole request. `field` carries the offending item's path
+            (`evaluations[3]`) so a client can locate it without parsing the message.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                empty_batch:
+                  summary: Empty evaluations array
+                  value:
+                    error: validation_error
+                    field: evaluations
+                    message: 'invalid value for parameter ''evaluations'': batch must contain at least one evaluation'
+                invalid_item:
+                  summary: One evaluation is invalid
+                  value:
+                    error: validation_error
+                    field: evaluations[3]
+                    message: 'evaluations[3]: frequency 0 MHz is outside supported range [100, 50000] MHz'
+                size_limit:
+                  summary: Over the batch size limit
+                  value:
+                    error: validation_error
+                    field: evaluations
+                    message: batch size 1001 exceeds limit of 1000
+        '503':
+          description: |
+            Admission control (roadmap S4): the server is already running the maximum
+            number of concurrent heavy requests (batch / heatmap / h3-heatmap), configured
+            by `performance.max_concurrent_heavy_requests` and shared across those three
+            endpoints. The request was rejected immediately (never queued). Unlike the 504
+            timeout, this is a transient overload — a slot frees as soon as an in-flight
+            heavy request finishes — so a `Retry-After` header is included. Never returned
+            when the limit is 0 (the default; admission control disabled).
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+                format: int32
+              description: Seconds to wait before retrying (performance.admission_retry_after_secs).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                service_overloaded:
+                  summary: Heavy-request concurrency limit reached (S4)
+                  value:
+                    error: service_overloaded
+                    message: Server is at its concurrent heavy-request limit (8); retry after 5 s
+        '504':
+          description: |
+            A server-side wall-clock budget was exceeded. Two distinct budgets map here, told
+            apart by the machine `error` code:
+
+            - `request_timeout` — the whole request exceeded `server.request_timeout_secs`
+              (default 30 s, roadmap S2). The server stops waiting and responds, but the
+              background compute is NOT cancelled and runs to completion.
+            - `computation_budget_exceeded` — a SINGLE aperture integration exceeded
+              `performance.integration_budget_ms` (default 30 000 ms, roadmap S3), aborting
+              that integration cooperatively. This caps one integral, not the whole request;
+              a large fan-out (heatmap/batch) can still spend `budget × points` of background
+              CPU after an S2 504.
+
+            504 (a 5xx) is used rather than 408 because the overrun is server-side and
+            deterministic in the request payload — there is no honest Retry-After; the remedy
+            is a smaller request, not waiting.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                computation_budget_exceeded:
+                  summary: Single integration over budget (S3)
+                  value:
+                    error: computation_budget_exceeded
+                    message: 'computation exceeded time budget in azimuthal_mode_field: 31000 ms > 30000 ms budget'
+                request_timeout:
+                  summary: Whole-request timeout (S2)
+                  value:
+                    error: request_timeout
+                    message: Request processing exceeded the configured timeout of 30000 ms
+  /api/v1/heatmap:
+    post:
+      tags:
+      - heatmap
+      summary: Generate loss heatmap
+      description: |-
+        Generates a 2D loss heatmap across antenna field of view.
+        Supports rectangular azimuth/elevation grids.
+
+        Loss is computed relative to peak gain for each grid point.
+        Maximum grid size: 100,000 points.
+      operationId: generateHeatmap
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HeatmapRequest'
+            examples:
+              rectangular_grid:
+                summary: Rectangular grid (73x46 = 3358 points)
+                value:
+                  antenna_id: antenna_1
+                  feed_id: x_band_feed
+                  feed_pointing_location:
+                    coordinate_system: ecef
+                    x: 4510731.5
+                    y: 4510731.5
+                    z: 3488870.0
+                  frequency_mhz: 8400.0
+                  grid_config:
+                    azimuth_range_deg:
+                      max: 360.0
+                      min: 0.0
+                      step: 5.0
+                    elevation_range_deg:
+                      max: 90.0
+                      min: 0.0
+                      step: 2.0
+                    grid_type: rectangular
+                  reflector_boresight:
+                    coordinate_system: ecef
+                    x: 4510732.0
+                    y: 4510732.0
+                    z: 3488950.0
+                  vehicle_attitude:
+                  - 1.0
+                  - 0.0
+                  - 0.0
+                  - 0.0
+                  vehicle_position:
+                    coordinate_system: ecef
+                    x: 4510731.123
+                    y: 4510731.456
+                    z: 3488865.789
+        required: true
+      responses:
+        '200':
+          description: Heatmap generation successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HeatmapResponse'
+        '400':
+          description: |
+            The request body could not be parsed. See `/api/v1/gain` for the full
+            400-vs-422 rule.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                unparseable_body:
+                  summary: Malformed JSON
+                  value:
+                    error: invalid_request_body
+                    message: 'parse error: expected value at line 1 column 3'
+        '404':
+          description: The request names an antenna or feed that does not exist (roadmap C2).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                antenna_not_found:
+                  summary: Antenna not found
+                  value:
+                    error: antenna_not_found
+                    message: antenna 'invalid_antenna' not found
+        '413':
+          description: |
+            Request body exceeds the configured maximum size
+            (`server.max_body_size_bytes`, default 10 MB).
+
+            Enforced on both framings (roadmap S1b): a declared `content-length` over the
+            limit is rejected before the body is read, and a body sent with
+            `Transfer-Encoding: chunked` is rejected as soon as the bytes read exceed the
+            limit. The chunked path cannot report a byte count in the message, since the
+            size is never declared.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                payload_too_large:
+                  summary: Payload too large
+                  value:
+                    error: payload_too_large
+                    message: Request body of 12000000 bytes exceeds the maximum of 10485760 bytes
+        '422':
+          description: |-
+            The body parsed but is semantically invalid — an out-of-range value, a
+            degenerate geometry, or a grid exceeding 100,000 points.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalid_grid:
+                  summary: Grid too large
+                  value:
+                    error: validation_error
+                    message: 'invalid grid specification for rectangular: total grid points 324000 exceeds maximum 100000 (1800x180 grid)'
+        '503':
+          description: |
+            Admission control (roadmap S4): the server is already running the maximum
+            number of concurrent heavy requests (batch / heatmap / h3-heatmap), configured
+            by `performance.max_concurrent_heavy_requests` and shared across those three
+            endpoints. The request was rejected immediately (never queued). Unlike the 504
+            timeout, this is a transient overload — a slot frees as soon as an in-flight
+            heavy request finishes — so a `Retry-After` header is included. Never returned
+            when the limit is 0 (the default; admission control disabled).
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+                format: int32
+              description: Seconds to wait before retrying (performance.admission_retry_after_secs).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                service_overloaded:
+                  summary: Heavy-request concurrency limit reached (S4)
+                  value:
+                    error: service_overloaded
+                    message: Server is at its concurrent heavy-request limit (8); retry after 5 s
+        '504':
+          description: |
+            A server-side wall-clock budget was exceeded. Two distinct budgets map here, told
+            apart by the machine `error` code:
+
+            - `request_timeout` — the whole request exceeded `server.request_timeout_secs`
+              (default 30 s, roadmap S2). The server stops waiting and responds, but the
+              background compute is NOT cancelled and runs to completion.
+            - `computation_budget_exceeded` — a SINGLE aperture integration exceeded
+              `performance.integration_budget_ms` (default 30 000 ms, roadmap S3), aborting
+              that integration cooperatively. This caps one integral, not the whole request;
+              a large fan-out (heatmap/batch) can still spend `budget × points` of background
+              CPU after an S2 504.
+
+            504 (a 5xx) is used rather than 408 because the overrun is server-side and
+            deterministic in the request payload — there is no honest Retry-After; the remedy
+            is a smaller request, not waiting.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                computation_budget_exceeded:
+                  summary: Single integration over budget (S3)
+                  value:
+                    error: computation_budget_exceeded
+                    message: 'computation exceeded time budget in azimuthal_mode_field: 31000 ms > 30000 ms budget'
+                request_timeout:
+                  summary: Whole-request timeout (S2)
+                  value:
+                    error: request_timeout
+                    message: Request processing exceeded the configured timeout of 30000 ms
+  /api/v1/h3-heatmap:
+    post:
+      tags:
+      - heatmap
+      summary: Compute a per-cell link budget over an H3 hexagonal grid
+      description: |
+        Computes antenna gain, free-space path loss, total path loss and (optionally) G/T
+        for every cell of an H3 hexagonal grid laid over the Earth's surface.
+
+        The grid is centred on the H3 cell containing `feed_pointing_location` — the Earth location
+        the feed's beam is aimed at, **not** the feed's physical location on the antenna —
+        and covers `n_rings` rings around it, so the response contains
+        `1 + 3 * n_rings * (n_rings + 1)` cells: 1, 7, 19, 37, … up to 331 at the maximum
+        `n_rings` of 10.
+
+        `h3_resolution` may be supplied explicitly (0-15). When it is absent the service
+        derives it from `frequency_mhz`, on half-open bands: 6 below 2000 MHz, 7 from
+        2000 up to but not including 8000 MHz, 8 from 8000 up to but not including
+        20000 MHz, 9 at 20000 MHz and above. The resolution actually used is echoed in
+        the response.
+
+        Two per-cell quantities need their definitions read before use:
+
+        - `loss_db` is `metadata.peak_gain_db - gain(this cell)` — relative to the **peak
+          over the cells actually evaluated**, the same rule `/api/v1/heatmap` applies. It
+          is therefore never negative and is exactly `0` at the peak cell, and
+          `total_path_loss_db` (`= free_space_path_loss_db + loss_db`) never falls below
+          the free-space value. Note that the peak of the *grid* need not be the peak of
+          the *beam*: a grid that does not contain the beam peak understates loss for
+          every cell in it.
+        - `g_over_t_db` is `gain_db - 10*log10(temperature_k)` and is present only when the
+          request supplies `temperature_k`. The temperature is a pure passthrough — the
+          service models no antenna noise temperature of its own.
+
+        Like `/api/v1/gain/batch` and `/api/v1/heatmap`, this is a compute-heavy endpoint and
+        shares their admission-control limit and per-integration compute budget.
+      operationId: computeH3LinkBudget
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/H3LinkBudgetRequest'
+            examples:
+              ground_station_coverage:
+                summary: 3.7 m ground station, 2 rings at resolution 7 (19 cells)
+                value:
+                  antenna_id: gs_3.7m_uncalibrated
+                  feed_id: s_band_feed
+                  feed_pointing_location:
+                    coordinate_system: geodetic
+                    x: -116.45
+                    y: 35.4267
+                    z: 800.0
+                  frequency_mhz: 2200.0
+                  h3_resolution: 7
+                  n_rings: 2
+                  reflector_boresight:
+                    coordinate_system: geodetic
+                    x: -116.45
+                    y: 35.4267
+                    z: 800.0
+                  temperature_k: 150.0
+                  vehicle_position:
+                    coordinate_system: geodetic
+                    x: -116.889
+                    y: 35.4267
+                    z: 1036.0
+        required: true
+      responses:
+        '200':
+          description: Link budget computed for every cell in the grid
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/H3LinkBudgetResponse'
+        '400':
+          description: |
+            The request body could not be parsed. See `/api/v1/gain` for the full
+            400-vs-422 rule.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                unparseable_body:
+                  summary: Malformed JSON
+                  value:
+                    error: invalid_request_body
+                    message: 'parse error: expected value at line 1 column 3'
+        '404':
+          description: The request names an antenna or feed that does not exist (roadmap C2).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                antenna_not_found:
+                  summary: Antenna not found
+                  value:
+                    error: antenna_not_found
+                    message: antenna 'invalid_antenna' not found
+        '413':
+          description: |-
+            Request body exceeds the configured maximum size
+            (`server.max_body_size_bytes`, default 10 MB). Enforced on both the
+            `content-length` and `Transfer-Encoding: chunked` framings — see
+            `/api/v1/heatmap` for the full description.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                payload_too_large:
+                  summary: Payload too large
+                  value:
+                    error: payload_too_large
+                    message: Request body of 12000000 bytes exceeds the maximum of 10485760 bytes
+        '422':
+          description: |-
+            The body parsed but is semantically invalid — an out-of-range value
+            (`n_rings` above 10, `h3_resolution` outside 0-15, a non-positive
+            `temperature_k`, a frequency outside 100-50000 MHz), or a degenerate geometry.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                out_of_range_resolution:
+                  summary: h3_resolution outside 0-15
+                  value:
+                    error: validation_error
+                    message: parameter 'h3_resolution' value 20 is out of valid range [0, 15]
+                too_many_rings:
+                  summary: n_rings above the maximum
+                  value:
+                    error: validation_error
+                    message: 'invalid value for parameter ''n_rings'': n_rings must be ≤ 10'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: |-
+            Admission control (roadmap S4): the server is already running the maximum
+            number of concurrent heavy requests (batch / heatmap / h3-heatmap), configured
+            by `performance.max_concurrent_heavy_requests` and shared across those three
+            endpoints. The request was rejected immediately (never queued), so a
+            `Retry-After` header is included. Never returned when the limit is 0 (the
+            default; admission control disabled).
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+                format: int32
+              description: Seconds to wait before retrying (performance.admission_retry_after_secs).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                service_overloaded:
+                  summary: Heavy-request concurrency limit reached (S4)
+                  value:
+                    error: service_overloaded
+                    message: Server is at its concurrent heavy-request limit (8); retry after 5 s
+        '504':
+          description: |-
+            A server-side wall-clock budget was exceeded — either the whole request
+            (`request_timeout`, `server.request_timeout_secs`) or a single aperture
+            integration (`computation_budget_exceeded`,
+            `performance.integration_budget_ms`). See `/api/v1/heatmap` for how the two
+            budgets differ; the fan-out caveat applies here too, since one request
+            integrates once per cell.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                computation_budget_exceeded:
+                  summary: Single integration over budget (S3)
+                  value:
+                    error: computation_budget_exceeded
+                    message: 'computation exceeded time budget in azimuthal_mode_field: 31000 ms > 30000 ms budget'
+                request_timeout:
+                  summary: Whole-request timeout (S2)
+                  value:
+                    error: request_timeout
+                    message: Request processing exceeded the configured timeout of 30000 ms
+  /api/v1/antennas:
+    get:
+      tags:
+      - antennas
+      summary: List all available antennas
+      description: Returns list of all loaded antenna configurations with basic metadata.
+      operationId: listAntennas
+      responses:
+        '200':
+          description: List of antennas
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AntennaListResponse'
+  /api/v1/antennas/{id}:
+    get:
+      tags:
+      - antennas
+      summary: Get antenna details
+      description: Returns detailed information about a specific antenna including feeds, calibration status, and physical parameters.
+      operationId: getAntennaDetails
+      parameters:
+      - name: id
+        in: path
+        description: Antenna ID
+        required: true
+        schema:
+          type: string
+        example: antenna_1
+      responses:
+        '200':
+          description: Antenna details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AntennaDetailsResponse'
+        '404':
+          description: Antenna not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/antennas/{id}/feeds:
+    get:
+      tags:
+      - antennas
+      summary: List feeds for antenna
+      description: Returns list of all feeds available for the specified antenna.
+      operationId: listFeeds
+      parameters:
+      - name: id
+        in: path
+        description: Antenna ID
+        required: true
+        schema:
+          type: string
+        example: antenna_1
+      responses:
+        '200':
+          description: List of feeds
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FeedListResponse'
+        '404':
+          description: Antenna not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+  /api/v1/antennas/{id}/feeds/{feed_id}:
+    get:
+      tags:
+      - antennas
+      summary: Get feed details
+      description: Returns detailed information about a specific feed.
+      operationId: getFeedDetails
+      parameters:
+      - name: id
+        in: path
+        description: Antenna ID
+        required: true
+        schema:
+          type: string
+        example: antenna_1
+      - name: feed_id
+        in: path
+        description: Feed ID
+        required: true
+        schema:
+          type: string
+        example: x_band_feed
+      responses:
+        '200':
+          description: Feed details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FeedInfo'
+        '404':
+          description: Antenna or feed not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 components:
   schemas:
     AntennaDetailsResponse:

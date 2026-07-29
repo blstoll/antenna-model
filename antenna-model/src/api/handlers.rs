@@ -6,9 +6,10 @@ use crate::api::error_response::{
     batch_validation_error, json_error, service_error, validation_error,
 };
 use crate::api::schemas::{
-    BatchGainRequest, BatchGainResponse, CalibrationStatusInfo, ErrorCode, ErrorResponse,
-    GainRequest, GainResponse, H3LinkBudgetRequest, H3LinkBudgetResponse, HealthResponse,
-    HeatmapRequest, HeatmapResponse, StatusResponse,
+    AntennaDetailsResponse, AntennaListResponse, BatchGainRequest, BatchGainResponse,
+    CalibrationStatusInfo, ErrorCode, ErrorResponse, GainRequest, GainResponse,
+    H3LinkBudgetRequest, H3LinkBudgetResponse, HealthResponse, HeatmapRequest, HeatmapResponse,
+    StatusResponse,
 };
 use crate::api::AppState;
 use crate::service::{
@@ -47,6 +48,24 @@ use tracing::{error, info, warn};
 ///   "status": "healthy"
 /// }
 /// ```
+#[utoipa::path(
+    get,
+    path = "/health",
+    tag = "health",
+    operation_id = "getHealth",
+    summary = "Health check (liveness probe)",
+    description = "Always returns 200 while the process is responsive. Used for the Kubernetes liveness
+probe, so it deliberately never returns a failure status: a restart cannot fix
+missing calibration data.
+
+The `status` field reports `healthy` when calibration data is loaded, or `degraded`
+when the service is running with an empty repository (calibration load failed and
+`calibration.fail_fast` was off). A degraded instance never becomes ready, so it
+receives no traffic — see `/ready`.",
+    responses(
+        (status = 200, description = r#"Service is responsive ("healthy", or "degraded" with no data loaded)"#, body = HealthResponse)
+    )
+)]
 #[handler]
 pub async fn health(state: Data<&Arc<AppState>>) -> Json<HealthResponse> {
     // Always HTTP 200 — this is the liveness probe (see HealthResponse::degraded). An
@@ -84,6 +103,21 @@ pub async fn health(state: Data<&Arc<AppState>>) -> Json<HealthResponse> {
 ///   "status": "not_ready"
 /// }
 /// ```
+#[utoipa::path(
+    get,
+    path = "/ready",
+    tag = "health",
+    operation_id = "getReady",
+    summary = "Readiness check (readiness probe)",
+    description = "Returns 200 only once the calibration load has completed successfully. Returns 503
+during startup, when the calibration load failed, and for the whole graceful-shutdown
+drain window.",
+    responses(
+        (status = 200, description = r#"Service is ready to serve requests ({"status": "ready"})"#, body = HealthResponse),
+        (status = 503, description = r#"Not ready — startup, failed calibration load, or shutting down
+({"status": "not_ready"})."#, body = HealthResponse)
+    )
+)]
 #[handler]
 pub async fn ready(state: Data<&Arc<AppState>>) -> Response {
     let is_ready = state.is_ready();
@@ -125,6 +159,17 @@ pub async fn ready(state: Data<&Arc<AppState>>) -> Response {
 ///   "memory_bytes": 134217728
 /// }
 /// ```
+#[utoipa::path(
+    get,
+    path = "/status",
+    tag = "health",
+    operation_id = "getStatus",
+    summary = "Service status and metadata",
+    description = "Returns comprehensive service information including loaded antennas, uptime, and version.",
+    responses(
+        (status = 200, description = "Service status information", body = StatusResponse)
+    )
+)]
 #[handler]
 pub async fn status(state: Data<&Arc<AppState>>) -> Json<StatusResponse> {
     let uptime = state.uptime_seconds();
@@ -193,6 +238,155 @@ pub async fn status(state: Data<&Arc<AppState>>) -> Json<StatusResponse> {
 ///   "include_reference": true
 /// }
 /// ```
+#[utoipa::path(
+    post,
+    path = "/api/v1/gain",
+    tag = "gain",
+    operation_id = "computeGain",
+    summary = "Compute antenna gain from 3D geometric configuration",
+    description = "Computes antenna gain for a specific geometric configuration including vehicle position,
+antenna orientation, feed position, and emitter location. Each position declares
+its own frame — ECEF or Geodetic — in its required `coordinate_system` field.
+
+Optionally computes reference gain (ideal case) and loss (reference - actual).",
+    request_body(content = GainRequest, examples(
+        ("ecef_coordinates" = (summary = "ECEF coordinates example", value = json!({
+            "antenna_id": "antenna_1",
+            "feed_id": "x_band_feed",
+            "vehicle_position": {"x": 4510731.123, "y": 4510731.456, "z": 3488865.789, "coordinate_system": "ecef"},
+            "vehicle_attitude": [1.0, 0.0, 0.0, 0.0],
+            "reflector_boresight": {"x": 4510732.0, "y": 4510732.0, "z": 3488950.0, "coordinate_system": "ecef"},
+            "feed_pointing_location": {"x": 4510731.5, "y": 4510731.5, "z": 3488870.0, "coordinate_system": "ecef"},
+            "emitter_position": {"x": 4520000.0, "y": 4520000.0, "z": 3500000.0, "coordinate_system": "ecef"},
+            "frequency_mhz": 8400.0,
+            "include_reference": true
+        }))),
+        ("geodetic_coordinates" = (summary = "Geodetic coordinates example", value = json!({
+            "antenna_id": "antenna_2",
+            "feed_id": "s_band_feed",
+            "vehicle_position": {"x": -118.1234, "y": 34.5678, "z": 100.0, "coordinate_system": "geodetic"},
+            "vehicle_attitude": [1.0, 0.0, 0.0, 0.0],
+            "reflector_boresight": {"x": -117.0, "y": 35.0, "z": 400000.0, "coordinate_system": "geodetic"},
+            "feed_pointing_location": {"x": -118.124, "y": 34.568, "z": 105.0, "coordinate_system": "geodetic"},
+            "emitter_position": {"x": -117.0, "y": 35.0, "z": 400000.0, "coordinate_system": "geodetic"},
+            "frequency_mhz": 2200.0,
+            "include_reference": false
+        })))
+    )),
+    responses(
+        (status = 200, description = "Gain computation successful", body = GainResponse, examples(
+            ("partially_calibrated" = (summary = "Partially calibrated antenna response", value = json!({
+                "antenna_id": "antenna_2",
+                "feed_id": "x_band_feed",
+                "gain_db": 41.2,
+                "reference_gain_db": 43.5,
+                "loss_db": 2.3,
+                "geometry": {
+                    "physical_feed_offset_m": {"x": 0.05, "y": 0.02, "z": 0.01},
+                    "emitter_azimuth_deg": 185.5,
+                    "emitter_elevation_deg": 32.1,
+                    "beam_squint_deg": 0.15
+                },
+                "warnings": [
+                    {"code": "partially_calibrated", "message": "Antenna 'antenna_2' is partially calibrated. Accuracy estimate: ±1.5 dB"},
+                    {"code": "out_of_coverage", "message": "Query is outside calibrated region - using physics model extrapolation"}
+                ],
+                "metadata": {"computation_time_ms": 2.8, "extrapolated": true},
+                "calibration_status": {
+                    "status": "partially_calibrated",
+                    "accuracy_estimate_db": 1.5,
+                    "coverage": {
+                        "azimuth_range_deg": [0.0, 0.0],
+                        "elevation_range_deg": [0.0, 0.0],
+                        "frequency_range_mhz": [7100.0, 8500.0],
+                        "num_measurements": 25,
+                        "is_boresight_only": true
+                    },
+                    "correction_applied": false,
+                    "parameters_source": "boresight_tuning"
+                }
+            }))),
+            ("uncalibrated" = (summary = "Uncalibrated antenna response", value = json!({
+                "antenna_id": "antenna_3",
+                "feed_id": "x_band_feed",
+                "gain_db": 40.5,
+                "reference_gain_db": 43.8,
+                "loss_db": 3.3,
+                "geometry": {
+                    "physical_feed_offset_m": {"x": 0.0, "y": 0.0, "z": 0.0},
+                    "emitter_azimuth_deg": 45.2,
+                    "emitter_elevation_deg": 78.9
+                },
+                "warnings": [
+                    {"code": "uncalibrated", "message": "Antenna 'antenna_3' is uncalibrated (using design specifications). Absolute gain accuracy: ±3.0 dB, Loss accuracy: ±2.0 dB"}
+                ],
+                "metadata": {"computation_time_ms": 1.5, "extrapolated": false},
+                "calibration_status": {
+                    "status": "uncalibrated",
+                    "accuracy_estimate_db": 3.0,
+                    "loss_accuracy_estimate_db": 2.0,
+                    "correction_applied": false,
+                    "parameters_source": "design_specifications"
+                }
+            })))
+        )),
+        (status = 400, description = "The request body could not be parsed. This is the only condition that
+returns 400 (roadmap C2) — a body that parses but is invalid returns 422.
+
+Note that a non-finite number lands here rather than in 422: JSON cannot
+encode `NaN` or `Infinity`, so serializers emit `null`, which does not
+deserialize into the numeric fields this schema declares.", body = ErrorResponse, examples(
+            ("unparseable_body" = (summary = "Malformed JSON", value = json!({
+                "error": "invalid_request_body",
+                "message": "parse error: expected value at line 1 column 3"
+            })))
+        )),
+        (status = 422, description = "The body parsed but is semantically invalid. Applies whether the failure is
+caught by the request pre-check or surfaces from the service layer — the
+client cannot tell, and should not have to.", body = ErrorResponse, examples(
+            ("invalid_frequency" = (summary = "Frequency out of range", value = json!({
+                "error": "validation_error",
+                "message": "frequency 0 MHz is outside supported range [100, 50000] MHz",
+                "field": "frequency_mhz"
+            }))),
+            ("degenerate_geometry" = (summary = "Boresight coincident with vehicle position", value = json!({
+                "error": "invalid_coordinate",
+                "message": "invalid coordinate for 'reflector_boresight': Boresight position too close to vehicle position (< 1mm separation)"
+            })))
+        )),
+        (status = 404, description = "The request names an antenna or feed that does not exist. Absence is not
+invalidity: no change to the body will make a missing antenna appear, so
+this is a 404 rather than a 422 (roadmap C2).", body = ErrorResponse, examples(
+            ("antenna_not_found" = (summary = "Antenna not found", value = json!({
+                "error": "antenna_not_found",
+                "message": "Antenna 'invalid_antenna' not found",
+                "field": "antenna_id"
+            }))),
+            ("feed_not_found" = (summary = "Feed not found", value = json!({
+                "error": "feed_not_found",
+                "message": "Feed 'invalid_feed' not found for antenna 'antenna_1'",
+                "field": "feed_id"
+            })))
+        )),
+        (status = 413, description = include_str!("openapi_descriptions/resp_413_payload_too_large.md"), body = ErrorResponse, examples(
+            ("payload_too_large" = (summary = "Payload too large", value = json!({
+                "error": "payload_too_large",
+                "message": "Request body of 12000000 bytes exceeds the maximum of 10485760 bytes"
+            })))
+        )),
+        (status = 504, description = include_str!("openapi_descriptions/resp_504_budgets.md"), body = ErrorResponse, examples(
+            ("request_timeout" = (summary = "Whole-request timeout (S2)", value = json!({
+                "error": "request_timeout",
+                "message": "Request processing exceeded the configured timeout of 30000 ms"
+            }))),
+            ("computation_budget_exceeded" = (summary = "Single integration over budget (S3)", value = json!({
+                "error": "computation_budget_exceeded",
+                "message": "computation exceeded time budget in azimuthal_mode_field: 31000 ms > 30000 ms budget"
+            })))
+        )),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
 #[handler]
 pub async fn compute_gain(
     state: Data<&Arc<AppState>>,
@@ -322,6 +516,88 @@ pub async fn compute_gain(
 ///   ]
 /// }
 /// ```
+#[utoipa::path(
+    post,
+    path = "/api/v1/gain/batch",
+    tag = "gain",
+    operation_id = "computeGainBatch",
+    summary = "Batch gain computation",
+    description = "Processes multiple gain computation requests in a single API call.
+Automatically uses parallel processing for batches ≥5 requests.
+
+Maximum batch size: 1000 evaluations.",
+    request_body(content = BatchGainRequest),
+    responses(
+        (status = 200, description = "Batch computation successful.
+
+May still include per-item failures, but only *compute*-class ones — an
+integration over budget, or one that did not converge — which cannot be
+predicted before running the integral. Such an item carries a `null`
+`gain_db` (a NaN, as JSON has no NaN literal) and the reason in its
+`warnings`. Validation-class failures never reach this response: they reject
+the whole batch (roadmap C2).", body = BatchGainResponse),
+        (status = 400, description = include_str!("openapi_descriptions/resp_400_see_gain.md"), body = ErrorResponse, examples(
+            ("unparseable_body" = (summary = "Malformed JSON", value = json!({
+                "error": "invalid_request_body",
+                "message": "parse error: expected value at line 1 column 3"
+            })))
+        )),
+        (status = 422, description = "The batch parsed but is semantically invalid — empty, over the 1000-item
+limit, or containing an invalid evaluation.
+
+Every item is validated before any physics runs, and the first failure
+rejects the whole request. `field` carries the offending item's path
+(`evaluations[3]`) so a client can locate it without parsing the message.", body = ErrorResponse, examples(
+            ("empty_batch" = (summary = "Empty evaluations array", value = json!({
+                "error": "validation_error",
+                "message": "invalid value for parameter 'evaluations': batch must contain at least one evaluation",
+                "field": "evaluations"
+            }))),
+            ("size_limit" = (summary = "Over the batch size limit", value = json!({
+                "error": "validation_error",
+                "message": "batch size 1001 exceeds limit of 1000",
+                "field": "evaluations"
+            }))),
+            ("invalid_item" = (summary = "One evaluation is invalid", value = json!({
+                "error": "validation_error",
+                "message": "evaluations[3]: frequency 0 MHz is outside supported range [100, 50000] MHz",
+                "field": "evaluations[3]"
+            })))
+        )),
+        (status = 404, description = "An evaluation names an antenna or feed that does not exist. Rejects the whole
+batch, with the offending item's path in `field`.", body = ErrorResponse, examples(
+            ("antenna_not_found" = (summary = "Unknown antenna in one item", value = json!({
+                "error": "antenna_not_found",
+                "message": "evaluations[3]: antenna 'invalid_antenna' not found",
+                "field": "evaluations[3]"
+            })))
+        )),
+        (status = 413, description = include_str!("openapi_descriptions/resp_413_payload_too_large.md"), body = ErrorResponse, examples(
+            ("payload_too_large" = (summary = "Payload too large", value = json!({
+                "error": "payload_too_large",
+                "message": "Request body of 12000000 bytes exceeds the maximum of 10485760 bytes"
+            })))
+        )),
+        (status = 504, description = include_str!("openapi_descriptions/resp_504_budgets.md"), body = ErrorResponse, examples(
+            ("request_timeout" = (summary = "Whole-request timeout (S2)", value = json!({
+                "error": "request_timeout",
+                "message": "Request processing exceeded the configured timeout of 30000 ms"
+            }))),
+            ("computation_budget_exceeded" = (summary = "Single integration over budget (S3)", value = json!({
+                "error": "computation_budget_exceeded",
+                "message": "computation exceeded time budget in azimuthal_mode_field: 31000 ms > 30000 ms budget"
+            })))
+        )),
+        (status = 503, description = include_str!("openapi_descriptions/resp_503_overloaded.md"), body = ErrorResponse,
+         headers(("Retry-After" = i32, description = "Seconds to wait before retrying (performance.admission_retry_after_secs).")),
+         examples(
+            ("service_overloaded" = (summary = "Heavy-request concurrency limit reached (S4)", value = json!({
+                "error": "service_overloaded",
+                "message": "Server is at its concurrent heavy-request limit (8); retry after 5 s"
+            })))
+        ))
+    )
+)]
 #[handler]
 pub async fn compute_gain_batch(
     state: Data<&Arc<AppState>>,
@@ -460,6 +736,80 @@ pub async fn compute_gain_batch(
 ///   }
 /// }
 /// ```
+#[utoipa::path(
+    post,
+    path = "/api/v1/heatmap",
+    tag = "heatmap",
+    operation_id = "generateHeatmap",
+    summary = "Generate loss heatmap",
+    description = "Generates a 2D loss heatmap across antenna field of view.
+Supports rectangular azimuth/elevation grids.
+
+Loss is computed relative to peak gain for each grid point.
+Maximum grid size: 100,000 points.",
+    request_body(content = HeatmapRequest, examples(
+        ("rectangular_grid" = (summary = "Rectangular grid (73x46 = 3358 points)", value = json!({
+            "antenna_id": "antenna_1",
+            "feed_id": "x_band_feed",
+            "vehicle_position": {"x": 4510731.123, "y": 4510731.456, "z": 3488865.789, "coordinate_system": "ecef"},
+            "vehicle_attitude": [1.0, 0.0, 0.0, 0.0],
+            "reflector_boresight": {"x": 4510732.0, "y": 4510732.0, "z": 3488950.0, "coordinate_system": "ecef"},
+            "feed_pointing_location": {"x": 4510731.5, "y": 4510731.5, "z": 3488870.0, "coordinate_system": "ecef"},
+            "frequency_mhz": 8400.0,
+            "grid_config": {
+                "grid_type": "rectangular",
+                "azimuth_range_deg": {"min": 0.0, "max": 360.0, "step": 5.0},
+                "elevation_range_deg": {"min": 0.0, "max": 90.0, "step": 2.0}
+            }
+        })))
+    )),
+    responses(
+        (status = 200, description = "Heatmap generation successful", body = HeatmapResponse),
+        (status = 400, description = include_str!("openapi_descriptions/resp_400_see_gain.md"), body = ErrorResponse, examples(
+            ("unparseable_body" = (summary = "Malformed JSON", value = json!({
+                "error": "invalid_request_body",
+                "message": "parse error: expected value at line 1 column 3"
+            })))
+        )),
+        (status = 422, description = "The body parsed but is semantically invalid — an out-of-range value, a
+degenerate geometry, or a grid exceeding 100,000 points.", body = ErrorResponse, examples(
+            ("invalid_grid" = (summary = "Grid too large", value = json!({
+                "error": "validation_error",
+                "message": "invalid grid specification for rectangular: total grid points 324000 exceeds maximum 100000 (1800x180 grid)"
+            })))
+        )),
+        (status = 404, description = "The request names an antenna or feed that does not exist (roadmap C2).", body = ErrorResponse, examples(
+            ("antenna_not_found" = (summary = "Antenna not found", value = json!({
+                "error": "antenna_not_found",
+                "message": "antenna 'invalid_antenna' not found"
+            })))
+        )),
+        (status = 413, description = include_str!("openapi_descriptions/resp_413_payload_too_large.md"), body = ErrorResponse, examples(
+            ("payload_too_large" = (summary = "Payload too large", value = json!({
+                "error": "payload_too_large",
+                "message": "Request body of 12000000 bytes exceeds the maximum of 10485760 bytes"
+            })))
+        )),
+        (status = 504, description = include_str!("openapi_descriptions/resp_504_budgets.md"), body = ErrorResponse, examples(
+            ("request_timeout" = (summary = "Whole-request timeout (S2)", value = json!({
+                "error": "request_timeout",
+                "message": "Request processing exceeded the configured timeout of 30000 ms"
+            }))),
+            ("computation_budget_exceeded" = (summary = "Single integration over budget (S3)", value = json!({
+                "error": "computation_budget_exceeded",
+                "message": "computation exceeded time budget in azimuthal_mode_field: 31000 ms > 30000 ms budget"
+            })))
+        )),
+        (status = 503, description = include_str!("openapi_descriptions/resp_503_overloaded.md"), body = ErrorResponse,
+         headers(("Retry-After" = i32, description = "Seconds to wait before retrying (performance.admission_retry_after_secs).")),
+         examples(
+            ("service_overloaded" = (summary = "Heavy-request concurrency limit reached (S4)", value = json!({
+                "error": "service_overloaded",
+                "message": "Server is at its concurrent heavy-request limit (8); retry after 5 s"
+            })))
+        ))
+    )
+)]
 #[handler]
 pub async fn generate_heatmap_endpoint(
     state: Data<&Arc<AppState>>,
@@ -562,6 +912,17 @@ pub async fn generate_heatmap_endpoint(
 ///   ]
 /// }
 /// ```
+#[utoipa::path(
+    get,
+    path = "/api/v1/antennas",
+    tag = "antennas",
+    operation_id = "listAntennas",
+    summary = "List all available antennas",
+    description = "Returns list of all loaded antenna configurations with basic metadata.",
+    responses(
+        (status = 200, description = "List of antennas", body = AntennaListResponse)
+    )
+)]
 #[handler]
 pub async fn list_antennas(
     state: Data<&Arc<AppState>>,
@@ -627,6 +988,21 @@ pub async fn list_antennas(
 ///   "physical_parameters": {...}
 /// }
 /// ```
+#[utoipa::path(
+    get,
+    path = "/api/v1/antennas/{id}",
+    tag = "antennas",
+    operation_id = "getAntennaDetails",
+    summary = "Get antenna details",
+    description = "Returns detailed information about a specific antenna including feeds, calibration status, and physical parameters.",
+    params(
+        ("id" = String, Path, description = "Antenna ID", example = "antenna_1")
+    ),
+    responses(
+        (status = 200, description = "Antenna details", body = AntennaDetailsResponse),
+        (status = 404, description = "Antenna not found", body = ErrorResponse)
+    )
+)]
 #[handler]
 pub async fn get_antenna_details(
     state: Data<&Arc<AppState>>,
@@ -778,6 +1154,21 @@ pub async fn get_antenna_details(
 ///   ]
 /// }
 /// ```
+#[utoipa::path(
+    get,
+    path = "/api/v1/antennas/{id}/feeds",
+    tag = "antennas",
+    operation_id = "listFeeds",
+    summary = "List feeds for antenna",
+    description = "Returns list of all feeds available for the specified antenna.",
+    params(
+        ("id" = String, Path, description = "Antenna ID", example = "antenna_1")
+    ),
+    responses(
+        (status = 200, description = "List of feeds", body = crate::api::schemas::FeedListResponse),
+        (status = 404, description = "Antenna not found", body = ErrorResponse)
+    )
+)]
 #[handler]
 pub async fn list_antenna_feeds(
     state: Data<&Arc<AppState>>,
@@ -849,6 +1240,22 @@ pub async fn list_antenna_feeds(
 ///   "q_factor": 8.0
 /// }
 /// ```
+#[utoipa::path(
+    get,
+    path = "/api/v1/antennas/{id}/feeds/{feed_id}",
+    tag = "antennas",
+    operation_id = "getFeedDetails",
+    summary = "Get feed details",
+    description = "Returns detailed information about a specific feed.",
+    params(
+        ("id" = String, Path, description = "Antenna ID", example = "antenna_1"),
+        ("feed_id" = String, Path, description = "Feed ID", example = "x_band_feed")
+    ),
+    responses(
+        (status = 200, description = "Feed details", body = crate::api::schemas::FeedInfo),
+        (status = 404, description = "Antenna or feed not found", body = ErrorResponse)
+    )
+)]
 #[handler]
 pub async fn get_feed_details(
     state: Data<&Arc<AppState>>,
@@ -936,6 +1343,92 @@ pub async fn get_feed_details(
 ///
 /// Returns HTTP 422 for validation errors (e.g., n_rings > 10, invalid positions, out-of-range
 /// frequency), HTTP 404 if antenna or feed not found, HTTP 500 for internal errors.
+#[utoipa::path(
+    post,
+    path = "/api/v1/h3-heatmap",
+    tag = "heatmap",
+    operation_id = "computeH3LinkBudget",
+    summary = "Compute a per-cell link budget over an H3 hexagonal grid",
+    description = include_str!("openapi_descriptions/op_h3_link_budget.md"),
+    request_body(content = H3LinkBudgetRequest, examples(
+        ("ground_station_coverage" = (summary = "3.7 m ground station, 2 rings at resolution 7 (19 cells)", value = json!({
+            "antenna_id": "gs_3.7m_uncalibrated",
+            "feed_id": "s_band_feed",
+            "vehicle_position": {"x": -116.889, "y": 35.4267, "z": 1036.0, "coordinate_system": "geodetic"},
+            "reflector_boresight": {"x": -116.45, "y": 35.4267, "z": 800.0, "coordinate_system": "geodetic"},
+            "feed_pointing_location": {"x": -116.45, "y": 35.4267, "z": 800.0, "coordinate_system": "geodetic"},
+            "frequency_mhz": 2200.0,
+            "n_rings": 2,
+            "h3_resolution": 7,
+            "temperature_k": 150.0
+        })))
+    )),
+    responses(
+        (status = 200, description = "Link budget computed for every cell in the grid", body = H3LinkBudgetResponse),
+        (status = 400, description = include_str!("openapi_descriptions/resp_400_see_gain.md"), body = ErrorResponse, examples(
+            ("unparseable_body" = (summary = "Malformed JSON", value = json!({
+                "error": "invalid_request_body",
+                "message": "parse error: expected value at line 1 column 3"
+            })))
+        )),
+        (status = 422, description = "The body parsed but is semantically invalid — an out-of-range value
+(`n_rings` above 10, `h3_resolution` outside 0-15, a non-positive
+`temperature_k`, a frequency outside 100-50000 MHz), or a degenerate geometry.", body = ErrorResponse, examples(
+            ("too_many_rings" = (summary = "n_rings above the maximum", value = json!({
+                "error": "validation_error",
+                "message": "invalid value for parameter 'n_rings': n_rings must be ≤ 10"
+            }))),
+            ("out_of_range_resolution" = (summary = "h3_resolution outside 0-15", value = json!({
+                "error": "validation_error",
+                "message": "parameter 'h3_resolution' value 20 is out of valid range [0, 15]"
+            })))
+        )),
+        (status = 404, description = "The request names an antenna or feed that does not exist (roadmap C2).", body = ErrorResponse, examples(
+            ("antenna_not_found" = (summary = "Antenna not found", value = json!({
+                "error": "antenna_not_found",
+                "message": "antenna 'invalid_antenna' not found"
+            })))
+        )),
+        (status = 413, description = "Request body exceeds the configured maximum size
+(`server.max_body_size_bytes`, default 10 MB). Enforced on both the
+`content-length` and `Transfer-Encoding: chunked` framings — see
+`/api/v1/heatmap` for the full description.", body = ErrorResponse, examples(
+            ("payload_too_large" = (summary = "Payload too large", value = json!({
+                "error": "payload_too_large",
+                "message": "Request body of 12000000 bytes exceeds the maximum of 10485760 bytes"
+            })))
+        )),
+        (status = 504, description = "A server-side wall-clock budget was exceeded — either the whole request
+(`request_timeout`, `server.request_timeout_secs`) or a single aperture
+integration (`computation_budget_exceeded`,
+`performance.integration_budget_ms`). See `/api/v1/heatmap` for how the two
+budgets differ; the fan-out caveat applies here too, since one request
+integrates once per cell.", body = ErrorResponse, examples(
+            ("request_timeout" = (summary = "Whole-request timeout (S2)", value = json!({
+                "error": "request_timeout",
+                "message": "Request processing exceeded the configured timeout of 30000 ms"
+            }))),
+            ("computation_budget_exceeded" = (summary = "Single integration over budget (S3)", value = json!({
+                "error": "computation_budget_exceeded",
+                "message": "computation exceeded time budget in azimuthal_mode_field: 31000 ms > 30000 ms budget"
+            })))
+        )),
+        (status = 503, description = "Admission control (roadmap S4): the server is already running the maximum
+number of concurrent heavy requests (batch / heatmap / h3-heatmap), configured
+by `performance.max_concurrent_heavy_requests` and shared across those three
+endpoints. The request was rejected immediately (never queued), so a
+`Retry-After` header is included. Never returned when the limit is 0 (the
+default; admission control disabled).", body = ErrorResponse,
+         headers(("Retry-After" = i32, description = "Seconds to wait before retrying (performance.admission_retry_after_secs).")),
+         examples(
+            ("service_overloaded" = (summary = "Heavy-request concurrency limit reached (S4)", value = json!({
+                "error": "service_overloaded",
+                "message": "Server is at its concurrent heavy-request limit (8); retry after 5 s"
+            })))
+        )),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
 #[handler]
 pub async fn h3_link_budget(
     state: Data<&Arc<AppState>>,
