@@ -428,15 +428,22 @@ fn cli_full_mode_correction_beats_the_uncorrected_model() {
 ///
 /// The fitted surface absorbs the injected bias PLUS the residual left by calibrating a
 /// nominal 2.0 mm surface RMS against data generated at 2.6 mm. That second component
-/// is small everywhere but not uniform: deep in the grid (probes 2–4 below) recovery is
-/// close to exact (measured 0.09–0.17 dB), while the probe nearest the main lobe
-/// (f=450, cone=3, clock=30 — still comfortably interior in all three axes) sits in a
-/// region where the fit is measurably looser, at 0.5928 dB, reproduced bit-for-bit
-/// across debug and release builds and across repeat runs. 0.35 dB (the estimate at
-/// planning time) undershot that. 0.65 dB is set with headroom above the measured
-/// 0.5928 dB worst case — enough to absorb run-to-run libm noise without flaking — while
-/// staying far below the injected bias's own 0.2–2.3 dB range, so a surface that fitted
-/// nothing would still fail this test.
+/// is small everywhere but not uniform. Measured per probe (frequency, cone, clock):
+/// (450, 3, 30) 0.5928 dB — the worst case, nearest the main lobe; (550, 7, 120) 0.0934
+/// dB; (570, 14, 200) 0.0365 dB; (500, 10, 260) 0.0934 dB.
+///
+/// Probe 3 was originally placed at 620 MHz, 20% into the frequency axis's topmost span
+/// [600, 700] — the span where `CorrectionSurface::evaluate` collapses to ~0, see
+/// docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md. That measured
+/// 0.1716 dB, roughly double probes 2 and 4, because it was partly measuring the filed
+/// defect rather than fit quality. Moved to 570 MHz, clear of the top span; its error
+/// dropped to 0.0365 dB, consistent with the other genuinely-interior probes.
+///
+/// All four values reproduced bit-for-bit across debug and release builds and across
+/// repeat runs. 0.65 dB is set with headroom above the measured 0.5928 dB worst case —
+/// enough to absorb run-to-run libm noise without flaking — while staying far below the
+/// injected bias's own 0.2–2.3 dB range, so a surface that fitted nothing would still
+/// fail this test.
 const BIAS_RECOVERY_TOLERANCE_DB: f64 = 0.65;
 
 #[test]
@@ -449,15 +456,18 @@ fn cli_full_mode_recovers_the_injected_bias() {
         .as_ref()
         .expect("full mode must ship a correction surface");
 
-    // Interior probe points only — off-grid but comfortably inside the fitted domain in
-    // every axis. The topmost knot span of each axis is excluded deliberately: the
-    // correction collapses to ~0 there (see
-    // docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md), which is a
-    // filed defect, not this test's subject.
+    // Interior probe points only — off-grid but each one sits below the topmost knot
+    // span of every axis, deliberately: the correction collapses to ~0 across that span
+    // (see docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md), a filed
+    // defect, not this test's subject. Concretely, the fitted frequency knot vector is
+    // [400, 400, 400, 400, 400, 500, 600, 700, 700, 700, 700, 700], so its topmost span
+    // is [600, 700] MHz — every probe's frequency here is <= 570 MHz, clear of it. The
+    // cone axis's topmost span is [20, 24] deg (probes <= 14 deg) and the clock axis's
+    // is [270, 315] deg (probes <= 260 deg).
     let probes = [
         (450.0_f64, 3.0_f64, 30.0_f64),
         (550.0, 7.0, 120.0),
-        (620.0, 14.0, 200.0),
+        (570.0, 14.0, 200.0),
         (500.0, 10.0, 260.0),
     ];
 
@@ -535,7 +545,17 @@ fn cli_without_validate_does_not_cross_validate() {
     );
 
     // The rest of step 6 still runs.
-    assert!(report["corrected_rmse"].as_f64().is_some());
-    assert!(report["main_lobe_max_error"].as_f64().is_some());
-    assert!(report["first_sidelobe_max_error"].as_f64().is_some());
+    assert!(
+        report["corrected_rmse"].as_f64().is_some(),
+        "corrected_rmse missing from report despite --validate being off; report was:\n{report:#}"
+    );
+    assert!(
+        report["main_lobe_max_error"].as_f64().is_some(),
+        "main_lobe_max_error missing from report despite --validate being off; report was:\n{report:#}"
+    );
+    assert!(
+        report["first_sidelobe_max_error"].as_f64().is_some(),
+        "first_sidelobe_max_error missing from report despite --validate being off; \
+         report was:\n{report:#}"
+    );
 }
