@@ -345,11 +345,16 @@ Unless a decision-register row flips them:
   corrected 0.9756 dB, and an injected bias is recovered at four probes within 0.65 dB. A
   full-pipeline number has now been observed end to end on synthetic data. **What remains
   open:** no `.bin` artifact ships from this repo yet (D9); real-measurement coverage is D13
-  (boresight, NTIA sweeps) and D14 (real-anchored full-mode artifact); the improvement and
-  known-answer-recovery assertions are both weaker than they should be, because D12's fixture
-  (288 points against 960 fitted coefficients) is badly underdetermined and lands squarely on
-  the correction-surface upper-edge-collapse defect D12 found (see the new risk entry below);
-  and `calibrate --tune-parameters` does not work at all — every full-mode tuned run crashes in
+  (boresight, NTIA sweeps) and D14 (real-anchored full-mode artifact); the known-answer-recovery
+  assertion is still weaker than it should be — but not because of the correction-surface
+  upper-edge-collapse defect D12 found, which was fixed 2026-07-30 (`a866cfb`; see the retired
+  risk entry below) and was never the binding constraint on off-grid accuracy: the four probe
+  errors were unchanged to four decimals (0.5928/0.0934/0.0365/0.0934 dB) across the fix, while
+  the corrected RMSE *at the fitted grid points* dropped 0.9756 → 0.0058 dB. The real limiting
+  factor is that D12's fixture (288 points against 960 fitted coefficients) is badly
+  underdetermined, letting the surface overfit the points it was fitted to while oscillating
+  between them — which is exactly what a near-zero on-grid RMSE next to unmoved off-grid probe
+  errors demonstrates; and `calibrate --tune-parameters` does not work at all — every full-mode tuned run crashes in
   argmin's Nelder-Mead before completing, so the tuner's own recovery of a perturbed physical
   parameter (as opposed to the correction surface's recovery of an injected bias) remains
   unverified end-to-end. The service side is unaffected throughout: the four enabled antennas
