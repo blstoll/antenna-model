@@ -863,13 +863,38 @@ invalid,10.0,8400.0,40.5,50.0
             .contains("outside the boresight-typical range"));
     }
 
-    /// Captures `tracing` output so the drop report can be asserted on.
-    #[derive(Clone, Default)]
-    struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    // ========================================================================
+    // Log capture
+    //
+    // A *scoped* subscriber (`tracing::subscriber::with_default`) cannot be used here.
+    // It installs the subscriber thread-locally, but registering and dropping a
+    // dispatcher also moves `tracing`'s global max-level filter. Under `cargo test`'s
+    // default thread-per-test parallelism, one test dropping its guard lowers that
+    // global filter while a sibling sits between installing its subscriber and emitting
+    // its event; the event is then discarded by the global fast path before it ever
+    // reaches the sibling's subscriber, and the capture comes back empty. Measured at a
+    // ~20% failure rate (2 of 10 runs of `cargo test -p calibrate --lib parser`), while
+    // passing 12/12 in isolation and 6/6 under `--test-threads=1`. Serializing the
+    // capturing tests against each other does NOT fix it — the global level is moved by
+    // dispatcher lifecycle across the whole binary, not just by these three tests.
+    //
+    // Instead: install ONE global subscriber for the test binary and never remove it, so
+    // the global level is raised once and stays raised. It writes to a *thread-local*
+    // buffer, so tests running concurrently still capture only their own output.
+    // ========================================================================
 
-    impl std::io::Write for CapturedLogs {
+    thread_local! {
+        static CAPTURED_LOG: std::cell::RefCell<Vec<u8>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// Writes tracing output into the emitting thread's own buffer.
+    #[derive(Clone, Copy, Default)]
+    struct ThreadLocalCapture;
+
+    impl std::io::Write for ThreadLocalCapture {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
+            CAPTURED_LOG.with(|b| b.borrow_mut().extend_from_slice(buf));
             Ok(buf.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
@@ -877,29 +902,32 @@ invalid,10.0,8400.0,40.5,50.0
         }
     }
 
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ThreadLocalCapture {
         type Writer = Self;
         fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
-
-    impl CapturedLogs {
-        fn text(&self) -> String {
-            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+            *self
         }
     }
 
     fn parse_capturing_logs(content: &str) -> (Result<MeasurementData>, String) {
-        let logs = CapturedLogs::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(logs.clone())
-            .with_max_level(tracing::Level::WARN)
-            .with_ansi(false)
-            .finish();
-        let result =
-            tracing::subscriber::with_default(subscriber, || parse_csv_content(content, "t.csv"));
-        (result, logs.text())
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .with_writer(ThreadLocalCapture)
+                .with_max_level(tracing::Level::WARN)
+                .with_ansi(false)
+                .finish();
+            // Ignore the error: another test binary component may have installed one
+            // first, which is fine — we only need *a* subscriber that does not go away.
+            let _ = tracing::subscriber::set_global_default(subscriber);
+        });
+
+        CAPTURED_LOG.with(|b| b.borrow_mut().clear());
+        let result = parse_csv_content(content, "t.csv");
+        let text = CAPTURED_LOG
+            .with(|b| String::from_utf8(b.borrow().clone()))
+            .expect("captured log is valid UTF-8");
+        (result, text)
     }
 
     /// Genuinely malformed rows are still dropped, and the drop is reported through
