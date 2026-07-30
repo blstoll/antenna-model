@@ -405,6 +405,15 @@ pub fn fit_correction_surface(
 ///
 /// # Returns
 /// Value of B_{i,k}(t)
+///
+/// # Degenerate axis
+/// A fully degenerate knot vector (every knot equal, e.g. `[5.0; 8]`) has zero-width spans
+/// everywhere, so every basis function — including the domain-maximum case above — returns
+/// 0.0 rather than summing to a partition of unity. This is pre-existing, not something the
+/// domain-maximum fix introduced or fixes: the half-open span can't fire on a zero-width
+/// interval either. It is guarded upstream, not here — `generate_knot_vector` rejects
+/// `max_val - min_val < min_spacing` before a degenerate vector can be built, so a caller
+/// that bypasses that guard would need its own handling for this case.
 fn bspline_basis(i: usize, k: usize, t: f64, knots: &[f64]) -> f64 {
     if k == 1 {
         // Base case: characteristic function of the half-open span [knots[i], knots[i+1]).
@@ -1590,12 +1599,13 @@ mod least_squares_tests {
     /// `docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md`). This
     /// fixture's frequency axis (`fixture_residuals`, `i in 0..8` → 8000..8700 MHz in
     /// 100 MHz steps) reaches exactly 8700 MHz, the frequency knot vector's maximum
-    /// (`fixture_knots`). Before the fix, the 48 of 288 points sitting on that face
-    /// evaluated the basis to all zero and contributed nothing to the normal equations,
-    /// so the last frequency coefficient had no data support and was pulled toward zero
-    /// by the ridge term alone. The fit below legitimately changed as a result — this is
-    /// not solver drift, it is the fixture actually being fit correctly for the first
-    /// time.
+    /// (`fixture_knots`). Only `i == 7` reaches 8700 MHz, so that is 6×6 = 36 of the 288
+    /// points (`j in 0..6` cone steps times `k in 0..6` clock steps at that one frequency
+    /// step); before the fix, those 36 points evaluated the basis to all zero and
+    /// contributed nothing to the normal equations, so the last frequency coefficient had
+    /// no data support and was pulled toward zero by the ridge term alone. The fit below
+    /// legitimately changed as a result — this is not solver drift, it is the fixture
+    /// actually being fit correctly for the first time.
     ///
     /// Pre-fix (buggy basis) values, kept for the record:
     /// `sum = 8.154347510713e1`, `sumsq = 5.590390188922e1`, `c[0] = 7.434343253931e-1`,
@@ -1605,6 +1615,11 @@ mod least_squares_tests {
     /// Sanity check on the new values: `sum` rose (81.54 -> 87.17) and `c[last]` rose
     /// sharply (0.149 -> 0.566) — exactly the direction expected when a starved
     /// coefficient regains data support instead of being suppressed by the ridge term.
+    /// This is coefficient-index-specific, not a uniform shift: flattening index is
+    /// `i_freq + n_freq * (i_cone + n_cone * i_clock)`, and `c[0]`, `c[1]`, `c[mid]` all
+    /// have `i_freq != 4` (the top frequency index), so none of them touch the
+    /// frequency-max span and none move much — while `c[last]` (index 124) is the single
+    /// coefficient at `i_freq = 4`, the one that was starved.
     ///
     /// The new values are corroborated by three independent checks, not just accepted
     /// as "whatever the code now emits": `fit_satisfies_normal_equations` (the solve is
