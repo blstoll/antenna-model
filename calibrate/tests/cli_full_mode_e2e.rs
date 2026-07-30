@@ -461,13 +461,20 @@ fn cli_full_mode_recovers_the_injected_bias() {
         .expect("full mode must ship a correction surface");
 
     // Interior probe points only — off-grid but each one sits below the topmost knot
-    // span of every axis, deliberately: the correction collapses to ~0 across that span
-    // (see docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md), a filed
-    // defect, not this test's subject. Concretely, the fitted frequency knot vector is
-    // [400, 400, 400, 400, 400, 500, 600, 700, 700, 700, 700, 700], so its topmost span
-    // is [600, 700] MHz — every probe's frequency here is <= 570 MHz, clear of it. The
-    // cone axis's topmost span is [20, 24] deg (probes <= 14 deg) and the clock axis's
-    // is [270, 315] deg (probes <= 260 deg).
+    // span of every axis, deliberately. Originally this was because the correction
+    // collapsed to ~0 across that span (a `bspline_basis` defect at the exact maximum of
+    // an axis); that was fixed 2026-07-30 in a866cfb, and the basis is now a partition of
+    // unity at every boundary, so it's history, not a live hazard here.
+    //
+    // Staying interior is still worthwhile post-fix, for a different reason: off-grid
+    // accuracy is limited by the underdetermined fit (960 coefficients, 288 points — see
+    // `BIAS_RECOVERY_TOLERANCE_DB` above), and a probe placed exactly at a boundary would
+    // conflate boundary behavior with that interpolation error. Keeping the probes
+    // interior keeps this test measuring one thing. Concretely, the fitted frequency knot
+    // vector is [400, 400, 400, 400, 400, 500, 600, 700, 700, 700, 700, 700], so its
+    // topmost span is [600, 700] MHz — every probe's frequency here is <= 570 MHz, clear
+    // of it. The cone axis's topmost span is [20, 24] deg (probes <= 14 deg) and the
+    // clock axis's is [270, 315] deg (probes <= 260 deg).
     let probes = [
         (450.0_f64, 3.0_f64, 30.0_f64),
         (550.0, 7.0, 120.0),
