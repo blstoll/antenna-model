@@ -262,6 +262,18 @@ noted above:
    ranges upstream before a degenerate vector can be built. Documented in `bspline_basis`'s doc
    comment; no `debug_assert!` added.
 
+   **Follow-up (2026-07-30, D15 review):** the "unreachable" qualifier is specific to
+   calibrate's 3D fitter path. The **boresight mode is a real producer of degenerate 4D axes**
+   on a different code path: `fit_frequency_correction`
+   (`calibrate/src/frequency_correction.rs`) builds its azimuth/elevation/temperature axes as
+   `order` equal knots (`create_degenerate_knot_vector`), which fails
+   `BSplineModel4D::validate`'s `len ≥ shape + order` check — and the service loader validates
+   every artifact — so any boresight artifact whose residuals tripped the 0.5 dB
+   frequency-correction threshold is **rejected at service load time**. A distinct defect from
+   the one fixed here (a loud structural rejection, not a silent zero), pinned by
+   `frequency_correction::tests::frequency_correction_is_rejected_by_the_service_side_validator`
+   and routed to unit **D13** (with D2 owning the artifact framing).
+
 **This fix does not make the correction-surface fit well-determined.** It corrects a basis
 evaluation bug that was corrupting fitted coefficients at every axis maximum; it does not add
 more constraints, more data, or a smaller coefficient count. Item 2 above is the concrete

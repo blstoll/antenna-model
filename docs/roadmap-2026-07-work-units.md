@@ -2377,6 +2377,10 @@ being written separately (2026-07-29) and is not tracked as a unit here.
   Note the second version axis rides along here too: `CalibrationMetadata.format_version` is
   inside the payload, so a headerless artifact is not un-versioned in the semantic sense —
   only in the container sense. Say which axis is which, as the exit criteria above require.
+  (A second boresight-artifact defect — degenerate correction-surface axes the service-side
+  validator rejects at load — was filed 2026-07-30 by the D15 review and is recorded on
+  **D13**; the fix belongs there, but coordinate: both units reshape what boresight mode
+  writes.)
 - **Note (2026-07-28, from C12 / C8 stage 4):** `CalibrationMetadata.rmse_db`/`r_squared`
   stay plain `f64` with a NaN sentinel by decision, not oversight — converting them to
   `Option<f64>` would change postcard's positional wire encoding, which is an ANTC
@@ -2954,7 +2958,10 @@ representable.
 3. A fully degenerate axis (every knot equal) makes every basis function return 0 rather than 1
    — pre-existing, not introduced or fixed here, currently unreachable because
    `generate_knot_vector` rejects degenerate ranges upstream. Noted in `bspline_basis`'s doc
-   comment (`41b7e94`).
+   comment (`41b7e94`). ("Unreachable" is specific to calibrate's 3D fitter path: the boresight
+   mode separately produces degenerate 4D axes on the service side via
+   `fit_frequency_correction`, a different code path and defect class — the service *rejects*
+   those artifacts at load. Filed 2026-07-30 by the D15 review, recorded on **D13**.)
 
 **This fix does not make the correction-surface fit well-determined** — it corrects a basis
 evaluation bug that was corrupting fitted coefficients at every axis maximum; item 2 above is
@@ -2991,6 +2998,22 @@ Best candidate: **Andrew 43998, 10 m — 6 frequencies spanning 3700–6425 MHz*
   hard rather than dropping rows — D11's gate does not apply here; do not "harmonize" the
   two parsers in this unit. Real data means real residuals: pick the tolerance from the
   measured before/after, not from wishful thinking, and record it.
+- **Inherited 2026-07-30 from the D15 review — the boresight frequency correction is
+  service-rejected.** `fit_frequency_correction` (`calibrate/src/frequency_correction.rs`)
+  builds its degenerate azimuth/elevation/temperature axes as `order` (3) equal knots
+  (`create_degenerate_knot_vector`), which fails `BSplineModel4D::validate`'s
+  `len >= shape + order` check — and the service loader validates every artifact
+  (`AntennaCalibration::validate` → `correction.validate()`). So a boresight artifact that
+  carries a correction surface (fitted whenever max |residual| > 0.5 dB) **fails to load**.
+  This unit's scope-3 assertions ("loads through the service loader", serves
+  `PartiallyCalibrated`) will hit it on any real fixture whose residuals trip the
+  threshold — the NTIA candidates plausibly will, given the multi-band feed caveat above.
+  Fix: build flat-but-valid axes the way `artifact_export::to_bspline_4d` builds its
+  temperature axis (coefficient layers replicated over a real interval with an interior
+  knot); merely lengthening the degenerate vectors is not a fix, since a zero-width axis
+  has no evaluable span. Pinned as a known defect by
+  `frequency_correction::tests::frequency_correction_is_rejected_by_the_service_side_validator`,
+  which must flip to `is_ok` when fixed.
 - **Depends on:** D2 (so the test pins the final headered artifact format, not the legacy
   one), D12 (reuses its CLI-harness pattern).
 
