@@ -189,12 +189,19 @@ fn surface_fitting_params(validate: bool, cv_folds: usize) -> CorrectionSurfaceP
 /// cross-validation fold refit a markedly more flexible surface — roughly double the knots
 /// at 1000× weaker regularization — so the reported CV RMSE described a model family more
 /// prone to overfit than the artifact being blessed.
+///
+/// `num_folds = 0` disables cross-validation only; every other check in step 6 (RMSE,
+/// main-lobe and first-sidelobe statistics, outliers, band analysis) runs regardless.
+/// Gating it on `--validate` matches the flag's documented meaning ("Run cross-validation
+/// after fitting") and step 5, which already honors it — before this, `--cv-folds`' clap
+/// default of 5 meant every full-mode run cross-validated whether asked to or not.
 fn validation_config(
+    validate: bool,
     cv_folds: usize,
     surface_params: &CorrectionSurfaceParams,
 ) -> ValidationConfig {
     ValidationConfig {
-        num_folds: cv_folds,
+        num_folds: if validate { cv_folds } else { 0 },
         main_lobe_beamwidths: 1.0,
         first_sidelobe_max_deg: 5.0,
         frequency_bands: vec![], // Use default bands
@@ -622,7 +629,7 @@ async fn run_calibration(args: Args) -> Result<()> {
     // Step 6: Validation
     info!("Step 6/6: Running validation...");
 
-    let validation_config = validation_config(args.cv_folds, &surface_params);
+    let validation_config = validation_config(args.validate, args.cv_folds, &surface_params);
 
     let validation_report = validate_calibration(
         &measurements.points,
@@ -853,7 +860,7 @@ mod tests {
     #[test]
     fn validation_config_scores_the_surface_that_ships() {
         let surface_params = surface_fitting_params(true, 5);
-        let config = validation_config(5, &surface_params);
+        let config = validation_config(true, 5, &surface_params);
 
         assert_eq!(
             config.correction_params.num_knots_frequency,
@@ -888,15 +895,52 @@ mod tests {
         );
     }
 
+    /// `--validate` is documented as "Run cross-validation after fitting". Step 5 honors
+    /// it; step 6 did not, so every full-mode run cross-validated whether asked or not.
+    #[test]
+    fn cross_validation_is_gated_on_the_validate_flag() {
+        let params = surface_fitting_params(false, 5);
+        assert_eq!(
+            validation_config(false, 5, &params).num_folds,
+            0,
+            "without --validate, step 6 must not cross-validate"
+        );
+
+        let params = surface_fitting_params(true, 5);
+        assert_eq!(
+            validation_config(true, 5, &params).num_folds,
+            5,
+            "with --validate, --cv-folds still sets the fold count"
+        );
+    }
+
+    /// Gating CV must not disable the rest of step 6.
+    #[test]
+    fn gating_cross_validation_leaves_the_other_validation_settings_intact() {
+        let params = surface_fitting_params(false, 5);
+        let ungated = validation_config(false, 5, &params);
+        let gated = validation_config(true, 5, &params);
+
+        assert_eq!(ungated.main_lobe_target_db, gated.main_lobe_target_db);
+        assert_eq!(
+            ungated.first_sidelobe_target_db,
+            gated.first_sidelobe_target_db
+        );
+        assert_eq!(ungated.outlier_threshold_db, gated.outlier_threshold_db);
+        assert_eq!(ungated.main_lobe_beamwidths, gated.main_lobe_beamwidths);
+        assert_eq!(ungated.first_sidelobe_max_deg, gated.first_sidelobe_max_deg);
+    }
+
     /// `--cv-folds N` reaches both the surface fit and the validation fold count, and
     /// cross-validation stays off entirely without `--validate`.
     #[test]
     fn cv_folds_reaches_the_fit_and_the_validator() {
         let with_validate = surface_fitting_params(true, 7);
         assert_eq!(with_validate.cross_validation_folds, 7);
-        assert_eq!(validation_config(7, &with_validate).num_folds, 7);
+        assert_eq!(validation_config(true, 7, &with_validate).num_folds, 7);
 
         let without_validate = surface_fitting_params(false, 7);
         assert_eq!(without_validate.cross_validation_folds, 0);
+        assert_eq!(validation_config(false, 7, &without_validate).num_folds, 0);
     }
 }
