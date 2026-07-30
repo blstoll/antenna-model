@@ -71,8 +71,14 @@ G1 ─┬─ G2 ── G3
     │      calibrate CLI integration-test     │
     │      work, as required)                 │
     │  (D10,D11) ─ D12 ─ D13, D14             │
-    │      (filed 2026-07-29: CLI e2e on      │
-    │      perturbed-truth synthetic, then    │
+    │  D12 DONE 2026-07-30 (branch feat/d12-  │
+    │      calibrate-cli-e2e): CLI e2e on     │
+    │      perturbed-truth synthetic, known-  │
+    │      answer recovery; filed 2 findings  │
+    │      (edge-collapse; tune-parameters    │
+    │      broken) + 1 flake fix (D11 log-    │
+    │      capture tests)                     │
+    │      D13, D14 open (filed 2026-07-29:   │
     │      real-data boresight + NASA-        │
     │      anchored full-mode artifacts;      │
     │      D13/D14 also need D2; D14 feeds D9)│
@@ -2567,6 +2573,10 @@ without `--validate`, whose help text is "Run cross-validation after fitting". S
 gates on `--validate`; step 6 does not. Gating it is a CLI behavior change this unit was not
 chartered to make. → file against the `calibrate` CLI integration-test work.
 
+**Resolved 2026-07-30 in D12 Task 1** — `validation_config` now takes `--validate` and sets
+`num_folds = 0` when it is false; only cross-validation is gated, the rest of step 6 is
+unchanged.
+
 ---
 
 **Filed 2026-07-29** out of D1's finding 2. **Correctness-class, not hygiene** — it sits in
@@ -2728,6 +2738,94 @@ calibrations, not just test fixtures.
 - **Depends on:** nothing.
 
 ### D12 — calibrate CLI end-to-end test on perturbed-truth synthetic data — Effort: M
+
+**✅ DONE 2026-07-30** — branch `feat/d12-calibrate-cli-e2e`. Six commits: `3f7b657` (Task 1),
+`5e7bc6d` + `4348eba` (Task 2), `d0ab870` + `e183a64` (Task 3), `cab335c` + `1b0a029` (Task 4),
+plus `d9c6f44` (flake fix), `921b6ca` and `2b70d69` (findings), and `586aa7a` (Task 5). Final
+suite: `cargo test -p calibrate --test cli_full_mode_e2e` → **11 passed, 1 ignored**, ~11 s.
+
+**Task 1 — cross-validation gated on `--validate`.** `validation_config` in
+`calibrate/src/main.rs` gained a `validate: bool` parameter and sets `num_folds = 0` when
+false. Only cross-validation is gated; corrected RMSE, main-lobe/first-sidelobe statistics,
+outliers and band analysis run unconditionally. Closes the finding D10 filed above.
+
+**Task 2 — the fixture.** Deterministic perturbed-truth generator in
+`calibrate/tests/support/mod.rs`. Class `UHF_Array_Element`, chosen for its broad beam
+(8.91 dB/K at boresight, −41.53 at 20°) because the fitter's 2° minimum E-cone knot spacing
+cannot resolve a narrow-beam class — `GroundStation_13m` falls 33.08 → −10.60 dB/K between 0°
+and 1° at 4 GHz. **288 rows**: 4 frequencies (400/500/600/700 MHz) × 9 E-cone (0–24°) × 8
+E-clock (0–315°). **Minimum G/T −68.22 dB/K**; **144 of 288 rows (50%) below −20 dB/K** — a
+standing pin on D11. Injected bias range **[0.200, 2.300] dB**, matching the closed-form
+extremes of its coefficients. Surface RMS perturbed **2.0 → 2.6 mm**; only surface RMS is
+perturbed, since full-mode `TunableParameters` has no `q_factor`, so a q perturbation could
+never be recovered. A drift guard (`fixture_config_matches_antenna_classes_yaml`) fails loudly
+if `antenna_classes.yaml`'s entry diverges from the hardcoded fixture config.
+
+**Task 3 — the end-to-end run.** First test executing the real binary through
+parse → predict → fit → validate → artifact. The artifact loads through the **service's**
+loader (`antenna_model::data::loader`), not just calibrate's own round-trip code. **Model-only
+RMSE 1.3071 dB → corrected 0.9756 dB** (ratio 0.746, a 25.4% improvement). The improvement
+assertion is bounded at `corrected < 0.9756 + 0.02` dB — an absolute epsilon, because the
+pipeline is deterministic to 4 decimal places across debug and release runs, so the epsilon
+covers cross-platform libm ULP differences rather than run-to-run variance. **This bound is
+deliberately weak and should be tightened once the edge-collapse defect is fixed** (finding 1
+below). Fixture generation is cached across `run_calibrate` calls: single-threaded suite time
+**12.89 s → 11.55 s**.
+
+**Task 4 — known-answer recovery.** Recovery of the injected bias at four interior probes,
+plus CLI-level pins for `--cv-folds` (N = 3 and 6 produce N fold RMSEs) and for the Task 1
+gating (no `cross_validation` section and no CV announcement without `--validate`). Per-probe
+errors: **0.5928 dB** at (450 MHz, 3°, 30°) — the worst case, nearest the main lobe; **0.0934**
+at (550, 7, 120); **0.0365** at (570, 14, 200); **0.0934** at (500, 10, 260). Tolerance
+`BIAS_RECOVERY_TOLERANCE_DB = 0.65 dB`. A review caught that the original probe 3 sat at
+620 MHz, *inside* the fitted frequency knot vector's topmost span [600, 700] MHz — so it was
+partly measuring the edge-collapse defect (finding 1) rather than fit quality. Moving it to
+570 MHz cut its error from 0.1716 to 0.0365 dB. The 0.5928 dB worst case is itself far worse
+than it should be: on an *overdetermined* grid (1232 points) the same bias is recovered to
+~0.003 dB. The shipped fixture is 288 points against **960 coefficients** —
+`(4+4)(6+4)(8+4)` for the artifact's 4/6/8 knot counts at order 4 — so it is badly
+underdetermined. **The known-answer assertion is therefore weaker than it should be** until
+the fitter's data-sufficiency check is fixed (that check requires `(spline_order+1)³ = 125`,
+which is the wrong quantity — see finding 1).
+
+**Task 5 — the tuned run: blocked by a defect, test committed `#[ignore]`d.**
+`calibrate --tune-parameters` **crashes** — `attempt to subtract with overflow` in argmin's
+Nelder-Mead, ~0.7 s in, for every `--tuning-mode` and every `--max-tuning-iterations`.
+`parameter_tuner.rs:389` builds the simplex with a single vertex where `N+1` are required. The
+identical bug was found and fixed in `boresight_calibration.rs` (2025-11-27) but never ported.
+Separately, `ParameterBounds::default()` caps `surface_rms_mm` at (0.1, **2.0**) mm — exactly
+`UHF_Array_Element`'s nominal — so the 2.6 mm perturbation is unreachable even once the crash
+is fixed. Task 5's original charter (measure the wall clock, decide CI status) **could not be
+carried out** — the run never completes. The test exists, is `#[ignore]`d with the
+reproduction command, and is ready to enable once the defect lands; the timing measurement was
+not done.
+
+**Three findings, none fixed here** (standing rule 5 — D12 doing its job):
+
+1. `docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md` (commit `921b6ca`) —
+   the correction surface returns ~0 across the topmost knot span of **every** axis, in both
+   calibrate's 3D `CorrectionSurface::evaluate` and the service-side 4D `evaluate_correction`.
+   Fitting a constant 1.5 dB: interior 1.500000, any axis at max 0.000000, 699.999 →
+   0.000090. Loses 332 of 1232 points (26.9%) on a regular grid. **Latent today** (no `.bin`
+   ships, all enabled antennas uncalibrated) but a served-path wrong answer as soon as D9/D14
+   ship an artifact. **Recommend fixing before D14**, since D14 builds a real-anchored
+   artifact for the served calibrated path. The doc also records two refuted hypotheses
+   (degenerate adaptive knots; underdetermination) and two adjacent problems (the wrong
+   data-sufficiency quantity; `compute_r_squared` returning a hardcoded 1.0 when
+   `ss_tot == 0`).
+2. `docs/findings-2026-07-30-full-mode-parameter-tuning-broken.md` (commit `2b70d69`) —
+   Task 5's two defects above.
+3. **Flake fix, commit `d9c6f44`** — the three D11 log-capture tests in
+   `calibrate/src/parser.rs` failed ~20% of the time under parallel execution (2 of 10 runs of
+   `cargo test -p calibrate --lib parser`), passing 12/12 in isolation and 6/6 single-threaded.
+   A scoped `tracing` subscriber is thread-local, but dispatcher registration/drop moves
+   tracing's **global** max-level filter, so a sibling's event was discarded before reaching
+   its subscriber and the capture came back empty. Serializing the capturing tests made it
+   *worse* (7 of 20). Fixed by installing one global subscriber that never unregisters,
+   writing to a thread-local buffer: 30/30 green afterwards, 10/10 on the full lib suite.
+   **Introduced by D11 in PR #26 — this was a live intermittent CI failure on `main`.**
+
+---
 
 **Filed 2026-07-29.** D1's closeout stated the gap plainly: `calibrate` has library-level
 integration tests (`calibrate/tests/`) but **nothing that runs the built binary** through
