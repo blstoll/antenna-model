@@ -249,9 +249,7 @@ struct CalibrateRun {
     stderr: String,
     artifact: PathBuf,
     report: PathBuf,
-    // Written by `--metadata` but not read by any test yet; kept (like `_dir`) so the
-    // path stays visible for a future test rather than silently discarding the arg.
-    _metadata: PathBuf,
+    metadata: PathBuf,
     _dir: tempfile::TempDir,
 }
 
@@ -333,7 +331,7 @@ fn run_calibrate(extra_args: &[&str]) -> CalibrateRun {
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
         artifact,
         report,
-        _metadata: metadata,
+        metadata,
         _dir: dir,
     };
 
@@ -557,5 +555,90 @@ fn cli_without_validate_does_not_cross_validate() {
         report["first_sidelobe_max_error"].as_f64().is_some(),
         "first_sidelobe_max_error missing from report despite --validate being off; \
          report was:\n{report:#}"
+    );
+}
+
+// ============================================================================
+// Tuned end-to-end run and its CI status (roadmap D12 Task 5)
+// ============================================================================
+
+/// End-to-end run WITH parameter tuning.
+///
+/// **`#[ignore]`d for a correctness reason, not a CI-cost one.** Measured 2026-07-30:
+/// `--tune-parameters` crashes the binary deterministically, on the very first
+/// optimization step, regardless of `--max-tuning-iterations` or `--tuning-mode`:
+///
+/// ```text
+/// thread 'main' panicked at argmin-0.11.0/src/solver/neldermead/mod.rs:357:43:
+/// attempt to subtract with overflow
+/// ```
+///
+/// Root cause: `calibrate::parameter_tuner::tune_parameters` builds its `NelderMead`
+/// solver with `NelderMead::new(vec![initial_params])` — a single initial vector — but
+/// Nelder-Mead requires a full simplex of **N+1** vertices for an N-parameter search
+/// (`--tuning-mode surface-only`, the default, has N=1 and needs 2 vertices; only 1 is
+/// given). `self.params.len()` is therefore always 1 regardless of tuning mode, and
+/// `next_iter` indexes `self.params[num_param_vecs - 2]` = `self.params[1 - 2]`, which
+/// underflows in `usize` arithmetic. This is not a new failure mode for this codebase:
+/// the sibling boresight-calibration path hit and fixed the identical bug (see
+/// `docs/implementation-plan.md`, "Bug Fixed" entry under the 2025-11-27 integration-test
+/// work) by building a real simplex — `boresight_calibration.rs:398-428` seeds it by
+/// perturbing each parameter by 10% (or 0.1 for small values) to get N+1 vertices.
+/// `parameter_tuner.rs::tune_parameters` never received the equivalent fix, so
+/// `--tune-parameters` in full-calibration mode is non-functional today. Fixing
+/// `parameter_tuner.rs` is out of this test file's scope (this task modifies only
+/// `cli_full_mode_e2e.rs`); this test documents the failure so it's ready to un-ignore
+/// once that fix lands.
+///
+/// Separately — a second, independent problem that will surface once the crash above is
+/// fixed: the tuner's own `ParameterBounds::default()` caps `surface_rms_mm` at
+/// `(0.1, 2.0)` mm (`calibrate/src/antenna_config.rs:155`), i.e. exactly the *nominal*
+/// value this fixture starts from and *below* the 2.6 mm perturbed truth
+/// (`support::PERTURBED_SURFACE_RMS_MM`). The search space cannot reach 2.6 mm at all —
+/// the best the optimizer could ever report is the nominal 2.0 mm boundary itself — so
+/// the directional assertion below cannot pass even after the simplex bug is fixed, until
+/// the bounds (or the fixture's perturbation target) are revisited.
+///
+/// Iteration count is held low for when this becomes unblocked: each Nelder-Mead
+/// evaluation runs the physics model over all 288 fixture points (~0.4 s in a debug
+/// build). The assertion is directional — the tuner must move surface RMS off the
+/// nominal 2.0 mm toward the 2.6 mm the data was generated at — not that it converges
+/// exactly, which a short run would not do anyway.
+#[ignore = "crashes: --tune-parameters panics with 'attempt to subtract with overflow' in \
+            argmin's Nelder-Mead solver (parameter_tuner.rs passes a 1-vertex simplex \
+            where N+1 are required; see doc comment above and \
+            docs/implementation-plan.md's boresight-calibration bugfix for the sibling \
+            fix). Measured 2026-07-30. Run with `cargo test -p calibrate --test \
+            cli_full_mode_e2e tuned -- --include-ignored` to reproduce."]
+#[test]
+fn cli_tuned_run_recovers_the_surface_rms_perturbation() {
+    let start = std::time::Instant::now();
+    let run = run_calibrate(&["--tune-parameters", "--max-tuning-iterations", "8"]);
+    let elapsed = start.elapsed();
+
+    println!("tuned end-to-end run took {:.1} s", elapsed.as_secs_f64());
+
+    let metadata: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&run.metadata).expect("read --metadata sidecar"),
+    )
+    .expect("parse --metadata sidecar");
+    assert_eq!(
+        metadata["parameters_tuned"], true,
+        "the metadata sidecar should record that tuning ran"
+    );
+
+    let calibration = antenna_model::data::loader::load_calibration_artifact(&run.artifact)
+        .expect("load artifact");
+
+    // The data-layer ReflectorGeometry stores millimetres already — no conversion.
+    let tuned_rms = calibration.physical_config.reflector.surface_rms_mm;
+    println!(
+        "surface RMS: nominal {NOMINAL_SURFACE_RMS_MM} mm, truth \
+         {PERTURBED_SURFACE_RMS_MM} mm, tuned {tuned_rms:.4} mm"
+    );
+    assert!(
+        tuned_rms > NOMINAL_SURFACE_RMS_MM,
+        "the tuner should move surface RMS toward the perturbed truth \
+         ({PERTURBED_SURFACE_RMS_MM} mm), but it stayed at or below nominal: {tuned_rms:.4} mm"
     );
 }
