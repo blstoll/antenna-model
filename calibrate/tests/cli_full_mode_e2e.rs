@@ -267,9 +267,29 @@ impl CalibrateRun {
     }
 }
 
+/// The fixture CSV text, computed once per test binary run and shared across every
+/// `run_calibrate` call.
+///
+/// `generate_rows()` runs the real physics model over the fixture grid and costs ~1.4s in
+/// a debug build — a large fraction of each `run_calibrate` call (~3.2s, subprocess
+/// included). Every call writes an identical file (the generator is deterministic — see
+/// `generator_is_deterministic`), so recomputing it per call buys nothing but wall-clock
+/// time. This cache lives here, not in `support/mod.rs`: `generate_rows` and
+/// `write_fixture_csv` themselves stay unmemoized and behaviorally unchanged, since
+/// `generator_is_deterministic` depends on calling `generate_rows()` twice for real to
+/// prove reproducibility.
+fn fixture_csv() -> &'static str {
+    static CSV: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    CSV.get_or_init(|| rows_to_csv(&generate_rows()))
+}
+
 /// Run the real `calibrate` binary in full mode over a freshly generated fixture.
 ///
 /// `extra_args` appends flags such as `--validate` / `--cv-folds N`.
+///
+/// Asserts success internally (see below) — a future test that needs to exercise an
+/// *expected* CLI failure will need a variant that returns the raw `Output` instead of
+/// panicking here.
 fn run_calibrate(extra_args: &[&str]) -> CalibrateRun {
     let dir = tempfile::tempdir().expect("temp dir");
     let input = dir.path().join("measurements.csv");
@@ -277,7 +297,9 @@ fn run_calibrate(extra_args: &[&str]) -> CalibrateRun {
     let report = dir.path().join("report.json");
     let metadata = dir.path().join("metadata.json");
 
-    write_fixture_csv(&input);
+    // Each call gets its own tempdir and its own copy of the file on disk — only the
+    // physics evaluation behind `fixture_csv()` is shared.
+    std::fs::write(&input, fixture_csv()).expect("write fixture CSV");
 
     // `--classes-file` defaults to `calibrate/antenna_classes.yaml`, resolved against the
     // process CWD. An integration test's CWD is the crate root, so build the path from
@@ -379,13 +401,21 @@ fn cli_full_mode_correction_beats_the_uncorrected_model() {
     // Until that is fixed, pin today's measured value as a ceiling so a further
     // regression is still caught, without asserting a recovery ratio the current code
     // cannot meet.
+    //
+    // The bound is an ABSOLUTE epsilon, not a proportional one: this pipeline is
+    // deterministic (no `--tune-parameters`, nothing in the fit path is thread-parallel)
+    // and was measured reproducible to 4 decimal places across three debug runs and one
+    // release run, so there is no run-to-run variance to size a percentage against. A
+    // proportional 5% bound would let `corrected` drift to 1.0243 dB undetected — about a
+    // third of the way back toward the 0.5x floor this replaced. The fixed +0.02 dB here
+    // covers cross-platform libm ULP differences in `cos`/`sin`/`atan2`, nothing more.
     let today_corrected_rmse = 0.9756;
+    let ceiling = today_corrected_rmse + 0.02;
     assert!(
-        corrected < 1.05 * today_corrected_rmse,
+        corrected < ceiling,
         "corrected RMSE regressed past today's known-defect ceiling: \
-         corrected {corrected:.4} dB vs ceiling {:.4} dB (1.05x the {today_corrected_rmse:.4} dB \
-         measured on 2026-07-29 — see \
-         docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md)",
-        1.05 * today_corrected_rmse
+         corrected {corrected:.4} dB vs ceiling {ceiling:.4} dB ({today_corrected_rmse:.4} dB \
+         measured on 2026-07-29 + 0.02 dB for cross-platform libm ULP noise) — see \
+         docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md"
     );
 }
