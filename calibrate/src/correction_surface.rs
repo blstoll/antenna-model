@@ -110,6 +110,27 @@ pub struct CorrectionSurfaceParams {
     pub min_knot_spacing_eclock: f64, // degrees
 }
 
+impl CorrectionSurfaceParams {
+    /// Return a copy of these parameters with cross-validation disabled.
+    ///
+    /// Used for every *inner* fit performed on behalf of an outer cross-validation —
+    /// both the fold refits in [`crate::validator::validate_calibration`] and the fold
+    /// fits inside [`cross_validate`] itself. Cross-validating a fold of a
+    /// cross-validation is never wanted: it does not describe the surface being scored,
+    /// and because each level re-enters `fit_correction_surface` with the same folds it
+    /// recurses until the shrinking training set trips the
+    /// `(spline_order + 1)³` minimum and the whole run fails.
+    ///
+    /// Every other field — knot counts, regularization, spline order, knot spacing — is
+    /// preserved, so the refit fits the *same model family* as the surface being scored.
+    pub fn without_nested_cross_validation(&self) -> Self {
+        Self {
+            cross_validation_folds: 0,
+            ..self.clone()
+        }
+    }
+}
+
 impl Default for CorrectionSurfaceParams {
     fn default() -> Self {
         Self {
@@ -977,9 +998,14 @@ fn cross_validate(residuals: &[ResidualPoint], params: &CorrectionSurfaceParams)
 
         let training_predictions = vec![0.0; training.len()]; // Zero mean for residuals
 
-        // Fit surface on training fold
-        let surface =
-            fit_correction_surface(&training_measurements, &training_predictions, params)?;
+        // Fit surface on training fold. The fold fit must not cross-validate in turn —
+        // `fit_correction_surface` would re-enter this function with the same fold count
+        // and recurse until the training set falls below the fitting minimum.
+        let surface = fit_correction_surface(
+            &training_measurements,
+            &training_predictions,
+            &params.without_nested_cross_validation(),
+        )?;
 
         // Evaluate on validation fold
         for val_res in &validation {
@@ -1144,6 +1170,94 @@ mod tests {
 
         let invalid_order = vec![0.0, 2.0, 1.0, 3.0];
         assert!(validate_knot_vector(&invalid_order, 2).is_err());
+    }
+
+    // ========================================================================
+    // D10 — cross-validation must not re-enter itself
+    // ========================================================================
+
+    #[test]
+    fn without_nested_cross_validation_preserves_every_other_field() {
+        let params = CorrectionSurfaceParams {
+            spline_order: 5,
+            num_knots_frequency: 4,
+            num_knots_econe: 6,
+            num_knots_eclock: 8,
+            regularization: 1e-3,
+            adaptive_knots: false,
+            cross_validation_folds: 5,
+            min_knot_spacing_frequency: 25.0,
+            min_knot_spacing_econe: 1.0,
+            min_knot_spacing_eclock: 3.0,
+        };
+
+        let refit = params.without_nested_cross_validation();
+
+        assert_eq!(refit.cross_validation_folds, 0);
+        assert_eq!(refit.spline_order, params.spline_order);
+        assert_eq!(refit.num_knots_frequency, params.num_knots_frequency);
+        assert_eq!(refit.num_knots_econe, params.num_knots_econe);
+        assert_eq!(refit.num_knots_eclock, params.num_knots_eclock);
+        assert_eq!(refit.regularization, params.regularization);
+        assert_eq!(refit.adaptive_knots, params.adaptive_knots);
+        assert_eq!(
+            refit.min_knot_spacing_frequency,
+            params.min_knot_spacing_frequency
+        );
+        assert_eq!(refit.min_knot_spacing_econe, params.min_knot_spacing_econe);
+        assert_eq!(
+            refit.min_knot_spacing_eclock,
+            params.min_knot_spacing_eclock
+        );
+    }
+
+    /// A fold fit inside `cross_validate` must not cross-validate in turn. The fixture is
+    /// sized so the recursion is what fails: 176 points → 141 in a fold (clears the
+    /// `(4+1)³ = 125` minimum), but a *second* level would train on 113 and trip it.
+    #[test]
+    fn cross_validation_does_not_recurse_into_itself() {
+        let mut measurements = Vec::new();
+        let mut predictions = Vec::new();
+        for fi in 0..2 {
+            let frequency_mhz = 8400.0 + 100.0 * fi as f64;
+            for ci in 0..11 {
+                let e_cone_deg = ci as f64;
+                for ki in 0..8 {
+                    let e_clock_deg = 45.0 * ki as f64;
+                    let ripple = 0.4 * e_clock_deg.to_radians().cos();
+                    measurements.push(MeasurementPoint::new(
+                        e_clock_deg,
+                        e_cone_deg,
+                        frequency_mhz,
+                        41.5 - 0.35 * e_cone_deg * e_cone_deg + ripple,
+                        50.0,
+                    ));
+                    predictions.push(41.5 - 0.33 * e_cone_deg * e_cone_deg);
+                }
+            }
+        }
+        assert_eq!(measurements.len(), 176);
+
+        let params = CorrectionSurfaceParams {
+            spline_order: 4,
+            num_knots_frequency: 4,
+            num_knots_econe: 6,
+            num_knots_eclock: 8,
+            regularization: 1e-3,
+            adaptive_knots: true,
+            cross_validation_folds: 5,
+            min_knot_spacing_frequency: 50.0,
+            min_knot_spacing_econe: 2.0,
+            min_knot_spacing_eclock: 5.0,
+        };
+
+        let surface = fit_correction_surface(&measurements, &predictions, &params)
+            .expect("one level of cross-validation must fit; a second level would not");
+
+        assert!(
+            surface.fit_stats.cross_validation_rmse.is_some(),
+            "the requested cross-validation should still have run"
+        );
     }
 }
 

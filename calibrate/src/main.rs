@@ -162,6 +162,49 @@ fn write_antc_artifact(
     Ok(())
 }
 
+/// Parameters the shipped correction surface is fitted with (full-mode step 5).
+///
+/// Deliberately sparser and more strongly regularized than
+/// [`CorrectionSurfaceParams::default`]: this is the model family the artifact ships, and
+/// [`validation_config`] must score *this* family, not the default one.
+fn surface_fitting_params(validate: bool, cv_folds: usize) -> CorrectionSurfaceParams {
+    CorrectionSurfaceParams {
+        spline_order: 4,
+        num_knots_frequency: 4,
+        num_knots_econe: 6,
+        num_knots_eclock: 8,
+        regularization: 1e-3,
+        adaptive_knots: true,
+        cross_validation_folds: if validate { cv_folds } else { 0 },
+        min_knot_spacing_frequency: 50.0, // 50 MHz minimum spacing
+        min_knot_spacing_econe: 2.0,      // 2 degrees minimum spacing
+        min_knot_spacing_eclock: 5.0,     // 5 degrees minimum spacing
+    }
+}
+
+/// Validation settings for full-mode step 6.
+///
+/// `correction_params` **must** be the params the surface being validated was fitted with.
+/// Passing `CorrectionSurfaceParams::default()` here (the pre-D10 behavior) made every
+/// cross-validation fold refit a markedly more flexible surface — roughly double the knots
+/// at 1000× weaker regularization — so the reported CV RMSE described a model family more
+/// prone to overfit than the artifact being blessed.
+fn validation_config(
+    cv_folds: usize,
+    surface_params: &CorrectionSurfaceParams,
+) -> ValidationConfig {
+    ValidationConfig {
+        num_folds: cv_folds,
+        main_lobe_beamwidths: 1.0,
+        first_sidelobe_max_deg: 5.0,
+        frequency_bands: vec![], // Use default bands
+        main_lobe_target_db: 1.0,
+        first_sidelobe_target_db: 1.0,
+        outlier_threshold_db: 3.0,
+        correction_params: surface_params.clone(),
+    }
+}
+
 /// Compute physics-model G/T predictions for all measurement points.
 fn compute_model_predictions(
     measurements: &[MeasurementPoint],
@@ -544,18 +587,7 @@ async fn run_calibration(args: Args) -> Result<()> {
     // Step 5: Fit correction surface to residuals
     info!("Step 5/6: Fitting correction surface to residuals...");
 
-    let surface_params = CorrectionSurfaceParams {
-        spline_order: 4,
-        num_knots_frequency: 4,
-        num_knots_econe: 6,
-        num_knots_eclock: 8,
-        regularization: 1e-3,
-        adaptive_knots: true,
-        cross_validation_folds: if args.validate { args.cv_folds } else { 0 },
-        min_knot_spacing_frequency: 50.0, // 50 MHz minimum spacing
-        min_knot_spacing_econe: 2.0,      // 2 degrees minimum spacing
-        min_knot_spacing_eclock: 5.0,     // 5 degrees minimum spacing
-    };
+    let surface_params = surface_fitting_params(args.validate, args.cv_folds);
 
     let correction_surface =
         fit_correction_surface(&measurements.points, &model_predictions, &surface_params)?;
@@ -575,16 +607,7 @@ async fn run_calibration(args: Args) -> Result<()> {
     // Step 6: Validation
     info!("Step 6/6: Running validation...");
 
-    let validation_config = ValidationConfig {
-        num_folds: args.cv_folds,
-        main_lobe_beamwidths: 1.0,
-        first_sidelobe_max_deg: 5.0,
-        frequency_bands: vec![], // Use default bands
-        main_lobe_target_db: 1.0,
-        first_sidelobe_target_db: 1.0,
-        outlier_threshold_db: 3.0,
-        correction_params: CorrectionSurfaceParams::default(),
-    };
+    let validation_config = validation_config(args.cv_folds, &surface_params);
 
     let validation_report = validate_calibration(
         &measurements.points,
@@ -801,5 +824,64 @@ async fn main() {
     if let Err(e) = result {
         error!("Calibration failed: {:#}", e);
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// D10 defect (a): the validation config must carry the params the artifact was
+    /// actually fitted with. Before the fix this was `CorrectionSurfaceParams::default()`,
+    /// so every fold refit fitted 8/8/12 knots at 1e-6 regularization while the shipped
+    /// surface was 4/6/8 at 1e-3.
+    #[test]
+    fn validation_config_scores_the_surface_that_ships() {
+        let surface_params = surface_fitting_params(true, 5);
+        let config = validation_config(5, &surface_params);
+
+        assert_eq!(
+            config.correction_params.num_knots_frequency,
+            surface_params.num_knots_frequency
+        );
+        assert_eq!(
+            config.correction_params.num_knots_econe,
+            surface_params.num_knots_econe
+        );
+        assert_eq!(
+            config.correction_params.num_knots_eclock,
+            surface_params.num_knots_eclock
+        );
+        assert_eq!(
+            config.correction_params.regularization,
+            surface_params.regularization
+        );
+        assert_eq!(
+            config.correction_params.spline_order,
+            surface_params.spline_order
+        );
+
+        // Guard the specific regression: these are the default's values, not ours.
+        let default = CorrectionSurfaceParams::default();
+        assert_ne!(
+            config.correction_params.num_knots_frequency, default.num_knots_frequency,
+            "fixture no longer distinguishes the artifact params from the default"
+        );
+        assert_ne!(
+            config.correction_params.regularization, default.regularization,
+            "fixture no longer distinguishes the artifact params from the default"
+        );
+    }
+
+    /// `--cv-folds N` reaches both the surface fit and the validation fold count, and
+    /// cross-validation stays off entirely without `--validate`.
+    #[test]
+    fn cv_folds_reaches_the_fit_and_the_validator() {
+        let with_validate = surface_fitting_params(true, 7);
+        assert_eq!(with_validate.cross_validation_folds, 7);
+        assert_eq!(validation_config(7, &with_validate).num_folds, 7);
+
+        let without_validate = surface_fitting_params(false, 7);
+        assert_eq!(without_validate.cross_validation_folds, 0);
     }
 }
