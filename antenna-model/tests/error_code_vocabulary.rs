@@ -1,54 +1,34 @@
 //! Guards that the served error-code vocabulary, the OpenAPI spec, and the API
 //! documentation all describe the same set of codes (roadmap unit C3).
 //!
-//! `api::schemas::error_codes` is the source of truth and is compiler-enforced at
-//! every emission site. The spec and the docs are hand-maintained, so they are
-//! pinned here instead — adding a code without documenting it fails the build.
+//! `api::schemas::ErrorCode` is the source of truth and is compiler-enforced at
+//! every emission site. `docs/api-documentation.md` is hand-maintained, so it is
+//! pinned here; `openapi.yaml` is generated from the enum (C7), and its check
+//! doubles as a utoipa-upgrade canary.
 //!
 //! This is deliberately narrow: it checks the *vocabulary*, not the status codes
-//! each one is served with. Roadmap unit C2 owns the statuses, and unit C7 adds the
-//! general path/method drift guard.
+//! each one is served with. Roadmap unit C2 owns the statuses; C7's
+//! generate-and-diff test (`openapi_spec.rs`) and route cross-check
+//! (`openapi_routes_match.rs`) own the rest of the spec.
 
-use antenna_model::api::schemas::error_codes;
+use antenna_model::api::schemas::ErrorCode;
 use std::path::{Path, PathBuf};
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
 }
 
-/// Read a `components.schemas.<schema>.properties.<property>.enum` string list.
-fn spec_enum<'a>(spec: &'a serde_yaml::Value, schema: &str, property: &str) -> Vec<&'a str> {
-    let enum_node = spec
-        .get("components")
-        .and_then(|n| n.get("schemas"))
-        .and_then(|n| n.get(schema))
-        .and_then(|n| n.get("properties"))
-        .and_then(|n| n.get(property))
-        .and_then(|n| n.get("enum"))
-        .and_then(|n| n.as_sequence())
-        .unwrap_or_else(|| {
-            panic!(
-                "openapi.yaml must define components.schemas.{schema}.properties.{property}.enum"
-            )
-        });
-
-    enum_node
-        .iter()
-        .map(|v| {
-            v.as_str()
-                .unwrap_or_else(|| panic!("every {schema}.{property} enum entry must be a string"))
-        })
-        .collect()
-}
-
-/// Every code in `error_codes::ALL` appears in openapi.yaml's `ErrorResponse.error`
-/// enum **and** in `GainError.code`, and neither enum contains anything else.
+/// Every code in `ErrorCode::ALL` appears in openapi.yaml's `ErrorCode` component
+/// enum, the enum contains nothing else, and both `ErrorResponse.error` and
+/// `GainError.code` reference that one component.
 ///
-/// Both are checked because both are hand-maintained copies of the same vocabulary.
-/// `GainError` (the typed per-item failure C8 stage 3 added to batch responses) draws
-/// on `ErrorResponse.error`'s codes but re-lists them, so before this test covered it,
-/// renaming a code updated the enum with a drift guard and silently rotted the one
-/// without — the exact failure mode C3 introduced this file to prevent.
+/// Before the C7 cutover the two fields carried duplicated inline enum copies and
+/// both had to be checked; generation collapsed them into one `$ref`'d component.
+/// Since openapi.yaml is now *generated* from the same enum, this cannot fail
+/// through hand-editing drift anymore — it is kept as an upgrade canary: a utoipa
+/// version bump that silently changed enum emission (dropped variants, stopped
+/// `$ref`-ing, renamed the component) would pass the generate-and-diff test and
+/// fail here.
 #[test]
 fn openapi_error_enum_matches_the_served_vocabulary() {
     let path = repo_root().join("openapi.yaml");
@@ -57,23 +37,47 @@ fn openapi_error_enum_matches_the_served_vocabulary() {
     let spec: serde_yaml::Value =
         serde_yaml::from_str(&text).expect("openapi.yaml must be valid YAML");
 
-    for (schema, property) in [("ErrorResponse", "error"), ("GainError", "code")] {
-        let documented = spec_enum(&spec, schema, property);
+    let schemas = spec
+        .get("components")
+        .and_then(|n| n.get("schemas"))
+        .expect("openapi.yaml must define components.schemas");
 
-        for code in error_codes::ALL {
-            assert!(
-                documented.contains(code),
-                "error code {code:?} is served but missing from openapi.yaml's \
-                 {schema}.{property} enum"
-            );
-        }
-        for code in &documented {
-            assert!(
-                error_codes::ALL.contains(code),
-                "openapi.yaml's {schema}.{property} enum documents error code {code:?}, \
-                 which the service never emits"
-            );
-        }
+    // The wiring: both error-code fields must reference the ErrorCode component.
+    for (schema, property) in [("ErrorResponse", "error"), ("GainError", "code")] {
+        let code_ref = schemas
+            .get(schema)
+            .and_then(|n| n.get("properties"))
+            .and_then(|n| n.get(property))
+            .and_then(|n| n.get("$ref"))
+            .and_then(|n| n.as_str())
+            .unwrap_or_else(|| panic!("{schema}.properties.{property} must $ref a component"));
+        assert_eq!(code_ref, "#/components/schemas/ErrorCode");
+    }
+
+    let documented: Vec<&str> = schemas
+        .get("ErrorCode")
+        .and_then(|n| n.get("enum"))
+        .and_then(|n| n.as_sequence())
+        .expect("openapi.yaml must define components.schemas.ErrorCode.enum")
+        .iter()
+        .map(|v| {
+            v.as_str()
+                .expect("every ErrorCode enum entry must be a string")
+        })
+        .collect();
+
+    for code in ErrorCode::ALL {
+        assert!(
+            documented.contains(&code.as_str()),
+            "error code {code:?} is served but missing from openapi.yaml's ErrorCode enum"
+        );
+    }
+    for code in &documented {
+        assert!(
+            ErrorCode::ALL.iter().any(|c| c.as_str() == *code),
+            "openapi.yaml's ErrorCode enum documents error code {code:?}, \
+             which the service never emits"
+        );
     }
 }
 
@@ -89,7 +93,7 @@ fn every_error_code_is_documented_in_the_api_docs() {
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
 
-    for code in error_codes::ALL {
+    for code in ErrorCode::ALL {
         let row = format!("| `{code}` |");
         assert!(
             text.contains(&row),
@@ -132,7 +136,7 @@ fn no_pascal_case_error_codes_remain_in_the_published_contract() {
                 assert!(
                     !value.starts_with(char::is_uppercase),
                     "{file}:{} advertises PascalCase error code {value:?}; the served \
-                     vocabulary is snake_case (see api/schemas.rs, mod error_codes)",
+                     vocabulary is snake_case (see api/schemas.rs, enum ErrorCode)",
                     lineno + 1
                 );
             }

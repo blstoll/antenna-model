@@ -252,7 +252,9 @@ Unless a decision-register row flips them:
   optional top-level defaults that items inherit).
 - Committing binary calibration artifacts to the repository.
 - Migrating to poem-openapi codegen (noted as a possible future item under C7; the drift
-  guard is the v1 answer).
+  guard is the v1 answer). *(Amended 2026-07-28/29: C7 was re-scoped during C8 stage 4 —
+  `openapi.yaml` is now auto-generated with `utoipa` (framework-agnostic; NOT poem-openapi,
+  which would have rewritten the routing layer). Landed 2026-07-29.)*
 - Physical sidelobe mechanisms — aperture-edge diffraction and quadripod strut scatter.
   These are domain-expert territory (same class as F2 ray tracing). Feature F7 (implemented
   2026-07-12) covers only a *statistical* envelope/floor; the physical mechanisms stay out of
@@ -260,9 +262,12 @@ Unless a decision-register row flips them:
 
 ## 7. Risks
 
-- **openapi.yaml is hand-maintained** and will keep drifting until unit C7's guard lands;
+- ~~**openapi.yaml is hand-maintained** and will keep drifting until unit C7's guard lands;
   every schema-touching unit before that must mirror changes manually (standing rule 4 in
-  the work-units doc).
+  the work-units doc).~~ **Resolved 2026-07-29 (C7):** `openapi.yaml` is generated from the
+  Rust types/handlers via `utoipa` and pinned byte-for-byte by `tests/openapi_spec.rs`, with
+  route coverage pinned by `tests/openapi_routes_match.rs`; standing rule 4 now documents
+  the regeneration workflow instead.
 - **Shared rayon global pool** couples batch, heatmap, and H3 load until S4; concurrent
   heavy requests contend unboundedly today.
 - **One unverified physics heuristic** (Seidel terms) remains on the live path until P2 is

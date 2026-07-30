@@ -30,7 +30,7 @@ use crate::data::types::{CalibrationCoverage, CalibrationStatus};
 pub use crate::warnings::{ApiWarning, WarningCode};
 
 /// Coordinate system type for 3D positions
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum CoordinateSystem {
     /// Earth-Centered Earth-Fixed coordinates (x, y, z in meters)
@@ -89,28 +89,10 @@ mod nan_as_null {
 /// never guessed — a body that omits `coordinate_system` is rejected with a 400 naming the
 /// field.
 ///
-/// # Examples
-///
-/// ```
-/// # use antenna_model::api::schemas::{CoordinateSystem, Position3D};
-/// // ECEF, meters from Earth's centre
-/// let ecef = Position3D::ecef(6_500_000.0, 0.0, 0.0);
-/// assert_eq!(ecef.coordinate_system, CoordinateSystem::ECEF);
-/// assert!(ecef.is_ecef());
-///
-/// // Earth-surface ECEF is stated, not inferred from its magnitude
-/// let ecef_surface = Position3D::ecef(6_378_137.0, 0.0, 100_000.0);
-/// assert!(ecef_surface.is_ecef());
-///
-/// // Geodetic (lon, lat degrees, alt meters)
-/// let geodetic = Position3D::geodetic(-118.1234, 34.5678, 100.0);
-/// assert_eq!(geodetic.coordinate_system, CoordinateSystem::Geodetic);
-///
-/// // A GEO satellite's altitude no longer competes with the ECEF threshold
-/// let geo = Position3D::geodetic(0.0, 0.0, 35_786_000.0);
-/// assert!(geo.is_geodetic());
-/// ```
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+// Construction examples live on `Position3D::ecef` / `Position3D::geodetic` and in
+// `constructor_examples_from_the_former_doctest` — the doc comment above is the
+// generated OpenAPI description, so a rustdoc doctest must not live in it.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, utoipa::ToSchema)]
 pub struct Position3D {
     /// X coordinate: ECEF X (meters) OR longitude (degrees)
     pub x: f64,
@@ -156,7 +138,7 @@ impl Position3D {
 }
 
 /// 3D vector (used for feed offsets, etc.)
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, utoipa::ToSchema)]
 pub struct Vector3D {
     /// X component
     pub x: f64,
@@ -189,9 +171,9 @@ impl Vector3D {
 ///
 /// # Coordinate Systems
 ///
-/// All Position3D fields support both ECEF and Geodetic coordinates with
-/// automatic detection. Mix-and-match is allowed (e.g., vehicle in Geodetic,
-/// emitter in ECEF).
+/// Every `Position3D` field declares its own frame in its required
+/// `coordinate_system` tag (there is no auto-detection). Mix-and-match is
+/// allowed (e.g., vehicle in Geodetic, emitter in ECEF).
 ///
 /// # Multi-Feed Support
 ///
@@ -208,7 +190,7 @@ impl Vector3D {
 /// The `reflector_boresight` position establishes the dish pointing direction.
 /// The vector from `vehicle_position` to `reflector_boresight` defines the
 /// boresight axis of the antenna coordinate frame.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, utoipa::ToSchema)]
 pub struct GainRequest {
     /// Antenna identifier
     pub antenna_id: String,
@@ -263,6 +245,7 @@ pub struct GainRequest {
     ///
     /// The quaternion must be normalised to unit length (norm within 1e-3 of 1.0).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(min_items = 4, max_items = 4)]
     pub vehicle_attitude: Option<[f64; 4]>,
 }
 
@@ -270,7 +253,7 @@ pub struct GainRequest {
 ///
 /// Contains computed gain, optional reference gain and loss, geometry information,
 /// warnings, calibration status, and performance metadata.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, utoipa::ToSchema)]
 pub struct GainResponse {
     /// Antenna identifier
     pub antenna_id: String,
@@ -279,9 +262,10 @@ pub struct GainResponse {
     pub feed_id: String,
 
     /// Computed gain in dB (serialized as null when NaN for failed evaluations)
-    // TODO(C7): needs `#[schema(nullable = true)]` when utoipa lands — it derives
-    // `type: number` from f64 and cannot see that nan_as_null emits JSON null.
+    // The schema override tells utoipa the wire type: it derives `type: number`
+    // from f64 and cannot see that nan_as_null emits JSON null.
     #[serde(with = "nan_as_null")]
+    #[schema(value_type = Option<f64>, required)]
     pub gain_db: f64,
 
     /// Reference gain in dB (if include_reference=true)
@@ -305,7 +289,7 @@ pub struct GainResponse {
     /// recorded: a failed batch item used to be a `gain_db: null` plus a
     /// `"Computation failed: …"` string in `warnings`, so a client that did not
     /// inspect every item's prose could not tell a failure from a quality caveat.
-    /// `code` is one of [`error_codes::ALL`] — the same vocabulary the HTTP error
+    /// `code` is one of the `ErrorCode` vocabulary — the same one the HTTP error
     /// bodies use, so the *reason* survives (a timed-out item reports
     /// `computation_budget_exceeded`, not a generic failure).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -313,9 +297,9 @@ pub struct GainResponse {
 
     /// Warnings about result quality (extrapolation, off-axis validity, …).
     ///
-    /// Each entry carries a stable [`WarningCode`] and a human-readable message;
-    /// branch on `code`, display `message`. See [`crate::warnings`] for the
-    /// vocabulary and its stability contract.
+    /// Each entry carries a stable `WarningCode` and a human-readable message;
+    /// branch on `code`, display `message`. See the `WarningCode` schema for the
+    /// vocabulary; codes are stable, messages are not.
     pub warnings: Vec<ApiWarning>,
 
     /// Computation metadata (timing, flags)
@@ -330,7 +314,7 @@ pub struct GainResponse {
 /// Computed geometry information.
 ///
 /// Details about the geometric configuration computed from 3D positions.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, utoipa::ToSchema)]
 pub struct GeometryInfo {
     /// Physical feed offset from the focal point in the antenna frame (meters).
     ///
@@ -358,7 +342,7 @@ pub struct GeometryInfo {
 }
 
 /// Computation performance metadata.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, utoipa::ToSchema)]
 pub struct ComputationMetadata {
     /// Total computation time in milliseconds
     pub computation_time_ms: f64,
@@ -400,7 +384,7 @@ pub struct ComputationMetadata {
 /// Request for batch gain computation.
 ///
 /// Process multiple gain requests in parallel for improved throughput.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, utoipa::ToSchema)]
 pub struct BatchGainRequest {
     /// List of gain computation requests
     pub evaluations: Vec<GainRequest>,
@@ -409,7 +393,7 @@ pub struct BatchGainRequest {
 /// Response from batch gain computation.
 ///
 /// Contains results for all evaluations and aggregate metadata.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, utoipa::ToSchema)]
 pub struct BatchGainResponse {
     /// Results for each evaluation
     pub results: Vec<GainResponse>,
@@ -419,7 +403,7 @@ pub struct BatchGainResponse {
 }
 
 /// Aggregate metadata for batch computation.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, utoipa::ToSchema)]
 pub struct BatchMetadata {
     /// Total computation time for batch in milliseconds
     pub total_computation_time_ms: f64,
@@ -440,7 +424,7 @@ pub struct BatchMetadata {
 /// Generates a 2D grid of loss values across antenna field of view, over a
 /// rectangular (azimuth/elevation) grid. For a per-cell link budget over an H3
 /// hexagonal grid on the Earth's surface, use `POST /api/v1/h3-heatmap` instead.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, utoipa::ToSchema)]
 pub struct HeatmapRequest {
     /// Antenna identifier
     pub antenna_id: String,
@@ -484,7 +468,7 @@ pub struct HeatmapRequest {
 /// The `H3` variant that lived here until C8 stage 4 (2026-07-28) was a not-implemented
 /// stub — it parsed and validated, then failed. The real H3 grid is the separate
 /// `POST /api/v1/h3-heatmap` endpoint. An `h3` tag is now an unknown variant → 400.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, utoipa::ToSchema)]
 #[serde(tag = "grid_type", rename_all = "lowercase")]
 pub enum GridConfig {
     /// Rectangular azimuth/elevation grid
@@ -497,7 +481,7 @@ pub enum GridConfig {
 }
 
 /// Range configuration for rectangular grid.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, utoipa::ToSchema)]
 pub struct RangeConfig {
     /// Minimum value in degrees
     pub min: f64,
@@ -523,7 +507,7 @@ impl RangeConfig {
 }
 
 /// Response from heatmap generation.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, utoipa::ToSchema)]
 pub struct HeatmapResponse {
     /// Antenna identifier
     pub antenna_id: String,
@@ -539,7 +523,7 @@ pub struct HeatmapResponse {
 
     /// Aggregated, deduplicated warnings across all grid points.
     ///
-    /// Each entry carries a stable [`WarningCode`] and a human-readable message.
+    /// Each entry carries a stable `WarningCode` and a human-readable message.
     /// Deduplication is on the whole warning (code **and** message), so a warning
     /// whose message varies per point would appear once per point — producers of
     /// grid-safe warnings keep their messages constant per (antenna, frequency).
@@ -556,9 +540,9 @@ pub struct HeatmapResponse {
 
 /// Grid data for heatmap.
 ///
-/// Single-variant tagged enum for the same reason as [`GridConfig`] — `grid_type` stays on
+/// Single-variant tagged enum for the same reason as `GridConfig` — `grid_type` stays on
 /// the wire. The `H3` variant was removed by C8 stage 4 (2026-07-28).
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, utoipa::ToSchema)]
 #[serde(tag = "grid_type", rename_all = "lowercase")]
 pub enum GridData {
     /// Rectangular grid data
@@ -573,7 +557,7 @@ pub enum GridData {
 }
 
 /// Heatmap computation metadata.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, utoipa::ToSchema)]
 pub struct HeatmapMetadata {
     /// Number of grid points evaluated
     pub points_evaluated: usize,
@@ -603,7 +587,7 @@ pub struct HeatmapMetadata {
 ///
 /// Computes per-cell link budget across a hexagonal grid of H3 cells
 /// centered on the antenna boresight projection, covering `n_rings` rings.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct H3LinkBudgetRequest {
     /// Antenna identifier
     pub antenna_id: String,
@@ -658,11 +642,12 @@ pub struct H3LinkBudgetRequest {
     ///
     /// The quaternion must be normalised to unit length (norm within 1e-3 of 1.0).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(min_items = 4, max_items = 4)]
     pub vehicle_attitude: Option<[f64; 4]>,
 }
 
 /// Per-cell link budget result for a single H3 cell.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct H3CellResult {
     /// H3 cell index (string representation)
     pub cell_id: String,
@@ -715,7 +700,7 @@ pub struct H3CellResult {
 }
 
 /// Response from H3-based link budget computation.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct H3LinkBudgetResponse {
     /// Antenna identifier
     pub antenna_id: String,
@@ -737,8 +722,8 @@ pub struct H3LinkBudgetResponse {
 
     /// Aggregated, deduplicated warnings across all cells.
     ///
-    /// Each entry carries a stable [`WarningCode`] and a human-readable message;
-    /// see [`HeatmapResponse::warnings`] for the deduplication rule.
+    /// Each entry carries a stable `WarningCode` and a human-readable message;
+    /// see `HeatmapResponse.warnings` for the deduplication rule.
     pub warnings: Vec<ApiWarning>,
 
     /// Computation metadata
@@ -759,14 +744,14 @@ pub struct H3LinkBudgetResponse {
 // ============================================================================
 
 /// Response listing available antennas.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, utoipa::ToSchema)]
 pub struct AntennaListResponse {
     /// List of available antennas
     pub antennas: Vec<AntennaInfo>,
 }
 
 /// Information about an antenna.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, utoipa::ToSchema)]
 pub struct AntennaInfo {
     /// Antenna identifier
     pub id: String,
@@ -785,7 +770,7 @@ pub struct AntennaInfo {
 }
 
 /// Detailed information about a specific antenna.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, utoipa::ToSchema)]
 pub struct AntennaDetailsResponse {
     /// Antenna identifier
     pub id: String,
@@ -814,8 +799,21 @@ pub struct AntennaDetailsResponse {
     pub calibration_status: Option<CalibrationStatusInfo>,
 }
 
+/// Response listing a specific antenna's feeds (`GET /api/v1/antennas/{id}/feeds`).
+///
+/// The body is `{"feeds": [...]}` — exactly what the service has always emitted.
+/// Typed by roadmap unit C7: the handler previously built untyped `serde_json`
+/// output, which a generated spec cannot describe. The C14 audit confirmed the
+/// wire shape carries no `antenna_id` (the hand-written spec wrongly declared
+/// one), so this type does not add one.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, utoipa::ToSchema)]
+pub struct FeedListResponse {
+    /// The antenna's feeds.
+    pub feeds: Vec<FeedInfo>,
+}
+
 /// Information about a feed.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, utoipa::ToSchema)]
 pub struct FeedInfo {
     /// Feed identifier
     pub id: String,
@@ -836,7 +834,7 @@ pub struct FeedInfo {
 }
 
 /// Validity ranges information.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, utoipa::ToSchema)]
 pub struct ValidityRangesInfo {
     /// Azimuth range in degrees (min, max)
     pub azimuth_deg: (f64, f64),
@@ -852,7 +850,7 @@ pub struct ValidityRangesInfo {
 }
 
 /// Calibration information.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, utoipa::ToSchema)]
 pub struct CalibrationInfo {
     /// Calibration date (ISO 8601)
     pub date: String,
@@ -871,17 +869,19 @@ pub struct CalibrationInfo {
     /// omission is reserved for structurally absent members such as
     /// `PhysicalParametersInfo.mesh`. Branch on `calibration_status.status` or
     /// `num_measurements`, which carry the same information typed.
-    // TODO(C7): needs `#[schema(nullable = true)]` when utoipa lands — it derives
-    // `type: number` from f64 and cannot see that nan_as_null emits JSON null.
+    // The schema override tells utoipa the wire type: it derives `type: number`
+    // from f64 and cannot see that nan_as_null emits JSON null.
     #[serde(with = "nan_as_null")]
+    #[schema(value_type = Option<f64>, required)]
     pub rmse_db: f64,
 
     /// R² correlation coefficient of the combined model.
     ///
     /// Serialized as JSON `null` for uncalibrated antennas — see `rmse_db`.
-    // TODO(C7): needs `#[schema(nullable = true)]` when utoipa lands — it derives
-    // `type: number` from f64 and cannot see that nan_as_null emits JSON null.
+    // The schema override tells utoipa the wire type: it derives `type: number`
+    // from f64 and cannot see that nan_as_null emits JSON null.
     #[serde(with = "nan_as_null")]
+    #[schema(value_type = Option<f64>, required)]
     pub r_squared: f64,
 
     /// Number of measurement points
@@ -889,7 +889,7 @@ pub struct CalibrationInfo {
 }
 
 /// Physical parameters information.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, utoipa::ToSchema)]
 pub struct PhysicalParametersInfo {
     /// Dish diameter in meters
     pub diameter_m: f64,
@@ -909,7 +909,7 @@ pub struct PhysicalParametersInfo {
 }
 
 /// Mesh reflector information.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, utoipa::ToSchema)]
 pub struct MeshInfo {
     /// Mesh spacing in millimeters
     pub mesh_spacing_mm: f64,
@@ -933,7 +933,7 @@ pub struct MeshInfo {
 /// - **fully_calibrated**: Dense measurement grid with full correction surface (±1 dB)
 /// - **partially_calibrated**: Limited measurements (boresight or sparse grid) (±1-3 dB)
 /// - **uncalibrated**: Design specifications only, no measurements (±3-5 dB absolute, ±2 dB loss)
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, utoipa::ToSchema)]
 pub struct CalibrationStatusInfo {
     /// Calibration status: "fully_calibrated", "partially_calibrated", or "uncalibrated"
     pub status: String,
@@ -999,7 +999,7 @@ impl From<&CalibrationStatus> for CalibrationStatusInfo {
 /// Measurement coverage information for partially calibrated antennas.
 ///
 /// Describes the spatial, frequency, and measurement density of calibration data.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, utoipa::ToSchema)]
 pub struct CoverageInfo {
     /// Azimuth coverage range in degrees (min, max)
     pub azimuth_range_deg: (f64, f64),
@@ -1036,7 +1036,7 @@ impl From<&CalibrationCoverage> for CoverageInfo {
 /// Health check response (liveness probe).
 ///
 /// Returns 200 when service is responsive.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, utoipa::ToSchema)]
 pub struct HealthResponse {
     /// Health status - "healthy" when operational
     pub status: String,
@@ -1068,7 +1068,7 @@ impl HealthResponse {
 ///
 /// Returns detailed service status including loaded antennas,
 /// uptime, version, and operational status.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, utoipa::ToSchema)]
 pub struct StatusResponse {
     /// Service status - "ok" when operational
     pub status: String,
@@ -1123,90 +1123,150 @@ impl StatusResponse {
 // Error Response
 // ============================================================================
 
-/// The canonical error-code vocabulary served in `ErrorResponse.error`.
+/// The canonical error-code vocabulary served in `ErrorResponse.error` and
+/// `GainError.code`.
 ///
 /// Every error body the service emits carries one of these codes, and nothing
-/// else. Emission sites reference these constants rather than repeating string
-/// literals, so a typo is a compile error instead of a new undocumented code on
-/// the wire (roadmap unit C3).
+/// else. Emission sites use these variants rather than string literals, so a
+/// typo is a compile error instead of a new undocumented code on the wire
+/// (roadmap unit C3). Promoted from a `&str`-const module to a closed enum by
+/// roadmap unit C7 so the generated `openapi.yaml` can derive the enum — the
+/// wire representation (`snake_case` strings) is unchanged.
 ///
-/// The set is mirrored in two places that are **not** compiler-checked — keep
-/// them in step when adding a code:
+/// The set is also mirrored in `docs/api-documentation.md` (the error-code
+/// table), which is **not** compiler-checked — keep it in step when adding a
+/// code; `tests/error_code_vocabulary.rs` fails otherwise.
 ///
-/// - `openapi.yaml` (the `ErrorResponse` schema's `error` enum), and
-/// - `docs/api-documentation.md` (the error-code table).
+/// An earlier `PascalCase` set existed only as unused `ErrorResponse`
+/// convenience constructors and never reached the wire; it was deleted in C3.
 ///
-/// Codes are `snake_case`. An earlier `PascalCase` set existed only as unused
-/// `ErrorResponse` convenience constructors and never reached the wire; it was
-/// deleted in C3.
-///
-/// The status noted on each code is the one it always carries. Which status a given
-/// *error* gets is decided in `api::error_response`
-/// (`validation_status` / `service_status`), not here — this module owns the names.
-pub mod error_codes {
-    /// The named antenna does not exist in the calibration repository (404).
-    pub const ANTENNA_NOT_FOUND: &str = "antenna_not_found";
+/// The status noted on each code is the one it always carries. Which status a
+/// given *error* gets is decided in `api::error_response`
+/// (`validation_status` / `service_status`), not here — this enum owns the names.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    PartialOrd,
+    Ord,
+    Serialize,
+    Deserialize,
+    utoipa::ToSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCode {
+    /// `antenna_not_found` — the named antenna does not exist in the calibration
+    /// repository (404).
+    AntennaNotFound,
 
-    /// The antenna exists but the named feed does not (404).
-    pub const FEED_NOT_FOUND: &str = "feed_not_found";
+    /// `feed_not_found` — the antenna exists but the named feed does not (404).
+    FeedNotFound,
 
-    /// The request deserialized but is semantically invalid (422, from either the
-    /// pre-check or the service layer — roadmap C2 made the two agree).
-    pub const VALIDATION_ERROR: &str = "validation_error";
+    /// `validation_error` — the request deserialized but is semantically invalid
+    /// (422, from either the pre-check or the service layer — roadmap C2 made the
+    /// two agree).
+    ValidationError,
 
-    /// A position or coordinate value is out of range or untransformable (422).
-    pub const INVALID_COORDINATE: &str = "invalid_coordinate";
+    /// `invalid_coordinate` — a position or coordinate value is out of range or
+    /// untransformable (422).
+    InvalidCoordinate,
 
-    /// The request body could not be read or parsed (400).
-    pub const INVALID_REQUEST_BODY: &str = "invalid_request_body";
+    /// `invalid_request_body` — the request body could not be read or parsed (400).
+    InvalidRequestBody,
 
-    /// The request body exceeds `server.max_body_size_bytes` (413).
-    pub const PAYLOAD_TOO_LARGE: &str = "payload_too_large";
+    /// `payload_too_large` — the request body exceeds
+    /// `server.max_body_size_bytes` (413).
+    PayloadTooLarge,
 
-    /// The request exceeded `server.request_timeout_secs` (504).
-    pub const REQUEST_TIMEOUT: &str = "request_timeout";
+    /// `request_timeout` — the request exceeded `server.request_timeout_secs` (504).
+    RequestTimeout,
 
-    /// A single aperture integration exceeded
+    /// `computation_budget_exceeded` — a single aperture integration exceeded
     /// `performance.integration_budget_ms` (504).
-    pub const COMPUTATION_BUDGET_EXCEEDED: &str = "computation_budget_exceeded";
+    ComputationBudgetExceeded,
 
-    /// Admission control rejected the request; a `Retry-After` header
-    /// accompanies it (503).
-    pub const SERVICE_OVERLOADED: &str = "service_overloaded";
+    /// `service_overloaded` — admission control rejected the request; a
+    /// `Retry-After` header accompanies it (503).
+    ServiceOverloaded,
 
-    /// An unexpected server-side failure (500).
-    pub const INTERNAL_ERROR: &str = "internal_error";
+    /// `internal_error` — an unexpected server-side failure (500).
+    InternalError,
+}
 
-    /// Every code above, in the order documented. Used by the drift test and
-    /// available to consumers that need to enumerate the vocabulary.
-    pub const ALL: &[&str] = &[
-        ANTENNA_NOT_FOUND,
-        FEED_NOT_FOUND,
-        VALIDATION_ERROR,
-        INVALID_COORDINATE,
-        INVALID_REQUEST_BODY,
-        PAYLOAD_TOO_LARGE,
-        REQUEST_TIMEOUT,
-        COMPUTATION_BUDGET_EXCEEDED,
-        SERVICE_OVERLOADED,
-        INTERNAL_ERROR,
+impl ErrorCode {
+    /// Every code, in the order documented. Used by the vocabulary drift test and
+    /// available to consumers that need to enumerate the set. Mirrors
+    /// [`crate::warnings::WarningCode::ALL`].
+    pub const ALL: &'static [ErrorCode] = &[
+        ErrorCode::AntennaNotFound,
+        ErrorCode::FeedNotFound,
+        ErrorCode::ValidationError,
+        ErrorCode::InvalidCoordinate,
+        ErrorCode::InvalidRequestBody,
+        ErrorCode::PayloadTooLarge,
+        ErrorCode::RequestTimeout,
+        ErrorCode::ComputationBudgetExceeded,
+        ErrorCode::ServiceOverloaded,
+        ErrorCode::InternalError,
     ];
+
+    /// The wire representation, identical to what `serde` emits.
+    ///
+    /// Kept as a hand-written match rather than derived from the serde attribute so
+    /// that adding a variant fails to compile here too, not just in [`Self::ALL`].
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ErrorCode::AntennaNotFound => "antenna_not_found",
+            ErrorCode::FeedNotFound => "feed_not_found",
+            ErrorCode::ValidationError => "validation_error",
+            ErrorCode::InvalidCoordinate => "invalid_coordinate",
+            ErrorCode::InvalidRequestBody => "invalid_request_body",
+            ErrorCode::PayloadTooLarge => "payload_too_large",
+            ErrorCode::RequestTimeout => "request_timeout",
+            ErrorCode::ComputationBudgetExceeded => "computation_budget_exceeded",
+            ErrorCode::ServiceOverloaded => "service_overloaded",
+            ErrorCode::InternalError => "internal_error",
+        }
+    }
+}
+
+impl std::fmt::Display for ErrorCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Lets existing assertions compare a typed code against its wire string
+/// (`assert_eq!(err.error, "antenna_not_found")`) without restating the enum.
+impl PartialEq<&str> for ErrorCode {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<ErrorCode> for &str {
+    fn eq(&self, other: &ErrorCode) -> bool {
+        *self == other.as_str()
+    }
 }
 
 /// Why a single evaluation inside a batch produced no gain.
 ///
-/// Carried by [`GainResponse::error`]; see that field for when it is present.
-/// Structurally a two-field subset of [`ErrorResponse`] — same `code` vocabulary
-/// ([`error_codes::ALL`]), no `field`/`details`, because a batch item failure is
+/// Carried by `GainResponse.error`; see that field for when it is present.
+/// Structurally a two-field subset of `ErrorResponse` — same `code` vocabulary
+/// (the `ErrorCode` schema), no `field`/`details`, because a batch item failure is
 /// reported per item rather than as the HTTP outcome.
 ///
-/// The field is named `code` (not `error`, as in [`ErrorResponse`]) because it sits
+/// The field is named `code` (not `error`, as in `ErrorResponse`) because it sits
 /// inside a member already named `error`; `"error": {"error": …}` reads as a
 /// mistake.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, utoipa::ToSchema)]
 pub struct GainError {
-    /// Machine-readable failure class, one of [`error_codes::ALL`].
-    pub code: String,
+    /// Machine-readable failure class.
+    pub code: ErrorCode,
 
     /// Human-readable explanation.
     pub message: String,
@@ -1214,9 +1274,9 @@ pub struct GainError {
 
 impl GainError {
     /// Create a per-item error from a code and message.
-    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
         Self {
-            code: code.into(),
+            code,
             message: message.into(),
         }
     }
@@ -1225,11 +1285,11 @@ impl GainError {
 /// Standardized error response.
 ///
 /// Returned for all error conditions with appropriate HTTP status codes.
-/// The `error` field always carries one of [`error_codes::ALL`].
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+/// The `error` field always carries one of the codes in the `ErrorCode` schema.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, utoipa::ToSchema)]
 pub struct ErrorResponse {
     /// Error type/category
-    pub error: String,
+    pub error: ErrorCode,
 
     /// Human-readable error message
     pub message: String,
@@ -1245,9 +1305,9 @@ pub struct ErrorResponse {
 
 impl ErrorResponse {
     /// Create a new error response
-    pub fn new(error: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn new(error: ErrorCode, message: impl Into<String>) -> Self {
         Self {
-            error: error.into(),
+            error,
             message: message.into(),
             field: None,
             details: None,
@@ -1317,6 +1377,29 @@ mod tests {
             err.to_string().contains("coordinate_system"),
             "the parse error must name the missing field, got: {err}"
         );
+    }
+
+    /// The former `Position3D` doctest, relocated: the type's doc comment is now
+    /// the generated OpenAPI description, and a fenced Rust block there would
+    /// leak into the published spec (C7 curation rule).
+    #[test]
+    fn constructor_examples_from_the_former_doctest() {
+        // ECEF, meters from Earth's centre
+        let ecef = Position3D::ecef(6_500_000.0, 0.0, 0.0);
+        assert_eq!(ecef.coordinate_system, CoordinateSystem::ECEF);
+        assert!(ecef.is_ecef());
+
+        // Earth-surface ECEF is stated, not inferred from its magnitude
+        let ecef_surface = Position3D::ecef(6_378_137.0, 0.0, 100_000.0);
+        assert!(ecef_surface.is_ecef());
+
+        // Geodetic (lon, lat degrees, alt meters)
+        let geodetic = Position3D::geodetic(-118.1234, 34.5678, 100.0);
+        assert_eq!(geodetic.coordinate_system, CoordinateSystem::Geodetic);
+
+        // A GEO satellite's altitude no longer competes with the ECEF threshold
+        let geo = Position3D::geodetic(0.0, 0.0, 35_786_000.0);
+        assert!(geo.is_geodetic());
     }
 
     #[test]
@@ -1544,8 +1627,8 @@ mod tests {
 
     #[test]
     fn test_error_response_basic() {
-        let error = ErrorResponse::new("TestError", "Test message");
-        assert_eq!(error.error, "TestError");
+        let error = ErrorResponse::new(ErrorCode::ValidationError, "Test message");
+        assert_eq!(error.error, ErrorCode::ValidationError);
         assert_eq!(error.message, "Test message");
         assert!(error.field.is_none());
         assert!(error.details.is_none());
@@ -1553,13 +1636,15 @@ mod tests {
 
     #[test]
     fn test_error_response_with_field() {
-        let error = ErrorResponse::new("TestError", "Test message").with_field("test_field");
+        let error =
+            ErrorResponse::new(ErrorCode::ValidationError, "Test message").with_field("test_field");
         assert_eq!(error.field, Some("test_field".to_string()));
     }
 
     #[test]
     fn test_error_response_with_details() {
-        let error = ErrorResponse::new("TestError", "Test message").with_details("More info");
+        let error = ErrorResponse::new(ErrorCode::ValidationError, "Test message")
+            .with_details("More info");
         assert_eq!(error.details, Some("More info".to_string()));
     }
 
@@ -1572,25 +1657,43 @@ mod tests {
     fn error_code_vocabulary_is_snake_case_and_unique() {
         use std::collections::HashSet;
 
-        for code in error_codes::ALL {
-            assert!(!code.is_empty(), "error code must not be empty");
+        for code in ErrorCode::ALL {
+            let s = code.as_str();
+            assert!(!s.is_empty(), "error code must not be empty");
             assert!(
-                code.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                s.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
                 "error code {code:?} is not snake_case"
             );
         }
 
-        let unique: HashSet<_> = error_codes::ALL.iter().collect();
+        let unique: HashSet<_> = ErrorCode::ALL.iter().collect();
         assert_eq!(
             unique.len(),
-            error_codes::ALL.len(),
-            "error_codes::ALL contains a duplicate"
+            ErrorCode::ALL.len(),
+            "ErrorCode::ALL contains a duplicate"
         );
+    }
+
+    /// The C7 enum promotion must not move the wire format: `as_str()`, `Display`,
+    /// and the serde representation all agree for every code. Mirrors the same
+    /// pin on `WarningCode`.
+    #[test]
+    fn as_str_matches_serde_for_every_error_code() {
+        for &code in ErrorCode::ALL {
+            let json = serde_json::to_string(&code).expect("code serializes");
+            assert_eq!(
+                json,
+                format!("\"{}\"", code.as_str()),
+                "as_str() and the serde representation disagree for {code:?}"
+            );
+            let parsed: ErrorCode = serde_json::from_str(&json).expect("code round-trips");
+            assert_eq!(parsed, code);
+        }
     }
 
     #[test]
     fn test_error_response_serialization() {
-        let error = ErrorResponse::new("TestError", "Test message")
+        let error = ErrorResponse::new(ErrorCode::ValidationError, "Test message")
             .with_field("test_field")
             .with_details("More info");
 
