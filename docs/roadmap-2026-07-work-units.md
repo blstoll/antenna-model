@@ -66,9 +66,16 @@ G1 ─┬─ G2 ── G3
     │  D1 DONE 2026-07-29 (serializer.rs →    │
     │      sidecar.rs); filed D10 + D11, and  │
     │      handed findings to D2 and D6       │
-    │  D10, D11 (no deps) — correctness-class,│
-    │      both BEFORE calibrate CLI          │
-    │      integration-test work              │
+    │  D10, D11 DONE 2026-07-29 (correctness- │
+    │      class; both landed BEFORE the      │
+    │      calibrate CLI integration-test     │
+    │      work, as required)                 │
+    │  (D10,D11) ─ D12 ─ D13, D14             │
+    │      (filed 2026-07-29: CLI e2e on      │
+    │      perturbed-truth synthetic, then    │
+    │      real-data boresight + NASA-        │
+    │      anchored full-mode artifacts;      │
+    │      D13/D14 also need D2; D14 feeds D9)│
     └─ (Phases 1–3 done) ─ D4 ─ D7
 Superseded by C8 (do not implement): S7, C5, C6
 Phase 5: F1..F9 (F8 done) gated on register rows (P3, P5/F4, F5, D9, F9); P1 + C8 DECIDED 2026-07-08;
@@ -2510,6 +2517,58 @@ being written separately (2026-07-29) and is not tracked as a unit here.
 
 ### D10 — Cross-validation validates a different surface than the one shipped — Effort: S
 
+**✅ DONE 2026-07-29** — branch `fix/d10-d11-calibrate-correctness`. All four exit criteria met.
+Defect (b) turned out to be **worse than filed**: the nested CV is not merely unrequested, it is
+**unbounded recursion**. `cross_validate` (`correction_surface.rs:931`) refits each fold by
+calling `fit_correction_surface` with the *same* params — `cross_validation_folds` still 5 — so
+every level re-enters cross-validation on a training set 20% smaller than the last, until the
+geometric shrink crosses the `(spline_order + 1)³` minimum and the whole run fails. Measured on
+a 256-point fixture: 205 → 164 → 132 → 106 < 125 → `InsufficientData { min_required: 125,
+actual: 106 }`. **Cross-validation could not complete at all** before this fix, on any input;
+that is why D1's end-to-end attempt died where it did.
+
+Consequently the guard is applied at **both** layers, not just the one the unit named:
+`CorrectionSurfaceParams::without_nested_cross_validation()` is the single definition of "an
+inner fit on behalf of an outer CV", and it is called by `validator::perform_cross_validation`
+(the fold refit) *and* by `correction_surface::cross_validate` (the fold fit). The second call
+site is what actually stops the recursion — a `fit_correction_surface` caller that asks for CV
+directly, which is exactly what `main.rs` step 5 does under `--validate`, never reaches the
+validator at all. No fitting math was touched, and `CorrectionSurfaceParams::default()` is
+unchanged.
+
+**Before/after on a 256-point synthetic grid** (2 frequencies × 16 E-cone × 8 E-clock, 5 folds):
+
+| | mean CV RMSE |
+|---|---|
+| before — `::default()` params, recursion live | **run fails**: `InsufficientData { 125, 106 }` |
+| after — `::default()` params (recursion fixed, for comparison only) | 1.391888 dB |
+| after — artifact params `4/6/8 @ 1e-3` (**what now ships**) | **1.433256 dB** |
+
+The reported number moved **+0.041 dB worse**, in the predicted direction: the default's 8/8/12
+knots at 1e-6 regularization is a markedly more flexible family, and it was flattering the
+artifact. `correction_params.cross_validation_folds` no longer changes the result at all
+(1.433256 either way) — the nested-CV knob is inert by construction.
+
+**Tests:** `main.rs::tests::validation_config_scores_the_surface_that_ships` (pins defect (a) —
+the wiring is extracted into `surface_fitting_params`/`validation_config` so the binary's
+config construction is unit-testable, and the test asserts the config differs from the default
+so the fixture cannot silently stop discriminating);
+`validator::tests::{fold_refit_uses_caller_knot_counts_and_regularization,
+fold_refit_uses_caller_spline_order, no_nested_cross_validation_under_any_caller_configuration,
+num_folds_controls_the_reported_fold_count}`;
+`correction_surface::tests::{without_nested_cross_validation_preserves_every_other_field,
+cross_validation_does_not_recurse_into_itself}` (the last is sized so recursion is what fails:
+176 points → 141 in a fold clears the 125 minimum, a second level would train on 113 and trip it).
+
+**One finding, not fixed here** (standing rule 5 — outside this unit's charter): full-mode
+step 6 runs `validate_calibration` **unconditionally** with `num_folds: args.cv_folds`, whose
+clap default is 5. So the *outer* cross-validation runs on every full-mode invocation even
+without `--validate`, whose help text is "Run cross-validation after fitting". Step 5 correctly
+gates on `--validate`; step 6 does not. Gating it is a CLI behavior change this unit was not
+chartered to make. → file against the `calibrate` CLI integration-test work.
+
+---
+
 **Filed 2026-07-29** out of D1's finding 2. **Correctness-class, not hygiene** — it sits in
 Phase 4 by crate, not by severity. Two defects in one plumbing mistake.
 
@@ -2553,6 +2612,72 @@ otherwise fit (see D11 for the other half of that stack).
 - **Depends on:** nothing. Independent of D1/D2.
 
 ### D11 — The parser silently discards every measurement below −20 dB/K — Effort: S/M
+
+**✅ DONE 2026-07-29** — branch `fix/d10-d11-calibrate-correctness`. All four exit criteria met.
+`MeasurementPoint::validate` is now physicality-only: an explicit finite check on all five
+fields (previously absent — a `NaN` frequency, temperature or G/T passed validation, since
+`NaN` fails every comparison in both directions) plus the existing angle / frequency /
+temperature bounds. The G/T range test is gone from validation and reappears as
+`MeasurementPoint::has_atypical_g_over_t`, counted into two new `DataQualityReport` fields
+(`atypical_g_over_t_count`, `g_over_t_range`), rendered as a warning line by
+`DataQualityReport::format`, and echoed at WARN by the CLI's step-1 summary. The former
+`[-20, 70]` literal is now the named `parser::TYPICAL_G_OVER_T_RANGE_DB`, documented as a
+*boresight* figure and explicitly not a validity test. The `eprintln!` is replaced by a
+structured `tracing::warn!` carrying `source`, `dropped` and `retained` fields plus a sample
+capped at `MAX_REPORTED_PARSE_ERRORS = 10`, with a second line naming the number withheld.
+
+**Before/after on a realistic pattern** (ITU-R S.580 envelope `29 − 25·log10 θ` dBi out to 48°
+then a −10 dBi floor, T_sys = 50 K, so peak G/T 41.5 dB/K falling to −27 dB/K at wide angles):
+
+| grid | rows | retained BEFORE | retained AFTER |
+|---|---|---|---|
+| 10 × 8 × 2 freq | 160 | 32 (20.0%) | **160 (100%)** |
+| 16 × 12 × 2 | 384 | 96 (25.0%) | **384 (100%)** |
+| 24 × 20 × 2 | 960 | 200 (20.8%) | **960 (100%)** |
+| 40 × 24 × 2 | 1920 | 432 (22.5%) | **1920 (100%)** |
+
+The old gate discarded ~78% of every grid, and — matching D1's observation exactly — the
+survivors were the near-boresight population rather than a fixed fraction: everything beyond
+θ ≈ 19°, where the S.580 envelope crosses −20 dB/K, was dropped regardless of grid density.
+
+**Downstream statistics moved, as the unit predicted** (1920-row grid, 0.5° beamwidth). These
+are the numbers to expect, not regressions:
+
+| | BEFORE (survivors only) | AFTER (all rows) |
+|---|---|---|
+| total points | 432 | 1920 |
+| main-lobe points | 48 | 48 (unchanged — the gate never cut the main lobe) |
+| sidelobe points | 384 | **1872** |
+| G/T range | (−19.7, 41.5) | **(−29.6, 41.5)** |
+| `outlier_count` | 48 | **768** |
+
+**Tests:** `parser::tests::{realistic_off_axis_measurements_are_not_dropped,
+deep_sidelobe_points_are_individually_valid, non_finite_values_are_rejected,
+quality_report_warns_about_atypical_g_over_t_without_dropping_it,
+quality_report_stays_quiet_when_all_points_are_typical,
+malformed_rows_are_dropped_and_reported_through_tracing, a_clean_parse_reports_no_warning,
+the_reported_failure_sample_is_bounded}`. The `tracing` assertions capture real subscriber
+output through a `MakeWriter` rather than trusting the call site.
+
+**Two findings, not fixed here** (standing rule 5):
+
+1. **`detect_outliers` is no longer meaningful on full-pattern data.** It applies a modified
+   Z-score (MAD on raw `g_over_t_db`) across all points, which asks "how far is this point
+   from the median of the pattern" — a sensible question on a main-lobe-only population and a
+   meaningless one on a population spanning 70 dB. The flagged count rose 48 → **768 of 1920
+   (40%)** purely because the data got wider. Nothing is wrong with the measurements; the
+   statistic is being applied to the wrong quantity (it should run on *residuals*, as
+   `validator::identify_outliers` already does, not on raw G/T). Deliberately left alone —
+   changing it is a design decision, and the D11 gotcha explicitly forbids tuning numbers to
+   look unchanged.
+2. **`create_sample_csv` cannot produce data that would have exercised this bug.** Its
+   synthetic pattern is `41.5 − (θ/5)²`, bottoming out at **+5.5 dB/K** at θ = 30° — a
+   quadratic-in-degrees rolloff no real dish has, and comfortably above the old −20 gate. The
+   generator sat just inside the threshold that was silently destroying real data, which is
+   part of why the gate survived so long. → the `calibrate` CLI integration-test work should
+   replace it with a realistic envelope.
+
+---
 
 **Filed 2026-07-29** out of D1's finding 4. **Correctness-class**, and it reaches real
 calibration data, not just synthetic grids.
@@ -2601,6 +2726,132 @@ calibrations, not just test fixtures.
 - **Sequencing:** before CLI integration-test work, alongside D10 — together they are what
   made an end-to-end run impossible.
 - **Depends on:** nothing.
+
+### D12 — calibrate CLI end-to-end test on perturbed-truth synthetic data — Effort: M
+
+**Filed 2026-07-29.** D1's closeout stated the gap plainly: `calibrate` has library-level
+integration tests (`calibrate/tests/`) but **nothing that runs the built binary** through
+parse → tune → fit → validate → artifact. The full-mode `main.rs` wiring is covered only by
+unit tests and the compiler. D10 and D11 are what made an end-to-end run impossible; once
+they land, this unit builds the test they were blocking.
+
+**Design principle — perturbed truth, not same-model fill.** If the synthetic measurements
+are generated by the *same* model configuration being calibrated, residuals are identically
+zero: the pipeline runs but the correction surface fits nothing and the test asserts
+nothing. Instead, generate "measurements" from the physics model with **deliberately
+perturbed parameters** (e.g. surface RMS and feed q-factor offset from the design spec)
+plus a **known injected smooth systematic bias** (a closed-form function of frequency/cone/
+clock — deterministic, no RNG) and optionally small noise. Calibrating the *nominal* design
+spec against this data gives known-answer assertions no real dataset can: the tuner must
+recover the perturbation, and the correction surface must recover the injected bias.
+
+- **Scope:**
+  1. A deterministic generator (test-support code in `calibrate/tests/`; it may use the
+     `antenna-model` crate directly — `calibrate` already depends on it) that writes a
+     dense measurement CSV: ≥3 frequencies spanning well over the 50 MHz knot minimum, a
+     cone/clock grid covering the main lobe through the first sidelobes, and **realistic
+     off-axis G/T values below −20 dB/K** — which makes this test also the standing pin on
+     D11's fix (those rows must reach the fitter).
+  2. A CLI integration test that runs the actual binary (Cargo provides
+     `env!("CARGO_BIN_EXE_calibrate")` in integration tests) with
+     `--calibration-mode full --validate` into a temp dir.
+  3. Assertions: exit 0; the artifact has the ANTC magic/header and loads through the
+     *service's* loader (`antenna-model` `data/loader.rs`), not just calibrate's own code;
+     the tuned parameters recover the injected perturbation within a stated tolerance; the
+     correction surface evaluated at probe points recovers the injected bias within
+     tolerance; corrected RMSE ≪ uncorrected RMSE; `--cv-folds N` observably changes the
+     report (pins D10).
+- **Runtime:** the default CI variant runs **without** `--tune-parameters` (the
+  differential-evolution tuner has its own unit tests); add one tuned end-to-end run and
+  measure it before deciding whether it needs `#[ignore]`/nightly.
+- **Exit criteria:** the CLI e2e test above exists, runs in CI, and each listed assertion
+  is present; the generator is deterministic (two runs produce byte-identical CSV); a
+  fixture-level comment documents the injected truth so tolerances are auditable.
+- **Gotchas:** never loosen the fitter's `(spline_order+1)³` minimum or the knot-spacing
+  floors to make a fixture fit — size the fixture to the fitter, not vice versa. Keep the
+  injected bias smooth at the scale of the knot spacing, or the recovery assertion will
+  fail for legitimate reasons (the spline cannot represent it).
+- **Depends on:** D10, D11 (hard — both defects sit on this test's path). Not blocked on
+  D2: full mode already writes the ANTC header via `write_antc_artifact`.
+
+### D13 — Real-data boresight calibration test (NTIA frequency sweeps) — Effort: S/M
+
+**Filed 2026-07-29.** The 2026-07-29 assessment of the digitized reference data (see the
+narrative roadmap, Addendum 2026-07-29) found that **boresight mode is the one calibration
+path real published data can drive today**: boresight calibration is a frequency-sweep fit
+(`BoresightMeasurements::from_csv`, columns `frequency_mhz,g_over_t_db,temperature_k`;
+Nelder-Mead over a handful of parameters — no large point minimum), and
+`ntia_84_164_antennas.psv` contains genuine multi-frequency boresight gain measurements.
+Best candidate: **Andrew 43998, 10 m — 6 frequencies spanning 3700–6425 MHz** (SA 8002A,
+5 frequencies, is an alternative/second fixture).
+
+- **Scope:**
+  1. A committed fixture CSV derived from the NTIA rows: gain → G/T via a documented
+     assumed constant system temperature; `temperature_k` column constant. Fixture header
+     documents provenance and every assumption (F8's headers are the template), including:
+     the Rx-band (3.7–4.2 GHz) and Tx-band (5.9–6.4 GHz) rows very likely came from
+     different feeds on the real hardware, and f/D is not published — the design-spec entry
+     uses an assumed typical value, stated in the header.
+  2. A design-specs file entry for the dish (boresight mode requires `--design-specs`).
+  3. CLI e2e test: run the binary with `--calibration-mode boresight`; assert exit 0, the
+     artifact carries the ANTC header (this pins D2's fix for D1-finding-1 — boresight
+     currently writes bare headerless postcard, `main.rs:340-345`), it loads through the
+     service loader, the antenna serves with `PartiallyCalibrated` status plus the
+     partial-calibration warning, and served boresight gain at the measured frequencies
+     lands within a stated tolerance of the NTIA values.
+- **Exit criteria:** the fixture + test above in CI; provenance header complete; tolerance
+  stated with a one-line justification in the test.
+- **Gotchas:** the boresight CSV parser is separate from the full-mode parser and fails
+  hard rather than dropping rows — D11's gate does not apply here; do not "harmonize" the
+  two parsers in this unit. Real data means real residuals: pick the tolerance from the
+  measured before/after, not from wishful thinking, and record it.
+- **Depends on:** D2 (so the test pins the final headered artifact format, not the legacy
+  one), D12 (reuses its CLI-harness pattern).
+
+### D14 — Real-anchored full-mode artifact: NASA CR-159703 hybrid fill — Effort: M/L
+
+**Filed 2026-07-29; approach approved by the maintainer 2026-07-29** (register row D14).
+The same data assessment concluded **no digitized dataset can drive full-mode fitting** —
+the fitter needs ≥125 points and per-axis spans over the knot minimums, while the best real
+single-antenna, single-configuration set (`nasa_cr159703_pattern_peaks.psv`, cut
+`122_kumar_C_h_121`) is ~12–16 envelope peaks at one frequency — and that this is likely
+permanent, because full 3D G/T grids are essentially never published. The maintainer's
+accepted fallback: **use our own model to fill the gaps, anchored to the real digitized
+measurements** — not ideal, stated honestly, tangible until a better dataset exists.
+
+**Why this dish:** the CR-159703 antennas are true prime-focus paraboloids (f/D 0.38,
+~20 dB-taper Kumar feed) — the **only** digitized dataset whose topology matches the
+model's (DSN is shaped-Cassegrain, GBT offset-Gregorian), so measured-minus-model residuals
+are meaningful rather than dominated by a topology gap.
+
+- **Method (each fabrication step documented in the fixture/script provenance):**
+  1. Design-spec entry for the 1.22 m dish from the report's figures (f/D 0.38, feed
+     geometry per the file header; text gain 41.4 dBi and HPBW ~1.5° as anchors).
+  2. Compute the model's pattern; take residual = digitized peak (made absolute via the
+     text gain anchor) − model at the peak angles.
+  3. Interpolate the residual smoothly across cone angle; across clock, use the H/E plane
+     pair where both exist, otherwise a documented axisymmetry assumption.
+  4. Synthesize the dense grid = model + interpolated residual over the report's
+     11.7–12.2 GHz band, residual **assumed frequency-flat** (a documented fabrication),
+     with a plausible constant system temperature for the G/T conversion.
+  5. Run the full-mode CLI on it; load the artifact through the service.
+- **Assertions:** the served **calibrated** pattern reproduces the digitized peaks within
+  their stated uncertainties (±1.0–1.5 dB level, ±0.3–0.5° angle, plus the absolute-anchor
+  uncertainty — budget them explicitly); calibrated beats uncalibrated at the anchor
+  points; the antenna serves with `Calibrated` status.
+- **D9 exemplar:** the generation lives as a documented script (`scripts/`), making this
+  the worked example of D9's "document + script the generation path" recommended default —
+  note it in D9 when this lands.
+- **Exit criteria:** script + fixtures + CLI e2e + service-side test in CI; every
+  fabricated element (fill, frequency-flatness, clock symmetry, T_sys, absolute anchor)
+  listed in one provenance block; the artifact is generated, never committed (D9).
+- **Gotchas:** fixture headers must label the fill as model-interpolated — this dataset
+  must never be quotable as "measured". Anchor-recovery tolerances must include the
+  digitization uncertainty budget, not just fit error. If the fitted surface cannot
+  reproduce the anchors within budget, that is a *finding about the pipeline or the fill*,
+  to be reported — not a reason to widen the budget.
+- **Depends on:** D10, D11, D12 (infrastructure and prerequisite fixes), D2 (artifact
+  format settled). Feeds D9.
 
 ---
 

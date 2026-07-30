@@ -705,6 +705,10 @@ fn perform_cross_validation(
 
     info!("Performing {}-fold cross-validation", num_folds);
 
+    // Forced unconditionally rather than relying on the caller passing params that
+    // already have it: nested cross-validation under a CV fold is never wanted.
+    let refit_params = config.correction_params.without_nested_cross_validation();
+
     let fold_size = n / num_folds;
     let mut fold_rmse_values = Vec::new();
 
@@ -732,11 +736,13 @@ fn perform_cross_validation(
             }
         }
 
-        // Fit correction surface on training set
+        // Fit correction surface on training set, with the caller's knot counts,
+        // regularization and spline order — the fold must score the same model family as
+        // the artifact being blessed — but never with nested cross-validation.
         let correction_surface = crate::correction_surface::fit_correction_surface(
             &train_measurements,
             &train_predictions,
-            &config.correction_params,
+            &refit_params,
         )?;
 
         // Evaluate on test set
@@ -955,5 +961,158 @@ mod tests {
         assert_eq!(config.num_folds, 5);
         assert_eq!(config.main_lobe_target_db, 1.0);
         assert_eq!(config.first_sidelobe_target_db, 1.0);
+    }
+
+    // ========================================================================
+    // D10 — the cross-validation fold refit must score the surface that ships
+    // ========================================================================
+
+    /// A grid large enough that a 5-fold split still clears the fitter's
+    /// `(spline_order + 1)³ = 125` minimum for cubic splines (256 points → 205 per fold).
+    fn cv_fixture() -> (Vec<MeasurementPoint>, Vec<f64>) {
+        let mut points = Vec::new();
+        let mut predictions = Vec::new();
+        for fi in 0..2 {
+            let frequency_mhz = 8400.0 + 100.0 * fi as f64;
+            for ci in 0..16 {
+                let e_cone_deg = ci as f64;
+                for ki in 0..8 {
+                    let e_clock_deg = 45.0 * ki as f64;
+                    // Main-lobe rolloff plus a clock-dependent ripple the physics model
+                    // does not carry — the ripple is what the surface has to fit.
+                    let ripple = 0.4 * e_clock_deg.to_radians().cos() * (1.0 + 0.05 * e_cone_deg);
+                    let measured = 41.5 - 0.35 * e_cone_deg * e_cone_deg + ripple;
+                    let model = 41.5 - 0.33 * e_cone_deg * e_cone_deg;
+                    points.push(MeasurementPoint::new(
+                        e_clock_deg,
+                        e_cone_deg,
+                        frequency_mhz,
+                        measured,
+                        50.0,
+                    ));
+                    predictions.push(model);
+                }
+            }
+        }
+        (points, predictions)
+    }
+
+    /// The parameters `calibrate` actually fits the shipped artifact with.
+    fn artifact_params() -> CorrectionSurfaceParams {
+        CorrectionSurfaceParams {
+            spline_order: 4,
+            num_knots_frequency: 4,
+            num_knots_econe: 6,
+            num_knots_eclock: 8,
+            regularization: 1e-3,
+            adaptive_knots: true,
+            cross_validation_folds: 0,
+            min_knot_spacing_frequency: 50.0,
+            min_knot_spacing_econe: 2.0,
+            min_knot_spacing_eclock: 5.0,
+        }
+    }
+
+    fn config_with(correction_params: CorrectionSurfaceParams) -> ValidationConfig {
+        ValidationConfig {
+            num_folds: 5,
+            main_lobe_beamwidths: 1.0,
+            first_sidelobe_max_deg: 5.0,
+            frequency_bands: vec![],
+            main_lobe_target_db: 1.0,
+            first_sidelobe_target_db: 1.0,
+            outlier_threshold_db: 3.0,
+            correction_params,
+        }
+    }
+
+    fn run_cv(config: &ValidationConfig) -> Result<CrossValidationResults> {
+        let (points, predictions) = cv_fixture();
+        let surface = crate::correction_surface::fit_correction_surface(
+            &points,
+            &predictions,
+            &artifact_params(),
+        )?;
+        let report = validate_calibration(&points, &predictions, &surface, config)?;
+        Ok(report
+            .cross_validation
+            .expect("num_folds > 1, so cross-validation must have run"))
+    }
+
+    /// The fold refit must fit the *caller's* model family. Two configs that differ only
+    /// in knot counts and regularization must therefore produce different CV numbers —
+    /// if the refit fell back to `CorrectionSurfaceParams::default()` (the pre-D10 bug)
+    /// both would fit the identical surface and report the identical RMSE.
+    #[test]
+    fn fold_refit_uses_caller_knot_counts_and_regularization() {
+        let sparse = run_cv(&config_with(artifact_params())).expect("sparse config");
+        let dense = run_cv(&config_with(CorrectionSurfaceParams {
+            num_knots_frequency: 8,
+            num_knots_econe: 8,
+            num_knots_eclock: 12,
+            regularization: 1e-6,
+            ..artifact_params()
+        }))
+        .expect("dense config");
+
+        assert!(
+            (sparse.mean_rmse - dense.mean_rmse).abs() > 1e-3,
+            "knot counts and regularization did not reach the fold refit: \
+             sparse={:.6} dB, dense={:.6} dB",
+            sparse.mean_rmse,
+            dense.mean_rmse
+        );
+    }
+
+    /// Spline order reaches the refit too, proven through the fitter's data minimum:
+    /// order 6 needs `(6+1)³ = 343` points, and a 5-fold split of 256 trains on 205.
+    /// Under the pre-D10 default (order 4, minimum 125) this would have succeeded.
+    #[test]
+    fn fold_refit_uses_caller_spline_order() {
+        let err = run_cv(&config_with(CorrectionSurfaceParams {
+            spline_order: 6,
+            ..artifact_params()
+        }))
+        .expect_err("order 6 cannot be fitted from a 205-point training fold");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("343"),
+            "expected the caller's spline order to set the data minimum, got: {message}"
+        );
+    }
+
+    /// Nested cross-validation must not run whatever the caller passes. Before D10 the
+    /// `cross_validation_folds: 5` case did not merely report a different number — each
+    /// level re-entered the fitter with the same fold count and recursed until the
+    /// training set fell under the minimum, failing the whole run.
+    #[test]
+    fn no_nested_cross_validation_under_any_caller_configuration() {
+        let without = run_cv(&config_with(artifact_params())).expect("folds = 0");
+        let with = run_cv(&config_with(CorrectionSurfaceParams {
+            cross_validation_folds: 5,
+            ..artifact_params()
+        }))
+        .expect("folds = 5 must not recurse");
+
+        assert_eq!(
+            without.mean_rmse, with.mean_rmse,
+            "the caller's cross_validation_folds changed the fold refit"
+        );
+    }
+
+    /// `--cv-folds N` is threaded through `num_folds` and must be visible in the report.
+    #[test]
+    fn num_folds_controls_the_reported_fold_count() {
+        for folds in [3usize, 5, 8] {
+            let results = run_cv(&ValidationConfig {
+                num_folds: folds,
+                ..config_with(artifact_params())
+            })
+            .unwrap_or_else(|e| panic!("{folds} folds: {e}"));
+
+            assert_eq!(results.num_folds, folds);
+            assert_eq!(results.fold_rmse_values.len(), folds);
+        }
     }
 }

@@ -172,6 +172,41 @@ clean of `unwrap`/`expect`/`panic`). The problems are of a different kind:
   are enabled. Units D9, S5, and P1b were written against the wrong premise — see their
   updated notes.**
 
+**Addendum 2026-07-29 — calibrate end-to-end gap, and the calibration test-data plan.**
+D1's closeout (2026-07-29) stated a verification gap plainly: `calibrate` has no CLI-level
+integration test, and a full-mode end-to-end run on synthetic data could not be driven at
+all. The two blocking defects were root-caused and filed the same day — **D10** (the
+validator's per-fold refit ignores the caller's fitting parameters, silently validating a
+more flexible surface than the one shipped, and runs an unrequested nested CV) and **D11**
+(the full-mode parser silently discards every row below −20 dB/K as "atypical G/T" — a
+boresight figure applied to sidelobe data, so residual counts collapse to the
+near-boresight population: 240 → 154, 576 → 138, 1920 → 134). Two smaller findings were
+routed to existing units: the boresight mode's headerless (no ANTC magic/version/CRC)
+artifact → **D2**; the orphaned `calibrate/src/mod.rs` → **D6**.
+
+The same day, the digitized reference data was assessed as candidate calibration input.
+Inventory: `dsn_34m_bwg`/`dsn_70m`/`gbt_100m` are boresight-only peak-gain points (2+1+2
+rows); `nasa_cr159703_pattern_peaks` is 97 real sidelobe-envelope peaks but split across
+~8 physically distinct feed/surface configs, single-frequency per config; the NTIA 84-164
+files are per-antenna boresight gain sweeps (~65 rows, ~30 dishes) and *population*
+percentile statistics (120 rows). **Verdict: none of it can drive full-mode fitting** —
+the fitter needs ≥(order+1)³ = 125 points and per-axis spans above the knot minimums
+(50 MHz frequency / 2° cone / 5° clock), while the best real single-config set is ~12–16 peaks
+at one frequency. The constraint is judged permanent: full 3D G/T grids are essentially
+never published; pattern cuts and boresight sweeps are what exists.
+
+The plan (maintainer-approved 2026-07-29, register row D14): **D12** — a perturbed-truth
+synthetic CLI e2e test (measurements generated from the model with *deliberately perturbed*
+parameters plus a known injected bias, so the tuner and correction surface have a known
+answer to recover — same-model fill would make residuals identically zero and the test
+vacuous); **D13** — a real-data boresight-mode test from the NTIA multi-frequency gain
+sweeps (the one calibration path real published data can drive today); **D14** — a
+real-anchored full-mode artifact for the served calibrated path, filling the gaps with the
+model itself, anchored to the NASA CR-159703 peaks (the only digitized dataset whose
+prime-focus topology matches the model's), every fabricated element documented. D14
+doubles as D9's scripted-generation exemplar. Sequencing: D10 + D11 first, then D12,
+then D13/D14 (both also behind D2).
+
 ---
 
 ## 2. Guiding principles
@@ -212,7 +247,7 @@ clean of `unwrap`/`expect`/`panic`). The problems are of a different kind:
 | **1 — Prediction correctness & physics scope** ✅ **DONE 2026-07-18** | No unexplained numbers on the live path; scope decisions recorded. | P1–P3 decisions in the register; spillover applied on the uncalibrated path with calibrated outputs unchanged (P1) and artifacts stamped with a physics-model version (P1b); f/D fails loudly (P4, 2026-07-17); single G/T implementation (P5, 2026-07-17); domain-contract open items current (P6, 2026-07-18). Beyond the original criteria, the phase also absorbed P7 (auto-refocus), P8 (off-axis honesty warning), P10/P10-tail (off-axis integrator), P11 (unified uncorrected-physics gate), and F7/F8 (sidelobe floor + data) — see the work-units doc. P10-perf remains open as a latency fast-follow (not a phase-exit criterion). |
 | **2 — Safety & operational correctness** ✅ **DONE 2026-07-24** | Config promises kept; bounded work; honest lifecycle. | ✅ Oversized → 413 (S1), on **both** framings — `content-length` and `Transfer-Encoding: chunked` (S1b, 2026-07-24); ✅ slow → 504 timeout (S2), enforceable on **all four** compute endpoints including `POST /api/v1/gain`, which now yields via `spawn_blocking` (S2b, 2026-07-24); ✅ integration has a wall-clock budget (S3); ✅ concurrency capped → 503 + Retry-After (S4, **ships disabled at `max_concurrent_heavy_requests: 0`**; permit release on timeout bounds admitted requests, not running compute); ✅ readiness/fail_fast/shutdown real (S5); ✅ H3 validator complete (S6). S7 superseded by C8. (Coordinate-ambiguity handling moved to C8, which removes the ambiguity instead of warning about it.) The two gaps that qualified the 2026-07-23 closeout — S1b and S2b, both filed by the 2026-07-24 Phase 2 review, which ran in parallel with S5 and so missed the original pass — are closed. |
 | **3 — API contract quality** | A client can trust the spec and the error contract — finalized once, then frozen. | One error vocabulary, JSON bodies, one status-code policy (C2–C4); `/h3-heatmap` documented in openapi + api-documentation with a verified example (C1, 2026-07-25); warnings no longer lost on a `/h3-heatmap` cache hit (C10, 2026-07-25); prose examples under a schema drift guard (C11, 2026-07-25); `loss_db` referenced to the grid peak on both heatmap endpoints (C9, 2026-07-26); **C8 contract finalization landed 2026-07-28 — all 4 stages complete**: ✅ stage 1, the aim-point field renames (`feed_position` → `feed_pointing_location`, `GeometryInfo.feed_offset_meters` → `physical_feed_offset_m`, `FeedInfo.position_offset` → `design_feed_offset_m`), landed 2026-07-26 on branch `feat/c8-stage1-aim-point-field-rename` with no computed value moved; ✅ stage 2, `coordinate_system` required (2026-07-27, branch `feat/c8-stage2-required-coordinate-system`) — the magnitude heuristic, `ECEF_THRESHOLD_M` and the `coordinate_ambiguity_warnings` plumbing are deleted, `Position3D::new` is replaced by `ecef()`/`geodetic()`, an untagged position is a 400 naming the field, and no computed value moved; ✅ stage 3, typed warnings (2026-07-27, branch `feat/c8-stage3-typed-warnings`) — `warnings` is `Vec<ApiWarning>` on all three response types, backed by a closed 14-variant `WarningCode` enum with an openapi/docs drift guard; the C2-deferred batch per-item failure shape became a typed `error` field reusing the `error_codes` vocabulary; no computed value moved; ✅ stage 4, endpoint coherence + spec completeness, **landed 2026-07-28 on branch `feat/c8-stage4-endpoint-coherence`** — the `/heatmap` H3 grid-type stub removed (`h3` grid_type is now a 400, an unknown serde variant, per C2), the producerless `not_implemented` error code retired (vocabulary is 10 codes), and every antenna-endpoint openapi schema audited (deliberately **not** hand-fixed — deferred to C7, which was re-scoped from a hand-maintained spec to utoipa auto-generation from the Rust types). **C7 is now the only remaining Phase 3 unit**, and only once it lands does its openapi drift guard freeze the contract. Stage 1 also filed three units it was not chartered to fix — C12 (`rmse_db`/`r_squared` documented as omitted but emitted as `null`; **done 2026-07-28**, decided in favour of declaring the `null` — see register row C12), C13 (`design_feed_offset_m` origin is vertex- vs focus-relative depending on the producer; latent behind D9, still open), C14 (openapi's feed-listing surface disagrees with the service; **superseded 2026-07-28** by C7's utoipa generation — see register row C14). **The contract is not yet frozen — freeze happens when C7 lands.** |
-| **4 — Structure, debt, docs** | The codebase stops accumulating the debt classes found in this review. | ✅ Legacy serializer gone (D1, 2026-07-29 — `serializer.rs` → `sidecar.rs`; the `CalibrationArtifact` wrapper and its dead constructor/summary/helpers deleted, the two JSON exporters now take the metadata and report directly; the binary writer had already gone in the 2026-07-18 postcard migration); version axes documented+validated (D2, now also owning boresight-mode's headerless artifact); 3D→4D bridge round-trip-tested; crate split done; design docs truthful; property tests in CI; **plus two correctness-class defects D1 surfaced in the `calibrate` pipeline and could not fix in charter — D10** (cross-validation refits with `CorrectionSurfaceParams::default()`, so every fold validates a surface with ~2× the knots at 1000× weaker regularization than the artifact being blessed, and runs a nested CV nobody requested) **and D11** (`MeasurementPoint::validate` rejects any row below −20 dB/K — a boresight figure — so legitimate sidelobe measurements are silently dropped from real calibration data, reported only via `eprintln!`). Both are independent, both sequence before any `calibrate` CLI integration-test work. |
+| **4 — Structure, debt, docs** | The codebase stops accumulating the debt classes found in this review. | ✅ Legacy serializer gone (D1, 2026-07-29 — `serializer.rs` → `sidecar.rs`; the `CalibrationArtifact` wrapper and its dead constructor/summary/helpers deleted, the two JSON exporters now take the metadata and report directly; the binary writer had already gone in the 2026-07-18 postcard migration); version axes documented+validated (D2, now also owning boresight-mode's headerless artifact); 3D→4D bridge round-trip-tested; crate split done; design docs truthful; property tests in CI; **plus the two correctness-class defects D1 surfaced in the `calibrate` pipeline and could not fix in charter — ✅ D10 and D11, both landed 2026-07-29** (branch `fix/d10-d11-calibrate-correctness`), ahead of the CLI integration-test work as required. **D10:** the validator refitted every cross-validation fold with `CorrectionSurfaceParams::default()`, validating a surface with ~2× the knots at 1000× weaker regularization than the artifact being blessed. The nested CV also proved *worse than filed* — not merely unrequested but **unbounded recursion**: `cross_validate` refits each fold with the same fold count, re-entering itself until the shrinking training set trips the `(spline_order+1)³` minimum, so **cross-validation could not complete on any input** (256-point fixture: 205 → 164 → 132 → 106 < 125, fail). Fixed at both layers through one `without_nested_cross_validation()` helper; the reported CV RMSE moved **+0.041 dB worse**, which is the fix working. **D11:** `MeasurementPoint::validate` rejected any row below −20 dB/K — a boresight figure — silently dropping legitimate sidelobe measurements via `eprintln!`. On a realistic ITU-R S.580 pattern that discarded **~78% of every grid**, retaining only the near-boresight population regardless of grid density. `validate` is now physicality-only (and finally rejects non-finite values, which it never did — `NaN` frequency, temperature and G/T all passed before); atypical G/T became a `DataQualityReport` warning with a G/T-range readout; drops now report through `tracing` at WARN with an accurate count and a bounded sample. Two further findings were filed from the pair, neither in charter: `detect_outliers` runs its modified Z-score on **raw G/T rather than residuals**, so it now flags 40% of a full pattern purely because the data got wider; and `create_sample_csv` generates a `41.5 − (θ/5)²` rolloff bottoming out at +5.5 dB/K, too shallow to have ever exercised the gate it sat just inside. That integration-test work is itself now specified (filed 2026-07-29 after the calibration-data assessment, §1 addendum): **D12** — perturbed-truth synthetic CLI e2e test with known-answer recovery assertions; **D13** — real-data boresight-mode test from the NTIA frequency sweeps; **D14** — real-anchored full-mode artifact (NASA CR-159703 hybrid fill, register row D14) exercising the served calibrated path and doubling as D9's generation exemplar. |
 | **5 — Decision-gated features** | New capability, only where the register says go. | Per-feature; see work units F1–F6. |
 
 ## 5. Decision register
@@ -240,7 +275,8 @@ Defaults are recommendations; the maintainer decides.
 | C12 | `CalibrationInfo.rmse_db`/`r_squared`: documented as omitted, actually emitted as `null` on every uncalibrated antenna (`skip_serializing_if` never fires — the only constructor wraps both in `Some(...)` unconditionally) | Map `NaN` → `None` so the field is genuinely omitted / declare the `null` as the contract | **Declare the `null`** (option 2). Both fields become plain `f64` with `#[serde(with = "nan_as_null")]` — the same convention `GainResponse.gain_db` already uses for a failed evaluation — replacing the `Option` + `skip_serializing_if` pair that promised an omission the code never performed. The wire output is unchanged (`null` before, `null` after); only the type and docs now agree with it. See `docs/domain-contract.md`, "Resolved by design 2026-07-28 (C12)". | **Decided + implemented** | Maintainer, 2026-07-28 |
 | C14 | `openapi.yaml`'s `/api/v1/antennas*` schemas disagree with the Rust types (feed listing named two of eight found defects; a 2026-07-28 audit found all seven components behind the four antenna routes wrong) | Fix by hand as part of C8 stage 4 / let C7's drift guard force it | **Superseded by C7.** C7 was re-scoped from a hand-maintained spec + drift guard to auto-generating `openapi.yaml` from the Rust types via `utoipa`, which fixes all eight defects by construction rather than by a hand-authored patch that could drift again. The 2026-07-28 audit table is recorded as C7's post-generation acceptance checklist in `docs/roadmap-2026-07-work-units.md`. | **Superseded** | Maintainer, 2026-07-28 |
 | D4 | Extract a shared `antenna-core` crate? | Split / keep two-crate layout | Split (mechanical move, after Phases 1–3) | Open | — |
-| D9 | Ship calibration `.bin` artifacts in-repo? | Commit binaries / generate in CI / docs-only | No binaries; document + script the generation path. **Note (2026-07-28, from C12/C8 stage 4):** `CalibrationMetadata.rmse_db`/`r_squared` stay plain `f64` with a NaN sentinel by decision — converting them to `Option<f64>` is an ANTC wire-format break that belongs with this unit's version-axes work (see D2), not the contract pass. | Open | — |
+| D9 | Ship calibration `.bin` artifacts in-repo? | Commit binaries / generate in CI / docs-only | No binaries; document + script the generation path. **Note (2026-07-28, from C12/C8 stage 4):** `CalibrationMetadata.rmse_db`/`r_squared` stay plain `f64` with a NaN sentinel by decision — converting them to `Option<f64>` is an ANTC wire-format break that belongs with this unit's version-axes work (see D2), not the contract pass. **Note (2026-07-29):** unit D14 will provide this unit's worked exemplar — a real-anchored artifact produced by a documented script, generated locally and never committed. | Open | — |
+| D14 | Full-mode calibration test data: no published dataset can drive the fitter (≥125 points over a real 3D domain; the best real single-config set is ~12–16 single-frequency envelope peaks — see §1 addendum 2026-07-29). Fabricate model-filled measurement grids anchored to real digitized data? | Real-anchored hybrid fill / synthetic-only / wait for a better dataset | **Real-anchored hybrid, staged**: perturbed-truth synthetic e2e first (D12 — known-answer assertions, no real data needed), real-data boresight test (D13 — the one mode real data drives today), then the NASA CR-159703 hybrid (D14 — model fills the gaps, anchored to the only digitized dataset whose prime-focus topology matches the model). Every fabricated element documented in fixture/script provenance; the dataset is never presentable as measured. "Wait" rejected as likely permanent: full 3D G/T grids are essentially never published. | **Decided** | Maintainer, 2026-07-29 |
 
 ## 6. Non-goals
 
@@ -301,15 +337,25 @@ Unless a decision-register row flips them:
   `cargo test --workspace`.~~ **Resolved 2026-07-09 by Phase 0 (G1)**: repo live at
   github.com/blstoll/antenna-model, CI green on every push since.
 - **The calibration pipeline's accuracy claims are unverified end-to-end** (2026-07-29, filed
-  by D1): no `.bin` artifact has been produced from a full-mode run in this repo (D9), no
-  CLI-level integration test exists, and the two defects D1 surfaced both bear on accuracy
-  rather than plumbing — **D11** silently drops sidelobe measurements before fitting, so the
-  correction surface is fitted and validated on main-lobe data while the report still prints
-  first-sidelobe statistics; **D10** then cross-validates a different (more flexible) surface
-  than the one shipped, so the reported CV RMSE does not describe the artifact. The service
-  side is unaffected — the four enabled antennas are uncalibrated design-spec entries that
-  load no correction surface — but every accuracy number the *calibrate* tool reports should
-  be treated as unconfirmed until D10 and D11 land.
+  by D1; **partially retired 2026-07-29 by D10 + D11**). The two defects are fixed: **D11** no
+  longer drops sidelobe measurements before fitting, so the correction surface is fitted and
+  validated on the same population the report prints first-sidelobe statistics for; **D10** now
+  cross-validates the surface that actually ships, and cross-validation *completes* at all
+  (before the fix its unbounded recursion failed every run). **What remains open is the
+  end-to-end gap itself**: no `.bin` artifact has yet been produced from a full-mode run in this
+  repo (D9), and no CLI-level integration test exists (D12/D13/D14). So the *mechanisms* are
+  now correct and unit-tested, but no full-pipeline number has been observed end to end — treat
+  `calibrate`'s reported accuracy figures as mechanically sound yet unexercised until D12 lands.
+  The service side is unaffected throughout: the four enabled antennas are uncalibrated
+  design-spec entries that load no correction surface.
+- **`detect_outliers` measures the wrong quantity** (2026-07-29, filed by D11):
+  `MeasurementData::detect_outliers` applies a modified Z-score (MAD) to raw `g_over_t_db`
+  across all points, which on a full pattern asks "how far is this point from the median of the
+  pattern" rather than "is this measurement anomalous". Now that D11 lets the sidelobe
+  population through, it flags ~40% of a realistic grid (48 → 768 of 1920). Nothing is wrong
+  with the data; the statistic belongs on *residuals*, as `validator::identify_outliers`
+  already does. Cosmetic today (the count is reported, never acted on), but it will mislead
+  whoever first reads a real quality report. Not yet filed as a unit.
 - **Decision latency**: five of the six feature units are decision-gated; if the register
   sits undecided, Phase 5 stalls by design. That is intentional but worth stating.
 - ~~**Loose Ka reference tolerance until P7 lands**: the DSN 34-m Ka row in the reference

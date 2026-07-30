@@ -8,6 +8,17 @@ use aws_sdk_s3::Client as S3Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
+use tracing::warn;
+
+/// G/T range typical of a **boresight** figure for a realistic antenna, in dB/K.
+///
+/// Used only to flag points for operator attention in [`DataQualityReport`]. It is *not*
+/// a validity test: off-axis measurements legitimately fall far below the lower bound.
+pub const TYPICAL_G_OVER_T_RANGE_DB: std::ops::RangeInclusive<f64> = -20.0..=70.0;
+
+/// Maximum number of individual parse/validation failures logged verbatim; beyond this
+/// only the count is reported, so a large drop is loud rather than a wall of text.
+const MAX_REPORTED_PARSE_ERRORS: usize = 10;
 
 /// A single measurement point from calibration data
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,7 +61,31 @@ impl MeasurementPoint {
     }
 
     /// Validate that the measurement point has physically reasonable values
+    ///
+    /// This is a **physicality** check only: finite values, plus the angle, frequency and
+    /// temperature bounds below. It deliberately does *not* range-check `g_over_t_db` —
+    /// a real pattern falls tens of dB below its boresight figure off the main lobe, so
+    /// any fixed G/T floor rejects legitimate sidelobe measurements as if they were
+    /// malformed. Atypical G/T is surfaced as a *warning* on
+    /// [`DataQualityReport`] instead, where an operator can see it without losing the
+    /// data. See roadmap unit D11.
     pub fn validate(&self) -> Result<()> {
+        if !self.e_clock_deg.is_finite()
+            || !self.e_cone_deg.is_finite()
+            || !self.frequency_mhz.is_finite()
+            || !self.g_over_t_db.is_finite()
+            || !self.temperature_k.is_finite()
+        {
+            anyhow::bail!(
+                "Measurement contains a non-finite value \
+                 (e_clock={}, e_cone={}, frequency={}, g_over_t={}, temperature={})",
+                self.e_clock_deg,
+                self.e_cone_deg,
+                self.frequency_mhz,
+                self.g_over_t_db,
+                self.temperature_k
+            );
+        }
         if !(0.0..=360.0).contains(&self.e_clock_deg) {
             anyhow::bail!(
                 "E-clock angle {} deg is out of valid range [0, 360]",
@@ -75,14 +110,15 @@ impl MeasurementPoint {
                 self.temperature_k
             );
         }
-        // G/T typically ranges from -10 to 60 dB/K for realistic antennas
-        if self.g_over_t_db < -20.0 || self.g_over_t_db > 70.0 {
-            anyhow::bail!(
-                "G/T {} dB/K is out of typical range [-20, 70]",
-                self.g_over_t_db
-            );
-        }
         Ok(())
+    }
+
+    /// Whether this point's G/T falls outside the range typical of a *boresight* figure.
+    ///
+    /// Reported as a quality warning, never a rejection: values below the floor are the
+    /// expected signature of off-axis measurements, not of bad data.
+    pub fn has_atypical_g_over_t(&self) -> bool {
+        !TYPICAL_G_OVER_T_RANGE_DB.contains(&self.g_over_t_db)
     }
 
     /// Check if this measurement is likely in the main lobe (near boresight)
@@ -228,14 +264,28 @@ impl MeasurementData {
         let freq_dist = self.frequency_distribution();
         let unique_frequencies = freq_dist.len();
 
+        let atypical_g_over_t_count = self
+            .points
+            .iter()
+            .filter(|p| p.has_atypical_g_over_t())
+            .count();
+        let g_over_t_range = self
+            .points
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| {
+                (lo.min(p.g_over_t_db), hi.max(p.g_over_t_db))
+            });
+
         DataQualityReport {
             total_points: self.points.len(),
             frequency_range: (freq_min, freq_max),
             e_cone_range: (cone_min, cone_max),
             e_clock_range: (clock_min, clock_max),
+            g_over_t_range,
             unique_frequencies,
             main_lobe_points: main_lobe_count,
             sidelobe_points: self.points.len() - main_lobe_count,
+            atypical_g_over_t_count,
             outlier_count: outliers.len(),
             outlier_indices: outliers,
             frequency_distribution: freq_dist,
@@ -250,9 +300,17 @@ pub struct DataQualityReport {
     pub frequency_range: (f64, f64),
     pub e_cone_range: (f64, f64),
     pub e_clock_range: (f64, f64),
+    /// Observed (min, max) G/T in dB/K across all points.
+    pub g_over_t_range: (f64, f64),
     pub unique_frequencies: usize,
     pub main_lobe_points: usize,
     pub sidelobe_points: usize,
+    /// Points whose G/T falls outside [`TYPICAL_G_OVER_T_RANGE_DB`].
+    ///
+    /// A warning, not a defect count: off-axis measurements are *expected* to sit below
+    /// the boresight-typical floor. A high count on data claimed to be main-lobe-only, or
+    /// values above the upper bound, is what warrants a second look.
+    pub atypical_g_over_t_count: usize,
     pub outlier_count: usize,
     #[serde(skip)]
     pub outlier_indices: Vec<usize>,
@@ -269,10 +327,11 @@ Total Points: {}
 Frequency Range: {:.1} - {:.1} MHz ({} unique frequencies)
 E-Cone Range: {:.2}° - {:.2}°
 E-Clock Range: {:.2}° - {:.2}°
+G/T Range: {:.2} - {:.2} dB/K
 Main Lobe Points: {} ({:.1}%)
 Sidelobe Points: {} ({:.1}%)
 Outliers Detected: {} ({:.1}%)
-
+{}
 Frequency Distribution:
 {}"#,
             self.total_points,
@@ -283,13 +342,32 @@ Frequency Distribution:
             self.e_cone_range.1,
             self.e_clock_range.0,
             self.e_clock_range.1,
+            self.g_over_t_range.0,
+            self.g_over_t_range.1,
             self.main_lobe_points,
             100.0 * self.main_lobe_points as f64 / self.total_points as f64,
             self.sidelobe_points,
             100.0 * self.sidelobe_points as f64 / self.total_points as f64,
             self.outlier_count,
             100.0 * self.outlier_count as f64 / self.total_points as f64,
+            self.format_atypical_g_over_t(),
             self.format_frequency_distribution()
+        )
+    }
+
+    /// Warning line for points outside the boresight-typical G/T range, or blank.
+    fn format_atypical_g_over_t(&self) -> String {
+        if self.atypical_g_over_t_count == 0 {
+            return String::new();
+        }
+        format!(
+            "\n⚠ G/T outside the boresight-typical range [{:.0}, {:.0}] dB/K: {} points \
+             ({:.1}%). Expected for off-axis measurements; check the data if these are \
+             meant to be main-lobe points.\n",
+            TYPICAL_G_OVER_T_RANGE_DB.start(),
+            TYPICAL_G_OVER_T_RANGE_DB.end(),
+            self.atypical_g_over_t_count,
+            100.0 * self.atypical_g_over_t_count as f64 / self.total_points as f64,
         )
     }
 
@@ -367,13 +445,31 @@ fn parse_csv_content(content: &str, source: &str) -> Result<MeasurementData> {
         }
     }
 
-    // Warn about errors but don't fail if we have some valid points
+    // Warn about dropped rows but don't fail if we have some valid points. Routed through
+    // `tracing` (not `eprintln!`) so it honors the configured log level, formatter and
+    // sinks — a silent stderr write is how the pre-D11 G/T gate hid a 40% data loss.
     if !errors.is_empty() {
-        eprintln!(
-            "Warning: {} errors encountered while parsing:\n{}",
+        let sample: Vec<&str> = errors
+            .iter()
+            .take(MAX_REPORTED_PARSE_ERRORS)
+            .map(String::as_str)
+            .collect();
+        warn!(
+            source = source,
+            dropped = errors.len(),
+            retained = points.len(),
+            "Dropped {} of {} rows while parsing measurements; first {} reason(s): {}",
             errors.len(),
-            errors.join("\n")
+            errors.len() + points.len(),
+            sample.len(),
+            sample.join(" | ")
         );
+        if errors.len() > MAX_REPORTED_PARSE_ERRORS {
+            warn!(
+                "... {} further parse failures not shown",
+                errors.len() - MAX_REPORTED_PARSE_ERRORS
+            );
+        }
     }
 
     Ok(MeasurementData::new(points, source.to_string()))
@@ -664,6 +760,201 @@ invalid,10.0,8400.0,40.5,50.0
 
         let result = parse_csv_content(csv_content, "test.csv");
         assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // D11 — sidelobe measurements must survive parsing
+    // ========================================================================
+
+    /// A realistic pattern: 41.5 dB/K at boresight falling well past −20 dB/K off-axis.
+    /// Every one of these rows is legitimate data; before D11 the 8 below −20 were
+    /// rejected as if malformed.
+    const REALISTIC_PATTERN_CSV: &str =
+        "e_clock_deg,e_cone_deg,frequency_mhz,g_over_t_db,temperature_k
+0.0,0.0,8400.0,41.5,50.0
+0.0,1.0,8400.0,38.2,50.0
+0.0,2.0,8400.0,25.7,50.0
+0.0,4.0,8400.0,2.4,50.0
+0.0,6.0,8400.0,-14.8,50.0
+0.0,8.0,8400.0,-21.3,50.0
+0.0,12.0,8400.0,-33.9,50.0
+0.0,20.0,8400.0,-41.2,50.0
+0.0,30.0,8400.0,-48.6,50.0
+0.0,45.0,8400.0,-55.0,50.0
+0.0,60.0,8400.0,-61.7,50.0
+0.0,90.0,8400.0,-70.4,50.0";
+
+    #[test]
+    fn realistic_off_axis_measurements_are_not_dropped() {
+        let data = parse_csv_content(REALISTIC_PATTERN_CSV, "pattern.csv")
+            .expect("a realistic antenna pattern must parse");
+
+        assert_eq!(
+            data.len(),
+            12,
+            "every row of a realistic pattern must survive parsing"
+        );
+        let min = data
+            .points
+            .iter()
+            .map(|p| p.g_over_t_db)
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            min < -40.0,
+            "deep sidelobe rows were dropped: minimum retained G/T is {min} dB/K"
+        );
+    }
+
+    #[test]
+    fn deep_sidelobe_points_are_individually_valid() {
+        // −70 dB/K at 90° off-boresight is an ordinary far-sidelobe measurement.
+        let point = MeasurementPoint::new(0.0, 90.0, 8400.0, -70.4, 50.0);
+        assert!(point.validate().is_ok());
+        assert!(point.has_atypical_g_over_t());
+    }
+
+    #[test]
+    fn non_finite_values_are_rejected() {
+        for point in [
+            MeasurementPoint::new(f64::NAN, 10.0, 8400.0, 41.5, 50.0),
+            MeasurementPoint::new(45.0, f64::NAN, 8400.0, 41.5, 50.0),
+            MeasurementPoint::new(45.0, 10.0, f64::NAN, 41.5, 50.0),
+            MeasurementPoint::new(45.0, 10.0, 8400.0, f64::NAN, 50.0),
+            MeasurementPoint::new(45.0, 10.0, 8400.0, 41.5, f64::NAN),
+            MeasurementPoint::new(45.0, 10.0, 8400.0, f64::INFINITY, 50.0),
+            MeasurementPoint::new(45.0, 10.0, 8400.0, f64::NEG_INFINITY, 50.0),
+        ] {
+            assert!(
+                point.validate().is_err(),
+                "non-finite measurement accepted: {point:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn quality_report_warns_about_atypical_g_over_t_without_dropping_it() {
+        let data = parse_csv_content(REALISTIC_PATTERN_CSV, "pattern.csv").unwrap();
+        let report = data.quality_report(2.0);
+
+        assert_eq!(report.total_points, 12, "no point was discarded");
+        assert_eq!(
+            report.atypical_g_over_t_count, 7,
+            "the 7 rows below -20 dB/K should be flagged, not removed"
+        );
+        assert!((report.g_over_t_range.0 - (-70.4)).abs() < 1e-9);
+        assert!((report.g_over_t_range.1 - 41.5).abs() < 1e-9);
+
+        let text = report.format();
+        assert!(text.contains("G/T outside the boresight-typical range"));
+        assert!(text.contains("G/T Range: -70.40 - 41.50 dB/K"));
+    }
+
+    #[test]
+    fn quality_report_stays_quiet_when_all_points_are_typical() {
+        let points = vec![
+            MeasurementPoint::new(0.0, 0.0, 8400.0, 41.5, 50.0),
+            MeasurementPoint::new(45.0, 1.0, 8400.0, 40.1, 50.0),
+        ];
+        let report = MeasurementData::new(points, "t.csv".to_string()).quality_report(2.0);
+
+        assert_eq!(report.atypical_g_over_t_count, 0);
+        assert!(!report
+            .format()
+            .contains("outside the boresight-typical range"));
+    }
+
+    /// Captures `tracing` output so the drop report can be asserted on.
+    #[derive(Clone, Default)]
+    struct CapturedLogs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+        type Writer = Self;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    impl CapturedLogs {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    fn parse_capturing_logs(content: &str) -> (Result<MeasurementData>, String) {
+        let logs = CapturedLogs::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(logs.clone())
+            .with_max_level(tracing::Level::WARN)
+            .with_ansi(false)
+            .finish();
+        let result =
+            tracing::subscriber::with_default(subscriber, || parse_csv_content(content, "t.csv"));
+        (result, logs.text())
+    }
+
+    /// Genuinely malformed rows are still dropped, and the drop is reported through
+    /// `tracing` at WARN with an accurate count — not a silent `eprintln!`.
+    #[test]
+    fn malformed_rows_are_dropped_and_reported_through_tracing() {
+        let csv = "e_clock_deg,e_cone_deg,frequency_mhz,g_over_t_db,temperature_k
+0.0,0.0,8400.0,41.5,50.0
+not-a-number,1.0,8400.0,40.0,50.0
+0.0,2.0,8400.0,-45.0,50.0
+500.0,3.0,8400.0,39.0,50.0
+0.0,4.0,8400.0,38.0,-5.0
+0.0,5.0,8400.0,-55.0,50.0";
+
+        let (result, logs) = parse_capturing_logs(csv);
+        let data = result.expect("the valid rows should still parse");
+
+        assert_eq!(data.len(), 3, "3 valid rows (two of them deep sidelobes)");
+        assert!(
+            logs.contains("WARN"),
+            "drop must be reported at WARN: {logs}"
+        );
+        assert!(
+            logs.contains("Dropped 3 of 6 rows"),
+            "drop report must carry an accurate count: {logs}"
+        );
+    }
+
+    #[test]
+    fn a_clean_parse_reports_no_warning() {
+        let (result, logs) = parse_capturing_logs(REALISTIC_PATTERN_CSV);
+        assert_eq!(result.unwrap().len(), 12);
+        assert!(
+            logs.is_empty(),
+            "a clean parse must not warn, but logged: {logs}"
+        );
+    }
+
+    /// A large drop is summarized rather than dumped line by line.
+    #[test]
+    fn the_reported_failure_sample_is_bounded() {
+        let mut csv =
+            String::from("e_clock_deg,e_cone_deg,frequency_mhz,g_over_t_db,temperature_k\n");
+        csv.push_str("0.0,0.0,8400.0,41.5,50.0\n");
+        for i in 0..40 {
+            csv.push_str(&format!("500.0,{}.0,8400.0,40.0,50.0\n", i));
+        }
+
+        let (result, logs) = parse_capturing_logs(&csv);
+        assert_eq!(result.unwrap().len(), 1);
+        assert!(logs.contains("Dropped 40 of 41 rows"));
+        assert!(
+            logs.contains("30 further parse failures not shown"),
+            "the sample should be capped at {MAX_REPORTED_PARSE_ERRORS}: {logs}"
+        );
     }
 
     #[test]
