@@ -3,6 +3,8 @@
 mod support;
 
 use calibrate::{AntennaClassRegistry, CorrectionSurfaceParams};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use support::*;
 
 #[test]
@@ -234,5 +236,156 @@ fn fixture_config_matches_antenna_classes_yaml() {
         "fixture is stale: antenna_classes.yaml system_noise_temperature_k for \
          {FIXTURE_CLASS} no longer matches support::FIXTURE_TEMPERATURE_K — update \
          fixture_config"
+    );
+}
+
+// ============================================================================
+// CLI end-to-end run (roadmap D12)
+// ============================================================================
+
+/// Outputs of one full-mode CLI run.
+struct CalibrateRun {
+    stdout: String,
+    stderr: String,
+    artifact: PathBuf,
+    report: PathBuf,
+    // Written by `--metadata` but not read by any test yet; kept (like `_dir`) so the
+    // path stays visible for a future test rather than silently discarding the arg.
+    _metadata: PathBuf,
+    _dir: tempfile::TempDir,
+}
+
+impl CalibrateRun {
+    /// Everything the binary printed, for assertions and failure messages.
+    fn output(&self) -> String {
+        format!("{}\n{}", self.stdout, self.stderr)
+    }
+
+    fn report_json(&self) -> serde_json::Value {
+        let text = std::fs::read_to_string(&self.report).expect("read --report sidecar");
+        serde_json::from_str(&text).expect("parse --report sidecar as JSON")
+    }
+}
+
+/// Run the real `calibrate` binary in full mode over a freshly generated fixture.
+///
+/// `extra_args` appends flags such as `--validate` / `--cv-folds N`.
+fn run_calibrate(extra_args: &[&str]) -> CalibrateRun {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let input = dir.path().join("measurements.csv");
+    let artifact = dir.path().join("antenna.bin");
+    let report = dir.path().join("report.json");
+    let metadata = dir.path().join("metadata.json");
+
+    write_fixture_csv(&input);
+
+    // `--classes-file` defaults to `calibrate/antenna_classes.yaml`, resolved against the
+    // process CWD. An integration test's CWD is the crate root, so build the path from
+    // CARGO_MANIFEST_DIR to be independent of how the test binary is invoked.
+    let classes_file = Path::new(env!("CARGO_MANIFEST_DIR")).join("antenna_classes.yaml");
+    assert!(
+        classes_file.exists(),
+        "antenna class definitions not found at {}",
+        classes_file.display()
+    );
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_calibrate"));
+    cmd.args(["--calibration-mode", "full"])
+        .arg("--input")
+        .arg(&input)
+        .arg("--output")
+        .arg(&artifact)
+        .args(["--antenna-id", "d12_uhf_test"])
+        .args(["--antenna-class", FIXTURE_CLASS])
+        .arg("--classes-file")
+        .arg(&classes_file)
+        .arg("--report")
+        .arg(&report)
+        .arg("--metadata")
+        .arg(&metadata)
+        .args(extra_args);
+
+    let out = cmd.output().expect("run the calibrate binary");
+    let run = CalibrateRun {
+        stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        artifact,
+        report,
+        _metadata: metadata,
+        _dir: dir,
+    };
+
+    assert!(
+        out.status.success(),
+        "calibrate exited with {:?}\n--- output ---\n{}",
+        out.status.code(),
+        run.output()
+    );
+
+    run
+}
+
+#[test]
+fn cli_full_mode_writes_a_service_loadable_artifact() {
+    let run = run_calibrate(&[]);
+
+    let bytes = std::fs::read(&run.artifact).expect("read artifact");
+    assert!(
+        bytes.starts_with(b"ANTC"),
+        "artifact is missing the ANTC magic; first bytes: {:?}",
+        &bytes[..bytes.len().min(8)]
+    );
+
+    // The point of this assertion: the artifact must load through the SERVICE's loader,
+    // not just calibrate's own round-trip code.
+    let calibration = antenna_model::data::loader::load_calibration_artifact(&run.artifact)
+        .expect("the service loader must accept a freshly written full-mode artifact");
+
+    assert_eq!(calibration.antenna_id, "d12_uhf_test");
+    assert!(
+        calibration.correction_surface.is_some(),
+        "full mode must ship a correction surface"
+    );
+}
+
+#[test]
+fn cli_full_mode_correction_beats_the_uncorrected_model() {
+    let run = run_calibrate(&[]);
+    let report = run.report_json();
+
+    let model_only = report["model_only_rmse"].as_f64().expect("model_only_rmse");
+    let corrected = report["corrected_rmse"].as_f64().expect("corrected_rmse");
+
+    println!("model-only RMSE {model_only:.4} dB, corrected {corrected:.4} dB");
+    assert!(
+        corrected < model_only,
+        "the correction surface must improve on the physics model: \
+         corrected {corrected:.4} dB vs model-only {model_only:.4} dB"
+    );
+
+    // NOT a `corrected < 0.5 * model_only` "the fit should remove most of the bias"
+    // assertion, on purpose. The injected bias here is a smooth, fully-representable
+    // signal (const + linear-in-frequency + cosine-in-clock + linear-in-cone), so a
+    // correct fitter should knock out far more than the ~25% improvement measured today
+    // (model-only 1.3071 dB -> corrected 0.9756 dB, ratio 0.746). It doesn't, because of
+    // a real defect in the fitted/served correction surface: `CorrectionSurface::evaluate`
+    // (and the service-side 4D `evaluate_correction`) collapses to ~0 across the topmost
+    // knot span of every axis, silently dropping the correction on the union of the three
+    // upper faces of the query grid (~27% of points here). See
+    // docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md for the full
+    // triage (two other hypotheses — degenerate adaptive knots, underdetermination — were
+    // considered and ruled out there).
+    //
+    // Until that is fixed, pin today's measured value as a ceiling so a further
+    // regression is still caught, without asserting a recovery ratio the current code
+    // cannot meet.
+    let today_corrected_rmse = 0.9756;
+    assert!(
+        corrected < 1.05 * today_corrected_rmse,
+        "corrected RMSE regressed past today's known-defect ceiling: \
+         corrected {corrected:.4} dB vs ceiling {:.4} dB (1.05x the {today_corrected_rmse:.4} dB \
+         measured on 2026-07-29 — see \
+         docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md)",
+        1.05 * today_corrected_rmse
     );
 }
