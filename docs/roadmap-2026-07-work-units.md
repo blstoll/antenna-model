@@ -78,6 +78,14 @@ G1 ─┬─ G2 ── G3
     │      (edge-collapse; tune-parameters    │
     │      broken) + 1 flake fix (D11 log-    │
     │      capture tests)                     │
+    │  D15 DONE 2026-07-30 (branch fix/       │
+    │      correction-surface-endpoint):      │
+    │      closes D12's edge-collapse finding │
+    │      — bspline_basis at a domain max.   │
+    │      The 4D interpolator was never      │
+    │      defective; artifacts were fitted   │
+    │      wrong, not served wrong.           │
+    │      tune-parameters still open.        │
     │      D13, D14 open (filed 2026-07-29:   │
     │      real-data boresight + NASA-        │
     │      anchored full-mode artifacts;      │
