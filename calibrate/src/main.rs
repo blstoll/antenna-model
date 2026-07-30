@@ -21,10 +21,8 @@ use calibrate::{
     tune_parameters,
     validate_calibration,
     AntennaClassRegistry,
-    AntennaConfiguration,
     ArtifactMetadata,
     BoresightMeasurements,
-    CalibrationArtifact,
     CorrectionSurfaceParams,
     DesignSpecs,
     MeasurementPoint,
@@ -521,13 +519,6 @@ async fn run_calibration(args: Args) -> Result<()> {
         info!("  ✓ Configuration ready with default parameters");
     }
 
-    // Create antenna configuration
-    let antenna_config = AntennaConfiguration::new(
-        args.antenna_id.clone(),
-        args.antenna_name.clone(),
-        class.class_id.clone(),
-    );
-
     // Step 4: Compute model predictions
     info!("Step 4/6: Computing model predictions...");
     let model_predictions =
@@ -652,30 +643,24 @@ async fn run_calibration(args: Args) -> Result<()> {
     // Generate and save calibration artifact
     info!("Generating calibration artifact...");
 
-    let artifact = CalibrationArtifact {
-        antenna_config,
-        correction_surface: correction_surface.clone(),
-        validation_report,
-        metadata: ArtifactMetadata {
-            created_at: chrono::Utc::now().to_rfc3339(),
-            measurement_source: measurements.source.clone(),
-            parameters_tuned: args.tune_parameters,
-            num_measurement_points: measurements.points.len(),
-            tool_version: env!("CARGO_PKG_VERSION").to_string(),
-            notes: Some(format!(
-                "Calibrated with class: {}, R²={:.6}",
-                class.class_id, correction_surface.fit_stats.r_squared
-            )),
-            frequency_range: quality_report.frequency_range,
-            angular_range: quality_report.e_cone_range,
-        },
+    let artifact_metadata = ArtifactMetadata {
+        created_at: chrono::Utc::now().to_rfc3339(),
+        measurement_source: measurements.source.clone(),
+        parameters_tuned: args.tune_parameters,
+        num_measurement_points: measurements.points.len(),
+        tool_version: env!("CARGO_PKG_VERSION").to_string(),
+        notes: Some(format!(
+            "Calibrated with class: {}, R²={:.6}",
+            class.class_id, correction_surface.fit_stats.r_squared
+        )),
+        frequency_range: quality_report.frequency_range,
+        angular_range: quality_report.e_cone_range,
     };
 
     // Build a service-loadable AntennaCalibration (4D B-spline correction
-    // surface) and write it as the binary artifact. The legacy
-    // `CalibrationArtifact` above is retained only to drive the optional
-    // `--metadata`/`--report` JSON sidecars below (it is no longer the on-disk
-    // binary format, which the service cannot load).
+    // surface) and write it as the binary artifact. `artifact_metadata` above
+    // and `validation_report` only drive the optional `--metadata`/`--report`
+    // JSON sidecars below; neither is part of the on-disk binary format.
     let focal_length_m = class.geometry.diameter_m * class.geometry.f_over_d;
     let surface_rms_mm = tunable_params
         .surface_rms_mm
@@ -708,7 +693,7 @@ async fn run_calibration(args: Args) -> Result<()> {
         &export_physical,
         &correction_surface,
         &measurements.points,
-        artifact.validation_report.corrected_rmse,
+        validation_report.corrected_rmse,
         correction_surface.fit_stats.r_squared,
         model_only_rmse,
         args.tune_parameters,
@@ -732,14 +717,14 @@ async fn run_calibration(args: Args) -> Result<()> {
     // Export metadata JSON (optional)
     if let Some(metadata_path) = args.metadata {
         info!("Exporting metadata to JSON...");
-        export_metadata_json(&artifact, &metadata_path)?;
+        export_metadata_json(&artifact_metadata, &metadata_path)?;
         info!("  ✓ Metadata saved: {}", metadata_path.display());
     }
 
     // Export validation report (optional)
     if let Some(report_path) = args.report {
         info!("Exporting validation report to JSON...");
-        export_validation_json(&artifact, &report_path)?;
+        export_validation_json(&validation_report, &report_path)?;
         info!("  ✓ Validation report saved: {}", report_path.display());
     }
 
@@ -756,15 +741,15 @@ async fn run_calibration(args: Args) -> Result<()> {
     info!("  Model-only RMSE: {:.4} dB", model_only_rmse);
     info!(
         "  Corrected RMSE: {:.4} dB",
-        artifact.validation_report.corrected_rmse
+        validation_report.corrected_rmse
     );
     info!(
         "  Improvement: {:.1}%",
-        artifact.validation_report.rmse_improvement_percent
+        validation_report.rmse_improvement_percent
     );
     info!(
         "  Main lobe target met: {}",
-        if artifact.validation_report.main_lobe_meets_target {
+        if validation_report.main_lobe_meets_target {
             "yes"
         } else {
             "no"
@@ -772,7 +757,7 @@ async fn run_calibration(args: Args) -> Result<()> {
     );
     info!(
         "  First sidelobe target met: {}",
-        if artifact.validation_report.first_sidelobe_meets_target {
+        if validation_report.first_sidelobe_meets_target {
             "yes"
         } else {
             "no"

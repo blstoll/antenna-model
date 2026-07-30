@@ -63,6 +63,12 @@ G1 ─┬─ G2 ── G3
     │      prose sibling, landed before C8   │
     │      so it guards C8's own rewrites)   │
     ├─ D1 ─ D2 ─ D3;  D6                     │
+    │  D1 DONE 2026-07-29 (serializer.rs →    │
+    │      sidecar.rs); filed D10 + D11, and  │
+    │      handed findings to D2 and D6       │
+    │  D10, D11 (no deps) — correctness-class,│
+    │      both BEFORE calibrate CLI          │
+    │      integration-test work              │
     └─ (Phases 1–3 done) ─ D4 ─ D7
 Superseded by C8 (do not implement): S7, C5, C6
 Phase 5: F1..F9 (F8 done) gated on register rows (P3, P5/F4, F5, D9, F9); P1 + C8 DECIDED 2026-07-08;
@@ -2229,6 +2235,86 @@ the right-hand column:
 
 ### D1 — Retire the deprecated legacy serializer in calibrate — Effort: S
 
+**✅ LANDED 2026-07-29** (branch `refactor/d1-retire-legacy-serializer`).
+
+**The unit's premise was half-stale on arrival, and the surviving half was the real work.**
+The dangerous part — `save_artifact`/`load_artifact`, the binary writer producing artifacts
+the service could not load — had already been deleted by the 2026-07-18 bincode → postcard
+migration, which shrank the module from 612 lines to 288 and rewrote its header. The answer
+to the gating question ("do the sidecar paths actually use this module?") is **yes**:
+`main.rs` called `export_metadata_json`/`export_validation_json` on every `--metadata` /
+`--report` run.
+
+What was left was the `CalibrationArtifact` wrapper the binary writer had left behind. It was
+**dead weight in the shape of a live type**: neither exporter read its `antenna_config` or
+`correction_surface` fields (`export_metadata_json` serializes `.metadata`,
+`export_validation_json` serializes `.validation_report`), yet building it forced
+`correction_surface.clone()` — a full 3D B-spline cloned per run purely to be dropped — and
+kept the name "calibration artifact" attached to a thing that is not the artifact. Its
+constructor `CalibrationArtifact::new` was already unreachable from production (main.rs built
+the struct literally), so `new`, `summary`, and the two private range-extractor helpers were
+dead too, alive only via the module's own test.
+
+As landed:
+
+- `calibrate/src/serializer.rs` → **`calibrate/src/sidecar.rs`** (`git mv`). The "serializer"
+  name outlived the serializer; the module is now only the two JSON sidecar exporters plus
+  `ArtifactMetadata`. The module header records the two-stage history so the next reader does
+  not re-derive it.
+- **Deleted:** `CalibrationArtifact`, `CalibrationArtifact::new`, `summary()`,
+  `extract_frequency_range`, `extract_angular_range`. Kept: `ArtifactMetadata`,
+  `SerializationError`, both exporters (now taking `&ArtifactMetadata` / `&ValidationReport`
+  directly instead of a wrapper), sharing one private `write_json` helper.
+- `main.rs` builds `ArtifactMetadata` directly; the `correction_surface.clone()` and the
+  now-unused `AntennaConfiguration::new` call are gone (no information lost — the metadata
+  literal already sourced `parameters_tuned` from `args`, not from the config).
+- **Tests:** the deleted `test_artifact_summary` is replaced by two exporter round-trip tests
+  (write → read → parse) — the exporters had no direct coverage before, only coverage
+  through a type that is now gone.
+- Docs re-trued where they named the renamed file: `CLAUDE.md` (workspace map),
+  `docs/architecture.md`, `docs/implementation-plan.md`.
+  `docs/calibration-workflow-guide.md` was checked and needed nothing — it documents the
+  `--metadata`/`--report` *flags*, never the module. Historical records
+  (`docs/review-findings-2026-06-10.md`, `docs/superpowers/plans/*`) keep the old name by
+  design.
+- `./scripts/check.sh` green (fmt, clippy `-D warnings`, full workspace tests, audit).
+
+**Four findings filed, none fixed here** (standing rule 5 — none is D1's charter). Findings 2
+and 4 came out of the failed end-to-end attempt described below; both were confirmed against
+the code, and both are real defects rather than test-harness artifacts:
+
+1. **Boresight mode writes a headerless artifact.** `main.rs:342-347` writes a bare
+   `postcard::to_allocvec` with no ANTC magic/version/CRC, while full mode uses
+   `write_antc_artifact`. The loader accepts both (`loader.rs:112`, "legacy headerless"), so
+   this is not a break — but it means boresight artifacts carry no version stamp and no
+   integrity check. → **inherited by D2** (version axes); recorded in that unit.
+2. **Cross-validation validates a different surface than the one shipped.** → **new unit D10.**
+3. **`calibrate/src/mod.rs` is orphaned.** A `mod.rs` beside `lib.rs` at a crate src root is
+   never compiled; this one is a 16-line stale early draft of `lib.rs` declaring only
+   `antenna_config` and `parser`. Nothing to salvage — confirmed 2026-07-29. → **D6** (repo
+   hygiene); delete there or on the next touch of the crate.
+4. **The parser silently discards every measurement below −20 dB/K.** → **new unit D11.**
+   This is the root cause of the residual collapse below, and it reaches real calibration
+   data, not just synthetic grids.
+
+**The end-to-end attempt, and what it exposed.** Full-mode calibration could not be driven to
+completion on synthetic data. The point count reaching the fitter collapses to ~134 regardless
+of input size (240 → 154, 576 → 138, 1920 → 134), converging on a fixed near-boresight
+population rather than scaling with the input. Root cause is D11: `MeasurementPoint::validate`
+rejects any row with `g_over_t_db < -20.0` and `parse_csv_content` drops rejected rows with
+only an `eprintln!`, so a denser or wider grid loses almost everything outside the main lobe.
+The two defects then stack — with ~134 survivors the validator's fold refit trains on ~107
+points, D10's unrequested nested CV trains on ~86, and the fitter's minimum of
+`(spline_order+1)³ = 125` (`correction_surface.rs:1010`) trips.
+
+Consequence for this unit: the `--metadata`/`--report` write is the last step of that pipeline,
+so the CLI wiring changed here is covered by the new unit tests and the compiler, **not** by an
+end-to-end run. No CLI-level integration test exists for `calibrate`
+(`calibrate/tests/integration_test.rs` covers config loading only); a plan for that gap is
+being written separately (2026-07-29) and is not tracked as a unit here.
+
+---
+
 - **Entrance / read first:** `calibrate/src/serializer.rs` — 612 lines, header honestly
   marked DEPRECATED (`:3-7`): it serializes the legacy `CalibrationArtifact` (3D surface)
   which the service **cannot** load (wrong struct + serde-bincode mode), and says it is
@@ -2253,6 +2339,23 @@ the right-hand column:
   `calibration-workflow-guide.md` (recommend: header u32 = container/binary layout version;
   `format_version` = semantic schema version); the loader validates both with clear errors
   on mismatch; one test with a wrong-version fixture. **Do not bump either version.**
+  Plus the inherited finding below: boresight-mode output carries an ANTC header, and a
+  round-trip test covers **both** producers.
+- **Inherited 2026-07-29 from D1 (finding 1) — boresight mode writes a headerless artifact.**
+  `calibrate/src/main.rs:342-347` writes a bare `postcard::to_allocvec(&calibration)` with no
+  ANTC magic, version, CRC32, or length, while full mode goes through
+  `main.rs::write_antc_artifact`. The service loads both — `data/loader.rs:56` takes the ANTC
+  branch only when the magic matches and otherwise falls through to the legacy headerless
+  path (`loader.rs:112`) — so nothing is broken today. What is missing is precisely what this
+  unit is about: a boresight artifact has **no version stamp** (so the loader's
+  `ANTC_SUPPORTED_VERSION` check at `loader.rs:81` cannot fire on it, and a future format
+  change would silently mis-decode it instead of being rejected loudly) and **no CRC** (so
+  truncation or corruption surfaces as a postcard decode error at best, wrong numbers at
+  worst). Both boresight and full mode should emit the same framing; the headerless *reader*
+  stays for backward compatibility, but nothing this repo produces should still rely on it.
+  Note the second version axis rides along here too: `CalibrationMetadata.format_version` is
+  inside the payload, so a headerless artifact is not un-versioned in the semantic sense —
+  only in the container sense. Say which axis is which, as the exit criteria above require.
 - **Note (2026-07-28, from C12 / C8 stage 4):** `CalibrationMetadata.rmse_db`/`r_squared`
   stay plain `f64` with a NaN sentinel by decision, not oversight — converting them to
   `Option<f64>` would change postcard's positional wire encoding, which is an ANTC
@@ -2329,7 +2432,21 @@ the right-hand column:
   the pattern gitignored; `aws-sdk-s3` + `aws-config` in `calibrate` (used in exactly one
   file, `parser.rs`, for optional S3 CSV input) moved behind an off-by-default cargo
   feature (e.g. `s3-input`) with a clear CLI error when invoked without it; CI/clippy stays
-  green for both feature states.
+  green for both feature states; `calibrate/src/mod.rs` deleted (see below).
+- **Inherited 2026-07-29 from D1 (finding 3) — `calibrate/src/mod.rs` is orphaned.** A
+  `mod.rs` sitting beside `lib.rs` at a crate's `src/` root is never part of any module tree,
+  so the compiler never reads it and no lint will ever flag it. This one is a 16-line stale
+  early draft of `lib.rs`: it declares only `antenna_config` and `parser` and re-exports
+  their types. Checked 2026-07-29 — **nothing to salvage**, it is a strict subset of
+  `lib.rs`. Safe to delete here or on the next touch of the crate, whichever comes first.
+- **Priority note (2026-07-29):** this unit's original headline rationale — "the primary
+  lever on the advisory count", filed 2026-07-09 against 17 vulnerabilities + 9 warnings from
+  the AWS subtree — is **stale**. `calibrate/Cargo.toml:11-18` already disables
+  `aws-config`/`aws-sdk-s3` default features to drop the vulnerable rustls 0.21 connector,
+  and upstream bumps closed the rest: `cargo audit` on `main` now reports **one** advisory
+  (`RUSTSEC-2024-0436`, `paste` unmaintained, already allowlisted). Gating the S3 subtree is
+  still worth doing for CLI build weight and dependency surface, but this is hygiene now, not
+  a security lever — priority drops back to "cheap, fold in anywhere."
 - **Follow-up flagged 2026-07-09 (Phase 0 / G1):** the first CI run's `cargo audit` job
   (non-blocking, `continue-on-error`) reported **17 vulnerabilities + 9 warnings**. The
   large majority come from the AWS SDK subtree pulled in by `aws-sdk-s3` + `aws-config`:
@@ -2390,6 +2507,100 @@ the right-hand column:
   wire-format break and belongs with D2's version-axes work, not this unit or the contract
   pass. Recorded here because D9 owns the artifact-shipping story this sentinel is part of.
 - **Depends on:** G2, S5 (readiness semantics for the zero-artifact state).
+
+### D10 — Cross-validation validates a different surface than the one shipped — Effort: S
+
+**Filed 2026-07-29** out of D1's finding 2. **Correctness-class, not hygiene** — it sits in
+Phase 4 by crate, not by severity. Two defects in one plumbing mistake.
+
+**Defect (a): the fold refit uses default fitting parameters.** `calibrate/src/main.rs:546-557`
+builds the `CorrectionSurfaceParams` the shipped artifact is actually fitted with — spline
+order 4, **4/6/8** knots (frequency/E-cone/E-clock), regularization **1e-3**. Ten lines later,
+`main.rs:585` hands the validator `correction_params: CorrectionSurfaceParams::default()`
+instead, and the per-fold refit at `calibrate/src/validator.rs:736-740` fits with *that*:
+**8/8/12** knots, regularization **1e-6** (`correction_surface.rs:113-128`). So every
+cross-validation fold fits roughly **double the knots at 1000× weaker regularization** — a
+markedly more flexible surface, and the direction that matters: the CV number reported for the
+artifact is measured on a model family more prone to overfit than the one being blessed. The
+`num_folds` field is threaded correctly (`main.rs:579`); only `correction_params` is dropped.
+
+**Defect (b): nested cross-validation runs unrequested.** Because the default carries
+`cross_validation_folds: 5`, each fold's refit starts its *own* 5-fold CV inside
+`fit_correction_surface` (`correction_surface.rs:351`). This happens even when the user did not
+ask for cross-validation at all — `main.rs:553` sets `cross_validation_folds: 0` unless
+`--validate` — and `--cv-folds` never reaches it. Visible as an unexplained "Running 5-fold
+cross-validation…" on a run that requested neither, and it is what shrinks each fold's training
+set far enough to trip the fitter's `(spline_order+1)³ = 125` minimum on data that would
+otherwise fit (see D11 for the other half of that stack).
+
+- **Fix:** (1) `main.rs` passes the same `surface_params` into `ValidationConfig` rather than
+  `::default()`; (2) `validate_calibration` **unconditionally** forces
+  `cross_validation_folds = 0` on its internal refits — nested CV inside a CV fold is never
+  wanted, so this must not depend on the caller getting (1) right.
+- **Exit criteria:** the fold refit provably uses the caller's knot counts and regularization
+  (a test that passes distinguishable params and asserts the refit surface's shape/knot
+  vectors match them); no nested CV under any caller configuration (a test that sets
+  `cross_validation_folds: 5` on the outer params and asserts the inner fit does not recurse);
+  `--cv-folds N` observably changes the fold count in the report. Expect the reported CV RMSE
+  to **move** — it was measuring the wrong model, so a changed number is the fix working, not
+  a regression. Record the before/after on a fixture in the commit message.
+- **Gotchas:** do not "fix" this by changing `CorrectionSurfaceParams::default()` — the
+  default is legitimate for other callers; the bug is that `main.rs` does not pass its own
+  params. Do not touch the fitting math.
+- **Sequencing:** **before** any `calibrate` CLI integration-test work — it is one of the two
+  defects that made an end-to-end run impossible, and integration tests written against the
+  current behavior would pin the bug.
+- **Depends on:** nothing. Independent of D1/D2.
+
+### D11 — The parser silently discards every measurement below −20 dB/K — Effort: S/M
+
+**Filed 2026-07-29** out of D1's finding 4. **Correctness-class**, and it reaches real
+calibration data, not just synthetic grids.
+
+**The defect.** `MeasurementPoint::validate` (`calibrate/src/parser.rs:53`) treats G/T as a
+physicality check and rejects any row outside `[-20, 70]` dB/K (`parser.rs:78-84`, comment:
+"G/T typically ranges from -10 to 60 dB/K for realistic antennas"). That is a **boresight**
+figure. Off the main lobe a real pattern falls tens of dB below peak, so legitimate sidelobe
+measurements sit far below −20 dB/K and are rejected as if malformed. `parse_csv_content`
+(`parser.rs:351-354`) then *drops* rejected rows, collects the reasons into an `errors` vector,
+and — provided at least one row survived — reports them with a single `eprintln!`
+(`parser.rs:371-376`) before returning success. Not `tracing`, so it bypasses the configured
+log level, the JSON formatter, and every log sink the project otherwise uses; a silent
+`eprintln!` is how this hid.
+
+**Evidence (2026-07-29, from D1's end-to-end attempt).** Point count reaching the fitter, by
+input grid size: 240 → 154, 576 → 138, 1920 → 134. It converges on the near-boresight
+population instead of scaling with input — the exact signature of a fixed-threshold cut on a
+pattern that falls off with angle. Widening or densifying the grid adds only rows that get
+discarded.
+
+**Why it matters beyond testing.** The project's stated accuracy requirement covers the **first
+sidelobe** explicitly (CLAUDE.md, "Accuracy Requirements"; `ValidationConfig.first_sidelobe_*`
+targets), and the correction surface exists to absorb residuals across the measured range. A
+gate that removes sidelobe rows before fitting means the surface is fitted, validated, and
+reported against main-lobe data only, while the report still prints first-sidelobe statistics
+computed from whatever handful of rows happened to clear −20. This silently narrows real
+calibrations, not just test fixtures.
+
+- **Fix:** keep `validate()` to **physicality only** — finite values, and the angle /
+  frequency / temperature bounds it already checks — and drop the G/T range test from it.
+  Move the G/T range check into `DataQualityReport` as a *warning* (out-of-typical-range
+  count, with min/max), where an operator can see it without losing the data. Route
+  dropped-row reporting through `tracing::warn!` with a **count** plus a bounded sample of
+  reasons, so a large drop is loud and does not scroll past as a wall of text.
+- **Exit criteria:** a fixture with realistic off-axis G/T values (−40 dB/K and below) parses
+  with **zero** rows dropped; a fixture with genuinely malformed rows still drops them and the
+  drop is reported through `tracing` at WARN with an accurate count; the quality report
+  surfaces out-of-typical-range points as a warning rather than silently discarding them; no
+  `eprintln!` remains in the parse path.
+- **Gotchas:** check `is_main_lobe`/`DataQualityReport` and the validator's main-lobe and
+  first-sidelobe partitioning after this lands — they will start seeing the sidelobe
+  population for the first time, and their point counts and reported statistics will move.
+  That is the defect being fixed, not a regression; capture before/after on a fixture. **Do
+  not** adjust any accuracy target to keep numbers looking the same.
+- **Sequencing:** before CLI integration-test work, alongside D10 — together they are what
+  made an end-to-end run impossible.
+- **Depends on:** nothing.
 
 ---
 
