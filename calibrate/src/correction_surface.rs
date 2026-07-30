@@ -407,12 +407,30 @@ pub fn fit_correction_surface(
 /// Value of B_{i,k}(t)
 fn bspline_basis(i: usize, k: usize, t: f64, knots: &[f64]) -> f64 {
     if k == 1 {
-        // Base case: characteristic function
+        // Base case: characteristic function of the half-open span [knots[i], knots[i+1]).
         if i < knots.len() - 1 && t >= knots[i] && t < knots[i + 1] {
             return 1.0;
         }
-        // Special case for right endpoint
-        if i == knots.len() - 2 && t == knots[i + 1] {
+        // The domain maximum needs the last non-degenerate span to be closed on the
+        // right, or no basis function is non-zero there at all.
+        //
+        // This is not cosmetic. `accumulate_normal_equations` evaluates the basis at
+        // every measurement, so before this a point sitting exactly on an axis maximum
+        // contributed an all-zero row: the last coefficient in that axis got no data
+        // support and was driven to ~0 by the ridge term, corrupting the fit across the
+        // entire top knot span rather than just at the endpoint. On a regular grid the
+        // maximum always has data on it. See
+        // docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md.
+        //
+        // The previous attempt at this keyed on `i == knots.len() - 2`, which for a
+        // clamped knot vector is a padding index outside the valid basis range
+        // `0..knots.len() - order`, so it never fired for a basis function that is
+        // actually evaluated.
+        if i + 1 < knots.len()
+            && t == knots[knots.len() - 1]
+            && knots[i + 1] == t
+            && knots[i] < knots[i + 1]
+        {
             return 1.0;
         }
         return 0.0;
@@ -1258,6 +1276,165 @@ mod tests {
             surface.fit_stats.cross_validation_rmse.is_some(),
             "the requested cross-validation should still have run"
         );
+    }
+
+    // ========================================================================
+    // Endpoint evaluation — see
+    // docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md
+    // ========================================================================
+
+    /// Clamped knot vector on `[lo, hi]` with `n_internal` evenly spaced internal knots.
+    fn clamped_knots(lo: f64, hi: f64, n_internal: usize, order: usize) -> Vec<f64> {
+        let mut k = vec![lo; order];
+        for i in 1..=n_internal {
+            k.push(lo + (hi - lo) * i as f64 / (n_internal + 1) as f64);
+        }
+        k.extend(std::iter::repeat_n(hi, order));
+        k
+    }
+
+    /// A surface whose coefficients are all 1.0. A correct B-spline basis is a partition
+    /// of unity, so this must evaluate to exactly 1.0 everywhere in its domain — including
+    /// on the boundary.
+    fn unit_surface(order: usize) -> CorrectionSurface {
+        let knots_frequency = clamped_knots(400.0, 700.0, 2, order);
+        let knots_econe = clamped_knots(0.0, 24.0, 4, order);
+        let knots_eclock = clamped_knots(0.0, 315.0, 6, order);
+        let shape = [
+            knots_frequency.len() - order,
+            knots_econe.len() - order,
+            knots_eclock.len() - order,
+        ];
+        CorrectionSurface {
+            coefficients: vec![1.0; shape[0] * shape[1] * shape[2]],
+            shape,
+            knots_frequency,
+            knots_econe,
+            knots_eclock,
+            spline_order: order,
+            fit_stats: FitStatistics {
+                num_points: 0,
+                rmse_db: 0.0,
+                max_residual_db: 0.0,
+                r_squared: 0.0,
+                cross_validation_rmse: None,
+                improvement_percent: 0.0,
+            },
+        }
+    }
+
+    /// The regression this fixes: the basis was a partition of unity everywhere *except*
+    /// at the exact maximum of an axis, where every basis function evaluated to zero.
+    /// Measured before the fix: 1.000000000 at t=0.9999, 0.000000000 at t=1.0.
+    #[test]
+    fn basis_is_a_partition_of_unity_on_every_face_and_corner() {
+        let s = unit_surface(4);
+        let (f_lo, f_hi) = (400.0, 700.0);
+        let (c_lo, c_hi) = (0.0, 24.0);
+        let (k_lo, k_hi) = (0.0, 315.0);
+        let f_mid = 0.5 * (f_lo + f_hi);
+        let c_mid = 0.5 * (c_lo + c_hi);
+        let k_mid = 0.5 * (k_lo + k_hi);
+
+        // Interior, all six faces, and all eight corners.
+        let mut probes = vec![
+            ("interior", f_mid, c_mid, k_mid),
+            ("freq min face", f_lo, c_mid, k_mid),
+            ("freq MAX face", f_hi, c_mid, k_mid),
+            ("cone min face", f_mid, c_lo, k_mid),
+            ("cone MAX face", f_mid, c_hi, k_mid),
+            ("clock min face", f_mid, c_mid, k_lo),
+            ("clock MAX face", f_mid, c_mid, k_hi),
+        ];
+        for &f in &[f_lo, f_hi] {
+            for &c in &[c_lo, c_hi] {
+                for &k in &[k_lo, k_hi] {
+                    probes.push(("corner", f, c, k));
+                }
+            }
+        }
+
+        for (label, f, c, k) in probes {
+            let got = s.evaluate(f, c, k).expect("evaluate");
+            assert!(
+                (got - 1.0).abs() < 1e-12,
+                "{label} ({f}, {c}, {k}): basis summed to {got:.12}, not 1.0 — \
+                 the B-spline basis is not a partition of unity there"
+            );
+        }
+    }
+
+    /// Approaching the maximum must not be discontinuous with reaching it.
+    #[test]
+    fn basis_is_continuous_up_to_the_maximum() {
+        let s = unit_surface(4);
+        for &f in &[699.0_f64, 699.9, 699.99, 699.999, 699.999_999, 700.0] {
+            let got = s.evaluate(f, 12.0, 180.0).expect("evaluate");
+            assert!(
+                (got - 1.0).abs() < 1e-12,
+                "at frequency {f} the basis summed to {got:.12}, not 1.0"
+            );
+        }
+    }
+
+    /// The consequence that actually mattered: because the fitter uses the same basis, a
+    /// measurement sitting exactly on an axis maximum contributed an all-zero row to the
+    /// normal equations, so the last coefficient got no data support and collapsed to ~0
+    /// under regularization — corrupting the whole top knot span, not just the endpoint.
+    /// A basis-only test would pass while the fit stayed broken, so assert on a FIT.
+    #[test]
+    fn a_fitted_constant_is_recovered_at_the_domain_maximum() {
+        // Deliberately OVERdetermined: 7^3 = 343 points against
+        // (2+4)^3 = 216 coefficients. The shipped 4/6/8 configuration is
+        // underdetermined (288 points, 960 coefficients), which degrades the fit for a
+        // separate, still-open reason — this test must isolate the endpoint behaviour,
+        // so it must not also be starved of data.
+        let freqs: Vec<f64> = (0..7).map(|i| 400.0 + 50.0 * i as f64).collect();
+        let cones: Vec<f64> = (0..7).map(|i| 4.0 * i as f64).collect();
+        let clocks: Vec<f64> = (0..7).map(|i| 52.5 * i as f64).collect();
+
+        let mut measurements = Vec::new();
+        let mut predictions = Vec::new();
+        for &f in &freqs {
+            for &c in &cones {
+                for &k in &clocks {
+                    // Residual is a constant 1.5 dB, which a B-spline represents exactly.
+                    measurements.push(MeasurementPoint::new(k, c, f, 1.5, 100.0));
+                    predictions.push(0.0);
+                }
+            }
+        }
+        assert_eq!(measurements.len(), 343);
+
+        let params = CorrectionSurfaceParams {
+            spline_order: 4,
+            num_knots_frequency: 2,
+            num_knots_econe: 2,
+            num_knots_eclock: 2,
+            regularization: 1e-9,
+            adaptive_knots: false,
+            cross_validation_folds: 0,
+            min_knot_spacing_frequency: 50.0,
+            min_knot_spacing_econe: 2.0,
+            min_knot_spacing_eclock: 5.0,
+        };
+        let surface = fit_correction_surface(&measurements, &predictions, &params)
+            .expect("fitting a constant must succeed");
+
+        for (label, f, c, k) in [
+            ("interior", 550.0, 12.0, 180.0),
+            ("frequency at MAX", 700.0, 12.0, 180.0),
+            ("frequency just under MAX", 699.99, 12.0, 180.0),
+            ("cone at MAX", 550.0, 24.0, 180.0),
+            ("clock at MAX", 550.0, 12.0, 315.0),
+            ("all three at MAX", 700.0, 24.0, 315.0),
+        ] {
+            let got = surface.evaluate(f, c, k).expect("evaluate");
+            assert!(
+                (got - 1.5).abs() < 1e-3,
+                "{label}: fitted constant recovered as {got:.6}, expected 1.5"
+            );
+        }
     }
 }
 
