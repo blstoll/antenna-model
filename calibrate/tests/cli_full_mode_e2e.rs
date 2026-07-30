@@ -419,3 +419,123 @@ fn cli_full_mode_correction_beats_the_uncorrected_model() {
          docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md"
     );
 }
+
+// ============================================================================
+// Known-answer recovery and cross-validation (roadmap D12-Task-4)
+// ============================================================================
+
+/// Tolerance on bias recovery, in dB.
+///
+/// The fitted surface absorbs the injected bias PLUS the residual left by calibrating a
+/// nominal 2.0 mm surface RMS against data generated at 2.6 mm. That second component
+/// is small everywhere but not uniform: deep in the grid (probes 2–4 below) recovery is
+/// close to exact (measured 0.09–0.17 dB), while the probe nearest the main lobe
+/// (f=450, cone=3, clock=30 — still comfortably interior in all three axes) sits in a
+/// region where the fit is measurably looser, at 0.5928 dB, reproduced bit-for-bit
+/// across debug and release builds and across repeat runs. 0.35 dB (the estimate at
+/// planning time) undershot that. 0.65 dB is set with headroom above the measured
+/// 0.5928 dB worst case — enough to absorb run-to-run libm noise without flaking — while
+/// staying far below the injected bias's own 0.2–2.3 dB range, so a surface that fitted
+/// nothing would still fail this test.
+const BIAS_RECOVERY_TOLERANCE_DB: f64 = 0.65;
+
+#[test]
+fn cli_full_mode_recovers_the_injected_bias() {
+    let run = run_calibrate(&[]);
+    let calibration = antenna_model::data::loader::load_calibration_artifact(&run.artifact)
+        .expect("load artifact");
+    let surface = calibration
+        .correction_surface
+        .as_ref()
+        .expect("full mode must ship a correction surface");
+
+    // Interior probe points only — off-grid but comfortably inside the fitted domain in
+    // every axis. The topmost knot span of each axis is excluded deliberately: the
+    // correction collapses to ~0 there (see
+    // docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md), which is a
+    // filed defect, not this test's subject.
+    let probes = [
+        (450.0_f64, 3.0_f64, 30.0_f64),
+        (550.0, 7.0, 120.0),
+        (620.0, 14.0, 200.0),
+        (500.0, 10.0, 260.0),
+    ];
+
+    let mut worst = 0.0_f64;
+    for (frequency_mhz, e_cone_deg, e_clock_deg) in probes {
+        // Parameters are named azimuth/elevation but the 3D->4D bridge maps
+        // clock -> azimuth, cone -> elevation (artifact_export.rs:482). Clock first.
+        let got = antenna_model::model::evaluate_correction(
+            surface,
+            e_clock_deg,
+            e_cone_deg,
+            frequency_mhz,
+            FIXTURE_TEMPERATURE_K,
+        )
+        .expect("evaluate the 4D correction surface")
+        .correction_db;
+
+        let expected = injected_bias_db(frequency_mhz, e_cone_deg, e_clock_deg);
+        let err = (got - expected).abs();
+        worst = worst.max(err);
+
+        println!(
+            "probe f={frequency_mhz:6.1} cone={e_cone_deg:5.1} clock={e_clock_deg:6.1} \
+             -> correction {got:+.4} dB, injected {expected:+.4} dB, err {err:.4} dB"
+        );
+    }
+
+    assert!(
+        worst <= BIAS_RECOVERY_TOLERANCE_DB,
+        "the correction surface should recover the injected bias within \
+         {BIAS_RECOVERY_TOLERANCE_DB} dB, worst error was {worst:.4} dB"
+    );
+}
+
+/// D10's standing pin at CLI level: `--cv-folds N` must reach the validator.
+#[test]
+fn cli_cv_folds_controls_the_reported_fold_count() {
+    for folds in [3usize, 6] {
+        let n = folds.to_string();
+        let run = run_calibrate(&["--validate", "--cv-folds", &n]);
+        let report = run.report_json();
+
+        let reported = report["cross_validation"]["num_folds"]
+            .as_u64()
+            .unwrap_or_else(|| {
+                panic!(
+                    "--validate --cv-folds {folds} should produce a cross-validation \
+                     section; report was:\n{report:#}"
+                )
+            });
+        assert_eq!(reported as usize, folds);
+
+        let values = report["cross_validation"]["fold_rmse_values"]
+            .as_array()
+            .expect("fold_rmse_values");
+        assert_eq!(values.len(), folds, "one RMSE per fold");
+    }
+}
+
+/// Task 1's pin: without `--validate`, step 6 must not cross-validate — but the rest of
+/// the validation report must still be there.
+#[test]
+fn cli_without_validate_does_not_cross_validate() {
+    let run = run_calibrate(&[]);
+    let report = run.report_json();
+
+    assert!(
+        report["cross_validation"].is_null(),
+        "cross-validation ran without --validate; report was:\n{report:#}"
+    );
+    assert!(
+        !run.output().contains("cross-validation"),
+        "the binary announced cross-validation on a run that did not request it:\n{}",
+        run.output()
+    );
+
+    // The rest of step 6 still runs.
+    assert!(report["corrected_rmse"].as_f64().is_some());
+    assert!(report["main_lobe_max_error"].as_f64().is_some());
+    assert!(report["first_sidelobe_max_error"].as_f64().is_some());
+}
