@@ -157,7 +157,12 @@ pub fn generate_rows() -> Vec<FixtureRow> {
                     FIXTURE_TEMPERATURE_K,
                     &params,
                 )
-                .expect("fixture G/T evaluation");
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "fixture G/T evaluation failed at f={frequency_mhz} MHz \
+                         cone={e_cone_deg} deg clock={e_clock_deg} deg: {e}"
+                    )
+                });
 
                 rows.push(FixtureRow {
                     e_clock_deg,
