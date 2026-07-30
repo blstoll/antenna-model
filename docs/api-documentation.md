@@ -68,7 +68,8 @@ docker run -p 8080:8080 \
 
 ### Heatmap Generation
 
-- `POST /api/v1/heatmap` - Generate 2D loss heatmap across antenna field of view
+- `POST /api/v1/heatmap` - Generate 2D loss heatmap across antenna field of view.
+  `grid_config.grid_type` accepts `rectangular` only.
 - `POST /api/v1/h3-heatmap` - Per-cell link budget over an H3 hexagonal grid on the
   Earth's surface (gain, path loss, optional G/T)
 
@@ -238,6 +239,15 @@ Each antenna can have multiple feeds with independent calibrations. Use composit
 `POST /api/v1/h3-heatmap` returns a per-cell link budget over an
 [H3](https://h3geo.org) hexagonal grid laid on the Earth's surface — gain, free-space
 path loss, total path loss, and optionally G/T for every cell.
+
+**Why two heatmap endpoints.** `POST /api/v1/heatmap` returns a *loss surface* over a
+rectangular azimuth/elevation grid in the antenna's own frame. `POST /api/v1/h3-heatmap`
+returns a per-cell *link budget* — gain, free-space path loss, total path loss and G/T —
+over an H3 hexagonal grid laid on the Earth's surface, centred on an Earth location. They
+differ in output, in reference frame and in what the caller must supply, not merely in grid
+shape, so they stay separate endpoints. `/heatmap` carried an `h3` grid type until 2026-07;
+it was a not-implemented stub and was removed (roadmap C8 stage 4). Merging the two is
+tracked as roadmap feature **F5**.
 
 **Grid placement and size.** The grid is centred on the H3 cell containing
 `feed_pointing_location` — the Earth location the beam is *aimed at*, not the feed's physical
@@ -422,10 +432,8 @@ response = requests.get("http://localhost:3000/api/v1/antennas")
 antennas = response.json()
 
 for antenna in antennas["antennas"]:
-    print(f"{antenna['antenna_id']}: {antenna['name']}")
-    print(f"  Feeds: {', '.join(antenna['feeds'])}")
-    if "calibration_status" in antenna:
-        print(f"  Status: {antenna['calibration_status']}")
+    print(f"{antenna['id']}: {antenna['name']} ({'enabled' if antenna['enabled'] else 'disabled'})")
+    print(f"  Feeds ({antenna['feed_count']}): {', '.join(antenna['feed_ids'])}")
 ```
 
 ### JavaScript Example: Heatmap Generation
@@ -467,6 +475,31 @@ All successful gain computation responses include:
 - **warnings**: Array of `{code, message}` objects — see [Warning codes](#warning-codes)
 - **metadata**: Computation metadata (timing, extrapolation flag)
 - **calibration_status**: Calibration status with accuracy estimates
+
+### No-value conventions: `null` vs. omitted
+
+The API uses two different, deliberately distinct ways to say a field has no value
+(roadmap unit C12, 2026-07-28):
+
+- **`null`** — the slot exists but carries no value for this response. `GET
+  /api/v1/antennas/{id}`'s `CalibrationInfo.rmse_db` and `r_squared` are **present and
+  `null`** for an uncalibrated (design-spec) antenna, never omitted: every antenna has a
+  calibration block, an uncalibrated one simply has no fit. This is the same convention
+  `GainResponse.gain_db` uses for a failed batch item (see the typed batch-item `error`
+  example above). Do not treat a `null` `rmse_db`/`r_squared` as "call again to fetch it" —
+  branch on the typed signals that carry the same information instead:
+  `calibration_status.status` (`"uncalibrated"`) or `calibration.num_measurements` (`0`).
+- **Omitted** — the field is structurally absent from the JSON object. Examples:
+  `PhysicalParametersInfo.mesh` is omitted for a solid (non-mesh) reflector,
+  `CalibrationStatusInfo.coverage` is omitted when no region has been measured, and
+  `ComputationMetadata.spillover_loss_db` is omitted on the calibrated path (the correction
+  surface absorbs spillover empirically, so there is nothing to report there).
+
+`null` says "this antenna has this kind of slot and it is empty"; omission says "this kind
+of information does not apply here at all." Do not infer one from the other, and do not add
+`skip_serializing_if` to a field that is declared `null` for a reason — that combination
+(declaring a field optional while a producer always constructs it) is exactly the defect
+C12 closed.
 
 Example response:
 
@@ -572,7 +605,6 @@ emission site, so a code cannot be introduced by a typo.
 | `validation_error` | 422 | The request parsed but is semantically invalid. |
 | `invalid_coordinate` | 422 | A position or coordinate value is out of range, or the positions are geometrically degenerate. |
 | `invalid_request_body` | 400 | The request body could not be read or parsed. |
-| `not_implemented` | 422 | A recognized but unimplemented option — currently only `/heatmap`'s H3 grid type. |
 | `payload_too_large` | 413 | The body exceeds `server.max_body_size_bytes`. |
 | `request_timeout` | 504 | The request exceeded `server.request_timeout_secs`. |
 | `computation_budget_exceeded` | 504 | One aperture integration exceeded `performance.integration_budget_ms`. |
@@ -865,7 +897,8 @@ pool once at startup.
 - **Quaternion**: Must be normalized (|q| ≈ 1.0, tolerance 0.01)
 - **Euler Angles**: |angle| < 360 degrees
 - **Batch Size**: Maximum 1000 evaluations
-- **Heatmap Grid**: Maximum 100,000 points
+- **Heatmap Grid**: Maximum 100,000 points; `grid_config.grid_type` accepts `rectangular`
+  only (the H3 hexagonal grid is served by the separate `/api/v1/h3-heatmap` endpoint)
 
 ### H3 Link Budget Request
 

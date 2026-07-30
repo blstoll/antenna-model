@@ -521,83 +521,30 @@ fn validate_quaternion_norm(
 
 /// Validate grid configuration for heatmap generation.
 fn validate_grid_config(grid_config: &GridConfig) -> ValidationResult<()> {
-    match grid_config {
-        GridConfig::Rectangular {
-            azimuth_range_deg,
-            elevation_range_deg,
-        } => {
-            validate_range_config(azimuth_range_deg, "azimuth_range_deg")?;
-            validate_range_config(elevation_range_deg, "elevation_range_deg")?;
+    let GridConfig::Rectangular {
+        azimuth_range_deg,
+        elevation_range_deg,
+    } = grid_config;
 
-            // Check total grid points
-            let total_points = azimuth_range_deg.num_points() * elevation_range_deg.num_points();
-            if total_points > MAX_HEATMAP_POINTS {
-                return Err(ValidationError::InvalidGrid {
-                    dimension: "rectangular".to_string(),
-                    reason: format!(
-                        "total grid points {} exceeds maximum {} ({}x{} grid)",
-                        total_points,
-                        MAX_HEATMAP_POINTS,
-                        azimuth_range_deg.num_points(),
-                        elevation_range_deg.num_points()
-                    ),
-                });
-            }
+    validate_range_config(azimuth_range_deg, "azimuth_range_deg")?;
+    validate_range_config(elevation_range_deg, "elevation_range_deg")?;
 
-            Ok(())
-        }
-        GridConfig::H3 {
-            h3_resolution,
-            center_azimuth_deg,
-            center_elevation_deg,
-            field_of_view_deg,
-        } => {
-            // Validate H3 resolution (0-15)
-            if *h3_resolution > 15 {
-                return Err(ValidationError::InvalidGrid {
-                    dimension: "h3_resolution".to_string(),
-                    reason: format!("H3 resolution {} exceeds maximum 15", h3_resolution),
-                });
-            }
-
-            // Validate center azimuth
-            if !center_azimuth_deg.is_finite() {
-                return Err(ValidationError::InvalidGrid {
-                    dimension: "center_azimuth_deg".to_string(),
-                    reason: format!("value is not finite: {}", center_azimuth_deg),
-                });
-            }
-
-            // Validate center elevation
-            if !center_elevation_deg.is_finite()
-                || *center_elevation_deg < -90.0
-                || *center_elevation_deg > 90.0
-            {
-                return Err(ValidationError::AngleOutOfRange {
-                    angle_type: "center_elevation".to_string(),
-                    value: *center_elevation_deg,
-                    min: -90.0,
-                    max: 90.0,
-                });
-            }
-
-            // Validate field of view
-            if !field_of_view_deg.is_finite()
-                || *field_of_view_deg <= 0.0
-                || *field_of_view_deg > 180.0
-            {
-                return Err(ValidationError::InvalidGrid {
-                    dimension: "field_of_view_deg".to_string(),
-                    reason: format!(
-                        "field of view {} must be in range (0, 180] degrees",
-                        field_of_view_deg
-                    ),
-                });
-            }
-
-            Ok(())
-        }
+    // Check total grid points
+    let total_points = azimuth_range_deg.num_points() * elevation_range_deg.num_points();
+    if total_points > MAX_HEATMAP_POINTS {
+        return Err(ValidationError::InvalidGrid {
+            dimension: "rectangular".to_string(),
+            reason: format!(
+                "total grid points {} exceeds maximum {} ({}x{} grid)",
+                total_points,
+                MAX_HEATMAP_POINTS,
+                azimuth_range_deg.num_points(),
+                elevation_range_deg.num_points()
+            ),
+        });
     }
+
+    Ok(())
 }
 
 /// Validate a range configuration.
@@ -876,59 +823,6 @@ mod tests {
         let err_msg = result.unwrap_err().to_string();
         // Error is caught at the individual range validation level
         assert!(err_msg.contains("too small") && err_msg.contains("points"));
-    }
-
-    #[test]
-    fn test_validate_h3_grid_valid() {
-        let grid = GridConfig::H3 {
-            h3_resolution: 7,
-            center_azimuth_deg: 180.0,
-            center_elevation_deg: 45.0,
-            field_of_view_deg: 30.0,
-        };
-        assert!(validate_grid_config(&grid).is_ok());
-    }
-
-    #[test]
-    fn test_validate_h3_grid_invalid_resolution() {
-        let grid = GridConfig::H3 {
-            h3_resolution: 20,
-            center_azimuth_deg: 180.0,
-            center_elevation_deg: 45.0,
-            field_of_view_deg: 30.0,
-        };
-        let result = validate_grid_config(&grid);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("exceeds maximum"));
-    }
-
-    #[test]
-    fn test_validate_h3_grid_invalid_elevation() {
-        let grid = GridConfig::H3 {
-            h3_resolution: 7,
-            center_azimuth_deg: 180.0,
-            center_elevation_deg: 100.0,
-            field_of_view_deg: 30.0,
-        };
-        let result = validate_grid_config(&grid);
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("outside valid range"));
-    }
-
-    #[test]
-    fn test_validate_h3_grid_invalid_fov() {
-        let grid = GridConfig::H3 {
-            h3_resolution: 7,
-            center_azimuth_deg: 180.0,
-            center_elevation_deg: 45.0,
-            field_of_view_deg: 200.0,
-        };
-        let result = validate_grid_config(&grid);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("field of view"));
     }
 
     // ========================================================================

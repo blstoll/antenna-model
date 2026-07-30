@@ -279,6 +279,8 @@ pub struct GainResponse {
     pub feed_id: String,
 
     /// Computed gain in dB (serialized as null when NaN for failed evaluations)
+    // TODO(C7): needs `#[schema(nullable = true)]` when utoipa lands — it derives
+    // `type: number` from f64 and cannot see that nan_as_null emits JSON null.
     #[serde(with = "nan_as_null")]
     pub gain_db: f64,
 
@@ -377,10 +379,16 @@ pub struct ComputationMetadata {
     pub extrapolated: bool,
 
     /// Physical spillover loss folded into `gain_db`, in dB (a small **negative**
-    /// value). `null` when physical spillover was NOT applied — i.e. the antenna
-    /// has a correction surface (which absorbs spillover empirically). Present only
-    /// on the uncalibrated path, so consumers can tell which model variant produced
-    /// the number.
+    /// value). **Omitted** — not `null` — when physical spillover was NOT applied,
+    /// i.e. the antenna has a correction surface, which absorbs spillover
+    /// empirically so there is no separate term to report. Present only on the
+    /// uncalibrated path, so consumers can tell which model variant produced the
+    /// number.
+    ///
+    /// Omission is correct here under the convention `CalibrationInfo.rmse_db`
+    /// documents (roadmap C12): a field is omitted when it is *structurally
+    /// absent*, and serialized as `null` only when the slot exists but has no
+    /// value. On the calibrated path there is no spillover term at all.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spillover_loss_db: Option<f64>,
 }
@@ -429,8 +437,9 @@ pub struct BatchMetadata {
 
 /// Request for loss heatmap generation.
 ///
-/// Generates a 2D grid of loss values across antenna field of view.
-/// Supports rectangular (azimuth/elevation) or H3 hexagonal grids.
+/// Generates a 2D grid of loss values across antenna field of view, over a
+/// rectangular (azimuth/elevation) grid. For a per-cell link budget over an H3
+/// hexagonal grid on the Earth's surface, use `POST /api/v1/h3-heatmap` instead.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct HeatmapRequest {
     /// Antenna identifier
@@ -462,11 +471,19 @@ pub struct HeatmapRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pointing_frequency_mhz: Option<f64>,
 
-    /// Grid configuration (rectangular or H3 hexagonal)
+    /// Grid configuration (rectangular)
     pub grid_config: GridConfig,
 }
 
 /// Grid configuration for heatmap generation.
+///
+/// A **single-variant tagged enum by design**: `grid_type` stays in the wire contract so a
+/// second grid family can be added later without a breaking change (feature F5 would merge
+/// `/api/v1/h3-heatmap` back in here). Do not collapse this into a plain struct.
+///
+/// The `H3` variant that lived here until C8 stage 4 (2026-07-28) was a not-implemented
+/// stub — it parsed and validated, then failed. The real H3 grid is the separate
+/// `POST /api/v1/h3-heatmap` endpoint. An `h3` tag is now an unknown variant → 400.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(tag = "grid_type", rename_all = "lowercase")]
 pub enum GridConfig {
@@ -476,17 +493,6 @@ pub enum GridConfig {
         azimuth_range_deg: RangeConfig,
         /// Elevation range configuration
         elevation_range_deg: RangeConfig,
-    },
-    /// H3 hexagonal grid
-    H3 {
-        /// H3 resolution (0-15, higher = finer resolution)
-        h3_resolution: u8,
-        /// Center azimuth in degrees
-        center_azimuth_deg: f64,
-        /// Center elevation in degrees
-        center_elevation_deg: f64,
-        /// Field of view in degrees
-        field_of_view_deg: f64,
     },
 }
 
@@ -528,7 +534,7 @@ pub struct HeatmapResponse {
     /// Operating frequency in MHz
     pub frequency_mhz: f64,
 
-    /// Grid data (rectangular or H3)
+    /// Grid data (rectangular)
     pub grid: GridData,
 
     /// Aggregated, deduplicated warnings across all grid points.
@@ -549,6 +555,9 @@ pub struct HeatmapResponse {
 }
 
 /// Grid data for heatmap.
+///
+/// Single-variant tagged enum for the same reason as [`GridConfig`] — `grid_type` stays on
+/// the wire. The `H3` variant was removed by C8 stage 4 (2026-07-28).
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(tag = "grid_type", rename_all = "lowercase")]
 pub enum GridData {
@@ -560,13 +569,6 @@ pub enum GridData {
         elevation_values: Vec<f64>,
         /// Loss values in dB (2D array: rows are elevation, columns are azimuth)
         loss_db: Vec<Vec<f64>>,
-    },
-    /// H3 hexagonal grid data
-    H3 {
-        /// H3 cell indices
-        h3_indices: Vec<String>,
-        /// Loss values in dB (one per H3 cell)
-        loss_db: Vec<f64>,
     },
 }
 
@@ -861,13 +863,26 @@ pub struct CalibrationInfo {
     /// Data source
     pub source: String,
 
-    /// Root mean squared error in dB (None for uncalibrated antennas)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rmse_db: Option<f64>,
+    /// RMSE of the combined model (physics + correction) in dB.
+    ///
+    /// Serialized as JSON `null` for uncalibrated (design-spec) antennas, which have no
+    /// fit — the same "slot exists, value does not" convention `GainResponse.gain_db`
+    /// uses (roadmap C12, 2026-07-28). It is **present and null**, never omitted;
+    /// omission is reserved for structurally absent members such as
+    /// `PhysicalParametersInfo.mesh`. Branch on `calibration_status.status` or
+    /// `num_measurements`, which carry the same information typed.
+    // TODO(C7): needs `#[schema(nullable = true)]` when utoipa lands — it derives
+    // `type: number` from f64 and cannot see that nan_as_null emits JSON null.
+    #[serde(with = "nan_as_null")]
+    pub rmse_db: f64,
 
-    /// R² correlation coefficient (None for uncalibrated antennas)
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub r_squared: Option<f64>,
+    /// R² correlation coefficient of the combined model.
+    ///
+    /// Serialized as JSON `null` for uncalibrated antennas — see `rmse_db`.
+    // TODO(C7): needs `#[schema(nullable = true)]` when utoipa lands — it derives
+    // `type: number` from f64 and cannot see that nan_as_null emits JSON null.
+    #[serde(with = "nan_as_null")]
+    pub r_squared: f64,
 
     /// Number of measurement points
     pub num_measurements: usize,
@@ -1145,10 +1160,6 @@ pub mod error_codes {
     /// The request body could not be read or parsed (400).
     pub const INVALID_REQUEST_BODY: &str = "invalid_request_body";
 
-    /// A requested option is recognized but unimplemented — currently only the
-    /// `/heatmap` H3 grid-type stub, which C8 stage 4 removes (422).
-    pub const NOT_IMPLEMENTED: &str = "not_implemented";
-
     /// The request body exceeds `server.max_body_size_bytes` (413).
     pub const PAYLOAD_TOO_LARGE: &str = "payload_too_large";
 
@@ -1174,7 +1185,6 @@ pub mod error_codes {
         VALIDATION_ERROR,
         INVALID_COORDINATE,
         INVALID_REQUEST_BODY,
-        NOT_IMPLEMENTED,
         PAYLOAD_TOO_LARGE,
         REQUEST_TIMEOUT,
         COMPUTATION_BUDGET_EXCEEDED,
@@ -1430,19 +1440,20 @@ mod tests {
     }
 
     #[test]
-    fn test_grid_config_h3_serialization() {
-        let grid = GridConfig::H3 {
-            h3_resolution: 7,
-            center_azimuth_deg: 180.0,
-            center_elevation_deg: 45.0,
-            field_of_view_deg: 30.0,
-        };
+    fn h3_grid_type_is_rejected_as_an_unknown_variant() {
+        // The `h3` grid type on /api/v1/heatmap was a not-implemented stub until C8
+        // stage 4 removed it; the real H3 grid is the separate POST /api/v1/h3-heatmap
+        // endpoint. An `h3` tag is now an unknown variant — i.e. a body that cannot be
+        // parsed, which under roadmap C2's policy is a 400, not a 422.
+        let json = r#"{"grid_type":"h3","h3_resolution":7,"center_azimuth_deg":180.0,"center_elevation_deg":45.0,"field_of_view_deg":30.0}"#;
 
-        let json = serde_json::to_string(&grid).unwrap();
-        assert!(json.contains("\"grid_type\":\"h3\""));
+        let err = serde_json::from_str::<GridConfig>(json)
+            .expect_err("an `h3` grid_type must not deserialize");
 
-        let deserialized: GridConfig = serde_json::from_str(&json).unwrap();
-        assert!(matches!(deserialized, GridConfig::H3 { .. }));
+        assert!(
+            err.to_string().contains("unknown variant"),
+            "expected an unknown-variant parse error, got: {err}"
+        );
     }
 
     // ========================================================================

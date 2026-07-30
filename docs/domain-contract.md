@@ -513,3 +513,26 @@ a small-offset negative control). `ray_trace.rs` math is untouched by P3.
   2·f·tan(cone/2) / BDF`, quadratic z defocus term) exactly. The design doc may again be
   used as a second source for this transform. Recorded here as history, not as an open
   item.
+- **Resolved by design 2026-07-28 (C8 stage 4).** `POST /api/v1/heatmap` no longer accepts
+  an `h3` grid type. It was a stub that parsed and validated, then returned
+  `not_implemented`; the real H3 grid has always been the separate
+  `POST /api/v1/h3-heatmap`. An `h3` grid_type is now an unknown serde variant — an
+  unparseable body — so it returns **400**, per C2's policy. `GridConfig`/`GridData` remain
+  single-variant **tagged** enums so `grid_type` stays on the wire and feature F5 can add a
+  variant back without a break. Do not collapse them into plain structs.
+- **Resolved by design 2026-07-28 (C12).** `CalibrationInfo.rmse_db` / `r_squared` are
+  **present and `null`** for uncalibrated antennas — never omitted. This settles two
+  conventions that had been used interchangeably:
+  - **`null` = the slot exists, the value does not.** Every antenna has a calibration block;
+    an uncalibrated one simply has no fit. Declared with `#[serde(with = "nan_as_null")]`,
+    the same mechanism `GainResponse.gain_db` uses for a failed evaluation.
+  - **Omitted = structurally absent.** `PhysicalParametersInfo.mesh` on a solid reflector,
+    `CalibrationStatusInfo.coverage` with no measured region,
+    `ComputationMetadata.spillover_loss_db` on the calibrated path (the correction surface
+    absorbs spillover empirically, so there is no term to report).
+
+  The `f64::NAN` sentinel stays in `CalibrationMetadata`, which is postcard-serialized and
+  so cannot hold an `Option` without an artifact format bump (see D2); the API type now has
+  the same shape, so there is no boundary conversion. Do **not** reintroduce
+  `Option<f64>` + `skip_serializing_if` here — that combination was the original defect: it
+  promised an omission the code never performed.

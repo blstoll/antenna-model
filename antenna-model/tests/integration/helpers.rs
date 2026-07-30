@@ -460,26 +460,20 @@ pub mod validators {
         if response.metadata.computation_time_ms < 0.0 {
             return Err("Invalid computation time".to_string());
         }
-        match &response.grid {
-            GridData::Rectangular {
-                azimuth_values,
-                elevation_values,
-                loss_db,
-            } => {
-                if azimuth_values.is_empty() || elevation_values.is_empty() {
-                    return Err("Empty grid axes".to_string());
-                }
-                if loss_db.len() != elevation_values.len() {
-                    return Err("Loss matrix row count mismatch".to_string());
-                }
-                for row in loss_db {
-                    if row.len() != azimuth_values.len() {
-                        return Err("Loss matrix column count mismatch".to_string());
-                    }
-                }
-            }
-            GridData::H3 { .. } => {
-                // H3 validation
+        let GridData::Rectangular {
+            azimuth_values,
+            elevation_values,
+            loss_db,
+        } = &response.grid;
+        if azimuth_values.is_empty() || elevation_values.is_empty() {
+            return Err("Empty grid axes".to_string());
+        }
+        if loss_db.len() != elevation_values.len() {
+            return Err("Loss matrix row count mismatch".to_string());
+        }
+        for row in loss_db {
+            if row.len() != azimuth_values.len() {
+                return Err("Loss matrix column count mismatch".to_string());
             }
         }
         Ok(())

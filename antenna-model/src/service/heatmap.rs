@@ -41,13 +41,13 @@ pub(crate) const NO_PEAK_GAIN_DB: f64 = -FAILED_POINT_LOSS_DB;
 ///
 /// Contains:
 /// - Vector of (azimuth, elevation) grid points in degrees
-/// - Tuple of (azimuth_values, elevation_values) for rectangular grids
+/// - Tuple of (azimuth_values, elevation_values)
 type GridPoints = (Vec<(f64, f64)>, (Vec<f64>, Vec<f64>));
 
 /// Generate a heatmap for the given request.
 ///
 /// This function:
-/// 1. Generates a grid of emitter positions (rectangular or H3 hexagonal)
+/// 1. Generates a grid of emitter positions (rectangular)
 /// 2. Evaluates gain at each grid point
 /// 3. Computes peak gain (reference)
 /// 4. Calculates loss relative to peak for each point
@@ -58,7 +58,6 @@ type GridPoints = (Vec<(f64, f64)>, (Vec<f64>, Vec<f64>));
 /// Grid points are evaluated in parallel using rayon when grid size exceeds
 /// PARALLEL_THRESHOLD (100 points). Expected performance:
 /// - 72x46 rectangular grid (~3312 points): <2 seconds
-/// - H3 resolution 7 (~5000 cells): <3 seconds
 pub fn generate_heatmap(
     request: &HeatmapRequest,
     repository: &CalibrationRepository,
@@ -175,38 +174,25 @@ pub fn generate_heatmap_with_budget(
         );
     }
 
-    // Format grid data based on grid type
-    let grid_data = match &request.grid_config {
-        GridConfig::Rectangular {
-            azimuth_range_deg: _,
-            elevation_range_deg: _,
-        } => {
-            let azimuth_values = grid_coords.0.clone();
-            let elevation_values = grid_coords.1.clone();
+    // Format grid data.
+    let azimuth_values = grid_coords.0.clone();
+    let elevation_values = grid_coords.1.clone();
 
-            // Reshape losses into 2D array (rows = elevation, columns = azimuth)
-            let num_az = azimuth_values.len();
-            let num_el = elevation_values.len();
-            let loss_db: Vec<Vec<f64>> = (0..num_el)
-                .map(|el_idx| {
-                    (0..num_az)
-                        .map(|az_idx| losses[el_idx * num_az + az_idx])
-                        .collect()
-                })
-                .collect();
+    // Reshape losses into 2D array (rows = elevation, columns = azimuth)
+    let num_az = azimuth_values.len();
+    let num_el = elevation_values.len();
+    let loss_db: Vec<Vec<f64>> = (0..num_el)
+        .map(|el_idx| {
+            (0..num_az)
+                .map(|az_idx| losses[el_idx * num_az + az_idx])
+                .collect()
+        })
+        .collect();
 
-            GridData::Rectangular {
-                azimuth_values,
-                elevation_values,
-                loss_db,
-            }
-        }
-        GridConfig::H3 { .. } => {
-            // H3 support: for now, return error indicating it's not implemented
-            return Err(AntennaModelError::NotImplemented {
-                feature: "H3 hexagonal grid".to_string(),
-            });
-        }
+    let grid_data = GridData::Rectangular {
+        azimuth_values,
+        elevation_values,
+        loss_db,
     };
 
     let computation_time_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -284,9 +270,6 @@ fn generate_grid_points(grid_config: &GridConfig) -> Result<GridPoints> {
             azimuth_range_deg,
             elevation_range_deg,
         } => generate_rectangular_grid(azimuth_range_deg, elevation_range_deg),
-        GridConfig::H3 { .. } => Err(AntennaModelError::NotImplemented {
-            feature: "H3 hexagonal grid".to_string(),
-        }),
     }
 }
 
@@ -687,22 +670,6 @@ mod tests {
     }
 
     #[test]
-    fn test_h3_grid_not_implemented() {
-        let grid_config = GridConfig::H3 {
-            h3_resolution: 7,
-            center_azimuth_deg: 180.0,
-            center_elevation_deg: 45.0,
-            field_of_view_deg: 30.0,
-        };
-
-        let result = generate_grid_points(&grid_config);
-
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, AntennaModelError::NotImplemented { .. }));
-    }
-
-    #[test]
     fn test_grid_generation_boundary_values() {
         // Test with fractional steps that don't divide evenly
         let azimuth_range = RangeConfig::new(0.0, 10.0, 3.0);
@@ -806,11 +773,10 @@ mod tests {
         assert!(!json.contains("NaN"), "Response JSON must not contain NaN");
 
         // Failed points should use sentinel value
-        if let GridData::Rectangular { ref loss_db, .. } = result.grid {
-            for row in loss_db {
-                for &val in row {
-                    assert!(val.is_finite(), "Loss values must be finite, got {}", val);
-                }
+        let GridData::Rectangular { ref loss_db, .. } = result.grid;
+        for row in loss_db {
+            for &val in row {
+                assert!(val.is_finite(), "Loss values must be finite, got {}", val);
             }
         }
     }

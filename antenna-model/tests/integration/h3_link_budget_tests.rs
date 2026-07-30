@@ -188,10 +188,8 @@ async fn test_heatmap_and_h3_heatmap_reference_loss_by_the_same_rule() {
         .expect("Heatmap computation failed");
 
     let h3_losses: Vec<f64> = h3.cells.iter().map(|c| c.loss_db).collect();
-    let rect_losses: Vec<f64> = match &heatmap.grid {
-        GridData::Rectangular { loss_db, .. } => loss_db.iter().flatten().copied().collect(),
-        GridData::H3 { loss_db, .. } => loss_db.clone(),
-    };
+    let GridData::Rectangular { loss_db, .. } = &heatmap.grid;
+    let rect_losses: Vec<f64> = loss_db.iter().flatten().copied().collect();
 
     for (endpoint, losses) in [("/h3-heatmap", &h3_losses), ("/heatmap", &rect_losses)] {
         assert!(!losses.is_empty(), "{endpoint} returned no grid values");

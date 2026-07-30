@@ -257,7 +257,10 @@ Per `docs/implementation-plan.md`, Sprints 1–7 are complete:
 - Physics engine (aperture integration, phase functions, far-field pattern, Ruze/mesh efficiency).
 - Calibration tool (parameter tuning, correction-surface fitting, boresight calibration).
 - REST API: single gain, batch, rectangular heatmap, H3 link budget, antenna/feed listing,
-  partial-calibration statuses, multi-feed support.
+  partial-calibration statuses, multi-feed support. `/heatmap` serves **rectangular grids
+  only** — the `h3` grid type was a `not_implemented` stub, removed 2026-07-28 (roadmap C8
+  stage 4); the real H3 grid is the separate `/h3-heatmap` endpoint. A merge of the two is
+  tracked as feature **F5**, not yet decided.
 - The **4D B-spline correction surface is implemented and live** (`model/correction_interpolator.rs`,
   applied at `service/evaluator.rs:265-287`).
 - The **P10 off-axis integrator landed 2026-07-15**: served off-axis gain is numerically

@@ -424,7 +424,7 @@ pub async fn compute_gain_batch(
 /// - feed_pointing_location: Earth location the feed's beam is aimed at (ECEF or Geodetic)
 /// - frequency_mhz: Operating frequency
 /// - pointing_frequency_mhz: Optional pointing frequency for beam squint
-/// - grid_config: Grid configuration (rectangular or H3)
+/// - grid_config: Grid configuration (rectangular)
 ///
 /// # Response
 /// Returns HTTP 200 with JSON body containing:
@@ -435,9 +435,10 @@ pub async fn compute_gain_batch(
 /// - warnings: List of warnings (e.g., extrapolation)
 /// - metadata: Computation metadata (points evaluated, time, peak gain)
 ///
-/// Returns HTTP 422 if the request is semantically invalid (bad grid configuration,
-/// out-of-range value, or the unimplemented H3 grid type), HTTP 404 if the named
-/// antenna/feed does not exist, HTTP 400 only if the body could not be parsed.
+/// Returns HTTP 422 if the request is semantically invalid (bad grid configuration or
+/// out-of-range value), HTTP 404 if the named antenna/feed does not exist, HTTP 400 if
+/// the body could not be parsed — including an `h3` grid_type, which is an unknown
+/// `grid_config` enum variant rather than a validated grid.
 ///
 /// # Performance
 /// - 72x46 rectangular grid (~3312 points): Target <2 seconds
@@ -700,8 +701,8 @@ pub async fn get_antenna_details(
         date: calibration.metadata.calibration_date.clone(),
         version: calibration.metadata.format_version.clone(),
         source: calibration.metadata.data_source.clone(),
-        rmse_db: Some(calibration.metadata.rmse_db),
-        r_squared: Some(calibration.metadata.r_squared),
+        rmse_db: calibration.metadata.rmse_db,
+        r_squared: calibration.metadata.r_squared,
         num_measurements: calibration.metadata.num_measurements,
     };
 

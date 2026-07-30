@@ -623,8 +623,7 @@ paths:
         '422':
           description: |
             The body parsed but is semantically invalid — an out-of-range value, a
-            degenerate geometry, a grid exceeding 100,000 points, or the unimplemented
-            H3 grid type (`not_implemented`).
+            degenerate geometry, or a grid exceeding 100,000 points.
           content:
             application/json:
               schema:
@@ -635,11 +634,6 @@ paths:
                   value:
                     error: "validation_error"
                     message: "invalid grid specification for rectangular: total grid points 324000 exceeds maximum 100000 (1800x180 grid)"
-                not_implemented:
-                  summary: H3 grid type on /heatmap
-                  value:
-                    error: "not_implemented"
-                    message: "feature not implemented: H3 grid heatmap"
         '404':
           description: |
             The request names an antenna or feed that does not exist (roadmap C2).
@@ -1990,7 +1984,6 @@ components:
             - validation_error
             - invalid_coordinate
             - invalid_request_body
-            - not_implemented
             - payload_too_large
             - request_timeout
             - computation_budget_exceeded
@@ -2022,7 +2015,6 @@ components:
             - validation_error
             - invalid_coordinate
             - invalid_request_body
-            - not_implemented
             - payload_too_large
             - request_timeout
             - computation_budget_exceeded

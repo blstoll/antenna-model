@@ -153,7 +153,8 @@ The Antenna Model Service is a high-accuracy antenna loss modeling system deploy
 - `GET /status` - Service status and loaded antennas
 - `POST /api/v1/gain` - Single antenna gain computation from 3D positions
 - `POST /api/v1/gain/batch` - Batch gain computation
-- `POST /api/v1/heatmap` - Generate loss heatmap grid (rectangular or H3 hexagonal)
+- `POST /api/v1/heatmap` - Generate rectangular loss heatmap grid
+- `POST /api/v1/h3-heatmap` - Generate H3 hexagonal per-cell link budget grid over an Earth-surface area
 - `GET /api/v1/antennas` - List available antennas with feeds
 - `GET /api/v1/antennas/{id}` - Antenna configuration details
 - `GET /api/v1/antennas/{id}/feeds` - List feeds for antenna
@@ -893,46 +894,6 @@ There is no magnitude-based auto-detection; the pre-2026-07-27 heuristic is desc
       "max": 90.0,
       "step": 2.0
     }
-  }
-}
-```
-
-#### Heatmap Request (H3 Hexagonal Grid)
-```json
-{
-  "antenna_id": "antenna_1",
-  "feed_id": "x_band_feed",
-  "vehicle_position": {
-    "x": 4510731.123,
-    "y": 4510731.456,
-    "z": 3488865.789,
-    "coordinate_system": "ecef"
-  },
-  "vehicle_attitude": {
-    "w": 1.0,
-    "x": 0.0,
-    "y": 0.0,
-    "z": 0.0
-  },
-  "reflector_boresight": {
-    "x": 4510732.0,
-    "y": 4510732.0,
-    "z": 3488950.0,
-    "coordinate_system": "ecef"
-  },
-  "feed_pointing_location": {
-    "x": 4510731.5,
-    "y": 4510731.5,
-    "z": 3488870.0,
-    "coordinate_system": "ecef"
-  },
-  "frequency_mhz": 8400.0,
-  "grid_config": {
-    "grid_type": "h3",
-    "h3_resolution": 7,
-    "center_azimuth_deg": 180.0,
-    "center_elevation_deg": 45.0,
-    "field_of_view_deg": 30.0
   }
 }
 ```

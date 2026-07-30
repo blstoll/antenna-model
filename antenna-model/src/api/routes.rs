@@ -1169,25 +1169,85 @@ mod tests {
             .await;
         response.assert_status_is_ok();
 
-        let body = response.json().await;
-        let json_value = body.value().object();
+        // C12: an uncalibrated antenna has no fit, so rmse_db / r_squared are JSON null —
+        // PRESENT with no value, not absent. `null` is this API's convention for "the slot
+        // exists, the value does not" (the same rule GainResponse.gain_db follows via
+        // nan_as_null); omission is reserved for structurally absent members like `mesh`.
+        // A client branches on calibration_status.status or num_measurements, both typed.
+        //
+        // `response.json()` (used elsewhere in this file) has no key-presence assertion, so
+        // this reads the raw body instead and parses it with serde_json. `into_body()`
+        // consumes the response, so it must be the last read — the pre-existing basic-info
+        // and calibration-status assertions below are re-derived from the same parsed
+        // `Value` rather than from `response.json()`.
+        let raw = response.0.into_body().into_string().await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
 
         // Check basic antenna info
-        assert_eq!(json_value.get("id").string(), "uncalibrated_antenna");
-        assert_eq!(json_value.get("name").string(), "Test Uncalibrated Antenna");
+        assert_eq!(
+            parsed.get("id").and_then(|v| v.as_str()),
+            Some("uncalibrated_antenna")
+        );
+        assert_eq!(
+            parsed.get("name").and_then(|v| v.as_str()),
+            Some("Test Uncalibrated Antenna")
+        );
 
         // Check calibration status
-        let calibration_status = json_value.get("calibration_status").object();
-        assert_eq!(calibration_status.get("status").string(), "uncalibrated");
-        assert_eq!(calibration_status.get("accuracy_estimate_db").f64(), 3.0);
+        let calibration_status = parsed
+            .get("calibration_status")
+            .and_then(|c| c.as_object())
+            .expect("calibration_status object");
         assert_eq!(
-            calibration_status.get("loss_accuracy_estimate_db").f64(),
-            2.0
+            calibration_status.get("status").and_then(|v| v.as_str()),
+            Some("uncalibrated")
         );
-        assert!(!calibration_status.get("correction_applied").bool());
         assert_eq!(
-            calibration_status.get("parameters_source").string(),
-            "design_specifications"
+            calibration_status
+                .get("accuracy_estimate_db")
+                .and_then(|v| v.as_f64()),
+            Some(3.0)
+        );
+        assert_eq!(
+            calibration_status
+                .get("loss_accuracy_estimate_db")
+                .and_then(|v| v.as_f64()),
+            Some(2.0)
+        );
+        assert_eq!(
+            calibration_status
+                .get("correction_applied")
+                .and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            calibration_status
+                .get("parameters_source")
+                .and_then(|v| v.as_str()),
+            Some("design_specifications")
+        );
+
+        let calibration = parsed
+            .get("calibration")
+            .and_then(|c| c.as_object())
+            .expect("an uncalibrated antenna still reports a calibration block");
+
+        assert_eq!(
+            calibration.get("rmse_db"),
+            Some(&serde_json::Value::Null),
+            "rmse_db must be present and null for an uncalibrated antenna, not omitted; \
+             got: {calibration:?}"
+        );
+        assert_eq!(
+            calibration.get("r_squared"),
+            Some(&serde_json::Value::Null),
+            "r_squared must be present and null for an uncalibrated antenna, not omitted; \
+             got: {calibration:?}"
+        );
+        // The typed signal a client should actually branch on.
+        assert_eq!(
+            calibration.get("num_measurements").and_then(|v| v.as_u64()),
+            Some(0)
         );
     }
 
