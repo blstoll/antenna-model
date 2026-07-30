@@ -321,6 +321,38 @@ mod tests {
         assert!(bspline.knots_temperature.iter().all(|&k| k == 290.0));
     }
 
+    /// KNOWN-DEFECT PIN (filed 2026-07-30 by the D15 review; routed to D13/D2):
+    /// the boresight-mode frequency correction is structurally rejected by the
+    /// service side.
+    ///
+    /// `create_degenerate_knot_vector` builds the azimuth/elevation/temperature
+    /// axes as `order` (3) equal knots, but `BSplineModel4D::validate` requires
+    /// `knots.len() >= shape + order` (= 4 here) on every axis, and the service
+    /// loader runs that validation on every artifact
+    /// (`AntennaCalibration::validate` → `correction.validate()`). So whenever
+    /// boresight residuals trip the 0.5 dB fitting threshold, the resulting
+    /// artifact carries a correction surface the service refuses to load. The fix
+    /// (D13's note in docs/roadmap-2026-07-work-units.md) is flat-but-valid axes
+    /// the way `artifact_export::to_bspline_4d` builds its temperature axis —
+    /// merely lengthening the degenerate vectors is not enough, since a
+    /// zero-width axis has no evaluable span.
+    ///
+    /// When that fix lands, this test MUST flip to asserting `validate().is_ok()`
+    /// (and D13's gotcha note updated).
+    #[test]
+    fn frequency_correction_is_rejected_by_the_service_side_validator() {
+        let frequencies = vec![7100.0, 7500.0, 8000.0, 8450.0];
+        let residuals = vec![0.8, 0.6, 0.5, 0.7];
+        let bspline = fit_frequency_correction(&frequencies, &residuals).unwrap();
+
+        assert!(
+            bspline.validate().is_err(),
+            "fit_frequency_correction's output now passes BSplineModel4D::validate — \
+             the degenerate-axis defect appears fixed; flip this test to assert Ok \
+             and update D13's gotcha note in docs/roadmap-2026-07-work-units.md"
+        );
+    }
+
     #[test]
     fn test_fit_frequency_correction_insufficient_data() {
         let frequencies = vec![7100.0, 7500.0, 8000.0]; // Only 3 points

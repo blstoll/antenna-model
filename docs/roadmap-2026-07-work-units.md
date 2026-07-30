@@ -78,6 +78,14 @@ G1 ─┬─ G2 ── G3
     │      (edge-collapse; tune-parameters    │
     │      broken) + 1 flake fix (D11 log-    │
     │      capture tests)                     │
+    │  D15 DONE 2026-07-30 (branch fix/       │
+    │      correction-surface-endpoint):      │
+    │      closes D12's edge-collapse finding │
+    │      — bspline_basis at a domain max.   │
+    │      The 4D interpolator was never      │
+    │      defective; artifacts were fitted   │
+    │      wrong, not served wrong.           │
+    │      tune-parameters still open.        │
     │      D13, D14 open (filed 2026-07-29:   │
     │      real-data boresight + NASA-        │
     │      anchored full-mode artifacts;      │
@@ -2369,6 +2377,10 @@ being written separately (2026-07-29) and is not tracked as a unit here.
   Note the second version axis rides along here too: `CalibrationMetadata.format_version` is
   inside the payload, so a headerless artifact is not un-versioned in the semantic sense —
   only in the container sense. Say which axis is which, as the exit criteria above require.
+  (A second boresight-artifact defect — degenerate correction-surface axes the service-side
+  validator rejects at load — was filed 2026-07-30 by the D15 review and is recorded on
+  **D13**; the fix belongs there, but coordinate: both units reshape what boresight mode
+  writes.)
 - **Note (2026-07-28, from C12 / C8 stage 4):** `CalibrationMetadata.rmse_db`/`r_squared`
   stay plain `f64` with a NaN sentinel by decision, not oversight — converting them to
   `Option<f64>` would change postcard's positional wire encoding, which is an ANTC
@@ -2872,6 +2884,89 @@ recover the perturbation, and the correction surface must recover the injected b
 - **Depends on:** D10, D11 (hard — both defects sit on this test's path). Not blocked on
   D2: full mode already writes the ANTC header via `write_antc_artifact`.
 
+### D15 — Fix the correction-surface upper-edge-collapse (D12 finding 1) — Effort: S
+
+**✅ DONE 2026-07-30** — branch `fix/correction-surface-endpoint`. Four commits: `a866cfb` (the
+fix), `e87efe6` (golden re-pin), `41b7e94` (comment corrections), `c79d2cf` (retargeted D12's
+assertions). Fixes
+`docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md`, filed by D12 as finding 1.
+
+**Mechanism.** `bspline_basis`'s `k == 1` base case (`calibrate/src/correction_surface.rs`) used
+a half-open span `t_i ≤ t < t_{i+1}`, so at `t == t_max` no basis function was non-zero and the
+basis was not a partition of unity at the exact domain maximum. A pre-existing "right endpoint"
+special case keyed on `i == knots.len() - 2` — for a clamped knot vector that is a *padding*
+index outside the valid basis range `0..knots.len() - order`, so it never fired for a basis
+function that is actually evaluated. Measured with all coefficients 1.0 (a correct basis must
+sum to exactly 1.0): 1.000000000 at t=0.99, 1.000000000 at t=0.9999, 0.000000000 at t=1.0 —
+razor-thin, not broad. The damaging half was the fitting side: `accumulate_normal_equations`
+uses the same basis, so every measurement lying exactly on an axis maximum (always populated on
+a regular grid — 72 of D12's 288 rows sit at 700 MHz) contributed an all-zero row, starving the
+top coefficient on that axis to ~0 via the ridge term and corrupting the fit across the entire
+top knot span. That is why 699.999 MHz returned 0.000090 while the basis there was already
+≈1.0 — the basis was fine; the coefficient it multiplied had already been destroyed.
+
+**The service-side 4D interpolator was never defective — this is the correction to D12's
+finding.** `antenna-model/src/model/correction_interpolator.rs` uses the standard NURBS-book
+Cox-de Boor recurrence (`basis[0] = 1.0` then the triangular recurrence) — a different algorithm
+from calibrate's naive recursive `bspline_basis` — with a `find_knot_span` that clamps to the
+last valid span. Verified by partition of unity with coefficients built by hand (bypassing the
+fitter entirely): interior, azimuth-at-max, elevation-at-max, frequency-at-max,
+temperature-at-max, and all four axes at max simultaneously all return exactly 1.000000000. Its
+apparent failure in D12's original diagnostic was inherited corrupted coefficients from the
+broken fitter — the served path was never itself wrong; artifacts were fitted wrong and the
+service faithfully served the bad coefficients. Still blocking for D9/D13/D14 (a shipped
+artifact would have carried the corruption), but it is an artifact-production defect, not a
+service defect, and the fix touched exactly one file, `calibrate/src/correction_surface.rs`.
+
+**Before/after (D12's fixture, `calibrate/tests/cli_full_mode_e2e.rs`, `c79d2cf`):** corrected
+RMSE **0.9756 → 0.0058 dB** (168× improvement; model-only 1.3071 dB unchanged). The four
+known-answer probe errors are **unchanged** — 0.5928 / 0.0934 / 0.0365 / 0.0934 dB —
+because the probes are off-grid and away from any upper edge, so their coefficients were never
+starved; `BIAS_RECOVERY_TOLERANCE_DB` stays at 0.65, deliberately not tightened. The probe
+residual was therefore never the edge collapse — it is overfitting from underdetermination: 960
+coefficients (`(4+4)(6+4)(8+4)` for 4/6/8 knots at order 4) against 288 points, letting the
+surface interpolate fitted points almost exactly while oscillating between them.
+
+**Golden re-pin (`e87efe6`, corrected by `41b7e94`).** `fit_matches_openblas_golden` pinned
+values captured when only the solver changed (LAPACK `dgesv` → in-house Cholesky), so it encoded
+the buggy basis rather than testing against it — a solver-drift guard, not a basis oracle. Its
+fixture reaches 8700 MHz, the frequency knot maximum, on exactly **36 of 288 points** (`i == 7`
+of an `8×6×6` loop — `e87efe6`'s commit message said 48; `41b7e94` corrected the count and
+cannot edit the earlier commit message). Re-pinned: `sum` 81.54 → 87.17, `c[last]` 0.1490 →
+0.5661 (3.8×), while `c[0]`, `c[1]`, `c[mid]` barely moved (they never touch the frequency-max
+span; `c[last]`, index 124, is the single coefficient at `i_freq = 4`, the starved one).
+Justified against three checks: `fit_satisfies_normal_equations`,
+`normal_equations_match_dense_reference`, and the new `a_fitted_constant_is_recovered_at_the_
+domain_maximum` — the genuine basis oracle, since a constant is analytically exactly
+representable.
+
+**New tests:** `basis_is_a_partition_of_unity_on_every_face_and_corner`,
+`basis_is_continuous_up_to_the_maximum`, `a_fitted_constant_is_recovered_at_the_domain_maximum`.
+
+**Left open, three items, none fixed here:**
+
+1. `validate_knot_vector` does not check multiplicity — `generate_adaptive_knots` can place
+   knots at an axis's min/max, producing multiplicity 5 at a boundary for order 4 on the
+   shipped adaptive-knot config. Excluded: adding the check would fail on the *current* adaptive
+   knots; fixing it also requires fixing `generate_adaptive_knots`' quantile placement.
+2. The data-sufficiency check tests `(spline_order+1)³ = 125` when the real requirement is the
+   coefficient count, 960 for the shipped 4/6/8 config. Excluded: fixing it would make D12's
+   288-point fixture fail its own minimum outright — a fixture-sizing design decision, not part
+   of this fix. **This is what still limits the recovery accuracy above** — the 0.5928 dB
+   worst-case probe error is underdetermination overfitting, not the edge collapse, and will not
+   improve until this is addressed.
+3. A fully degenerate axis (every knot equal) makes every basis function return 0 rather than 1
+   — pre-existing, not introduced or fixed here, currently unreachable because
+   `generate_knot_vector` rejects degenerate ranges upstream. Noted in `bspline_basis`'s doc
+   comment (`41b7e94`). ("Unreachable" is specific to calibrate's 3D fitter path: the boresight
+   mode separately produces degenerate 4D axes on the service side via
+   `fit_frequency_correction`, a different code path and defect class — the service *rejects*
+   those artifacts at load. Filed 2026-07-30 by the D15 review, recorded on **D13**.)
+
+**This fix does not make the correction-surface fit well-determined** — it corrects a basis
+evaluation bug that was corrupting fitted coefficients at every axis maximum; item 2 above is
+the concrete mechanism by which the fit remains underdetermined today.
+
 ### D13 — Real-data boresight calibration test (NTIA frequency sweeps) — Effort: S/M
 
 **Filed 2026-07-29.** The 2026-07-29 assessment of the digitized reference data (see the
@@ -2903,6 +2998,22 @@ Best candidate: **Andrew 43998, 10 m — 6 frequencies spanning 3700–6425 MHz*
   hard rather than dropping rows — D11's gate does not apply here; do not "harmonize" the
   two parsers in this unit. Real data means real residuals: pick the tolerance from the
   measured before/after, not from wishful thinking, and record it.
+- **Inherited 2026-07-30 from the D15 review — the boresight frequency correction is
+  service-rejected.** `fit_frequency_correction` (`calibrate/src/frequency_correction.rs`)
+  builds its degenerate azimuth/elevation/temperature axes as `order` (3) equal knots
+  (`create_degenerate_knot_vector`), which fails `BSplineModel4D::validate`'s
+  `len >= shape + order` check — and the service loader validates every artifact
+  (`AntennaCalibration::validate` → `correction.validate()`). So a boresight artifact that
+  carries a correction surface (fitted whenever max |residual| > 0.5 dB) **fails to load**.
+  This unit's scope-3 assertions ("loads through the service loader", serves
+  `PartiallyCalibrated`) will hit it on any real fixture whose residuals trip the
+  threshold — the NTIA candidates plausibly will, given the multi-band feed caveat above.
+  Fix: build flat-but-valid axes the way `artifact_export::to_bspline_4d` builds its
+  temperature axis (coefficient layers replicated over a real interval with an interior
+  knot); merely lengthening the degenerate vectors is not a fix, since a zero-width axis
+  has no evaluable span. Pinned as a known defect by
+  `frequency_correction::tests::frequency_correction_is_rejected_by_the_service_side_validator`,
+  which must flip to `is_ok` when fixed.
 - **Depends on:** D2 (so the test pins the final headered artifact format, not the legacy
   one), D12 (reuses its CLI-harness pattern).
 

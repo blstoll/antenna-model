@@ -468,10 +468,20 @@ mod tests {
         let model = to_bspline_4d(&surface, t_lo, t_hi).expect("conversion should succeed");
         assert!(model.validate().is_ok());
 
-        // Sample interior + near-boundary points across the fitted ranges.
-        let clocks = [10.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0, 349.0];
-        let cones = [0.5, 3.0, 5.0, 7.0, 9.5];
-        let freqs = [8050.0, 8200.0, 8350.0];
+        // Sample interior points AND the exact domain boundaries of every axis
+        // (fitted ranges: clock [0, 350], cone [0, 10], freq [8000, 8400]) —
+        // including the temperature boundaries of the synthetic 4D axis. Boundary
+        // sampling added 2026-07-30 after the D15 endpoint fix: interior-only
+        // sampling left the two implementations' boundary behavior uncompared (see
+        // docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md,
+        // "Why it went unnoticed"), so any future divergence at an edge would have
+        // gone unseen here.
+        let clocks = [
+            0.0, 10.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0, 349.0, 350.0,
+        ];
+        let cones = [0.0, 0.5, 3.0, 5.0, 7.0, 9.5, 10.0];
+        let freqs = [8000.0, 8050.0, 8200.0, 8350.0, 8400.0];
+        let temps = [t_lo, t_mid, t_hi];
 
         let mut max_err = 0.0_f64;
         let mut samples = 0;
@@ -479,17 +489,20 @@ mod tests {
             for &c in &cones {
                 for &f in &freqs {
                     let expected = surface.evaluate(f, c, k).expect("3D evaluate");
-                    // 4D mapping: azimuth=clock, elevation=cone, frequency=f.
-                    let got = evaluate_correction(&model, k, c, f, t_mid)
-                        .expect("4D evaluate")
-                        .correction_db;
-                    let err = (got - expected).abs();
-                    max_err = max_err.max(err);
-                    samples += 1;
-                    assert!(
-                        err < 1e-9,
-                        "mismatch at clock={k}, cone={c}, freq={f}: expected={expected}, got={got}, err={err}"
-                    );
+                    for &t in &temps {
+                        // 4D mapping: azimuth=clock, elevation=cone, frequency=f.
+                        let got = evaluate_correction(&model, k, c, f, t)
+                            .expect("4D evaluate")
+                            .correction_db;
+                        let err = (got - expected).abs();
+                        max_err = max_err.max(err);
+                        samples += 1;
+                        assert!(
+                            err < 1e-9,
+                            "mismatch at clock={k}, cone={c}, freq={f}, temp={t}: \
+                             expected={expected}, got={got}, err={err}"
+                        );
+                    }
                 }
             }
         }

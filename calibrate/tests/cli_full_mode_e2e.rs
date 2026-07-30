@@ -383,38 +383,35 @@ fn cli_full_mode_correction_beats_the_uncorrected_model() {
          corrected {corrected:.4} dB vs model-only {model_only:.4} dB"
     );
 
-    // NOT a `corrected < 0.5 * model_only` "the fit should remove most of the bias"
-    // assertion, on purpose. The injected bias here is a smooth, fully-representable
-    // signal (const + linear-in-frequency + cosine-in-clock + linear-in-cone), so a
-    // correct fitter should knock out far more than the ~25% improvement measured today
-    // (model-only 1.3071 dB -> corrected 0.9756 dB, ratio 0.746). It doesn't, because of
-    // a real defect in the fitted/served correction surface: `CorrectionSurface::evaluate`
-    // (and the service-side 4D `evaluate_correction`) collapses to ~0 across the topmost
-    // knot span of every axis, silently dropping the correction on the union of the three
-    // upper faces of the query grid (~27% of points here). See
-    // docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md for the full
-    // triage (two other hypotheses — degenerate adaptive knots, underdetermination — were
-    // considered and ruled out there).
+    // The correction now removes essentially all of the injected bias AT THE MEASUREMENT
+    // POINTS: model-only 1.3071 dB -> corrected 0.0058 dB. Before the endpoint fix
+    // (`bspline_basis` evaluating to zero at the exact maximum of an axis, starving the
+    // last coefficient on every axis to ~0 by the ridge term), this was 0.9756 dB — a 168x
+    // improvement.
     //
-    // Until that is fixed, pin today's measured value as a ceiling so a further
-    // regression is still caught, without asserting a recovery ratio the current code
-    // cannot meet.
+    // This is RMSE at the fitted data points, and near-exact interpolation there is
+    // EXPECTED of an underdetermined fit (960 coefficients, 288 points) — it is not
+    // evidence the surface is accurate between grid points. `BIAS_RECOVERY_TOLERANCE_DB`
+    // below is the assertion that measures off-grid accuracy; it did not move when this
+    // one did, because it probes points the endpoint defect never touched.
     //
     // The bound is an ABSOLUTE epsilon, not a proportional one: this pipeline is
-    // deterministic (no `--tune-parameters`, nothing in the fit path is thread-parallel)
-    // and was measured reproducible to 4 decimal places across three debug runs and one
-    // release run, so there is no run-to-run variance to size a percentage against. A
-    // proportional 5% bound would let `corrected` drift to 1.0243 dB undetected — about a
-    // third of the way back toward the 0.5x floor this replaced. The fixed +0.02 dB here
-    // covers cross-platform libm ULP differences in `cos`/`sin`/`atan2`, nothing more.
-    let today_corrected_rmse = 0.9756;
-    let ceiling = today_corrected_rmse + 0.02;
+    // deterministic (no `--tune-parameters`, nothing in the fit path is thread-parallel),
+    // and `corrected` was measured reproducible to 4 decimal places (0.0058) across both a
+    // debug and a release run on 2026-07-30, so there is no run-to-run variance on this
+    // machine to size a percentage against. The +0.002 dB epsilon is therefore sized for
+    // cross-platform libm ULP differences in `cos`/`sin`/`atan2` on OTHER hardware, not
+    // local noise — deliberately tight because, this close to zero, a loose absolute bound
+    // would hide a large proportional regression (the old +0.02 dB was 3.4x the value it
+    // bounded).
+    let today_corrected_rmse = 0.0058;
+    let ceiling = today_corrected_rmse + 0.002;
     assert!(
         corrected < ceiling,
-        "corrected RMSE regressed past today's known-defect ceiling: \
+        "corrected RMSE regressed past the measured ceiling: \
          corrected {corrected:.4} dB vs ceiling {ceiling:.4} dB ({today_corrected_rmse:.4} dB \
-         measured on 2026-07-29 + 0.02 dB for cross-platform libm ULP noise) — see \
-         docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md"
+         measured on 2026-07-30 (debug and release agree to 4 decimals) + 0.002 dB for \
+         cross-platform libm ULP noise)"
     );
 }
 
@@ -424,24 +421,33 @@ fn cli_full_mode_correction_beats_the_uncorrected_model() {
 
 /// Tolerance on bias recovery, in dB.
 ///
-/// The fitted surface absorbs the injected bias PLUS the residual left by calibrating a
-/// nominal 2.0 mm surface RMS against data generated at 2.6 mm. That second component
-/// is small everywhere but not uniform. Measured per probe (frequency, cone, clock):
-/// (450, 3, 30) 0.5928 dB — the worst case, nearest the main lobe; (550, 7, 120) 0.0934
-/// dB; (570, 14, 200) 0.0365 dB; (500, 10, 260) 0.0934 dB.
+/// UNCHANGED at 0.65 dB by the endpoint-defect fix (`bspline_basis` zero at an axis
+/// maximum, starving the topmost coefficient on every axis — see
+/// docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md). The four probe
+/// errors reproduced bit-for-bit before and after: (450, 3, 30) 0.5928 dB — the worst
+/// case, nearest the main lobe; (550, 7, 120) 0.0934 dB; (570, 14, 200) 0.0365 dB; (500,
+/// 10, 260) 0.0934 dB. They didn't move because these probes are deliberately off-grid
+/// AND interior — none sits in the topmost knot span of any axis that the fix touched
+/// (see the probe-placement comment in the test below), so their coefficients were never
+/// starved.
 ///
-/// Probe 3 was originally placed at 620 MHz, 20% into the frequency axis's topmost span
-/// [600, 700] — the span where `CorrectionSurface::evaluate` collapses to ~0, see
-/// docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md. That measured
-/// 0.1716 dB, roughly double probes 2 and 4, because it was partly measuring the filed
-/// defect rather than fit quality. Moved to 570 MHz, clear of the top span; its error
-/// dropped to 0.0365 dB, consistent with the other genuinely-interior probes.
+/// What actually limits recovery here is overfitting from an underdetermined fit: the
+/// shipped configuration has 960 coefficients ((4+4)(6+4)(8+4) for 4/6/8 knots at
+/// spline order 4) fitting only 288 measurement points, so the surface can interpolate
+/// every data point almost exactly (`corrected_rmse` 0.0058 dB, see the ceiling assertion
+/// above) while oscillating between them — which is exactly what these off-grid probes
+/// are catching. That is tracked separately from the endpoint defect: the fitter's
+/// data-sufficiency check tests `(spline_order+1)^3 = 125` points as the minimum, when the
+/// real requirement is the coefficient count (960 here). See
+/// docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md, which records this.
+/// This tolerance can only tighten once that is addressed; it is deliberately left
+/// unchanged by this change.
 ///
-/// All four values reproduced bit-for-bit across debug and release builds and across
+/// All four probe values reproduce bit-for-bit across debug and release builds and across
 /// repeat runs. 0.65 dB is set with headroom above the measured 0.5928 dB worst case —
 /// enough to absorb run-to-run libm noise without flaking — while staying far below the
-/// injected bias's own 0.2–2.3 dB range, so a surface that fitted nothing would still
-/// fail this test.
+/// injected bias's own 0.7529–1.4529 dB range at these probes, so a surface that fitted
+/// nothing would still fail this test.
 const BIAS_RECOVERY_TOLERANCE_DB: f64 = 0.65;
 
 #[test]
@@ -455,13 +461,20 @@ fn cli_full_mode_recovers_the_injected_bias() {
         .expect("full mode must ship a correction surface");
 
     // Interior probe points only — off-grid but each one sits below the topmost knot
-    // span of every axis, deliberately: the correction collapses to ~0 across that span
-    // (see docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md), a filed
-    // defect, not this test's subject. Concretely, the fitted frequency knot vector is
-    // [400, 400, 400, 400, 400, 500, 600, 700, 700, 700, 700, 700], so its topmost span
-    // is [600, 700] MHz — every probe's frequency here is <= 570 MHz, clear of it. The
-    // cone axis's topmost span is [20, 24] deg (probes <= 14 deg) and the clock axis's
-    // is [270, 315] deg (probes <= 260 deg).
+    // span of every axis, deliberately. Originally this was because the correction
+    // collapsed to ~0 across that span (a `bspline_basis` defect at the exact maximum of
+    // an axis); that was fixed 2026-07-30 in a866cfb, and the basis is now a partition of
+    // unity at every boundary, so it's history, not a live hazard here.
+    //
+    // Staying interior is still worthwhile post-fix, for a different reason: off-grid
+    // accuracy is limited by the underdetermined fit (960 coefficients, 288 points — see
+    // `BIAS_RECOVERY_TOLERANCE_DB` above), and a probe placed exactly at a boundary would
+    // conflate boundary behavior with that interpolation error. Keeping the probes
+    // interior keeps this test measuring one thing. Concretely, the fitted frequency knot
+    // vector is [400, 400, 400, 400, 400, 500, 600, 700, 700, 700, 700, 700], so its
+    // topmost span is [600, 700] MHz — every probe's frequency here is <= 570 MHz, clear
+    // of it. The cone axis's topmost span is [20, 24] deg (probes <= 14 deg) and the
+    // clock axis's is [270, 315] deg (probes <= 260 deg).
     let probes = [
         (450.0_f64, 3.0_f64, 30.0_f64),
         (550.0, 7.0, 120.0),
