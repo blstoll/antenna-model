@@ -1580,9 +1580,39 @@ mod least_squares_tests {
         assert!(max < 1e-8, "(B^T B + λI)c != B^T r, residual {max:e}");
     }
 
-    /// Regression guard: values captured from the previous OpenBLAS/LAPACK (`dgesv`)
-    /// implementation, before the switch to sparse normal equations + Cholesky. The fit
-    /// must not drift.
+    /// Regression guard for **solver drift**: the sparse normal-equations + Cholesky path
+    /// must keep agreeing with the original OpenBLAS/LAPACK (`dgesv`) implementation it
+    /// replaced. It is not an oracle for the B-spline basis itself — see the re-pin note
+    /// below.
+    ///
+    /// **Re-pinned 2026-07-30** after the `bspline_basis` domain-maximum fix (see the
+    /// `k == 1` base case above and
+    /// `docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md`). This
+    /// fixture's frequency axis (`fixture_residuals`, `i in 0..8` → 8000..8700 MHz in
+    /// 100 MHz steps) reaches exactly 8700 MHz, the frequency knot vector's maximum
+    /// (`fixture_knots`). Before the fix, the 48 of 288 points sitting on that face
+    /// evaluated the basis to all zero and contributed nothing to the normal equations,
+    /// so the last frequency coefficient had no data support and was pulled toward zero
+    /// by the ridge term alone. The fit below legitimately changed as a result — this is
+    /// not solver drift, it is the fixture actually being fit correctly for the first
+    /// time.
+    ///
+    /// Pre-fix (buggy basis) values, kept for the record:
+    /// `sum = 8.154347510713e1`, `sumsq = 5.590390188922e1`, `c[0] = 7.434343253931e-1`,
+    /// `c[1] = 7.358607285775e-1`, `c[mid] = 7.478379397133e-1`,
+    /// `c[last] = 1.489868817277e-1`.
+    ///
+    /// Sanity check on the new values: `sum` rose (81.54 -> 87.17) and `c[last]` rose
+    /// sharply (0.149 -> 0.566) — exactly the direction expected when a starved
+    /// coefficient regains data support instead of being suppressed by the ridge term.
+    ///
+    /// The new values are corroborated by three independent checks, not just accepted
+    /// as "whatever the code now emits": `fit_satisfies_normal_equations` (the solve is
+    /// self-consistent, `(BᵀB + λI)c = Bᵀr`), `normal_equations_match_dense_reference`
+    /// (the sparse accumulation matches a dense reference), and — the genuine basis
+    /// oracle — `a_fitted_constant_is_recovered_at_the_domain_maximum`, which fits a
+    /// constant (analytically exactly representable by any B-spline) and recovers it
+    /// everywhere including the domain maximum, independent of any pinned number here.
     #[test]
     fn fit_matches_openblas_golden() {
         let residuals = fixture_residuals();
@@ -1601,12 +1631,12 @@ mod least_squares_tests {
                 "{what}: got {got:.12e}, want {want:.12e}"
             );
         };
-        close(sum, 8.154347510713e1, "sum");
-        close(sumsq, 5.590390188922e1, "sumsq");
-        close(c[0], 7.434343253931e-1, "c[0]");
-        close(c[1], 7.358607285775e-1, "c[1]");
-        close(c[c.len() / 2], 7.478379397133e-1, "c[mid]");
-        close(c[c.len() - 1], 1.489868817277e-1, "c[last]");
+        close(sum, 8.717338510919e1, "sum");
+        close(sumsq, 6.171608452120e1, "sumsq");
+        close(c[0], 7.444512507241e-1, "c[0]");
+        close(c[1], 7.368946771474e-1, "c[1]");
+        close(c[c.len() / 2], 7.472561519268e-1, "c[mid]");
+        close(c[c.len() - 1], 5.661438211178e-1, "c[last]");
     }
 
     /// Behavior change worth pinning: with λ = 0 and a basis the data cannot identify,
