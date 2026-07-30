@@ -485,8 +485,23 @@ async fn run_calibration(args: Args) -> Result<()> {
         quality_report.main_lobe_points, quality_report.sidelobe_points
     );
 
+    info!(
+        "  G/T range: {:.1} - {:.1} dB/K",
+        quality_report.g_over_t_range.0, quality_report.g_over_t_range.1
+    );
+
     if quality_report.outlier_count > 0 {
         warn!("  ⚠ Found {} outlier points", quality_report.outlier_count);
+    }
+
+    if quality_report.atypical_g_over_t_count > 0 {
+        warn!(
+            "  ⚠ {} points outside the boresight-typical G/T range [{:.0}, {:.0}] dB/K \
+             (expected for off-axis measurements; all are retained and fitted)",
+            quality_report.atypical_g_over_t_count,
+            calibrate::parser::TYPICAL_G_OVER_T_RANGE_DB.start(),
+            calibrate::parser::TYPICAL_G_OVER_T_RANGE_DB.end(),
+        );
     }
 
     // Step 2: Load antenna class definition
