@@ -9,7 +9,8 @@
 //! - Physical parameter optimization (optional)
 //! - Correction surface fitting to residuals
 //! - Validation and quality metrics
-//! - Calibration artifact generation and serialization
+//! - Calibration artifact generation (see `artifact_export`) plus optional
+//!   JSON metadata/report sidecars (see `sidecar`)
 
 // Compiler and linter configuration
 #![deny(unsafe_code)]
@@ -28,7 +29,7 @@ pub mod design_specs_loader;
 pub mod frequency_correction;
 pub mod parameter_tuner;
 pub mod parser;
-pub mod serializer;
+pub mod sidecar;
 pub mod validator;
 
 // Re-export commonly used types
@@ -54,9 +55,8 @@ pub use validator::{
     OutlierPoint, ValidationConfig, ValidationError, ValidationReport,
 };
 
-pub use serializer::{
-    export_metadata_json, export_validation_json, ArtifactMetadata, CalibrationArtifact,
-    SerializationError,
+pub use sidecar::{
+    export_metadata_json, export_validation_json, ArtifactMetadata, SerializationError,
 };
 
 pub use design_specs_loader::{DesignSpecs, FeedSpecs, MeshSpecs, ReflectorSpecs, TuningBounds};

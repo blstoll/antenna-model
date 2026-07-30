@@ -1369,7 +1369,8 @@ antenna-model/
 │   │   ├── parser.rs            # Parse measurement CSV
 │   │   ├── fitter.rs            # B-spline fitting
 │   │   ├── validator.rs         # Validation logic
-│   │   └── serializer.rs        # Write artifacts
+│   │   ├── artifact_export.rs   # Write the service-loadable .bin artifact
+│   │   └── sidecar.rs           # Optional JSON metadata/report sidecars
 │   └── README.md
 │
 ├── calibration_data/            # Committed artifacts

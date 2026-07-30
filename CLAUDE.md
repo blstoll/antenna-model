@@ -91,7 +91,8 @@ antenna-model/           # Cargo workspace root
 │       ├── parameter_tuner.rs    # Differential evolution optimizer
 │       ├── correction_surface.rs # B-spline/RBF fitting
 │       ├── validator.rs          # Cross-validation
-│       └── serializer.rs         # CalibrationArtifact type + JSON metadata/report sidecars
+│       ├── artifact_export.rs    # Service-loadable AntennaCalibration (3D→4D bridge)
+│       └── sidecar.rs            # Optional JSON metadata/report sidecars only
 └── calibration_data/   # Calibration config (antennas.yaml) + generated *.bin artifacts (none checked in; see roadmap D9)
 ```
 

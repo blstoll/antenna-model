@@ -81,7 +81,9 @@ This implementation plan breaks down the Antenna Model Service into manageable s
 - `correction_surface.rs` - B-spline/RBF fitting
 - `antenna_config.rs` - Config extraction
 - `validator.rs` - Cross-validation
-- `serializer.rs` - Binary artifact generation
+- `artifact_export.rs` - Service-loadable `AntennaCalibration` (3D→4D bridge); the ANTC
+  framing lives in `main.rs::write_antc_artifact`
+- `sidecar.rs` - Optional `--metadata`/`--report` JSON sidecars (no binary output)
 
 ### Key Technical Context for Sprint 6+
 
