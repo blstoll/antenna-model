@@ -701,6 +701,64 @@ mod tests {
         );
     }
 
+    /// This interpolator is a partition of unity at every domain boundary — including
+    /// each axis's exact maximum, the point where calibrate's fitter-side
+    /// `bspline_basis` was NOT until 2026-07-30 (see
+    /// docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md). That
+    /// investigation verified this by hand; this test commits the verification.
+    ///
+    /// The coefficients are built by hand, not fitted, so a fitter defect cannot leak
+    /// in: with every coefficient 1.0, a correct basis must return exactly 1.0
+    /// anywhere in the domain, boundaries included.
+    #[test]
+    fn basis_is_a_partition_of_unity_at_every_axis_boundary() {
+        // Order-4 clamped axes with one interior knot each — the same structure
+        // production artifacts carry (order 4, clamped, non-degenerate).
+        fn clamped(lo: f64, mid: f64, hi: f64) -> Vec<f64> {
+            vec![lo, lo, lo, lo, mid, hi, hi, hi, hi]
+        }
+        let n = 5; // knots.len() (9) - order (4) basis functions per axis
+        let model = BSplineModel4D {
+            coefficients: vec![1.0; n * n * n * n],
+            shape: [n, n, n, n],
+            knots_azimuth: clamped(0.0, 180.0, 360.0),
+            knots_elevation: clamped(0.0, 45.0, 90.0),
+            knots_frequency: clamped(8000.0, 8350.0, 8700.0),
+            knots_temperature: clamped(280.0, 290.0, 300.0),
+            spline_order: 4,
+        };
+        assert!(
+            model.validate().is_ok(),
+            "test model failed validate(): {:?}",
+            model.validate()
+        );
+
+        // Interior values chosen off every knot.
+        let (az_i, el_i, f_i, t_i) = (123.4, 33.3, 8123.0, 285.5);
+        let probes = [
+            ("interior", az_i, el_i, f_i, t_i),
+            ("azimuth at max", 360.0, el_i, f_i, t_i),
+            ("elevation at max", az_i, 90.0, f_i, t_i),
+            ("frequency at max", az_i, el_i, 8700.0, t_i),
+            ("temperature at max", az_i, el_i, f_i, 300.0),
+            ("all four at max", 360.0, 90.0, 8700.0, 300.0),
+            ("all four at min", 0.0, 0.0, 8000.0, 280.0),
+        ];
+        for (label, az, el, f, t) in probes {
+            let result = evaluate_correction(&model, az, el, f, t).expect("evaluate");
+            assert!(
+                !result.extrapolated,
+                "{label}: an exact domain boundary is in-range, not extrapolated"
+            );
+            assert!(
+                (result.correction_db - 1.0).abs() < 1e-12,
+                "{label} (az={az}, el={el}, f={f}, t={t}): basis summed to {:.12}, \
+                 not 1.0 — not a partition of unity there",
+                result.correction_db
+            );
+        }
+    }
+
     /// Test that `find_knot_span` with the corrected formula (`n = len - order`)
     /// selects the correct span index for the topmost knot interval.
     #[test]
