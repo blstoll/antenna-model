@@ -354,7 +354,7 @@ Unless a decision-register row flips them:
   parameter (as opposed to the correction surface's recovery of an injected bias) remains
   unverified end-to-end. The service side is unaffected throughout: the four enabled antennas
   are uncalibrated design-spec entries that load no correction surface.
-- **The correction surface returns ~0 across the topmost knot span of every axis**
+- ~~**The correction surface returns ~0 across the topmost knot span of every axis**
   (2026-07-29/30, filed by D12): both calibrate's 3D `CorrectionSurface::evaluate` and the
   service-side 4D `evaluate_correction` collapse to zero correction near the upper edge of the
   frequency/E-cone/E-clock knot ranges (a surface fitted to a constant 1.5 dB returns
@@ -363,7 +363,20 @@ Unless a decision-register row flips them:
   are uncalibrated design-spec entries — but it becomes a served-path wrong answer as soon as
   D9 or D14 ships a real correction-surface artifact. **Recommend fixing before D14**, since
   D14 builds a real-anchored artifact specifically to exercise the served calibrated path. See
-  `docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md`.
+  `docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md`.~~ **Resolved 2026-07-30
+  by commit `a866cfb`** on branch `fix/correction-surface-endpoint`: `bspline_basis`'s `k == 1`
+  base case used a half-open span, so the basis was not a partition of unity at an exact axis
+  maximum, and `accumulate_normal_equations` turned every measurement sitting on a maximum into
+  an all-zero row that starved the top coefficient on that axis via the ridge term — the fitter
+  was defective, not the service-side interpolator, which was verified correct at every boundary
+  by partition of unity with hand-built coefficients throughout (see the findings doc for the
+  full correction). D12's fixture: corrected RMSE 0.9756 → 0.0058 dB (168× improvement); the
+  four known-answer probes were unaffected (0.5928/0.0934/0.0365/0.0934 dB, unchanged) because
+  they are off-grid and away from any edge — that residual is underdetermination (960
+  coefficients, 288 points), not the edge collapse, and **remains open** along with two other
+  items excluded from this fix's scope: `validate_knot_vector` not checking multiplicity, and
+  the data-sufficiency check testing the wrong quantity (125 vs. the real 960-coefficient
+  requirement). **This fix does not make the fit well-determined.**
 - **`detect_outliers` measures the wrong quantity** (2026-07-29, filed by D11):
   `MeasurementData::detect_outliers` applies a modified Z-score (MAD) to raw `g_over_t_db`
   across all points, which on a full pattern asks "how far is this point from the median of the
