@@ -286,8 +286,13 @@ fn boresight_coverage_is_written_as_an_on_axis_cone() {
         "the on-axis restriction belongs entirely to elevation"
     );
 
-    // The gate the evaluator actually runs, on the azimuth a boresight-aimed query
-    // really produces.
+    // `CalibrationCoverage::contains` — the type's own range test, on the azimuth a
+    // boresight-aimed query really produces. NOTE: this is *not* the function the
+    // evaluator runs; that is the private `service::evaluator::is_in_coverage`, which
+    // duplicates this logic rather than calling it. They agree today, and the served
+    // path is asserted separately by
+    // `evaluator::tests::a_boresight_aimed_query_gets_the_boresight_correction_applied`.
+    // If the roadmap's pole fix ever makes them disagree, that is the drift to fix.
     assert!(
         coverage.contains(63.43, 0.0, 7800.0),
         "boresight coverage must accept a boresight query whatever its azimuth reads"

@@ -3239,17 +3239,25 @@ Best candidate: **Andrew 43998, 10 m — 6 frequencies spanning 3700–6425 MHz*
   spillover and the F7 floor on surface presence and a no-surface baseline would compute
   different physics. D13's real-data e2e should assert the same thing alongside its NTIA
   tolerance.
-- **Filed, not fixed — `is_in_coverage`'s azimuth clause is meaningless at the pole in
-  general.** The degeneracy is not boresight-mode-specific: any coverage region whose
-  elevation range includes 0 contains the pole, so a full-mode artifact with, say, azimuth
-  coverage `(170, 190)` would also wrongly reject an exact-boresight query whose noise
-  azimuth is 63°. Mostly theoretical today — full-mode coverage extents come from measured
-  points and rarely include elevation 0 exactly. The fix is to skip the azimuth clause when
-  `elevation_deg` is below a pole threshold. Deliberately **not** applied under D13: doing it
-  there would mask, rather than express, the boresight artifact's intent — the artifact
-  should say what it covers. Documented in `is_in_coverage`'s doc comment and pinned by
-  `legacy_degenerate_boresight_coverage_rejects_its_own_point`, whose failure message points
-  back here.
+- **Filed, not fixed — the azimuth clause is meaningless at the pole in general.** The
+  degeneracy is not boresight-mode-specific: any coverage region whose elevation range
+  includes 0 contains the pole, so a full-mode artifact with, say, azimuth coverage
+  `(170, 190)` would also wrongly reject an exact-boresight query whose noise azimuth is 63°.
+  Mostly theoretical today — full-mode coverage extents come from measured points and rarely
+  include elevation 0 exactly. The fix is to skip the azimuth clause when `elevation_deg` is
+  below a pole threshold. Deliberately **not** applied under D13: doing it there would mask,
+  rather than express, the boresight artifact's intent — the artifact should say what it
+  covers.
+
+  **There are TWO copies of this predicate and the fix must touch both.**
+  `service::evaluator::is_in_coverage` (private, and the one the served path actually runs)
+  and `CalibrationCoverage::contains` (public API on the type, currently exercised only by
+  tests) implement the same range test independently — `contains` is not called by
+  `is_in_coverage`. They agree today; a fix applied to one alone makes the public type lie
+  about what the service does. Either fix both or, preferably, make `is_in_coverage` delegate
+  to `contains` so the duplication cannot come back. Documented in `is_in_coverage`'s doc
+  comment and pinned by `legacy_degenerate_boresight_coverage_rejects_its_own_point`, whose
+  failure message points back here.
 - **Depends on:** D2 (✅ done 2026-07-30 — the headered artifact format is final, so this
   test pins that rather than the legacy one), D12 (reuses its CLI-harness pattern; the
   boresight harness in `cli_boresight_mode_e2e.rs` is the closer starting point).

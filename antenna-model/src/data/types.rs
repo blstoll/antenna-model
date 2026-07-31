@@ -802,6 +802,13 @@ impl CalibrationCoverage {
     }
 
     /// Checks if a query point is within the calibrated coverage.
+    ///
+    /// **This logic is duplicated by `service::evaluator::is_in_coverage`, which is
+    /// what the served path actually runs — it does not call this method.** The two
+    /// agree today. They share the pole limitation documented on `is_in_coverage`
+    /// (the azimuth clause is meaningless at `elevation ≈ 0`, where azimuth is
+    /// degenerate); the roadmap fix for that must touch both, or the public type
+    /// starts lying about what the service does.
     pub fn contains(&self, azimuth: f64, elevation: f64, frequency: f64) -> bool {
         azimuth >= self.azimuth_range.0
             && azimuth <= self.azimuth_range.1

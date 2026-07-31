@@ -463,6 +463,12 @@ pub fn compute_gain_from_request_with_budget(
 /// elevation 0 exactly. The fix — skip the azimuth clause when `elevation_deg` is
 /// below a pole threshold — is filed on the roadmap, not applied here, because
 /// doing it silently would mask rather than express a boresight artifact's intent.
+///
+/// **When that fix lands it must touch two functions.** This one and
+/// [`CalibrationCoverage::contains`](crate::data::types::CalibrationCoverage::contains)
+/// implement the same range test independently — this function does not delegate to
+/// it. They agree today; fixing one alone would make the public type lie about what
+/// the service does. Prefer making this delegate rather than editing both.
 pub(crate) fn is_in_coverage(
     coverage: &Option<CalibrationCoverage>,
     azimuth_deg: f64,
