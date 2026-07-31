@@ -355,7 +355,8 @@ impl IntegrationParams {
     /// `physics_is_uncorrected` is [`crate::data::types::AntennaCalibration::physics_is_uncorrected`]
     /// — true iff the artifact carries **no** correction surface. Both
     /// [`Self::apply_spillover`] and [`Self::apply_sidelobe_floor`] are gated on exactly
-    /// that predicate and must never be set independently of each other (roadmap P11).
+    /// that predicate when deriving the params for a **served gain**, and this setter is how
+    /// that is done (roadmap P11).
     ///
     /// **Every producer of a gain number for a given artifact must call this with the same
     /// argument** — the service when it serves the artifact, and `calibrate` when it fits
@@ -370,6 +371,24 @@ impl IntegrationParams {
     /// Note the argument is a property of the **artifact**, not of the query: it is decided
     /// once per antenna, so no discontinuity is introduced between covered and
     /// out-of-coverage queries.
+    ///
+    /// # The one place that deliberately does not use this
+    ///
+    /// `service::evaluator`'s **ideal-reference** computation (the `loss_db` denominator)
+    /// sets `apply_spillover` alone, from `result.spillover_loss_db.is_some()` — the
+    /// spillover the actual evaluation *applied*, not the predicate. That is correct and
+    /// must stay: the model layer restricts spillover to `StandardPhysicalOptics`, so a
+    /// large-offset feed can have the flag on and yet fold in no spillover. Deriving the
+    /// reference's flag from the predicate there would apply spillover to the ideal
+    /// reference that the actual never got, leaving a one-sided bias in `loss_db`. Its
+    /// sibling `apply_sidelobe_floor` is carried unchanged from the clone and is inert on
+    /// that path anyway (the ideal reflector has `surface_rms = 0.0`, so the floor is
+    /// identically zero).
+    ///
+    /// So the rule is not "these flags are never set individually" — it is that **every
+    /// producer of a gain for a given artifact derives them from the same predicate through
+    /// this setter**. The reference is not a served gain for the artifact; it is a
+    /// deliberately matched counterfactual. Do not "unify" that call site into this one.
     #[must_use]
     pub fn with_uncorrected_physics_gates(mut self, physics_is_uncorrected: bool) -> Self {
         self.apply_spillover = physics_is_uncorrected;

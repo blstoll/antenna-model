@@ -3438,12 +3438,24 @@ served with the gates on.
 
 **As landed.**
 - `IntegrationParams::with_uncorrected_physics_gates(physics_is_uncorrected)` in
-  `model/integration.rs` is now the only way either crate sets these two flags — the same
-  structural move D2 made with `write_antc_artifact` and D13 with `flat_axis`. Four
-  production call sites route through it: `service/evaluator.rs`, `service/h3_link_budget.rs`,
-  `calibrate/boresight_calibration.rs` (per artifact) and `calibrate/main.rs` +
-  `parameter_tuner.rs` (hard-coded `false`, because full mode always attaches a correction —
-  `fit_correction_surface` propagates a failure rather than shipping without one).
+  `model/integration.rs` is now how every producer of a **served** gain sets these two flags
+  — the same structural move D2 made with `write_antc_artifact` and D13 with `flat_axis`.
+  **Five call sites in five files**, carrying three distinct decisions:
+  `service/evaluator.rs` and `service/h3_link_budget.rs` (from
+  `calibration.physics_is_uncorrected()`); `calibrate/boresight_calibration.rs` (per
+  artifact, per pass); and `calibrate/main.rs` + `calibrate/parameter_tuner.rs`, which are
+  two call sites making one decision — hard-coded `false`, because full mode always attaches
+  a correction (`fit_correction_surface` propagates a failure rather than shipping without
+  one) and because D16 requires those two stages to evaluate the same model as each other.
+- **One deliberate non-user, documented on both ends.** `service/evaluator.rs`'s
+  ideal-reference computation (the `loss_db` denominator) sets `apply_spillover` alone, from
+  `result.spillover_loss_db.is_some()` — what the actual evaluation *applied*, not the
+  predicate. The model layer restricts spillover to `StandardPhysicalOptics`, so a
+  large-offset feed can carry the flag and fold in no spillover; deriving the reference's
+  flag from the predicate would apply spillover to the ideal reference the actual never got
+  and leave a one-sided bias in `loss_db`. The reference is a matched counterfactual, not a
+  served gain for the artifact. The setter's docs name this exception and the call site
+  points back at the setter, so neither reads as an oversight to be "unified" later.
 - Measured on the D13 real-data fixtures. **Andrew (uncorrected branch): worst
   served-vs-published 0.483 → 0.1813 dB**, and the served residual RMSE now equals the RMSE
   the artifact reports (0.1065 dB, four decimals). The reported RMSE *rose* 0.0828 → 0.1065 dB

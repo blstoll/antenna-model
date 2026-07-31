@@ -358,6 +358,12 @@ pub fn compute_gain_from_request_with_budget(
         // reference too so the base spillover cancels in loss_db; if the actual did NOT get
         // spillover (large offset / non-standard mode, or calibrated), the reference must
         // not either, keeping loss_db free of a one-sided spillover bias.
+        //
+        // This is the ONE place that sets a P11-gated flag without going through
+        // `with_uncorrected_physics_gates`, and that is deliberate — the setter's docs name
+        // this exception. Routing this line through the setter would derive the flag from
+        // the *predicate* rather than from what the actual evaluation applied, reintroducing
+        // exactly the one-sided bias the paragraph above exists to prevent.
         let mut reference_params = integration_params.clone();
         reference_params.apply_spillover = result.spillover_loss_db.is_some();
         // `apply_sidelobe_floor` is carried unchanged from the clone. For the ideal
