@@ -119,9 +119,15 @@ G1 ─┬─ G2 ── G3
     │      setter. Andrew worst served error  │
     │      0.483 -> 0.181 dB. FILED: the      │
     │      density axis (default vs adaptive) │
-    │      still diverges — 1.16 dB silently, │
-    │      no radial self-check on the mode   │
-    │      path. P10 family, not D17.         │
+    │      still diverges — no radial self-   │
+    │      check on the mode path. Parked in  │
+    │      P10-perf, then PROMOTED to its own │
+    │      unit P12 on 2026-07-31 after re-   │
+    │      measurement: NOT latent on the     │
+    │      enabled antennas (gs_3.7m X-band   │
+    │      th=5deg is 0.82 dB off with the    │
+    │      floor NOT binding) and NOT only a  │
+    │      floor problem. P12 blocks P10-perf.│
     │  D14 open (filed 2026-07-29: NASA-      │
     │      anchored full-mode artifact;       │
     │      also needs D2; feeds D9)           │
@@ -135,7 +141,8 @@ F7 IMPLEMENTED 2026-07-12 then PARKED 2026-07-13 (inverted premise — see the F
 UNBLOCKED by P10 2026-07-15; REDESIGN DECIDED 2026-07-16 (power-sum + obliquity factor +
 floor-only rear hemisphere) — sequence WITH P10-perf (they interact);
 P10 DONE 2026-07-15; post-P10 assessment follow-ups filed 2026-07-15: P10-perf, P10-tail, P11
-(P10-tail + P11 DONE 2026-07-15/16); P2 DECIDED 2026-07-16 (REMOVE the Seidel mode; Stage-1
+(P10-tail + P11 DONE 2026-07-15/16); P12 filed 2026-07-31 [DECISION: D-A radial-check form,
+D-B adaptive() floor] — served-path correctness, blocks P10-perf; P2 DECIDED 2026-07-16 (REMOVE the Seidel mode; Stage-1
 gate tripped and removal re-affirmed same day — the terms are wrong-sign/wrong-scale additions
 on top of complete exact physics, not duplicates); P3 DECIDED + EXECUTED 2026-07-16 (document +
 flag; warning pinned on all four endpoints, H3 cache-hit gap fixed)
@@ -515,28 +522,21 @@ gap that let this ship.
   served with uncorrected physics and unchanged (still slow, still correct) for calibrated
   antennas that still run the rear PO integral.
 
-**INHERITED 2026-07-31 from D17 — the mode path never checks radial convergence, and the
-served preset is where that bites.** Filed here rather than as its own unit because it is the
-same `radial_points_for` budget this unit already re-scopes, and any fix interacts with the
-sample counts this unit exists to reduce. The finding, source-confirmed at
-`model/integration.rs:526-541`: the asymmetric (azimuthal-mode) branch's runtime self-check
-compares `I(M)` vs `I(M+1)` — **mode truncation only**. `n_rho` is computed once and never
-verified, unlike the symmetric branch's N-vs-2N radial check (`:495-511`). Consequence
-measured on D12's `UHF_Array_Element` fixture (8 m, f/D 0.45, `asymmetry_factor` 1.1, D/λ =
-16) at θ=16°, φ=90°, 600 MHz: `compute_gain_db` returns **−50.7668 dBi** under the served
-`adaptive()` (radial floor 16) against **−49.6090** under `default()` (floor 32) and
-**−49.5426** under `high_accuracy()` (floor 64) — the two denser presets agreeing to 0.066 dB
-— i.e. **1.16 dB of silent error with `converged = true` and no warning**. A direct
-`integrate_aperture` call at the same point reports 32.6 % relative error at floor 16, 2.98 %
-at 32, converging only at 64. Binding condition: `4·(D/λ)·sinθ < min_rho_points`, so it is a
-low-`D/λ` + asymmetric-geometry defect — **latent** on the four enabled antennas (asymmetric
-feeds at D/λ ≈ 97 for gs_3.7m X-band up to ≈ 3600 for dsn_34m Ka, so the floor binds only
-within a couple of degrees of boresight where the integrand is smooth), **live** in the
-calibration pipeline's own fixture. Two things to decide together: whether the mode path
-gains a radial N-vs-2N check (cost: one more radial sweep per mode-path evaluation, which
-this unit is trying to *reduce*), and whether `adaptive()`'s floor of 16 is simply too low.
-Note CLAUDE.md's integrator description was corrected the same day — it had claimed the
-self-check was "never silent" without qualification.
+**INHERITED 2026-07-31 from D17, then PROMOTED OUT 2026-07-31 → see unit P12.** D17 filed the
+mode path's missing radial convergence check here, on the reasoning that it is the same
+`radial_points_for` budget this unit re-scopes and that it was latent on the enabled antennas.
+Re-measuring against the exact `antennas.yaml` parameters falsified the latency of it —
+`gs_3.7m_uncalibrated`/`x_band_feed` at 8.4 GHz, θ=5° is **0.82 dB** from converged with
+`converged = true`, **with the density floor not binding at all** — so it is a served-path
+correctness defect, not a knob this unit can turn in passing. It now has its own unit, **P12**,
+with the full measurement table.
+
+**What remains here is the coupling, and it is tight.** P12 wants to *add* a radial sweep to
+the mode path (up to 3× its cost); this unit exists to *reduce* that cost. Decide P12's D-A
+(what form the radial check takes) with this unit's FFT `gₘ` and O(M) Bessel-recurrence
+speedups on the table — they change what a per-call check can afford. **Land P12 first
+anyway** (correctness ordering): optimizing sample counts against an unverified radial budget
+risks tuning the integrator to preserve a number that is off by a dB.
 
 ### P10-tail — Rear-hemisphere radial budget + physicality coverage beyond 90° — Effort: S
 
@@ -596,6 +596,131 @@ self-check was "never silent" without qualification.
   mirrored in `openapi.yaml`/`docs/api-documentation.md` (standing rule 4).
 - **Depends on:** nothing. **Blocks:** the F7 redesign *should* build on the unified predicate
   (its gate reuses this seam) — land P11 first.
+
+### P12 `[DECISION]` — The azimuthal-mode path never checks radial convergence — Effort: M
+
+**Filed 2026-07-31, promoted out of D17's "filed, not fixed" note and out of P10-perf, where
+D17 had parked it. Promoted because re-measuring it against the *exact* `antennas.yaml`
+parameters falsified the two claims that justified parking it** (see "What re-measurement
+changed" below): it is **not latent on the enabled antennas**, and it is **not only a floor
+problem**, so it is not a knob-turn that can ride along with a latency unit. This is a
+served-path correctness defect in the same class as P10 — smaller in magnitude, identical in
+kind: *a wrong number returned with `converged = true` and no warning*.
+
+**The defect.** `integrate_aperture` has two branches. The **symmetric** (J₀ Hankel) branch
+sizes the radial density, then *verifies* it: it recomputes at 2N and compares
+(`model/integration.rs:514-530`, `radial_check_points` at `:568`). The **asymmetric**
+(azimuthal-mode Jₘ) branch — taken whenever the feed is laterally displaced **or**
+`asymmetry_factor != 1.0` — computes `n_rho` once at `:545` and never verifies it. Its
+self-check (`:550-554`) compares `I(M)` vs `I(M+1)`: **azimuthal mode truncation only**. So on
+the mode path `converged = true` asserts nothing whatsoever about the radial quadrature, which
+is the axis that actually fails.
+
+This makes CLAUDE.md's integrator claim — a self-check that "flags non-convergence… never
+silently returns" — true on one branch and false on the other, with the geometry deciding
+which. Every enabled antenna with an offset feed takes the unverified branch.
+
+**Measured 2026-07-31 against exact `calibration_data/antennas.yaml` parameters** (served
+`adaptive()` vs a radial ladder run to convergence at `min_rho_points` 512–2048; `n_phi` and
+`m_max` held constant throughout, confirmed via `num_evaluations`, so every delta below is
+purely radial):
+
+| geometry | θ, φ | served `adaptive()` | converged | error | `converged` flag | floor binding? |
+|---|---|---|---|---|---|---|
+| `gs_3.7m_uncalibrated` / `x_band_feed`, 8.4 GHz | 5°, 0° | **−30.4500 dBi** | −29.6343 dBi | **0.82 dB** | `true` | **no** — `n_rho` = 43 from the formula |
+| `dsn_34m_uncalibrated` / `x_band`, 8.45 GHz | 0.10°, 0° | **2.9760 dBi** | 4.1427 dBi | **1.17 dB** | `true` | yes |
+| D12 `UHF_Array_Element` fixture, 600 MHz | 16°, 90° | **−50.7668 dBi** | −49.5383 dBi | **1.23 dB** | `true` | yes |
+
+The `gs_3.7m` row is the one that reframes the unit. Convergence ladder at that point
+(`min_rho_points` → served gain): 16 → −30.45004, 32 → −30.45001, 64 → −29.76998,
+128 → −29.64243, 256 → −29.63484, 512 → −29.63437, 2048 → −29.63434. The first two rows are
+*identical* because the floor is not binding there — `radial_points_for` returns 43 from its
+own physics budget — and the answer is still **0.82 dB off**. Raising `adaptive()`'s floor
+would not have moved it.
+
+**So there are two distinct sub-defects, with one root cause:**
+
+- **(a) The floor is too low.** `adaptive()` sets `min_rho_points: 16` against `default()`'s 32
+  and `high_accuracy()`'s 64 (`:295-308`, `:254-267`, `:338`). It binds when
+  `4·(D/λ)·sinθ < 16` — a low-θ / low-`D/λ` regime — and costs >1 dB there (rows 2 and 3).
+- **(b) The ~2× Nyquist budget itself is short on the mode path.** `radial_points_for`
+  (`:856-908`) sums the radial cycle content of the m=0 kernel plus the aperture-plane phase
+  terms and takes 4 samples/cycle. That budget was derived and validated for the **symmetric**
+  integrand; on the mode path it is demonstrably insufficient (row 1) while the floor sits
+  idle. **The mechanism is not yet established — establishing it is task 1 below.** Do not
+  assume it is a mis-derived constant; it may be that the per-mode integrand `gₘ(ρ)·Jₘ(kρ sinθ)`
+  carries radial content the m=0 budget does not model.
+- **Root cause of both being *silent*:** no radial self-check on this branch. (a) and (b) are
+  both invisible for exactly the same reason, and either can recur under any future budget
+  formula.
+
+**Why it was believed latent, and why that was wrong.** D17 reasoned that the enabled antennas'
+offset feeds sit at `D/λ ≈ 97–3600`, so `4·(D/λ)·sinθ < 16` only within a fraction of a degree
+of boresight where the integrand is smooth. That reasoning is sound **for sub-defect (a) only**
+— and it is the whole reason (b) went unnoticed, because (b) does not depend on the floor at
+all. `gs_3.7m` at 5° off-boresight is an ordinary served query, well outside the floor-binding
+cone (which ends at 2.21° for that geometry), returning a 0.82 dB error.
+
+**Decisions required before implementing** — both are the maintainer's, and they are coupled:
+
+- **D-A — Does the mode path get a radial N-vs-2N check?** The honest answer to "is this
+  number converged" costs a **second full radial sweep**: the mode path costs `n_rho × n_phi`,
+  so checking triples total work (N + 2N). That runs directly against **P10-perf**, whose whole
+  purpose is to *reduce* this path's cost (`dsn_34m` Ka already measures ~3.3 s at θ=90°; a
+  naive check makes it ~10 s). Options: (i) full N-vs-2N, honest and expensive; (ii) check on a
+  **subset of modes** — the dominant `m` carry most of the field, so a check restricted to
+  `m = 0` plus the largest-`|gₘ|` mode may bound the error at a fraction of the cost;
+  (iii) derive a *validated* budget with proven margin and check only periodically / in tests
+  rather than per-call. **Recommended: (ii)**, with (i) implemented first as the correctness
+  reference that (ii) is measured against — never ship (ii) without (i) to grade it.
+- **D-B — Is `adaptive()`'s floor of 16 simply wrong?** Raising it to 32 (matching `default()`)
+  fixes sub-defect (a) at rows 2 and 3 and closes D17's remaining calibrate-vs-service preset
+  divergence as a side effect. It does nothing for (b). **Recommended: raise to 32** as a cheap
+  independent improvement, explicitly *not* as the fix for this unit.
+
+**Sequencing with P10-perf — decide together, land P12 first.** These two units pull in
+opposite directions on the same code and the same cost budget: P12 wants more radial work,
+P10-perf wants less. Correctness ordering (guiding principle 1) puts P12 first, but its D-A
+choice should be made with P10-perf's FFT/recurrence speedups on the table, since those change
+what a check can afford. Do **not** land P10-perf's optimizations first: a faster wrong answer
+is still wrong, and optimizing against an unverified radial budget risks tuning sample counts
+to preserve a number that is off by a dB.
+
+- **Work:**
+  1. **Establish the mechanism for (b) before changing any constant.** Instrument the per-mode
+     radial integrand at the `gs_3.7m` θ=5° point; determine what radial content
+     `radial_points_for` is not counting. Report it — a wrong budget formula is a finding in
+     its own right.
+  2. Implement the radial self-check per D-A. Honest `converged = false` + `error_estimate` is
+     an acceptable outcome for expensive geometries; a silent wrong number is not.
+  3. Apply D-B's floor decision.
+  4. Extend the P10 validation protocol (`antenna-model/tests/reference_validation.rs`) to
+     cover the **mode path** at radial-convergence-sensitive points, not just the symmetric
+     path. The three table rows above are ready-made regression anchors.
+  5. Re-true CLAUDE.md's integrator paragraph and the `adaptive()` docstring
+     (`:271-294`) once the behavior is settled — both currently describe a self-check the mode
+     path does not perform.
+- **Exit criteria:** on the mode path, a radial-convergence claim is either *verified* or
+  *reported false* — never assumed; the three measured rows above are pinned as regression
+  tests; the mechanism behind (b) is documented; CLAUDE.md and the `adaptive()` docstring
+  match the shipped behavior; served values that move are recorded (this unit **will** move
+  served numbers, unlike D17).
+- **Gotchas:**
+  - **This changes served gain on every antenna with an offset or asymmetric feed** — five of
+    the enabled feeds. Expect the reference-validation anchors to move; they are boresight
+    peaks on symmetric geometries, so they *should not*, and a moved boresight anchor means the
+    change leaked onto the symmetric path. Check both.
+  - **Do not validate at a single angle** (standing pitfall 2 in CLAUDE.md). The failure is
+    angle-local and branch-local: `dsn_34m` X-band is 1.17 dB off at θ=0.10° and 0.036 dB off
+    at θ=2.0°, and the symmetric path is correct throughout.
+  - `PHYSICS_MODEL_VERSION` must bump if served values move.
+  - The `error_estimate` returned on the mode path today measures mode truncation only. If a
+    radial estimate joins it, decide explicitly how the two combine rather than overwriting
+    one with the other.
+- **Depends on:** nothing hard (P10 landed). **Coupled to:** P10-perf (cost budget, D-A) and,
+  through the shared `radial_points_for` budget, P10-tail. **Feeds:** D17's remaining open item
+  — the `calibrate` (`default()`, floor 32) vs service (`adaptive()`, floor 16) preset
+  divergence is a *symptom* of this defect and closes with D-B.
 
 ### P2 `[DECISION]` — Seidel higher-order aberration terms: REMOVE (double-counted) — Effort: S/M
 
