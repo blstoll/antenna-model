@@ -204,8 +204,8 @@ For antennas calibrated with boresight measurements only:
     "correction_applied": false,
     "parameters_source": "boresight_tuned",
     "coverage": {
-      "azimuth_range_deg": [0.0, 0.0],
-      "elevation_range_deg": [0.0, 0.0],
+      "azimuth_range_deg": [0.0, 360.0],
+      "elevation_range_deg": [0.0, 0.01],
       "frequency_range_mhz": [7100.0, 8500.0],
       "num_measurements": 15,
       "is_boresight_only": true
@@ -228,7 +228,9 @@ For antennas calibrated with boresight measurements only:
 - `status`: "partially_calibrated" - limited coverage
 - `accuracy_estimate_db`: 1.5 - ±1.5 dB at boresight
 - `correction_applied`: false - physics model only (no correction surface for boresight-only)
-- `coverage.is_boresight_only`: true - measurements at single spatial point
+- `coverage.is_boresight_only`: true - measurements on the boresight axis. Coverage is an
+  on-axis **cone** (`elevation ≤ 0.01°`, azimuth unconstrained), not the point `(0, 0)`:
+  boresight is the pole of the (azimuth, polar-angle) system, where azimuth is degenerate.
 - `warnings`: Informs about partial calibration limitation
 
 ### Partially Calibrated (Out-of-Coverage) Response
@@ -247,8 +249,8 @@ When query is outside the calibrated region:
     "correction_applied": false,
     "parameters_source": "boresight_tuned",
     "coverage": {
-      "azimuth_range_deg": [0.0, 0.0],
-      "elevation_range_deg": [0.0, 0.0],
+      "azimuth_range_deg": [0.0, 360.0],
+      "elevation_range_deg": [0.0, 0.01],
       "frequency_range_mhz": [7100.0, 8500.0],
       "num_measurements": 15,
       "is_boresight_only": true

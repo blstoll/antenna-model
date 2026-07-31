@@ -89,6 +89,55 @@ pub enum ArtifactExportError {
 /// Result alias for this module.
 pub type Result<T> = std::result::Result<T, ArtifactExportError>;
 
+/// Build a *flat-but-valid* axis for a dimension the surface does not vary in.
+///
+/// Returns `(n_layers, knots)`. Replicating the coefficient slab identically
+/// across `n_layers` layers along the axis makes the surface exactly constant in
+/// it, because B-spline basis functions are a partition of unity: the layers all
+/// carry the same value, and the basis weights sum to one at every point of the
+/// span.
+///
+/// This is the **only** correct way to collapse a dimension in a
+/// [`BSplineModel4D`]; the obvious alternative — one coefficient layer and a
+/// knot vector of `order` equal knots — is rejected on two independent counts,
+/// which is why it lives here as one shared definition rather than being
+/// re-derived per producer:
+///
+/// 1. `BSplineModel4D::validate` requires `knots.len() >= shape + order` on
+///    every axis, and the service loader runs that validation on every artifact.
+/// 2. The evaluator's span is `[knots[order-1], knots[len-order]]`; with a
+///    single coefficient layer that interval is necessarily empty regardless of
+///    knot-vector length, so the axis has nothing to evaluate over. Lengthening
+///    a degenerate vector is therefore *not* a fix — the layer count has to grow
+///    with it.
+///
+/// The layout is a clamped knot vector over the real interval `[lo, hi]` with
+/// one interior knot at the midpoint: `order` copies of `lo`, then the midpoint,
+/// then `order` copies of `hi` (length `2*order + 1 = n_layers + order` for
+/// `n_layers = order + 1`).
+///
+/// # Panics (debug only)
+///
+/// Debug-asserts `lo < hi`; a zero-width interval would reintroduce the empty
+/// span this helper exists to avoid. Callers validate the interval and return a
+/// proper error, so this cannot fire in release.
+pub(crate) fn flat_axis(lo: f64, hi: f64, order: usize) -> (usize, Vec<f64>) {
+    debug_assert!(
+        lo < hi,
+        "flat axis needs a non-empty interval: [{lo}, {hi}]"
+    );
+
+    let n_layers = order + 1;
+    let mid = 0.5 * (lo + hi);
+
+    let mut knots = Vec::with_capacity(2 * order + 1);
+    knots.extend(std::iter::repeat_n(lo, order));
+    knots.push(mid);
+    knots.extend(std::iter::repeat_n(hi, order));
+
+    (n_layers, knots)
+}
+
 /// Convert a 3D calibrate [`CorrectionSurface`] into a service-loadable 4D
 /// [`BSplineModel4D`].
 ///
@@ -106,17 +155,13 @@ pub type Result<T> = std::result::Result<T, ArtifactExportError>;
 ///
 /// # Temperature axis construction
 ///
-/// The temperature axis is made *flat but valid* (not degenerate). The
-/// coefficient slab is replicated identically across `n_temp = spline_order + 1`
-/// temperature layers, and the temperature knot vector is a clamped vector over
-/// the real interval `[t_lo, t_hi]` **with one interior knot** at the midpoint:
-/// `order` copies of `t_lo`, then `t_mid`, then `order` copies of `t_hi`
-/// (length `2*order + 1 = n_temp + order`).
-///
-/// The interior knot ensures the temperature axis has a genuine non-degenerate
-/// span so the basis functions are nonzero and sum to one.  Because all
-/// temperature layers are identical, the result is temperature-independent
-/// across `[t_lo, t_hi]`.
+/// The temperature axis is made *flat but valid* (not degenerate) by
+/// [`flat_axis`], which is shared with the boresight-mode producer in
+/// `frequency_correction`: the coefficient slab is replicated identically across
+/// `n_temp = spline_order + 1` temperature layers over a clamped knot vector on
+/// the real interval `[t_lo, t_hi]`. Because all temperature layers are
+/// identical and the basis is a partition of unity, the result is
+/// temperature-independent across `[t_lo, t_hi]`.
 ///
 /// # Arguments
 /// * `surface` - The fitted 3D correction surface.
@@ -148,16 +193,8 @@ pub fn to_bspline_4d(surface: &CorrectionSurface, t_lo: f64, t_hi: f64) -> Resul
     let n_az = n_clock;
     let n_el = n_cone;
     let n_freq_4d = n_freq;
-    let n_temp = order + 1; // flat-but-valid temperature axis (see module/fn docs)
-
-    // Clamped temperature knot vector with one interior knot at the midpoint:
-    // `order` copies of t_lo, then t_mid, then `order` copies of t_hi
-    // (length 2*order + 1 = n_temp + order).
-    let t_mid = 0.5 * (t_lo + t_hi);
-    let mut knots_temperature = Vec::with_capacity(2 * order + 1);
-    knots_temperature.extend(std::iter::repeat_n(t_lo, order));
-    knots_temperature.push(t_mid);
-    knots_temperature.extend(std::iter::repeat_n(t_hi, order));
+    // Flat-but-valid temperature axis (see [`flat_axis`] and the module/fn docs).
+    let (n_temp, knots_temperature) = flat_axis(t_lo, t_hi, order);
 
     // Reindex coefficients from source layout (freq fastest) to dest layout (az fastest).
     //   Source: idx = i_freq + n_freq * (i_cone + n_cone * i_clock)

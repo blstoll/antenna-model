@@ -740,8 +740,8 @@ There is no magnitude-based auto-detection; the pre-2026-07-27 heuristic is desc
     "status": "partially_calibrated",
     "accuracy_estimate_db": 1.5,
     "coverage": {
-      "azimuth_range_deg": [0.0, 0.0],
-      "elevation_range_deg": [0.0, 0.0],
+      "azimuth_range_deg": [0.0, 360.0],
+      "elevation_range_deg": [0.0, 0.01],
       "frequency_range_mhz": [7100.0, 8500.0],
       "num_measurements": 25,
       "is_boresight_only": true

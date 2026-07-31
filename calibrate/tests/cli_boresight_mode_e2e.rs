@@ -15,7 +15,9 @@
 //! numbers rather than a load failure. Both are now asserted below.
 
 use antenna_model::data::loader::{ANTC_ARTIFACT_VERSION, ANTC_HEADER_LEN, ANTC_MAGIC};
-use antenna_model::data::types::{CalibrationStatus, CALIBRATION_SCHEMA_VERSION};
+use antenna_model::data::types::{
+    CalibrationStatus, BORESIGHT_COVERAGE_CONE_DEG, CALIBRATION_SCHEMA_VERSION,
+};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -24,13 +26,10 @@ use std::process::Command;
 ///
 /// The values are a plausible X-band sweep for the 3.7 m design spec below, chosen so the
 /// tuner converges to a **max |residual| under 0.5 dB** — the threshold at which
-/// `frequency_correction::should_fit_correction` would fit a correction surface. That is
-/// deliberate and is asserted explicitly in `boresight_fixture_stays_below_the_correction_
-/// fit_threshold`: a boresight artifact that *does* carry a frequency correction currently
-/// fails to load, because `fit_frequency_correction` builds degenerate 4D axes that the
-/// service-side `BSplineModel4D::validate` rejects. That defect is filed and pinned under
-/// roadmap unit D13, which owns the fix; this unit is about container framing, so the
-/// fixture stays on the near side of the threshold rather than papering over it.
+/// `frequency_correction::should_fit_correction` fits a correction surface. Keeping this
+/// fixture on the near side of the threshold is what points the framing tests below at the
+/// *uncorrected* boresight artifact specifically; `RIPPLED_BORESIGHT_CSV` covers the other
+/// side of the branch.
 const BORESIGHT_CSV: &str = "\
 frequency_mhz,g_over_t_db,temperature_k
 7100,21.5,290
@@ -38,6 +37,26 @@ frequency_mhz,g_over_t_db,temperature_k
 7800,22.2,290
 8150,22.5,290
 8500,22.7,290
+";
+
+/// The same sweep with a ±1 dB frequency ripple superimposed. Parameter tuning cannot absorb
+/// it — surface RMS, q-factor and mesh geometry are all smooth in frequency — so the residual
+/// clears `should_fit_correction`'s 0.5 dB threshold and the run attaches a frequency
+/// correction surface.
+///
+/// That branch was **unloadable** until 2026-07-31 (roadmap D13): `fit_frequency_correction`
+/// built its azimuth/elevation/temperature axes as `order` equal knots over a single
+/// coefficient layer, which `BSplineModel4D::validate` rejects — so the service refused every
+/// boresight artifact that carried a correction. D2 could only pin the framing on the
+/// no-correction path for exactly that reason. This fixture exists to hold the other path
+/// open.
+const RIPPLED_BORESIGHT_CSV: &str = "\
+frequency_mhz,g_over_t_db,temperature_k
+7100,22.5,290
+7450,20.9,290
+7800,23.2,290
+8150,21.5,290
+8500,23.7,290
 ";
 
 const ANTENNA_ID: &str = "gs_3.7m";
@@ -70,11 +89,16 @@ fn design_specs_path() -> PathBuf {
 
 /// Run the real `calibrate` binary in boresight mode over `BORESIGHT_CSV`.
 fn run_boresight() -> CalibrateRun {
+    run_boresight_over(BORESIGHT_CSV)
+}
+
+/// Run the real `calibrate` binary in boresight mode over an arbitrary fixture CSV.
+fn run_boresight_over(csv: &str) -> CalibrateRun {
     let dir = tempfile::tempdir().expect("temp dir");
     let input = dir.path().join("boresight.csv");
     let artifact = dir.path().join("antenna.bin");
 
-    std::fs::write(&input, BORESIGHT_CSV).expect("write fixture CSV");
+    std::fs::write(&input, csv).expect("write fixture CSV");
 
     let specs = design_specs_path();
     assert!(
@@ -183,15 +207,157 @@ fn boresight_fixture_stays_below_the_correction_fit_threshold() {
     let calibration = antenna_model::data::loader::load_calibration_artifact(&run.artifact)
         .expect("load the boresight artifact");
 
-    // See BORESIGHT_CSV's comment: a boresight artifact carrying a frequency correction
-    // is currently rejected at load by `BSplineModel4D::validate` (degenerate axes from
-    // `fit_frequency_correction`) — roadmap D13 owns that fix. If this assertion ever
-    // fails, the fixture has drifted across the 0.5 dB threshold and the two tests above
-    // are no longer testing what they claim; do not "fix" it by loosening the loader.
+    // See BORESIGHT_CSV's comment. The two tests above are about the framing of a
+    // *no-correction* boresight artifact; if this fixture drifts across the 0.5 dB
+    // threshold they quietly become duplicates of the rippled ones below.
     assert!(
         calibration.correction_surface.is_none(),
         "fixture drifted: the tuner's residual now exceeds the 0.5 dB correction-fit \
-         threshold, so this artifact exercises the D13 defect rather than D2's framing"
+         threshold, so this artifact no longer covers the no-correction branch"
+    );
+}
+
+/// The D13 regression test at CLI level: a boresight run whose residuals trip the fitting
+/// threshold must produce an artifact the **service's own loader** accepts.
+///
+/// Before the fix this failed at `load_calibration_artifact` with an `InvalidKnotVector`
+/// on the azimuth axis — the whole boresight-plus-correction path was dead on arrival.
+#[test]
+fn a_boresight_artifact_carrying_a_frequency_correction_loads() {
+    let run = run_boresight_over(RIPPLED_BORESIGHT_CSV);
+
+    let calibration = antenna_model::data::loader::load_calibration_artifact(&run.artifact).expect(
+        "the service loader must accept a boresight artifact that carries a frequency \
+             correction (roadmap D13 — degenerate correction axes)",
+    );
+
+    let correction = calibration.correction_surface.as_ref().unwrap_or_else(|| {
+        panic!(
+            "the rippled fixture must trip the 0.5 dB correction-fit threshold, otherwise \
+             this test is vacuous\n{}",
+            run.output()
+        )
+    });
+
+    // One control point per measured frequency; the other three axes are flat.
+    assert_eq!(
+        correction.shape[2],
+        RIPPLED_BORESIGHT_CSV.lines().count() - 1,
+        "frequency axis should carry one control point per measurement row"
+    );
+
+    assert!(
+        matches!(
+            calibration.calibration_status,
+            Some(CalibrationStatus::PartiallyCalibrated { .. })
+        ),
+        "a frequency correction does not upgrade boresight coverage; got {:?}",
+        calibration.calibration_status
+    );
+}
+
+/// Boresight coverage must be written as an on-axis **cone with unconstrained azimuth**,
+/// not as the point `(0,0)`.
+///
+/// Boresight is the pole of the (azimuth, polar-angle) system: azimuth is degenerate there,
+/// so an `azimuth_range = (0, 0)` claim constrains a coordinate carrying no information and
+/// `is_in_coverage` then rejects the very query the coverage describes — the artifact loads,
+/// reports `PartiallyCalibrated`, carries its correction, and serves raw physics anyway.
+#[test]
+fn boresight_coverage_is_written_as_an_on_axis_cone() {
+    let run = run_boresight_over(RIPPLED_BORESIGHT_CSV);
+    let calibration = antenna_model::data::loader::load_calibration_artifact(&run.artifact)
+        .expect("load the rippled boresight artifact");
+
+    let coverage = calibration
+        .calibration_coverage
+        .as_ref()
+        .expect("a boresight artifact must record its coverage");
+
+    assert_eq!(
+        coverage.azimuth_range,
+        (0.0, 360.0),
+        "azimuth is degenerate at the pole, so boresight coverage must leave it \
+         unconstrained"
+    );
+    assert_eq!(
+        coverage.elevation_range,
+        (0.0, BORESIGHT_COVERAGE_CONE_DEG),
+        "the on-axis restriction belongs entirely to elevation"
+    );
+
+    // `CalibrationCoverage::contains` — the type's own range test, on the azimuth a
+    // boresight-aimed query really produces. NOTE: this is *not* the function the
+    // evaluator runs; that is the private `service::evaluator::is_in_coverage`, which
+    // duplicates this logic rather than calling it. They agree today, and the served
+    // path is asserted separately by
+    // `evaluator::tests::a_boresight_aimed_query_gets_the_boresight_correction_applied`.
+    // If the roadmap's pole fix ever makes them disagree, that is the drift to fix.
+    assert!(
+        coverage.contains(63.43, 0.0, 7800.0),
+        "boresight coverage must accept a boresight query whatever its azimuth reads"
+    );
+    assert!(
+        !coverage.contains(63.43, 5.0, 7800.0),
+        "5° off axis is not boresight coverage"
+    );
+
+    assert!(
+        coverage.is_boresight_only(),
+        "the cone encoding must still report as boresight-only — the API surfaces \
+         this verbatim as coverage.is_boresight_only"
+    );
+
+    // validity_ranges are surfaced in status/metadata responses and must make the
+    // same claim rather than the degenerate one.
+    assert_eq!(calibration.validity_ranges.azimuth_min_max, (0.0, 360.0));
+    assert_eq!(
+        calibration.validity_ranges.elevation_min_max,
+        (0.0, BORESIGHT_COVERAGE_CONE_DEG)
+    );
+}
+
+/// The correction the artifact carries must also *evaluate* to something real at boresight.
+///
+/// A "fix" that only lengthened the degenerate knot vectors would satisfy the loader and
+/// still fail here: an axis whose evaluable span `[knots[order-1], knots[len-order]]` is
+/// empty drives its basis functions to zero and collapses the correction to 0 dB, which
+/// would look exactly like a correctly-loaded surface that happens to correct nothing.
+#[test]
+fn the_carried_frequency_correction_evaluates_to_a_real_value() {
+    let run = run_boresight_over(RIPPLED_BORESIGHT_CSV);
+    let calibration = antenna_model::data::loader::load_calibration_artifact(&run.artifact)
+        .expect("load the rippled boresight artifact");
+    let correction = calibration
+        .correction_surface
+        .as_ref()
+        .expect("rippled fixture must carry a correction surface");
+
+    // The ripple is ±1 dB about the smooth sweep, so the fitted correction must be
+    // materially nonzero somewhere across the band. Sample every measured frequency.
+    let frequencies = [7100.0, 7450.0, 7800.0, 8150.0, 8500.0];
+    let mut max_abs = 0.0_f64;
+    for freq in frequencies {
+        let value = antenna_model::model::evaluate_correction(
+            correction,
+            0.0,
+            0.0,
+            freq,
+            calibration.validity_ranges.temperature_const,
+        )
+        .expect("evaluate the boresight correction")
+        .correction_db;
+        assert!(
+            value.is_finite(),
+            "correction at {freq} MHz is not finite: {value}"
+        );
+        max_abs = max_abs.max(value.abs());
+    }
+
+    assert!(
+        max_abs > 0.5,
+        "the fitted correction is ~0 dB across the whole band (max |c| = {max_abs:.4} dB); \
+         the collapsed axes are evaluating their basis to zero"
     );
 }
 

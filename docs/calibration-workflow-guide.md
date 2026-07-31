@@ -347,6 +347,17 @@ frequency_mhz,g_over_t_db,temperature_k
 - All measurements at azimuth=0°, elevation=0° (boresight)
 - Frequency range should cover or be within feed's operating range
 
+**Provenance comments:** lines beginning with `#` are skipped, so a measurement file can carry
+its own provenance and assumptions ahead of the header and still be run unmodified. Record
+anything that had to be assumed to produce the `g_over_t_db` column — most importantly the
+system noise temperature, if the source published *gain* rather than G/T. The committed
+real-data fixtures at `calibrate/tests/fixtures/ntia_84_164_*_boresight.csv` are the worked
+example.
+
+**Malformed rows are a hard error, not a dropped row.** Unlike the full-mode parser, which
+reports bad rows and continues, this parser aborts the run and names the offending file line: a
+boresight sweep is a handful of points, so a silently dropped one changes the fit.
+
 ### 3.3 Running Boresight Calibration
 
 **Command:**
@@ -546,8 +557,8 @@ curl -X POST http://localhost:3000/api/v1/gain \
     "correction_applied": false,
     "parameters_source": "boresight_tuned",
     "coverage": {
-      "azimuth_range_deg": [0.0, 0.0],
-      "elevation_range_deg": [0.0, 0.0],
+      "azimuth_range_deg": [0.0, 360.0],
+      "elevation_range_deg": [0.0, 0.01],
       "frequency_range_mhz": [7100.0, 8500.0],
       "num_measurements": 15,
       "is_boresight_only": true
@@ -949,8 +960,8 @@ INFO  Service ready on http://localhost:3000
     "accuracy_estimate_db": 1.5,
     "correction_applied": false,
     "coverage": {
-      "azimuth_range_deg": [0.0, 0.0],
-      "elevation_range_deg": [0.0, 0.0],
+      "azimuth_range_deg": [0.0, 360.0],
+      "elevation_range_deg": [0.0, 0.01],
       "frequency_range_mhz": [7100.0, 8500.0],
       "is_boresight_only": true
     }
@@ -1133,7 +1144,13 @@ pub struct CalibrationCoverage {
 ```
 
 **Methods:**
-- `is_boresight_only() -> bool`: Returns true if azimuth and elevation ranges are both (0, 0)
+- `is_boresight_only() -> bool`: Returns true if the elevation range is an on-axis cone no
+  wider than `BORESIGHT_COVERAGE_CONE_DEG` (0.01°). **Azimuth is deliberately ignored**:
+  boresight is the pole of the (azimuth, polar-angle) system, where azimuth is degenerate —
+  a boresight-aimed query takes its azimuth from `atan2` on float noise, so constraining it
+  rejects the very direction the coverage describes. Boresight artifacts therefore write
+  `azimuth_range = (0, 360)` and carry the on-axis restriction in elevation alone. The
+  legacy `(0,0)/(0,0)` encoding written before 2026-07-31 still reports true.
 - `contains(az, el, freq) -> bool`: Checks if query point is within coverage
 - `validate() -> Result<()>`: Ensures range consistency (min ≤ max)
 

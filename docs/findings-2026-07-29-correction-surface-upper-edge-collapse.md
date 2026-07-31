@@ -274,6 +274,17 @@ noted above:
    `frequency_correction::tests::frequency_correction_is_rejected_by_the_service_side_validator`
    and routed to unit **D13** (with D2 owning the artifact framing).
 
+   **✅ Resolved 2026-07-31 (D13's inherited blocker).** The collapsed axes are now
+   *flat-but-valid*: `artifact_export::flat_axis(lo, hi, order)` — extracted from full mode's
+   temperature-axis construction and shared by both producers — replicates the coefficient
+   layer across `order + 1` layers over a real interval, so the surface is exactly constant
+   along the axis while satisfying both `validate`'s length check and the evaluator's need for
+   a non-empty span. `create_degenerate_knot_vector` is deleted; the pin test was inverted to
+   `frequency_correction_is_accepted_by_the_service_side_validator`. Note the connection to
+   item 3 above: merely lengthening the degenerate vectors would have satisfied the loader and
+   then hit *exactly* the silent zero documented here, so `collapsed_axes_are_flat_not_just_
+   valid` asserts the evaluated correction is materially nonzero rather than only loadable.
+
 **This fix does not make the correction-surface fit well-determined.** It corrects a basis
 evaluation bug that was corrupting fitted coefficients at every axis maximum; it does not add
 more constraints, more data, or a smaller coefficient count. Item 2 above is the concrete

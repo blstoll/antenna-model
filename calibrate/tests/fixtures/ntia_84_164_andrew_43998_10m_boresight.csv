@@ -1,0 +1,53 @@
+# ntia_84_164_andrew_43998_10m_boresight.csv — REAL measured boresight gains, converted to G/T.
+#
+# Source: NTIA Report 84-164, F.H. Harman & R.L. Jennings, "Sidelobe characteristics of
+#         earth station antennas" (1984), public domain.
+#         https://its.ntia.gov/publications/download/84-164_ocr.pdf
+#         Backing antenna/gain table digitized under F8 and committed at
+#         antenna-model/tests/fixtures/reference_datasets/sidelobe_data/ntia_84_164_antennas.psv
+#
+# Antenna: Andrew 43998, 10.0 m commercial C-band earth station. Six frequencies, the widest
+#          multi-frequency span of any single antenna in the table (D/lambda 123 -> 214):
+#
+#   table | freq_mhz | D/lambda | gain_dbi     band
+#   A-2   |   3700   |   123    |  50.4        receive (3.7-4.2 GHz)
+#   A-2   |   3950   |   132    |  51.0        receive
+#   A-2   |   4200   |   140    |  51.4        receive
+#   A-3   |   5925   |   197    |  54.0        transmit (5.925-6.425 GHz)
+#   A-3   |   6175   |   206    |  54.3        transmit
+#   A-3   |   6425   |   214    |  54.5        transmit
+#
+# The gain_dbi column above is REAL PUBLISHED DATA, transcribed verbatim. Everything below
+# is an assumption this fixture adds, and none of it is measured:
+#
+# ASSUMPTION 1 — system noise temperature. The report publishes GAIN; the calibrate tool's
+#   boresight parser takes G/T. A single constant T_sys = 100 K is assumed across the whole
+#   sweep and written verbatim into the temperature_k column, so
+#       g_over_t_db = gain_dbi - 10*log10(100) = gain_dbi - 20.0
+#   exactly, and the model's own G/T = gain - 10*log10(temperature_k) inverts it exactly. The
+#   fit therefore runs against the published gains with no noise-budget error introduced. The
+#   100 K value is a plausible clear-sky C-band earth-station figure and nothing more: it is
+#   NOT from the report, and it is deliberately constant so that it cancels rather than
+#   shaping the frequency trend the tuner is fitting.
+#
+# ASSUMPTION 2 — the two bands are very likely DIFFERENT FEEDS. Rows 1-3 are receive-band
+#   (3.7-4.2 GHz) and rows 4-6 are transmit-band (5.925-6.425 GHz) figures for the same
+#   reflector. Real C-band earth stations feed those bands through separate ports, so a
+#   single-feed fit across all six rows is a modeling simplification. It is defensible here
+#   because the reflector — the thing the boresight tuner actually adjusts (surface RMS) —
+#   is shared, and the 3.7 -> 6.4 GHz efficiency rolloff the fit keys on is a surface-error
+#   effect of that shared reflector.
+#
+# ASSUMPTION 3 — f/D is not published for this model. The companion design-spec fixture
+#   (ntia_andrew_43998_10m_design_specs.yaml, in this directory) assumes a typical
+#   prime-focus earth-station value; see that file's header. Surface RMS there is likewise an
+#   assumed starting estimate, and it is one of the two parameters the tuner adjusts.
+#
+# This file is TEST DATA, not a measurement record. It must not be presented as one.
+frequency_mhz,g_over_t_db,temperature_k
+3700,30.4,100
+3950,31.0,100
+4200,31.4,100
+5925,34.0,100
+6175,34.3,100
+6425,34.5,100
