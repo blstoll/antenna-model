@@ -15,7 +15,9 @@
 //! numbers rather than a load failure. Both are now asserted below.
 
 use antenna_model::data::loader::{ANTC_ARTIFACT_VERSION, ANTC_HEADER_LEN, ANTC_MAGIC};
-use antenna_model::data::types::{CalibrationStatus, CALIBRATION_SCHEMA_VERSION};
+use antenna_model::data::types::{
+    CalibrationStatus, BORESIGHT_COVERAGE_CONE_DEG, CALIBRATION_SCHEMA_VERSION,
+};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -251,6 +253,62 @@ fn a_boresight_artifact_carrying_a_frequency_correction_loads() {
         ),
         "a frequency correction does not upgrade boresight coverage; got {:?}",
         calibration.calibration_status
+    );
+}
+
+/// Boresight coverage must be written as an on-axis **cone with unconstrained azimuth**,
+/// not as the point `(0,0)`.
+///
+/// Boresight is the pole of the (azimuth, polar-angle) system: azimuth is degenerate there,
+/// so an `azimuth_range = (0, 0)` claim constrains a coordinate carrying no information and
+/// `is_in_coverage` then rejects the very query the coverage describes — the artifact loads,
+/// reports `PartiallyCalibrated`, carries its correction, and serves raw physics anyway.
+#[test]
+fn boresight_coverage_is_written_as_an_on_axis_cone() {
+    let run = run_boresight_over(RIPPLED_BORESIGHT_CSV);
+    let calibration = antenna_model::data::loader::load_calibration_artifact(&run.artifact)
+        .expect("load the rippled boresight artifact");
+
+    let coverage = calibration
+        .calibration_coverage
+        .as_ref()
+        .expect("a boresight artifact must record its coverage");
+
+    assert_eq!(
+        coverage.azimuth_range,
+        (0.0, 360.0),
+        "azimuth is degenerate at the pole, so boresight coverage must leave it \
+         unconstrained"
+    );
+    assert_eq!(
+        coverage.elevation_range,
+        (0.0, BORESIGHT_COVERAGE_CONE_DEG),
+        "the on-axis restriction belongs entirely to elevation"
+    );
+
+    // The gate the evaluator actually runs, on the azimuth a boresight-aimed query
+    // really produces.
+    assert!(
+        coverage.contains(63.43, 0.0, 7800.0),
+        "boresight coverage must accept a boresight query whatever its azimuth reads"
+    );
+    assert!(
+        !coverage.contains(63.43, 5.0, 7800.0),
+        "5° off axis is not boresight coverage"
+    );
+
+    assert!(
+        coverage.is_boresight_only(),
+        "the cone encoding must still report as boresight-only — the API surfaces \
+         this verbatim as coverage.is_boresight_only"
+    );
+
+    // validity_ranges are surfaced in status/metadata responses and must make the
+    // same claim rather than the degenerate one.
+    assert_eq!(calibration.validity_ranges.azimuth_min_max, (0.0, 360.0));
+    assert_eq!(
+        calibration.validity_ranges.elevation_min_max,
+        (0.0, BORESIGHT_COVERAGE_CONE_DEG)
     );
 }
 

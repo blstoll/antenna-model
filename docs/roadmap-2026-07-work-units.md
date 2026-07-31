@@ -3159,7 +3159,10 @@ Best candidate: **Andrew 43998, 10 m — 6 frequencies spanning 3700–6425 MHz*
      unit adds is the same round trip on **real** data), it loads through the
      service loader, the antenna serves with `PartiallyCalibrated` status plus the
      partial-calibration warning, and served boresight gain at the measured frequencies
-     lands within a stated tolerance of the NTIA values.
+     lands within a stated tolerance of the NTIA values. **Assert `correction_applied` (or
+     that the served gain differs from raw physics by the expected correction) alongside the
+     tolerance** — the tolerance alone would not have caught the silent coverage-gate skip
+     recorded below, and this is what guards the gate against regressing.
 - **Exit criteria:** the fixture + test above in CI; provenance header complete; tolerance
   stated with a one-line justification in the test.
 - **Gotchas:** the boresight CSV parser is separate from the full-mode parser and fails
@@ -3191,22 +3194,62 @@ Best candidate: **Andrew 43998, 10 m — 6 frequencies spanning 3700–6425 MHz*
   CLI-level tests in `cli_boresight_mode_e2e.rs` driven by a new rippled fixture that trips
   the 0.5 dB threshold. **D2's constraint is lifted**: the boresight e2e file now covers both
   sides of the correction-fit branch.
-- **⚠️ Second blocker found while fixing the first, NOT fixed — the boresight correction is
-  unreachable on the served path.** `build_calibration_artifact` records boresight coverage
-  as `azimuth_range = (0, 0)`, and `service::evaluator::is_in_coverage` gates the correction
-  on `az >= 0.0 && az <= 0.0`. But at boresight the azimuth is *undefined*:
-  `antenna_frame_to_spherical` computes it as `atan2(y, x)` on two components that are float
-  noise. Measured on a realistic ECEF geometry (emitter placed exactly at the boresight aim
-  point): elevation comes back exactly `0.0` — `acos(z/range)` saturates, so the elevation
-  gate is safe — but azimuth comes back **63.43°**, and the correction is silently skipped.
-  So a loadable boresight artifact still serves uncorrected physics. This unit's scope-3
-  assertion ("served boresight gain lands within a stated tolerance of the NTIA values")
-  runs straight into it. The fix is a coverage-semantics decision, not a mechanical one —
-  at elevation 0 every azimuth is the same direction, so the candidate is azimuth coverage
-  `0..360` with the on-axis restriction carried by elevation alone, plus a decision on
-  whether the elevation gate is exact-zero or a small on-axis cone (a query 0.001° off
-  boresight arguably still deserves the boresight correction). **Needs a maintainer call
-  before D13 proper starts.**
+- **✅ Second blocker found while fixing the first, also cleared 2026-07-31 — the boresight
+  correction was unreachable on the served path.** `build_calibration_artifact` recorded
+  boresight coverage as `azimuth_range = (0, 0)`, and `service::evaluator::is_in_coverage`
+  gates the correction on `az >= 0.0 && az <= 0.0`. But boresight is the **pole** of the
+  (azimuth, polar-angle) system, where azimuth is degenerate: every azimuth value names the
+  same direction, and `antenna_frame_to_spherical` derives it from `atan2(y, x)` on two
+  components that are float noise. Measured on a realistic ECEF geometry with the emitter
+  placed exactly at the boresight aim point: elevation comes back exactly `0.0` —
+  `acos(z/range)` saturates, so the elevation gate happened to be safe — but azimuth comes
+  back **63.43°**. A coverage region written as `az ∈ [0,0] ∧ el ∈ [0,0]` therefore asserts
+  a constraint on a coordinate that carries no information at the pole, and rejects the very
+  point it is meant to cover whenever `atan2` noise lands anywhere but exactly 0.0 — which is
+  nearly always. So the artifact loaded, reported `PartiallyCalibrated`, carried its
+  correction, and served raw physics.
+
+  **Encoding decided and applied** `[DECIDED 2026-07-31 — maintainer]`: boresight coverage is
+  an on-axis **cone**, not a point — `azimuth_range = (0, 360)` (unconstrained, since the
+  clause is vacuous once queries are normalised into `[0, 360)`) and
+  `elevation_range = (0, BORESIGHT_COVERAGE_CONE_DEG)` with the constant = **0.01°**, defined
+  in `data/types.rs` beside `CalibrationCoverage`. The value sits between a numerical floor
+  and an honesty ceiling with room on both sides: elevation is `acos` near 1 where noise
+  amplifies as √, and ~1 m of catastrophic-cancellation noise on ECEF differences at ~10⁷ m
+  range puts polar-angle noise at order 10⁻⁵ degrees (two-plus orders of margin); the cone
+  must stay well inside the main lobe for "boresight-calibrated" to stay true, and the
+  narrowest realistic HPBW here (Ka on a several-metre dish) is ~0.1° (one order of margin).
+  Mirrored into `validity_ranges`, which does not gate the correction but is surfaced in
+  status/metadata responses and made the same degenerate claim.
+
+  **One consequence beyond the value change:** `CalibrationCoverage::is_boresight_only` was
+  `az.0 == az.1 && el.0 == el.1`, so the new encoding would have made the API report
+  `coverage.is_boresight_only: false` for boresight artifacts. The predicate moved with the
+  encoding — it now tests the elevation cone alone and ignores azimuth for the same pole
+  reason, which also keeps legacy `(0,0)/(0,0)` artifacts on disk reporting correctly.
+  Pinned by `a_full_grid_reaching_boresight_is_not_boresight_only` (the threshold is tight
+  enough to separate the two) and `legacy_degenerate_boresight_coverage_still_reports_
+  boresight_only`.
+
+  **Served-path proof, per the maintainer's note:** `evaluator::tests::a_boresight_aimed_
+  query_gets_the_boresight_correction_applied` asserts `correction_applied` **and** that the
+  served gain shifts by exactly the correction — the assertion that catches a silent skip,
+  since every other observable looked healthy while this was broken. Its baseline carries a
+  *zero-valued* surface rather than no surface, because `physics_is_uncorrected()` gates
+  spillover and the F7 floor on surface presence and a no-surface baseline would compute
+  different physics. D13's real-data e2e should assert the same thing alongside its NTIA
+  tolerance.
+- **Filed, not fixed — `is_in_coverage`'s azimuth clause is meaningless at the pole in
+  general.** The degeneracy is not boresight-mode-specific: any coverage region whose
+  elevation range includes 0 contains the pole, so a full-mode artifact with, say, azimuth
+  coverage `(170, 190)` would also wrongly reject an exact-boresight query whose noise
+  azimuth is 63°. Mostly theoretical today — full-mode coverage extents come from measured
+  points and rarely include elevation 0 exactly. The fix is to skip the azimuth clause when
+  `elevation_deg` is below a pole threshold. Deliberately **not** applied under D13: doing it
+  there would mask, rather than express, the boresight artifact's intent — the artifact
+  should say what it covers. Documented in `is_in_coverage`'s doc comment and pinned by
+  `legacy_degenerate_boresight_coverage_rejects_its_own_point`, whose failure message points
+  back here.
 - **Depends on:** D2 (✅ done 2026-07-30 — the headered artifact format is final, so this
   test pins that rather than the legacy one), D12 (reuses its CLI-harness pattern; the
   boresight harness in `cli_boresight_mode_e2e.rs` is the closer starting point).

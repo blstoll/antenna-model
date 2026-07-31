@@ -139,13 +139,13 @@ The service automatically evaluates the correction surface at query time:
      boresight-only `calibration_coverage`, so no correction is applied
    - The response is flagged extrapolated and carries the partial-calibration warning
 
-> **Known defect (2026-07-31, roadmap D13):** case 1 does not currently fire. Boresight
-> coverage is recorded as `azimuth_range = (0, 0)`, but at boresight the azimuth is
-> undefined — `antenna_frame_to_spherical` computes it as `atan2(y, x)` on two components
-> that are float noise, and a realistic ECEF geometry aimed exactly at the boresight point
-> yields 63.43°. The elevation gate is safe (`acos(z/range)` saturates to exactly 0.0); the
-> azimuth gate is not. Until this is resolved, a boresight artifact loads and carries its
-> correction but serves uncorrected physics.
+Boresight coverage is an on-axis **cone** — azimuth unconstrained, `elevation ≤ 0.01°`
+(`BORESIGHT_COVERAGE_CONE_DEG`) — not the point `(az=0, el=0)`. Boresight is the pole of
+the (azimuth, polar-angle) system, where azimuth is degenerate: a boresight-aimed query
+takes its azimuth from `atan2` on two components that are float noise, so the old
+`azimuth_range = (0, 0)` encoding rejected the very direction it was meant to cover
+(measured: 63.43° on a realistic ECEF geometry) and case 1 never fired. Fixed 2026-07-31
+under roadmap D13.
 
 ## Expected Accuracy Improvement
 

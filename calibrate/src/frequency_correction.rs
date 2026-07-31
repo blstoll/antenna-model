@@ -47,9 +47,17 @@ use crate::artifact_export::flat_axis;
 /// because `coordinates_3d::normalize_azimuth_deg` maps into `[0, 360)`.
 ///
 /// The claim that this correction is only *measured* at boresight is carried by
-/// the artifact's `calibration_coverage` (azimuth and elevation both `0..=0`),
-/// which is where `service::evaluator::is_in_coverage` enforces it — not by
-/// pinching these knot spans.
+/// the artifact's `calibration_coverage`, which is where
+/// `service::evaluator::is_in_coverage` enforces it — not by pinching these knot
+/// spans. That coverage is an on-axis **cone**, not a point: boresight is the pole
+/// of the (azimuth, polar-angle) system, so azimuth is degenerate there and
+/// coverage constrains elevation alone, to
+/// [`BORESIGHT_COVERAGE_CONE_DEG`](antenna_model::data::types::BORESIGHT_COVERAGE_CONE_DEG).
+/// Writing it as `az ∈ [0,0] ∧ el ∈ [0,0]` — as boresight mode did until
+/// 2026-07-31 — constrains a coordinate that carries no information at the pole,
+/// and so rejected the very point it was meant to cover: the azimuth of a
+/// boresight-aimed query is `atan2` on float noise (measured: 63.43°). See
+/// `boresight_calibration::build_calibration_artifact`.
 const AZIMUTH_AXIS_DEG: (f64, f64) = (0.0, 360.0);
 
 /// Span of the flat elevation axis, in degrees. Elevation reaches the service's

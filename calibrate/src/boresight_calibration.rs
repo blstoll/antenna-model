@@ -35,7 +35,7 @@ use antenna_model::data::types::{
     CalibrationMetadataBuilder, CalibrationStatus, FeedParameters as DataFeedParameters,
     MeasurementDensity, MeshParameters as DataMeshParameters, ParameterSource,
     PhysicalAntennaConfigBuilder, ReflectorGeometry as DataReflectorGeometry,
-    ValidityRangesBuilder,
+    ValidityRangesBuilder, BORESIGHT_COVERAGE_CONE_DEG,
 };
 use antenna_model::model::{
     compute_g_over_t, AntennaConfigurationBuilder, FeedParametersBuilder, IntegrationParams,
@@ -618,20 +618,30 @@ pub fn build_calibration_artifact(
         .build()
         .map_err(|e| anyhow::anyhow!("Failed to build physical antenna config: {}", e))?;
 
-    // Build validity ranges (boresight only, but frequency range from measurements)
+    // Boresight coverage is an on-axis polar CONE, not the point (az=0, el=0).
+    //
+    // Boresight is the pole of the (azimuth, polar-angle) system: azimuth is
+    // degenerate there — every azimuth value names the same direction, and a query
+    // aimed exactly at boresight gets its azimuth from `atan2` on two components
+    // that are float noise (measured: 63.43° on a realistic ECEF geometry). The old
+    // `azimuth_range = (0, 0)` encoding therefore constrained a coordinate carrying
+    // no information, and `is_in_coverage` rejected the very point the coverage was
+    // meant to describe — so the fitted frequency correction was never applied.
+    // Azimuth unconstrained + a small elevation cone is the truthful claim.
     let freq_range = measurements.frequency_range();
     let validity_ranges = ValidityRangesBuilder::default()
-        .azimuth_range(0.0, 0.0) // Boresight only
-        .elevation_range(0.0, 0.0) // Boresight only
+        .azimuth_range(0.0, 360.0) // degenerate at the pole: unconstrained
+        .elevation_range(0.0, BORESIGHT_COVERAGE_CONE_DEG) // on-axis cone
         .frequency_range(freq_range.0, freq_range.1)
         .temperature(290.0) // Default
         .build()
         .map_err(|e| anyhow::anyhow!("Failed to build validity ranges: {}", e))?;
 
-    // Build calibration coverage (boresight only)
+    // Build calibration coverage (boresight only) — same cone encoding, and this is
+    // the one the evaluator actually gates the correction surface on.
     let coverage = CalibrationCoverageBuilder::default()
-        .azimuth_range(0.0, 0.0)
-        .elevation_range(0.0, 0.0)
+        .azimuth_range(0.0, 360.0)
+        .elevation_range(0.0, BORESIGHT_COVERAGE_CONE_DEG)
         .frequency_range(freq_range.0, freq_range.1)
         .num_measurements(measurements.points.len())
         .has_correction_surface(calibration_result.frequency_correction.is_some())

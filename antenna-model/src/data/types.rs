@@ -731,6 +731,26 @@ impl CalibrationStatus {
     }
 }
 
+/// Half-angle, in degrees, of the on-axis cone that counts as "boresight" coverage.
+///
+/// Boresight is the **pole** of the (azimuth, elevation-as-polar-angle) coordinate
+/// system, where azimuth is degenerate: every azimuth value names the same
+/// direction. Boresight coverage is therefore a small polar cone — elevation below
+/// a threshold, azimuth unconstrained — never a point in az/el space. See
+/// [`CalibrationCoverage::is_boresight_only`] and the flat-axis constants in
+/// `calibrate/src/frequency_correction.rs`.
+///
+/// 0.01° sits between two constraints with room to spare:
+///
+/// - **Floor (numerical).** Elevation is `acos(z/range)` near 1, where noise
+///   amplifies as √. With ~1 m of catastrophic-cancellation noise on ECEF
+///   component differences at ~10⁷ m range, polar-angle noise is order 10⁻⁵
+///   degrees. Two-plus orders of margin.
+/// - **Ceiling (honesty).** The cone must stay well inside the main lobe for
+///   "boresight-calibrated" to remain a true claim. The narrowest realistic HPBW
+///   for these antennas (Ka on a several-metre dish) is ~0.1°. One order of margin.
+pub const BORESIGHT_COVERAGE_CONE_DEG: f64 = 0.01;
+
 /// Measurement coverage for partially calibrated antennas.
 ///
 /// Describes the spatial, frequency, and measurement density of partial calibration data.
@@ -739,11 +759,13 @@ impl CalibrationStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CalibrationCoverage {
     /// Azimuth coverage range in degrees (min, max)
-    /// For boresight-only: (0.0, 0.0)
+    /// For boresight-only: (0.0, 360.0) — azimuth is degenerate at the pole, so
+    /// the truthful claim is "unconstrained"; see [`BORESIGHT_COVERAGE_CONE_DEG`]
     pub azimuth_range: (f64, f64),
 
-    /// Elevation coverage range in degrees (min, max)
-    /// For boresight-only: (0.0, 0.0)
+    /// Elevation coverage range in degrees (min, max), elevation being the polar
+    /// angle off boresight.
+    /// For boresight-only: `(0.0, BORESIGHT_COVERAGE_CONE_DEG)`
     pub elevation_range: (f64, f64),
 
     /// Frequency coverage range in MHz (min, max)
@@ -763,10 +785,20 @@ impl CalibrationCoverage {
         CalibrationCoverageBuilder::default()
     }
 
-    /// Checks if this is boresight-only coverage (single spatial point).
+    /// Checks if this is boresight-only coverage — an on-axis polar cone.
+    ///
+    /// **Azimuth is deliberately ignored.** Boresight is the pole of the
+    /// (azimuth, polar-angle) system, where azimuth carries no information: a
+    /// query aimed exactly at boresight gets its azimuth from `atan2` on two
+    /// components that are float noise, so any azimuth constraint is either
+    /// vacuous or wrong. Coverage is boresight-only iff the elevation range is
+    /// an on-axis cone no wider than [`BORESIGHT_COVERAGE_CONE_DEG`].
+    ///
+    /// This subsumes the legacy `(0,0)/(0,0)` encoding that boresight mode wrote
+    /// before 2026-07-31 — a zero-width elevation range is a degenerate cone —
+    /// so artifacts already on disk still report correctly.
     pub fn is_boresight_only(&self) -> bool {
-        self.azimuth_range.0 == self.azimuth_range.1
-            && self.elevation_range.0 == self.elevation_range.1
+        self.elevation_range.0 == 0.0 && self.elevation_range.1 <= BORESIGHT_COVERAGE_CONE_DEG
     }
 
     /// Checks if a query point is within the calibrated coverage.
@@ -2009,6 +2041,66 @@ mod tests {
             has_correction_surface: true,
         };
         assert!(!limited.is_boresight_only());
+    }
+
+    /// The current boresight encoding (2026-07-31): azimuth unconstrained because
+    /// it is degenerate at the pole, elevation an on-axis cone.
+    #[test]
+    fn boresight_cone_coverage_is_boresight_only() {
+        let cone = CalibrationCoverage {
+            azimuth_range: (0.0, 360.0),
+            elevation_range: (0.0, BORESIGHT_COVERAGE_CONE_DEG),
+            frequency_range: (3700.0, 6425.0),
+            num_measurements: 6,
+            has_correction_surface: true,
+        };
+        assert!(
+            cone.is_boresight_only(),
+            "an on-axis cone with unconstrained azimuth IS boresight-only coverage; \
+             the API surfaces this as coverage.is_boresight_only"
+        );
+
+        // A query aimed exactly at boresight: azimuth is atan2 on float noise, so
+        // it can be anything. It must still be in coverage.
+        assert!(
+            cone.contains(63.43, 0.0, 4000.0),
+            "boresight coverage must not reject a boresight query over its \
+             meaningless azimuth"
+        );
+
+        // Just outside the cone is genuinely off-axis and must fall out.
+        assert!(!cone.contains(63.43, 10.0 * BORESIGHT_COVERAGE_CONE_DEG, 4000.0));
+    }
+
+    /// Artifacts written before 2026-07-31 carry the degenerate `(0,0)/(0,0)`
+    /// encoding. They must keep reporting boresight-only — but note they remain
+    /// unreachable through `contains` for any nonzero azimuth, which is the defect
+    /// the cone encoding fixes going forward.
+    #[test]
+    fn legacy_degenerate_boresight_coverage_still_reports_boresight_only() {
+        let legacy = CalibrationCoverage {
+            azimuth_range: (0.0, 0.0),
+            elevation_range: (0.0, 0.0),
+            frequency_range: (7100.0, 8500.0),
+            num_measurements: 5,
+            has_correction_surface: true,
+        };
+        assert!(legacy.is_boresight_only());
+        assert!(!legacy.contains(63.43, 0.0, 8000.0));
+    }
+
+    /// A full-mode grid that happens to reach the on-axis point is NOT
+    /// boresight-only: the cone threshold is tight enough to separate them.
+    #[test]
+    fn a_full_grid_reaching_boresight_is_not_boresight_only() {
+        let grid = CalibrationCoverage {
+            azimuth_range: (0.0, 360.0),
+            elevation_range: (0.0, 25.0),
+            frequency_range: (7100.0, 8500.0),
+            num_measurements: 512,
+            has_correction_surface: true,
+        };
+        assert!(!grid.is_boresight_only());
     }
 
     #[test]

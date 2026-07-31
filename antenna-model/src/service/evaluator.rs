@@ -441,6 +441,28 @@ pub fn compute_gain_from_request_with_budget(
 ///
 /// When a `CalibrationCoverage` is present (partially calibrated artifact), the
 /// query must fall within the specified azimuth, elevation, and frequency ranges.
+///
+/// # Known limitation: the azimuth clause is meaningless at the pole
+///
+/// `elevation_deg` is the polar angle off boresight, so `elevation_deg ≈ 0` is the
+/// **pole** of the coordinate system, where azimuth is degenerate: it comes from
+/// `atan2` on two components that are float noise and can be any value (measured:
+/// 63.43° for a query aimed exactly at the boresight point). Applying an azimuth
+/// constraint there tests a coordinate that carries no information.
+///
+/// Boresight artifacts avoid this by declaring azimuth **unconstrained** —
+/// `(0, 360)` with the on-axis restriction carried by elevation alone; see
+/// `data::types::BORESIGHT_COVERAGE_CONE_DEG`. That is the artifact expressing what
+/// it actually covers, which is the right place for it.
+///
+/// The general case is still wrong and is deliberately not fixed here: any coverage
+/// region whose elevation range includes 0 contains the pole, so a full-mode
+/// artifact with, say, azimuth coverage `(170, 190)` would also wrongly reject an
+/// exact-boresight query whose noise azimuth is 63°. It is mostly theoretical today
+/// because full-mode coverage extents come from measured points and rarely include
+/// elevation 0 exactly. The fix — skip the azimuth clause when `elevation_deg` is
+/// below a pole threshold — is filed on the roadmap, not applied here, because
+/// doing it silently would mask rather than express a boresight artifact's intent.
 pub(crate) fn is_in_coverage(
     coverage: &Option<CalibrationCoverage>,
     azimuth_deg: f64,
@@ -857,6 +879,58 @@ mod tests {
         );
 
         assert!(is_in_coverage(&coverage, 180.0, 45.0, 8400.0));
+    }
+
+    /// A boresight artifact's coverage must accept a boresight query whatever its
+    /// azimuth reads, because azimuth is degenerate at the pole (`atan2` on float
+    /// noise). This is the gate that silently skipped the boresight frequency
+    /// correction while the encoding was `azimuth_range = (0, 0)`.
+    #[test]
+    fn boresight_cone_coverage_accepts_a_pole_query_at_any_azimuth() {
+        let coverage = Some(
+            CalibrationCoverage::builder()
+                .azimuth_range(0.0, 360.0)
+                .elevation_range(0.0, crate::data::types::BORESIGHT_COVERAGE_CONE_DEG)
+                .frequency_range(3700.0, 6425.0)
+                .num_measurements(6)
+                .has_correction_surface(true)
+                .build()
+                .unwrap(),
+        );
+
+        // 63.43° is the azimuth measured for a query aimed exactly at the boresight
+        // point on a realistic ECEF geometry; 0.0 and 359.9 are equally valid there.
+        for az in [0.0, 63.43, 180.0, 359.9] {
+            assert!(
+                is_in_coverage(&coverage, az, 0.0, 4000.0),
+                "boresight coverage rejected a boresight query at azimuth {az}"
+            );
+        }
+
+        // Outside the cone is genuinely off-axis, whatever the azimuth.
+        assert!(!is_in_coverage(&coverage, 63.43, 5.0, 4000.0));
+    }
+
+    /// The encoding this replaced, kept as an explicit record of the defect: a
+    /// zero-width azimuth range rejects the point it is meant to cover.
+    #[test]
+    fn legacy_degenerate_boresight_coverage_rejects_its_own_point() {
+        let legacy = Some(
+            CalibrationCoverage::builder()
+                .azimuth_range(0.0, 0.0)
+                .elevation_range(0.0, 0.0)
+                .frequency_range(3700.0, 6425.0)
+                .num_measurements(6)
+                .has_correction_surface(true)
+                .build()
+                .unwrap(),
+        );
+
+        assert!(
+            !is_in_coverage(&legacy, 63.43, 0.0, 4000.0),
+            "if this now passes, the azimuth clause has been made pole-aware — good, \
+             but update is_in_coverage's doc comment and the roadmap item it points at"
+        );
     }
 
     #[test]
@@ -1829,6 +1903,89 @@ mod tests {
             calibration_warnings.is_empty(),
             "Unexpected calibration warnings: {:?}",
             calibration_warnings
+        );
+    }
+
+    /// End-to-end proof that a boresight artifact's frequency correction actually
+    /// reaches the served gain.
+    ///
+    /// This is the assertion that catches a *silent skip*: before 2026-07-31 the
+    /// artifact loaded, carried its correction, reported `PartiallyCalibrated`, and
+    /// served raw physics — every observable except this one looked healthy. It
+    /// asserts `correction_applied` and the gain shift, not just a tolerance band.
+    #[test]
+    fn a_boresight_aimed_query_gets_the_boresight_correction_applied() {
+        const CORRECTION_DB: f64 = 1.5;
+
+        // Emitter placed exactly at the boresight aim point: the query IS boresight,
+        // so its azimuth is atan2 on float noise and its elevation is ~0.
+        let target = Position3D::geodetic(-117.0, 35.0, 400_000.0);
+        let request = GainRequest {
+            emitter_position: target.clone(),
+            reflector_boresight: target,
+            ..create_test_request()
+        };
+
+        let coverage = CalibrationCoverage::builder()
+            .azimuth_range(0.0, 360.0)
+            .elevation_range(0.0, crate::data::types::BORESIGHT_COVERAGE_CONE_DEG)
+            .frequency_range(8000.0, 9000.0)
+            .num_measurements(5)
+            .has_correction_surface(true)
+            .build()
+            .unwrap();
+
+        // A flat-axis frequency correction shaped exactly as calibrate's
+        // `fit_frequency_correction` writes it: order + 1 identical layers on
+        // azimuth/elevation/temperature over their full queryable spans.
+        let surface = |value: f64| {
+            let order = 3usize;
+            let layers = order + 1;
+            let n_freq = 4;
+            crate::data::types::BSplineModel4D {
+                coefficients: vec![value; layers * layers * n_freq * layers],
+                shape: [layers, layers, n_freq, layers],
+                knots_azimuth: vec![0.0, 0.0, 0.0, 180.0, 360.0, 360.0, 360.0],
+                knots_elevation: vec![0.0, 0.0, 0.0, 90.0, 180.0, 180.0, 180.0],
+                knots_frequency: vec![8000.0, 8000.0, 8000.0, 8300.0, 9000.0, 9000.0, 9000.0],
+                knots_temperature: vec![0.0, 0.0, 0.0, 500.0, 1000.0, 1000.0, 1000.0],
+                spline_order: order as u8,
+            }
+        };
+
+        let serve = |correction_db: f64| {
+            let mut calibration = create_test_calibration(CalibrationStatus::PartiallyCalibrated {
+                accuracy_estimate_db: 1.5,
+                coverage: coverage.clone(),
+            });
+            calibration.correction_surface = Some(surface(correction_db));
+            let mut repo = CalibrationRepository::new();
+            repo.add_calibration(calibration);
+            compute_gain_from_request(&request, &repo).unwrap()
+        };
+
+        // The baseline carries a ZERO-valued surface rather than no surface at all:
+        // `physics_is_uncorrected()` gates spillover and the F7 sidelobe floor on
+        // surface *presence*, so a no-surface baseline would compute different
+        // physics and the difference below would not isolate the correction.
+        let baseline = serve(0.0);
+        let corrected = serve(CORRECTION_DB);
+
+        let status = corrected
+            .calibration_status
+            .as_ref()
+            .expect("partially calibrated artifact must report status");
+        assert!(
+            status.correction_applied,
+            "the boresight correction was silently skipped — the coverage gate is \
+             rejecting a boresight query again"
+        );
+
+        assert!(
+            (corrected.gain_db - baseline.gain_db - CORRECTION_DB).abs() < 1e-9,
+            "served gain should shift by exactly the correction: {} - {} != {CORRECTION_DB}",
+            corrected.gain_db,
+            baseline.gain_db
         );
     }
 
