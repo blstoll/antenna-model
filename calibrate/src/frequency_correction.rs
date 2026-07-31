@@ -1,9 +1,9 @@
 //! Frequency-only correction surface fitting for boresight calibration.
 //!
 //! This module provides functionality to fit a 1D frequency-only correction surface
-//! to boresight measurement residuals. The correction is stored as a degenerate 4D
-//! B-spline (single spatial point) for compatibility with the service's existing
-//! interpolation code.
+//! to boresight measurement residuals. The correction is stored as a 4D B-spline
+//! whose azimuth, elevation and temperature axes are *flat* — constant, but with a
+//! real span — for compatibility with the service's existing interpolation code.
 //!
 //! # Use Case
 //!
@@ -14,12 +14,54 @@
 //! # Design
 //!
 //! - Input: Frequency-residual pairs (measured - physics model at boresight)
-//! - Output: Degenerate 4D B-spline with shape [1, 1, N_freq, 1]
+//! - Output: 4D B-spline that varies only along frequency, shape
+//!   `[order+1, order+1, N_freq, order+1]`
 //! - Threshold: Only fit if max(abs(residuals)) > 0.5 dB
 //! - Method: Cubic B-spline with uniform knot spacing
+//!
+//! # Why the collapsed axes are *flat*, not degenerate
+//!
+//! Until 2026-07-31 the three non-frequency axes were built as `order` equal
+//! knots over a single coefficient layer — a genuinely degenerate axis. Such an
+//! artifact **could not be loaded by the service at all**: `BSplineModel4D::
+//! validate` requires `knots.len() >= shape + order` per axis and the loader
+//! runs it on every artifact, so any boresight run whose residuals tripped the
+//! 0.5 dB threshold produced a `.bin` the service rejected. Lengthening the
+//! degenerate vectors would have satisfied the length check while leaving the
+//! evaluable span `[knots[order-1], knots[len-order]]` empty, so the axes are
+//! now built by [`artifact_export::flat_axis`](crate::artifact_export) — the
+//! same construction full mode uses for its temperature axis — which replicates
+//! the coefficient layer over a real interval. See roadmap unit D13.
 
 use antenna_model::data::types::BSplineModel4D;
 use thiserror::Error;
+
+use crate::artifact_export::flat_axis;
+
+/// Span of the flat azimuth axis, in degrees.
+///
+/// The three constants below bound axes the fitted surface is **constant**
+/// along, so their only job is to cover every value the service can ever query
+/// — a query landing outside a knot span is reported as extrapolated, and there
+/// is no interpolation error here to warn about. Azimuth is the full circle
+/// because `coordinates_3d::normalize_azimuth_deg` maps into `[0, 360)`.
+///
+/// The claim that this correction is only *measured* at boresight is carried by
+/// the artifact's `calibration_coverage` (azimuth and elevation both `0..=0`),
+/// which is where `service::evaluator::is_in_coverage` enforces it — not by
+/// pinching these knot spans.
+const AZIMUTH_AXIS_DEG: (f64, f64) = (0.0, 360.0);
+
+/// Span of the flat elevation axis, in degrees. Elevation reaches the service's
+/// correction surface as a **polar angle from boresight** (0° on axis), so the
+/// full range is `[0, 180]`. See [`AZIMUTH_AXIS_DEG`].
+const ELEVATION_AXIS_DEG: (f64, f64) = (0.0, 180.0);
+
+/// Span of the flat temperature axis, in Kelvin. The evaluator queries the
+/// correction with `validity_ranges.temperature_const`, which boresight mode
+/// sets to 290 K; this bracket covers any system noise temperature that value
+/// could plausibly take. See [`AZIMUTH_AXIS_DEG`].
+const TEMPERATURE_AXIS_K: (f64, f64) = (0.0, 1000.0);
 
 /// Error types for frequency correction fitting.
 #[derive(Debug, Error)]
@@ -80,18 +122,20 @@ pub fn should_fit_correction(residuals: &[f64]) -> bool {
     max_abs_residual > THRESHOLD_DB
 }
 
-/// Fits a 1D frequency-only correction surface and converts to degenerate 4D B-spline.
+/// Fits a 1D frequency-only correction surface and converts to a 4D B-spline
+/// that is flat in every axis but frequency.
 ///
-/// This function creates a cubic B-spline interpolation of the frequency-dependent
-/// residuals and packages it as a degenerate 4D B-spline for compatibility with
-/// the service's correction surface evaluation code.
+/// This function creates a cubic B-spline of the frequency-dependent residuals
+/// and packages it as a `BSplineModel4D` for the service's correction-surface
+/// evaluation code.
 ///
-/// The degenerate 4D B-spline has:
-/// - shape = [1, 1, N_freq, 1] where N_freq is the number of control points
-/// - Azimuth dimension: single point at 0.0 degrees (boresight)
-/// - Elevation dimension: single point at 0.0 degrees (boresight)
-/// - Frequency dimension: proper B-spline with N_freq control points
-/// - Temperature dimension: single point at 290.0 K (typical)
+/// The resulting 4D B-spline has:
+/// - shape = `[F, F, N_freq, F]` with `F = spline_order + 1`, where `N_freq` is
+///   the number of frequency control points
+/// - Frequency dimension: proper B-spline with `N_freq` control points
+/// - Azimuth, elevation and temperature: **flat** axes (identical coefficient
+///   layers over a real span, see the module docs) so the surface is exactly
+///   constant along them
 ///
 /// # Arguments
 ///
@@ -100,7 +144,7 @@ pub fn should_fit_correction(residuals: &[f64]) -> bool {
 ///
 /// # Returns
 ///
-/// A degenerate 4D B-spline model that can be stored in `AntennaCalibration.correction_surface`
+/// A 4D B-spline model that can be stored in `AntennaCalibration.correction_surface`
 ///
 /// # Errors
 ///
@@ -119,31 +163,44 @@ pub fn should_fit_correction(residuals: &[f64]) -> bool {
 /// let residuals = vec![0.8, 0.6, 0.5, 0.7];
 ///
 /// let correction = fit_frequency_correction(&frequencies, &residuals).unwrap();
-/// assert_eq!(correction.shape, [1, 1, 4, 1]);
+/// assert_eq!(correction.shape, [4, 4, 4, 4]); // flat, flat, 4 frequencies, flat
+/// correction.validate().expect("the service loader must accept this");
 /// ```
 pub fn fit_frequency_correction(frequencies: &[f64], residuals: &[f64]) -> Result<BSplineModel4D> {
     // Validate inputs
     validate_inputs(frequencies, residuals)?;
 
     // For simplicity, use the measured points as control points directly
-    // This creates an interpolating B-spline through the data points
-    let n_points = frequencies.len();
+    let n_freq = frequencies.len();
     let spline_order: u8 = 3; // Cubic B-spline
+    let order = spline_order as usize;
 
-    // Create knot vectors for each dimension
     let knots_frequency = create_knot_vector(frequencies, spline_order);
-    let knots_azimuth = create_degenerate_knot_vector(0.0, spline_order); // Boresight azimuth
-    let knots_elevation = create_degenerate_knot_vector(0.0, spline_order); // Boresight elevation
-    let knots_temperature = create_degenerate_knot_vector(290.0, spline_order); // Typical temp
 
-    // The coefficients are the residual values
-    // For a degenerate 4D B-spline [1, 1, N, 1], we have N coefficients
-    let coefficients = residuals.to_vec();
+    // The three axes this correction does not vary along. Flat, not degenerate:
+    // identical coefficient layers over a real span (see the module docs).
+    let (n_az, knots_azimuth) = flat_axis(AZIMUTH_AXIS_DEG.0, AZIMUTH_AXIS_DEG.1, order);
+    let (n_el, knots_elevation) = flat_axis(ELEVATION_AXIS_DEG.0, ELEVATION_AXIS_DEG.1, order);
+    let (n_temp, knots_temperature) = flat_axis(TEMPERATURE_AXIS_K.0, TEMPERATURE_AXIS_K.1, order);
 
-    // Create the degenerate 4D B-spline
+    // Replicate the residual control points across every flat layer, in the 4D
+    // flat-index layout the service evaluates:
+    //   idx = i_az + n_az * (i_el + n_el * (i_freq + n_freq * i_temp))
+    let mut coefficients = vec![0.0_f64; n_az * n_el * n_freq * n_temp];
+    for i_temp in 0..n_temp {
+        for (i_freq, &residual) in residuals.iter().enumerate() {
+            for i_el in 0..n_el {
+                for i_az in 0..n_az {
+                    let idx = i_az + n_az * (i_el + n_el * (i_freq + n_freq * i_temp));
+                    coefficients[idx] = residual;
+                }
+            }
+        }
+    }
+
     let bspline = BSplineModel4D {
         coefficients,
-        shape: [1, 1, n_points, 1],
+        shape: [n_az, n_el, n_freq, n_temp],
         knots_azimuth,
         knots_elevation,
         knots_frequency,
@@ -241,25 +298,10 @@ fn create_knot_vector(data_points: &[f64], order: u8) -> Vec<f64> {
     knots
 }
 
-/// Creates a degenerate knot vector for a single point (collapsed dimension).
-///
-/// For a cubic B-spline (order 3), this returns [value, value, value, value].
-///
-/// # Arguments
-///
-/// * `value` - The single point value
-/// * `order` - B-spline order (degree + 1)
-///
-/// # Returns
-///
-/// Knot vector with `order` repeated values
-fn create_degenerate_knot_vector(value: f64, order: u8) -> Vec<f64> {
-    vec![value; order as usize]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use antenna_model::model::evaluate_correction;
 
     #[test]
     fn test_should_fit_correction_with_small_residuals() {
@@ -305,51 +347,155 @@ mod tests {
         assert!(result.is_ok());
 
         let bspline = result.unwrap();
-        assert_eq!(bspline.shape, [1, 1, 4, 1]);
+        // order + 1 = 4 layers on each flat axis; 4 frequency control points.
+        assert_eq!(bspline.shape, [4, 4, 4, 4]);
         assert_eq!(bspline.spline_order, 3);
-        assert_eq!(bspline.coefficients, residuals);
+        assert_eq!(bspline.coefficients.len(), 4 * 4 * 4 * 4);
 
-        // Check knot vectors
-        assert_eq!(bspline.knots_azimuth.len(), 3);
-        assert_eq!(bspline.knots_elevation.len(), 3);
-        assert_eq!(bspline.knots_temperature.len(), 3);
+        // Knot vectors: 2*order + 1 on each flat axis, n + order on frequency.
+        assert_eq!(bspline.knots_azimuth.len(), 7);
+        assert_eq!(bspline.knots_elevation.len(), 7);
+        assert_eq!(bspline.knots_temperature.len(), 7);
         assert!(bspline.knots_frequency.len() >= frequencies.len());
 
-        // Check degenerate dimensions have repeated knots
-        assert!(bspline.knots_azimuth.iter().all(|&k| k == 0.0));
-        assert!(bspline.knots_elevation.iter().all(|&k| k == 0.0));
-        assert!(bspline.knots_temperature.iter().all(|&k| k == 290.0));
+        // Each flat axis spans its full documented interval.
+        assert_eq!(bspline.knots_azimuth.first(), Some(&AZIMUTH_AXIS_DEG.0));
+        assert_eq!(bspline.knots_azimuth.last(), Some(&AZIMUTH_AXIS_DEG.1));
+        assert_eq!(bspline.knots_elevation.first(), Some(&ELEVATION_AXIS_DEG.0));
+        assert_eq!(bspline.knots_elevation.last(), Some(&ELEVATION_AXIS_DEG.1));
+        assert_eq!(
+            bspline.knots_temperature.first(),
+            Some(&TEMPERATURE_AXIS_K.0)
+        );
+        assert_eq!(
+            bspline.knots_temperature.last(),
+            Some(&TEMPERATURE_AXIS_K.1)
+        );
     }
 
-    /// KNOWN-DEFECT PIN (filed 2026-07-30 by the D15 review; routed to D13/D2):
-    /// the boresight-mode frequency correction is structurally rejected by the
-    /// service side.
+    /// Regression pin, inverted 2026-07-31 (roadmap D13; defect filed 2026-07-30
+    /// by the D15 review).
     ///
-    /// `create_degenerate_knot_vector` builds the azimuth/elevation/temperature
-    /// axes as `order` (3) equal knots, but `BSplineModel4D::validate` requires
-    /// `knots.len() >= shape + order` (= 4 here) on every axis, and the service
-    /// loader runs that validation on every artifact
-    /// (`AntennaCalibration::validate` → `correction.validate()`). So whenever
-    /// boresight residuals trip the 0.5 dB fitting threshold, the resulting
-    /// artifact carries a correction surface the service refuses to load. The fix
-    /// (D13's note in docs/roadmap-2026-07-work-units.md) is flat-but-valid axes
-    /// the way `artifact_export::to_bspline_4d` builds its temperature axis —
-    /// merely lengthening the degenerate vectors is not enough, since a
-    /// zero-width axis has no evaluable span.
+    /// The boresight-mode frequency correction used to be **structurally
+    /// unloadable**: its azimuth/elevation/temperature axes were `order` equal
+    /// knots over one coefficient layer, and `BSplineModel4D::validate` requires
+    /// `knots.len() >= shape + order` on every axis. The service loader runs that
+    /// validation on every artifact (`AntennaCalibration::validate` →
+    /// `correction.validate()`), so any boresight run whose residuals tripped the
+    /// 0.5 dB fitting threshold wrote a `.bin` the service refused to load.
     ///
-    /// When that fix lands, this test MUST flip to asserting `validate().is_ok()`
-    /// (and D13's gotcha note updated).
+    /// This test used to assert `is_err()` to pin the defect. It now asserts the
+    /// contract the fix established, and must never be relaxed back.
     #[test]
-    fn frequency_correction_is_rejected_by_the_service_side_validator() {
+    fn frequency_correction_is_accepted_by_the_service_side_validator() {
         let frequencies = vec![7100.0, 7500.0, 8000.0, 8450.0];
         let residuals = vec![0.8, 0.6, 0.5, 0.7];
         let bspline = fit_frequency_correction(&frequencies, &residuals).unwrap();
 
+        bspline.validate().expect(
+            "fit_frequency_correction must produce a surface the service loader accepts; \
+             the degenerate-axis defect has regressed",
+        );
+    }
+
+    /// The three collapsed axes must be *flat*, not merely valid: the fitted
+    /// correction is a function of frequency alone, so moving along azimuth,
+    /// elevation or temperature must not change the evaluated value by so much
+    /// as a rounding step.
+    ///
+    /// This is the assertion that a "just lengthen the degenerate knot vectors"
+    /// fix would fail — an axis with an empty span evaluates its basis to zero
+    /// and collapses the whole correction to 0 dB.
+    #[test]
+    fn collapsed_axes_are_flat_not_just_valid() {
+        let frequencies = vec![3700.0, 3950.0, 4200.0, 5925.0, 6175.0, 6425.0];
+        let residuals = vec![0.9, 0.7, 0.55, -0.8, -0.95, -0.6];
+        let bspline = fit_frequency_correction(&frequencies, &residuals).unwrap();
+
+        let freq = 4000.0;
+        let reference = evaluate_correction(&bspline, 0.0, 0.0, freq, 290.0)
+            .expect("evaluate at boresight")
+            .correction_db;
+
         assert!(
-            bspline.validate().is_err(),
-            "fit_frequency_correction's output now passes BSplineModel4D::validate — \
-             the degenerate-axis defect appears fixed; flip this test to assert Ok \
-             and update D13's gotcha note in docs/roadmap-2026-07-work-units.md"
+            reference.abs() > 0.1,
+            "the reference value is ~0 dB, so a collapsed-to-zero surface would \
+             pass the comparisons below vacuously; got {reference} dB"
+        );
+
+        for az in [0.0, 1.0, 45.0, 180.0, 359.0, 360.0] {
+            for el in [0.0, 0.5, 30.0, 90.0, 179.0, 180.0] {
+                for temp in [1.0, 100.0, 290.0, 500.0, 999.0] {
+                    let result = evaluate_correction(&bspline, az, el, freq, temp)
+                        .expect("evaluate off the collapsed axes' origin");
+                    assert!(
+                        (result.correction_db - reference).abs() < 1e-12,
+                        "correction must not depend on az/el/temperature: \
+                         ({az}, {el}, {temp}) gave {} dB vs {reference} dB at the origin",
+                        result.correction_db
+                    );
+                    assert!(
+                        !result.extrapolated,
+                        "({az}, {el}, {temp}) is inside every flat axis span but was \
+                         reported as extrapolated"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A clamped B-spline interpolates its first and last control points, so the
+    /// correction reproduces the measured residual exactly at the endpoints of
+    /// the frequency sweep. (Interior control points are *not* interpolated —
+    /// see the note in `frequency_control_points_are_not_interpolated`.)
+    #[test]
+    fn correction_reproduces_the_endpoint_residuals() {
+        let frequencies = vec![3700.0, 3950.0, 4200.0, 5925.0, 6175.0, 6425.0];
+        let residuals = vec![0.9, 0.7, 0.55, -0.8, -0.95, -0.6];
+        let bspline = fit_frequency_correction(&frequencies, &residuals).unwrap();
+
+        for (freq, expected) in [
+            (frequencies[0], residuals[0]),
+            (
+                frequencies[frequencies.len() - 1],
+                residuals[residuals.len() - 1],
+            ),
+        ] {
+            let got = evaluate_correction(&bspline, 0.0, 0.0, freq, 290.0)
+                .expect("evaluate at a sweep endpoint")
+                .correction_db;
+            assert!(
+                (got - expected).abs() < 1e-9,
+                "at {freq} MHz the correction should reproduce the endpoint residual \
+                 {expected} dB, got {got} dB"
+            );
+        }
+    }
+
+    /// Known limitation, pinned so it is not mistaken for a regression: the
+    /// residuals are used **as control points**, not fitted, so at interior
+    /// frequencies the correction is a smoothed version of the residual sequence
+    /// rather than an interpolant of it. The deviation is bounded by how fast the
+    /// residuals vary between samples. Not fixed here (this unit is about the
+    /// artifact being loadable at all); recorded on roadmap D13.
+    #[test]
+    fn frequency_control_points_are_not_interpolated() {
+        // A deliberately spiky residual sequence maximises the smoothing gap.
+        let frequencies = vec![1000.0, 1100.0, 1200.0, 1300.0, 1400.0];
+        let residuals = vec![0.0, 2.0, 0.0, 2.0, 0.0];
+        let bspline = fit_frequency_correction(&frequencies, &residuals).unwrap();
+
+        let got = evaluate_correction(&bspline, 0.0, 0.0, frequencies[1], 290.0)
+            .expect("evaluate at an interior control point")
+            .correction_db;
+
+        assert!(
+            (got - residuals[1]).abs() > 0.1,
+            "this test documents that interior residuals are NOT interpolated; if the \
+             fitter has been changed to a true interpolating/least-squares fit, delete \
+             this test rather than loosening it (got {got} dB at {} MHz for residual {})",
+            frequencies[1],
+            residuals[1]
         );
     }
 
@@ -434,15 +580,6 @@ mod tests {
     }
 
     #[test]
-    fn test_create_degenerate_knot_vector() {
-        let knots = create_degenerate_knot_vector(42.0, 3);
-        assert_eq!(knots, vec![42.0, 42.0, 42.0]);
-
-        let knots = create_degenerate_knot_vector(0.0, 4);
-        assert_eq!(knots, vec![0.0, 0.0, 0.0, 0.0]);
-    }
-
-    #[test]
     fn test_validate_inputs_valid() {
         let frequencies = vec![100.0, 200.0, 300.0, 400.0];
         let residuals = vec![0.5, 0.6, 0.4, 0.7];
@@ -465,21 +602,37 @@ mod tests {
     }
 
     #[test]
-    fn test_degenerate_4d_structure() {
+    fn test_flat_4d_structure() {
         // Test with many frequency points
         let frequencies: Vec<f64> = (0..20).map(|i| 7000.0 + i as f64 * 100.0).collect();
         let residuals: Vec<f64> = (0..20).map(|i| (i as f64 * 0.1).sin()).collect();
 
         let bspline = fit_frequency_correction(&frequencies, &residuals).unwrap();
 
-        // Verify degenerate 4D structure
-        assert_eq!(bspline.shape[0], 1); // Azimuth: single point
-        assert_eq!(bspline.shape[1], 1); // Elevation: single point
-        assert_eq!(bspline.shape[2], 20); // Frequency: 20 points
-        assert_eq!(bspline.shape[3], 1); // Temperature: single point
+        // Flat axes carry order + 1 = 4 identical layers; frequency carries the data.
+        assert_eq!(bspline.shape[0], 4); // Azimuth: flat
+        assert_eq!(bspline.shape[1], 4); // Elevation: flat
+        assert_eq!(bspline.shape[2], 20); // Frequency: 20 control points
+        assert_eq!(bspline.shape[3], 4); // Temperature: flat
 
-        // Total coefficients should be 1 * 1 * 20 * 1 = 20
-        assert_eq!(bspline.coefficients.len(), 20);
+        assert_eq!(bspline.coefficients.len(), 4 * 4 * 20 * 4);
+        bspline.validate().expect("structure must stay loadable");
+
+        // Every flat layer of a given frequency index carries the same residual.
+        let [n_az, n_el, n_freq, n_temp] = bspline.shape;
+        for (i_freq, &residual) in residuals.iter().enumerate() {
+            for i_temp in 0..n_temp {
+                for i_el in 0..n_el {
+                    for i_az in 0..n_az {
+                        let idx = i_az + n_az * (i_el + n_el * (i_freq + n_freq * i_temp));
+                        assert_eq!(
+                            bspline.coefficients[idx], residual,
+                            "layer ({i_az}, {i_el}, {i_freq}, {i_temp}) is not a replica"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

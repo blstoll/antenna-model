@@ -2419,11 +2419,11 @@ schema stamp is the *only* version guard a headerless file gets).
 **One deliberate constraint on the boresight fixture, documented in the test.** Its
 measurements are chosen to keep the tuner's max |residual| under 0.5 dB, i.e. on the near side
 of `should_fit_correction`'s threshold, because a boresight artifact that *does* carry a
-frequency correction currently fails to load — the degenerate-axes defect recorded on **D13**,
-which owns the fix. `boresight_fixture_stays_below_the_correction_fit_threshold` asserts the
-fixture has not drifted across that line, so the framing tests cannot silently start
-exercising the D13 defect instead. Coordinate when D13 lands: both units reshape what
-boresight mode writes.
+frequency correction failed to load — the degenerate-axes defect recorded on **D13**, which
+owned the fix. `boresight_fixture_stays_below_the_correction_fit_threshold` asserts the
+fixture has not drifted across that line. **Lifted 2026-07-31**: D13's inherited blocker is
+fixed, and the same file now runs a second, rippled fixture over the correction-carrying
+branch. The original fixture stays put so both sides of the branch keep their own coverage.
 
 Also refreshed: `examples/README_boresight.md`'s "Artifact Incompatible with Service"
 troubleshooting now distinguishes the two rejection messages and adds the CRC one.
@@ -2453,9 +2453,8 @@ troubleshooting now distinguishes the two rejection messages and adds the CRC on
   inside the payload, so a headerless artifact is not un-versioned in the semantic sense —
   only in the container sense. Say which axis is which, as the exit criteria above require.
   (A second boresight-artifact defect — degenerate correction-surface axes the service-side
-  validator rejects at load — was filed 2026-07-30 by the D15 review and is recorded on
-  **D13**; the fix belongs there, but coordinate: both units reshape what boresight mode
-  writes.)
+  validator rejects at load — was filed 2026-07-30 by the D15 review, recorded on **D13**,
+  and ✅ fixed there 2026-07-31.)
 - **Note (2026-07-28, from C12 / C8 stage 4):** `CalibrationMetadata.rmse_db`/`r_squared`
   stay plain `f64` with a NaN sentinel by decision, not oversight — converting them to
   `Option<f64>` would change postcard's positional wire encoding, which is an ANTC
@@ -3061,10 +3060,12 @@ representable.
 3. A fully degenerate axis (every knot equal) makes every basis function return 0 rather than 1
    — pre-existing, not introduced or fixed here, currently unreachable because
    `generate_knot_vector` rejects degenerate ranges upstream. Noted in `bspline_basis`'s doc
-   comment (`41b7e94`). ("Unreachable" is specific to calibrate's 3D fitter path: the boresight
-   mode separately produces degenerate 4D axes on the service side via
-   `fit_frequency_correction`, a different code path and defect class — the service *rejects*
-   those artifacts at load. Filed 2026-07-30 by the D15 review, recorded on **D13**.)
+   comment (`41b7e94`). ("Unreachable" was specific to calibrate's 3D fitter path: the boresight
+   mode separately produced degenerate 4D axes on the service side via
+   `fit_frequency_correction`, a different code path and defect class — the service *rejected*
+   those artifacts at load. Filed 2026-07-30 by the D15 review, recorded on **D13**, ✅ fixed
+   there 2026-07-31 — the collapsed axes are now flat-but-valid, so boresight mode is no
+   longer a producer of degenerate axes.)
 
 **This fix does not make the correction-surface fit well-determined** — it corrects a basis
 evaluation bug that was corrupting fitted coefficients at every axis maximum; item 2 above is
@@ -3165,22 +3166,47 @@ Best candidate: **Andrew 43998, 10 m — 6 frequencies spanning 3700–6425 MHz*
   hard rather than dropping rows — D11's gate does not apply here; do not "harmonize" the
   two parsers in this unit. Real data means real residuals: pick the tolerance from the
   measured before/after, not from wishful thinking, and record it.
-- **Inherited 2026-07-30 from the D15 review — the boresight frequency correction is
-  service-rejected.** `fit_frequency_correction` (`calibrate/src/frequency_correction.rs`)
-  builds its degenerate azimuth/elevation/temperature axes as `order` (3) equal knots
-  (`create_degenerate_knot_vector`), which fails `BSplineModel4D::validate`'s
+- **✅ Inherited blocker cleared 2026-07-31 — the boresight frequency correction is no
+  longer service-rejected.** (Filed 2026-07-30 by the D15 review; branch
+  `fix/d13-boresight-correction-flat-axes`.) `fit_frequency_correction`
+  (`calibrate/src/frequency_correction.rs`) built its azimuth/elevation/temperature axes as
+  `order` (3) equal knots over a **single** coefficient layer
+  (`create_degenerate_knot_vector`), failing `BSplineModel4D::validate`'s
   `len >= shape + order` check — and the service loader validates every artifact
-  (`AntennaCalibration::validate` → `correction.validate()`). So a boresight artifact that
-  carries a correction surface (fitted whenever max |residual| > 0.5 dB) **fails to load**.
-  This unit's scope-3 assertions ("loads through the service loader", serves
-  `PartiallyCalibrated`) will hit it on any real fixture whose residuals trip the
-  threshold — the NTIA candidates plausibly will, given the multi-band feed caveat above.
-  Fix: build flat-but-valid axes the way `artifact_export::to_bspline_4d` builds its
-  temperature axis (coefficient layers replicated over a real interval with an interior
-  knot); merely lengthening the degenerate vectors is not a fix, since a zero-width axis
-  has no evaluable span. Pinned as a known defect by
-  `frequency_correction::tests::frequency_correction_is_rejected_by_the_service_side_validator`,
-  which must flip to `is_ok` when fixed.
+  (`AntennaCalibration::validate` → `correction.validate()`), so a boresight artifact that
+  carried a correction surface (fitted whenever max |residual| > 0.5 dB) **could not be
+  loaded at all**. Fixed by replicating the coefficient layer across `order + 1` layers per
+  collapsed axis over a real interval — the same construction full mode already used for its
+  temperature axis, now extracted as the single shared
+  `artifact_export::flat_axis(lo, hi, order)` so the two producers cannot drift. Shape went
+  from `[1, 1, N, 1]` to `[4, 4, N, 4]`. Axis spans cover the whole queryable domain
+  (azimuth `0..360`, elevation `0..180` as a polar angle from boresight, temperature
+  `0..1000 K`) so a surface that is constant along them never reports a spurious
+  extrapolation; the boresight-only *claim* stays where the evaluator enforces it, in
+  `calibration_coverage`. `create_degenerate_knot_vector` is deleted. Tests:
+  `frequency_correction_is_accepted_by_the_service_side_validator` (the old known-defect pin,
+  inverted), `collapsed_axes_are_flat_not_just_valid` (the assertion a merely-lengthened
+  degenerate vector still fails — an empty span drives the basis to zero and silently
+  collapses the correction to 0 dB), `correction_reproduces_the_endpoint_residuals`, and two
+  CLI-level tests in `cli_boresight_mode_e2e.rs` driven by a new rippled fixture that trips
+  the 0.5 dB threshold. **D2's constraint is lifted**: the boresight e2e file now covers both
+  sides of the correction-fit branch.
+- **⚠️ Second blocker found while fixing the first, NOT fixed — the boresight correction is
+  unreachable on the served path.** `build_calibration_artifact` records boresight coverage
+  as `azimuth_range = (0, 0)`, and `service::evaluator::is_in_coverage` gates the correction
+  on `az >= 0.0 && az <= 0.0`. But at boresight the azimuth is *undefined*:
+  `antenna_frame_to_spherical` computes it as `atan2(y, x)` on two components that are float
+  noise. Measured on a realistic ECEF geometry (emitter placed exactly at the boresight aim
+  point): elevation comes back exactly `0.0` — `acos(z/range)` saturates, so the elevation
+  gate is safe — but azimuth comes back **63.43°**, and the correction is silently skipped.
+  So a loadable boresight artifact still serves uncorrected physics. This unit's scope-3
+  assertion ("served boresight gain lands within a stated tolerance of the NTIA values")
+  runs straight into it. The fix is a coverage-semantics decision, not a mechanical one —
+  at elevation 0 every azimuth is the same direction, so the candidate is azimuth coverage
+  `0..360` with the on-axis restriction carried by elevation alone, plus a decision on
+  whether the elevation gate is exact-zero or a small on-axis cone (a query 0.001° off
+  boresight arguably still deserves the boresight correction). **Needs a maintainer call
+  before D13 proper starts.**
 - **Depends on:** D2 (✅ done 2026-07-30 — the headered artifact format is final, so this
   test pins that rather than the legacy one), D12 (reuses its CLI-harness pattern; the
   boresight harness in `cli_boresight_mode_e2e.rs` is the closer starting point).

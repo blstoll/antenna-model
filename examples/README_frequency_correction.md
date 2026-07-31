@@ -8,7 +8,7 @@ The frequency correction module (`calibrate/src/frequency_correction.rs`) provid
 
 1. **Determine if correction is needed**: Check if residuals exceed 0.5 dB threshold
 2. **Fit 1D B-spline**: Create a cubic B-spline correction across frequency dimension
-3. **Convert to degenerate 4D**: Package as a 4D B-spline for service compatibility
+3. **Convert to a flat-axis 4D B-spline**: Package as a 4D B-spline for service compatibility
 
 ## When to Use
 
@@ -81,38 +81,71 @@ if should_fit_correction(&residuals_by_freq) {
 }
 ```
 
-## Degenerate 4D B-spline Structure
+## Flat-axis 4D B-spline Structure
 
-The fitted frequency correction is stored as a degenerate 4D B-spline:
+The fitted frequency correction is stored as a 4D B-spline that varies only along
+frequency. The other three axes are **flat**, not degenerate:
 
 ```rust
 BSplineModel4D {
-    shape: [1, 1, N_freq, 1],  // Single spatial point, N frequency points, single temperature
+    // order + 1 = 4 identical layers on each collapsed axis; N frequency control points
+    shape: [4, 4, N_freq, 4],
 
-    // Degenerate dimensions (single point)
-    knots_azimuth: [0.0, 0.0, 0.0],      // Boresight azimuth
-    knots_elevation: [0.0, 0.0, 0.0],    // Boresight elevation
-    knots_temperature: [290.0, 290.0, 290.0],  // Typical temperature
+    // Flat dimensions: a clamped knot vector over a real span, one interior knot
+    knots_azimuth:     [0.0,   0.0,   0.0,   180.0, 360.0,  360.0,  360.0],
+    knots_elevation:   [0.0,   0.0,   0.0,    90.0, 180.0,  180.0,  180.0],
+    knots_temperature: [0.0,   0.0,   0.0,   500.0, 1000.0, 1000.0, 1000.0],
 
     // Frequency dimension (proper B-spline)
     knots_frequency: [f_min, ..., f_max],  // Clamped cubic B-spline
 
-    coefficients: [c1, c2, ..., cN],  // N correction values in dB
+    // Each residual replicated across every flat layer, in the service's
+    // idx = i_az + n_az * (i_el + n_el * (i_freq + n_freq * i_temp)) layout
+    coefficients: vec![...; 4 * 4 * N_freq * 4],
     spline_order: 3,  // Cubic
 }
 ```
+
+### Why not a single degenerate point?
+
+A one-layer axis over `order` equal knots looks like the obvious way to collapse a
+dimension, and it is how this module worked until 2026-07-31. It is wrong twice over:
+
+1. **The service refuses to load it.** `BSplineModel4D::validate` requires
+   `knots.len() >= shape + order` on every axis, and the loader validates every artifact.
+   Every boresight run whose residuals cleared the 0.5 dB threshold produced a `.bin` the
+   service rejected outright.
+2. **Lengthening the knot vector is not a fix.** The evaluator's span is
+   `[knots[order-1], knots[len-order]]`, which stays empty for a single coefficient layer
+   however long the vector is. An empty span drives every basis function to zero, so the
+   correction evaluates to 0 dB — a silent failure that looks like a healthy artifact.
+
+Both are avoided by growing the layer count alongside the knot vector, which is what
+`artifact_export::flat_axis(lo, hi, order)` does. The flat spans deliberately cover the
+whole queryable domain so a surface that is constant along an axis never reports a
+spurious "extrapolated" warning; the boresight-only claim is carried by the artifact's
+`calibration_coverage`, which is where the evaluator enforces it.
 
 ## Service Evaluation
 
 The service automatically evaluates the correction surface at query time:
 
-1. **Query at boresight** (az≈0, el≈0):
+1. **Query at boresight**:
    - Correction is interpolated at the query frequency
    - Applied: `gain_final = gain_physics + correction(freq)`
 
-2. **Query off-axis** (az≠0 or el≠0):
-   - Correction is extrapolated (or returns zero, depending on implementation)
-   - Warning generated for out-of-coverage query
+2. **Query off-axis**:
+   - `service::evaluator::is_in_coverage` finds the query outside the artifact's
+     boresight-only `calibration_coverage`, so no correction is applied
+   - The response is flagged extrapolated and carries the partial-calibration warning
+
+> **Known defect (2026-07-31, roadmap D13):** case 1 does not currently fire. Boresight
+> coverage is recorded as `azimuth_range = (0, 0)`, but at boresight the azimuth is
+> undefined — `antenna_frame_to_spherical` computes it as `atan2(y, x)` on two components
+> that are float noise, and a realistic ECEF geometry aimed exactly at the boresight point
+> yields 63.43°. The elevation gate is safe (`acos(z/range)` saturates to exactly 0.0); the
+> azimuth gate is not. Until this is resolved, a boresight artifact loads and carries its
+> correction but serves uncorrected physics.
 
 ## Expected Accuracy Improvement
 
@@ -167,4 +200,4 @@ cargo run --release --bin calibrate -- \
 - **Optional enhancement**: Boresight calibration works without frequency correction
 - **Threshold**: Only fit if `max(abs(residuals)) > 0.5 dB`
 - **Compatible**: Uses standard `BSplineModel4D` format for service compatibility
-- **Performance**: Minimal overhead (single spatial point, simple interpolation)
+- **Performance**: Minimal overhead (`4 × 4 × N_freq × 4` coefficients, simple interpolation)

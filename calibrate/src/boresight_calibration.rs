@@ -865,11 +865,16 @@ mod tests {
 
         let correction = correction_result.unwrap();
 
-        // Verify degenerate 4D structure
-        assert_eq!(correction.shape[0], 1); // Azimuth: single point
-        assert_eq!(correction.shape[1], 1); // Elevation: single point
+        // Verify the flat-axis 4D structure: azimuth, elevation and temperature
+        // carry order + 1 = 4 identical layers each (D13, 2026-07-31 — a single
+        // layer over degenerate knots is what the service loader used to reject).
+        assert_eq!(correction.shape[0], 4); // Azimuth: flat
+        assert_eq!(correction.shape[1], 4); // Elevation: flat
         assert_eq!(correction.shape[2], 4); // Frequency: 4 control points
-        assert_eq!(correction.shape[3], 1); // Temperature: single point
+        assert_eq!(correction.shape[3], 4); // Temperature: flat
+        correction
+            .validate()
+            .expect("a fitted frequency correction must load through the service");
 
         // Verify it can be stored in BoresightCalibrationResult
         let calibration_result = BoresightCalibrationResult {

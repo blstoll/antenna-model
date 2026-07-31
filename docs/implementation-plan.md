@@ -390,6 +390,15 @@ cargo run --release --bin calibrate -- \
 - ✅ Exported from `calibrate/src/lib.rs`
 - ✅ Fixed pre-existing clippy warnings in boresight_calibration.rs and design_specs_loader.rs
 
+> **Superseded 2026-07-31 (roadmap D13).** The "degenerate 4D" structure recorded in this
+> sprint entry was **not** loadable by the service, contrary to the acceptance criterion
+> below: single-layer axes over `order` equal knots fail `BSplineModel4D::validate`'s
+> `knots.len() >= shape + order` check, which the loader runs on every artifact. The
+> criterion was never actually exercised end to end. The collapsed axes are now
+> *flat-but-valid* (`artifact_export::flat_axis`), shape `[4, 4, N_freq, 4]`; see
+> `examples/README_frequency_correction.md` for the current structure. Everything below is
+> kept as the historical record of this sprint.
+
 **Acceptance Criteria:** ✅ ALL MET
 - ✅ Correction fitted when appropriate (threshold-based decision)
 - ✅ Service can evaluate degenerate 4D correction (compatible with existing code)
