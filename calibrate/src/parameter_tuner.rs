@@ -114,7 +114,7 @@ impl ObjectiveFunction {
         mode: TuningMode,
         integration_params: IntegrationParams,
     ) -> Self {
-        let bounds = ParameterBounds::default();
+        let bounds = ParameterBounds::from_class(&antenna_class);
         Self {
             antenna_class,
             measurements,
@@ -304,6 +304,67 @@ impl CostFunction for ObjectiveFunction {
     }
 }
 
+/// The tunable bounds in the order `params_to_physical` reads the parameter vector.
+///
+/// Mirrors the order `tune_parameters` builds the initial vector in; the two must agree or
+/// each parameter is validated against another's range.
+fn ordered_bounds(bounds: &ParameterBounds, mode: TuningMode) -> Vec<(f64, f64)> {
+    let mut ordered = vec![bounds.surface_rms_mm];
+
+    if mode.num_parameters() >= 2 {
+        ordered.push(bounds.mesh_spacing_mm);
+    }
+
+    if mode.num_parameters() >= 3 {
+        ordered.push(bounds.wire_diameter_mm);
+    }
+
+    ordered
+}
+
+/// Build the initial Nelder-Mead simplex: `N + 1` vertices for an `N`-parameter search.
+///
+/// Nelder-Mead is a simplex method, so it needs one more vertex than it has dimensions.
+/// argmin does not check this — seeded with a single vertex it underflows `usize` on the
+/// first iteration and panics (see the regression test below). The sibling boresight path
+/// hit the identical bug and fixed it on 2025-11-27 (`boresight_calibration.rs`); this is
+/// that fix, plus the bounds handling that path does not need.
+///
+/// Vertex `i + 1` perturbs parameter `i` by 10% of its value (or 0.1 for values of 1.0 or
+/// less), **stepping away from whichever bound is nearer** so the vertex cannot seed in the
+/// out-of-bounds region where `compute_rmse` returns a flat 1e10 penalty. That direction
+/// choice is load-bearing rather than defensive: every tunable of `UHF_Array_Element` sits
+/// exactly on its upper bound, so an unconditional upward step would put all `N` non-origin
+/// vertices on the penalty plateau and hand the optimizer a simplex with no gradient.
+fn build_initial_simplex(initial: &[f64], bounds: &[(f64, f64)]) -> Vec<Array1<f64>> {
+    let mut simplex = vec![Array1::from_vec(initial.to_vec())];
+
+    for (i, &value) in initial.iter().enumerate() {
+        let (lo, hi) = bounds[i];
+        let step = if value.abs() > 1.0 {
+            value.abs() * 0.1
+        } else {
+            0.1
+        };
+
+        // Room on each side. Negative when `value` already sits outside the bound, in which
+        // case the larger side is the one pointing back into the valid range.
+        let room_up = hi - value;
+        let room_down = value - lo;
+
+        let mut vertex = initial.to_vec();
+        vertex[i] = if room_up >= room_down {
+            value + step.min(room_up)
+        } else {
+            value - step.min(room_down)
+        };
+
+        simplex.push(Array1::from_vec(vertex));
+    }
+
+    simplex
+}
+
 /// Tune physical parameters to minimize RMSE between model and measurements
 ///
 /// This is an **optional** calibration step that fine-tunes 2-3 key parameters.
@@ -352,8 +413,17 @@ pub fn tune_parameters(
 
     let max_iters = max_iterations.unwrap_or(200);
 
-    // Use fast integration parameters for optimization (speed over accuracy)
-    let integration_params = IntegrationParams::fast();
+    // Must match `main.rs::compute_model_predictions`, which uses `default()`.
+    //
+    // These are not interchangeable, and the difference is not small where it matters:
+    // `fast()` vs `default()` disagree by up to 0.088 dB at 24 deg cone on the
+    // `UHF_Array_Element` fixture, against a surface-RMS signal of 0.003-0.010 dB — a 26x
+    // ratio. Tuning under `fast()` therefore optimised the parameters against integrator
+    // discretisation error rather than against the physics, and handed the resulting
+    // parameters to a pipeline that then computed its residuals under `default()`. The
+    // tuner must minimise the residuals the correction surface will actually be fitted to,
+    // so it has to evaluate the same model. Measured 2026-07-31.
+    let integration_params = IntegrationParams::default();
 
     // Initial parameter values from tunable parameters or class defaults
     let mut initial_params_vec = Vec::new();
@@ -366,8 +436,6 @@ pub fn tune_parameters(
     if mode.num_parameters() >= 3 {
         initial_params_vec.push(initial_tunable.effective_wire_diameter(&antenna_class));
     }
-
-    let initial_params = Array1::from_vec(initial_params_vec.clone());
 
     // Create objective function
     let antenna_class_arc = Arc::new(antenna_class);
@@ -385,8 +453,12 @@ pub fn tune_parameters(
         .context("Failed to compute initial RMSE")?;
     info!("Initial RMSE: {:.3} dB", initial_rmse);
 
-    // Set up Nelder-Mead optimizer
-    let solver = NelderMead::new(vec![initial_params]).with_sd_tolerance(1e-6)?;
+    // Set up Nelder-Mead optimizer over a full N+1 vertex simplex seeded inside the bounds
+    let simplex = build_initial_simplex(
+        &initial_params_vec,
+        &ordered_bounds(&objective.bounds, mode),
+    );
+    let solver = NelderMead::new(simplex).with_sd_tolerance(1e-6)?;
 
     // Run optimization
     info!(
@@ -447,9 +519,10 @@ pub fn tune_parameters(
 mod tests {
     use super::*;
     use crate::antenna_config::{
-        FeedParameters, MeshParameters, ReflectorGeometry, SurfaceParameters,
+        AntennaClassRegistry, FeedParameters, MeshParameters, ReflectorGeometry, SurfaceParameters,
     };
     use crate::parser::MeasurementPoint;
+    use std::path::Path;
 
     /// Create a simple test antenna class
     fn create_test_class() -> AntennaClass {
@@ -549,6 +622,189 @@ mod tests {
         // In bounds - should return reasonable RMSE
         let result = objective.compute_rmse(&[0.5]).unwrap();
         assert!(result < 100.0);
+    }
+
+    /// Nelder-Mead over `N` parameters needs a simplex of `N + 1` vertices.
+    #[test]
+    fn initial_simplex_has_n_plus_one_vertices() {
+        let class = create_test_class();
+        for mode in [
+            TuningMode::SurfaceRmsOnly,
+            TuningMode::SurfaceAndMeshSpacing,
+            TuningMode::All,
+        ] {
+            let n = mode.num_parameters();
+            let initial = vec![0.5, 2.0, 0.2][..n].to_vec();
+            let bounds = ordered_bounds(&ParameterBounds::from_class(&class), mode);
+
+            let simplex = build_initial_simplex(&initial, &bounds);
+
+            assert_eq!(
+                simplex.len(),
+                n + 1,
+                "{mode:?} tunes {n} parameters, so the simplex needs {} vertices",
+                n + 1
+            );
+            for vertex in &simplex {
+                assert_eq!(vertex.len(), n, "every vertex spans all {n} parameters");
+            }
+        }
+    }
+
+    /// Seed vertices must land inside the bounds, or the optimizer starts against a wall.
+    ///
+    /// Driven here with parameters sitting exactly on their upper bound — the situation
+    /// `ParameterBounds::from_class` now prevents, but which `build_initial_simplex` must
+    /// still survive, since it is handed whatever bounds it is given. Perturbing upward
+    /// unconditionally (the sibling boresight heuristic) would put *every* non-origin
+    /// vertex in the out-of-bounds region, where `compute_rmse` returns a flat 1e10 —
+    /// a simplex with no usable gradient.
+    #[test]
+    fn initial_simplex_vertices_stay_within_bounds() {
+        let bounds = vec![(0.1, 2.0), (1.0, 10.0), (0.05, 1.0)];
+        let initial: Vec<f64> = bounds.iter().map(|(_, hi)| *hi).collect();
+
+        let simplex = build_initial_simplex(&initial, &bounds);
+
+        for (v, vertex) in simplex.iter().enumerate() {
+            for (i, (lo, hi)) in bounds.iter().enumerate() {
+                let value = vertex[i];
+                assert!(
+                    value >= *lo && value <= *hi,
+                    "vertex {v} parameter {i} = {value} is outside bounds [{lo}, {hi}]"
+                );
+            }
+        }
+
+        // ...and each vertex must actually differ from the origin in its own parameter,
+        // or the simplex is degenerate and the search cannot move along that axis.
+        for (i, vertex) in simplex.iter().skip(1).enumerate() {
+            assert!(
+                (vertex[i] - initial[i]).abs() > f64::EPSILON,
+                "vertex {} did not perturb parameter {i} (both {})",
+                i + 1,
+                initial[i]
+            );
+        }
+    }
+
+    /// Regression pin for the crash filed in
+    /// `docs/findings-2026-07-30-full-mode-parameter-tuning-broken.md`.
+    ///
+    /// `tune_parameters` seeded `NelderMead` with a single vertex, so argmin computed
+    /// `self.params[num_param_vecs - 2]` with `num_param_vecs == 1` and the `usize`
+    /// subtraction underflowed: "attempt to subtract with overflow", ~0.7 s in, for every
+    /// tuning mode and every iteration cap. Nothing drove `tune_parameters` through argmin
+    /// in a test, which is why it hid — so this test does exactly that, for N = 1, 2 and 3.
+    #[test]
+    fn tune_parameters_completes_for_every_tuning_mode() {
+        for mode in [
+            TuningMode::SurfaceRmsOnly,
+            TuningMode::SurfaceAndMeshSpacing,
+            TuningMode::All,
+        ] {
+            let result = tune_parameters(
+                create_test_class(),
+                TunableParameters::default_from_class(),
+                create_synthetic_measurements(),
+                mode,
+                Some(3),
+            )
+            .unwrap_or_else(|e| panic!("{mode:?} tuning failed: {e}"));
+
+            assert!(
+                result.surface_rms_mm.is_finite(),
+                "{mode:?} produced a non-finite surface RMS"
+            );
+            assert!(
+                result.final_rmse_db <= result.initial_rmse_db,
+                "{mode:?}: Nelder-Mead reported a best cost ({}) worse than the starting \
+                 point ({}), which it can only do if the simplex never evaluated",
+                result.final_rmse_db,
+                result.initial_rmse_db
+            );
+        }
+    }
+
+    /// Every class nominal must start *strictly inside* its own search bracket.
+    ///
+    /// This is the invariant that replaced the class-agnostic bounds. Under the old fixed
+    /// ranges, all three `UHF_Array_Element` tunables sat exactly on their upper bound, so
+    /// the tuner opened its search standing on the boundary. Checked against the real
+    /// shipped classes, not a fixture, because the hazard was a real class meeting a real
+    /// bound.
+    #[test]
+    fn every_shipped_class_nominal_is_interior_to_its_own_bounds() {
+        let registry = AntennaClassRegistry::load_from_file(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("antenna_classes.yaml"),
+        )
+        .expect("load the shipped antenna class definitions");
+
+        let class_ids = registry.list_class_ids();
+        assert!(!class_ids.is_empty(), "no antenna classes were loaded");
+
+        for class_id in class_ids {
+            let class = registry
+                .get_class(&class_id)
+                .expect("a listed class id must resolve");
+            let bounds = ParameterBounds::from_class(class);
+
+            for (name, nominal, (lo, hi)) in [
+                (
+                    "surface_rms_mm",
+                    class.surface.rms_mm,
+                    bounds.surface_rms_mm,
+                ),
+                (
+                    "mesh_spacing_mm",
+                    class.mesh.spacing_mm,
+                    bounds.mesh_spacing_mm,
+                ),
+                (
+                    "wire_diameter_mm",
+                    class.mesh.wire_diameter_mm,
+                    bounds.wire_diameter_mm,
+                ),
+            ] {
+                assert!(
+                    nominal > lo && nominal < hi,
+                    "{class_id}: nominal {name} = {nominal} is not strictly inside its \
+                     bracket [{lo}, {hi}] — the tuner would start on its own boundary"
+                );
+            }
+        }
+    }
+
+    /// The tuner must survive a class whose nominals are the old fixed upper bounds.
+    #[test]
+    fn tune_parameters_completes_for_a_class_at_the_legacy_bounds() {
+        let class = AntennaClass {
+            class_id: "AtLegacyUpperBounds".to_string(),
+            mesh: MeshParameters {
+                spacing_mm: 10.0,
+                wire_diameter_mm: 1.0,
+            },
+            surface: SurfaceParameters { rms_mm: 2.0 },
+            ..create_test_class()
+        };
+        let bounds = ParameterBounds::from_class(&class);
+
+        let result = tune_parameters(
+            class,
+            TunableParameters::default_from_class(),
+            create_synthetic_measurements(),
+            TuningMode::All,
+            Some(3),
+        )
+        .expect("tuning should complete");
+
+        assert!(
+            result.surface_rms_mm >= bounds.surface_rms_mm.0
+                && result.surface_rms_mm <= bounds.surface_rms_mm.1,
+            "tuned surface RMS {} escaped its bounds {:?}",
+            result.surface_rms_mm,
+            bounds.surface_rms_mm
+        );
     }
 
     // Integration test with full optimization (marked as ignored for speed)

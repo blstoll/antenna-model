@@ -281,6 +281,17 @@ fn fixture_csv() -> &'static str {
     CSV.get_or_init(|| rows_to_csv(&generate_rows()))
 }
 
+/// The same grid without the injected systematic bias, cached the same way.
+///
+/// Used only by the parameter-tuning tests: the bias is what the *correction surface* has
+/// to recover, and it is ~120–360× larger than the surface-RMS signal the *tuner* has to
+/// recover, which makes the two confounded on one fixture. See
+/// `support::generate_rows_without_bias` for the measurement.
+fn bias_free_fixture_csv() -> &'static str {
+    static CSV: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    CSV.get_or_init(|| rows_to_csv(&generate_rows_without_bias()))
+}
+
 /// Run the real `calibrate` binary in full mode over a freshly generated fixture.
 ///
 /// `extra_args` appends flags such as `--validate` / `--cv-folds N`.
@@ -289,6 +300,11 @@ fn fixture_csv() -> &'static str {
 /// *expected* CLI failure will need a variant that returns the raw `Output` instead of
 /// panicking here.
 fn run_calibrate(extra_args: &[&str]) -> CalibrateRun {
+    run_calibrate_on(fixture_csv(), extra_args)
+}
+
+/// As [`run_calibrate`], over a caller-supplied measurement CSV.
+fn run_calibrate_on(csv: &str, extra_args: &[&str]) -> CalibrateRun {
     let dir = tempfile::tempdir().expect("temp dir");
     let input = dir.path().join("measurements.csv");
     let artifact = dir.path().join("antenna.bin");
@@ -296,8 +312,8 @@ fn run_calibrate(extra_args: &[&str]) -> CalibrateRun {
     let metadata = dir.path().join("metadata.json");
 
     // Each call gets its own tempdir and its own copy of the file on disk — only the
-    // physics evaluation behind `fixture_csv()` is shared.
-    std::fs::write(&input, fixture_csv()).expect("write fixture CSV");
+    // physics evaluation behind the cached CSV is shared.
+    std::fs::write(&input, csv).expect("write fixture CSV");
 
     // `--classes-file` defaults to `calibrate/antenna_classes.yaml`, resolved against the
     // process CWD. An integration test's CWD is the crate root, so build the path from
@@ -575,58 +591,41 @@ fn cli_without_validate_does_not_cross_validate() {
 // Tuned end-to-end run and its CI status (roadmap D12 Task 5)
 // ============================================================================
 
-/// End-to-end run WITH parameter tuning.
+/// End-to-end run WITH parameter tuning: the tuner must recover the perturbed surface RMS.
 ///
-/// **`#[ignore]`d for a correctness reason, not a CI-cost one.** Measured 2026-07-30:
-/// `--tune-parameters` crashes the binary deterministically, on the very first
-/// optimization step, regardless of `--max-tuning-iterations` or `--tuning-mode`:
+/// Runs against the **bias-free** fixture, deliberately. The biased fixture that the rest
+/// of this file uses cannot support this assertion, and the reason is quantitative rather
+/// than incidental: the injected bias averages +1.22 dB, while the whole 2.0 → 2.6 mm
+/// surface-RMS perturbation is worth 0.003 dB at 400 MHz and 0.010 dB at 700 MHz (Ruze
+/// loss `exp(-(4πσ/λ)²)` with λ = 43–75 cm). The bias is 120–360× larger and has the same
+/// near-constant shape, so it is confounded with surface RMS, and minimising RMSE against
+/// it drives surface RMS to its *lower* bound. That is not a hypothesis: with the
+/// degenerate-simplex crash fixed and the biased fixture still in place, this test reported
+/// **0.1 mm against a 2.6 mm truth**. See `support::generate_rows_without_bias`.
 ///
-/// ```text
-/// thread 'main' panicked at argmin-0.11.0/src/solver/neldermead/mod.rs:357:43:
-/// attempt to subtract with overflow
-/// ```
+/// The bias is what the *correction surface* has to recover, and the correction-surface
+/// assertions above keep using it. Two known answers, two fixtures.
 ///
-/// Root cause: `calibrate::parameter_tuner::tune_parameters` builds its `NelderMead`
-/// solver with `NelderMead::new(vec![initial_params])` — a single initial vector — but
-/// Nelder-Mead requires a full simplex of **N+1** vertices for an N-parameter search
-/// (`--tuning-mode surface-only`, the default, has N=1 and needs 2 vertices; only 1 is
-/// given). `self.params.len()` is therefore always 1 regardless of tuning mode, and
-/// `next_iter` indexes `self.params[num_param_vecs - 2]` = `self.params[1 - 2]`, which
-/// underflows in `usize` arithmetic. This is not a new failure mode for this codebase:
-/// the sibling boresight-calibration path hit and fixed the identical bug (see
-/// `docs/implementation-plan.md`, "Bug Fixed" entry under the 2025-11-27 integration-test
-/// work) by building a real simplex — `boresight_calibration.rs:398-428` seeds it by
-/// perturbing each parameter by 10% (or 0.1 for small values) to get N+1 vertices.
-/// `parameter_tuner.rs::tune_parameters` never received the equivalent fix, so
-/// `--tune-parameters` in full-calibration mode is non-functional today. Fixing
-/// `parameter_tuner.rs` is out of this test file's scope (this task modifies only
-/// `cli_full_mode_e2e.rs`); this test documents the failure so it's ready to un-ignore
-/// once that fix lands.
+/// **History.** This test was `#[ignore]`d on 2026-07-30 by roadmap unit D12 because
+/// `--tune-parameters` crashed deterministically — `tune_parameters` seeded `NelderMead`
+/// with a single vertex where N+1 are required, so argmin underflowed `usize` computing
+/// `params[num_param_vecs - 2]`. Fixed 2026-07-31 (`build_initial_simplex`), along with two
+/// others found while un-ignoring it: the class-agnostic `ParameterBounds` that put every
+/// `UHF_Array_Element` tunable exactly on its cap, and the tuner evaluating its objective
+/// under `IntegrationParams::fast()` while the pipeline computed residuals under
+/// `default()` — a mismatch reaching 0.088 dB at 24° cone, 26× the signal being fitted.
 ///
-/// Separately — a second, independent problem that will surface once the crash above is
-/// fixed: the tuner's own `ParameterBounds::default()` caps `surface_rms_mm` at
-/// `(0.1, 2.0)` mm (`calibrate/src/antenna_config.rs:155`), i.e. exactly the *nominal*
-/// value this fixture starts from and *below* the 2.6 mm perturbed truth
-/// (`support::PERTURBED_SURFACE_RMS_MM`). The search space cannot reach 2.6 mm at all —
-/// the best the optimizer could ever report is the nominal 2.0 mm boundary itself — so
-/// the directional assertion below cannot pass even after the simplex bug is fixed, until
-/// the bounds (or the fixture's perturbation target) are revisited.
-///
-/// Iteration count is held low for when this becomes unblocked: each Nelder-Mead
-/// evaluation runs the physics model over all 288 fixture points (~0.4 s in a debug
-/// build). The assertion is directional — the tuner must move surface RMS off the
-/// nominal 2.0 mm toward the 2.6 mm the data was generated at — not that it converges
-/// exactly, which a short run would not do anyway.
-#[ignore = "crashes: --tune-parameters panics with 'attempt to subtract with overflow' in \
-            argmin's Nelder-Mead solver (parameter_tuner.rs passes a 1-vertex simplex \
-            where N+1 are required; see doc comment above and \
-            docs/implementation-plan.md's boresight-calibration bugfix for the sibling \
-            fix). Measured 2026-07-30. Run with `cargo test -p calibrate --test \
-            cli_full_mode_e2e tuned -- --include-ignored` to reproduce."]
+/// Iterations are held low: each Nelder-Mead evaluation runs the physics model over all
+/// 288 fixture points, and the objective now uses the denser `default()` integrator, so
+/// this run costs ~20 s in a debug build. Four iterations suffice — measured 2026-07-31,
+/// the tuner lands on 2.6000 mm from its 2.0 mm start.
 #[test]
 fn cli_tuned_run_recovers_the_surface_rms_perturbation() {
     let start = std::time::Instant::now();
-    let run = run_calibrate(&["--tune-parameters", "--max-tuning-iterations", "8"]);
+    let run = run_calibrate_on(
+        bias_free_fixture_csv(),
+        &["--tune-parameters", "--max-tuning-iterations", "4"],
+    );
     let elapsed = start.elapsed();
 
     println!("tuned end-to-end run took {:.1} s", elapsed.as_secs_f64());
@@ -649,9 +648,63 @@ fn cli_tuned_run_recovers_the_surface_rms_perturbation() {
         "surface RMS: nominal {NOMINAL_SURFACE_RMS_MM} mm, truth \
          {PERTURBED_SURFACE_RMS_MM} mm, tuned {tuned_rms:.4} mm"
     );
+    // Tolerance is 25% of the 0.6 mm perturbation. The measured recovery is exact to four
+    // decimals on macOS/aarch64, so this is slack for platform floating-point differences,
+    // not for a sloppy fit — if this ever needs widening, the reason is a finding, not a
+    // tolerance to adjust.
+    const TOLERANCE_MM: f64 = 0.15;
     assert!(
-        tuned_rms > NOMINAL_SURFACE_RMS_MM,
-        "the tuner should move surface RMS toward the perturbed truth \
-         ({PERTURBED_SURFACE_RMS_MM} mm), but it stayed at or below nominal: {tuned_rms:.4} mm"
+        (tuned_rms - PERTURBED_SURFACE_RMS_MM).abs() < TOLERANCE_MM,
+        "the tuner should recover the perturbed truth {PERTURBED_SURFACE_RMS_MM} mm from \
+         its {NOMINAL_SURFACE_RMS_MM} mm nominal start, within {TOLERANCE_MM} mm; \
+         got {tuned_rms:.4} mm"
     );
+}
+
+/// `--tune-parameters` must survive every `--tuning-mode`, i.e. N = 1, 2 and 3 parameters.
+///
+/// This is the CLI-level half of the acceptance criteria in
+/// `docs/findings-2026-07-30-full-mode-parameter-tuning-broken.md`: the degenerate-simplex
+/// crash was independent of tuning mode, so the fix has to be proven across all three. The
+/// cheap library-level equivalent lives in `parameter_tuner.rs`
+/// (`tune_parameters_completes_for_every_tuning_mode`, 5 measurement points); this one adds
+/// the arg-parsing and artifact-writing layers on the real 288-point fixture.
+///
+/// Deliberately asserts *completion*, not recovery. Recovery is what
+/// `cli_tuned_run_recovers_the_surface_rms_perturbation` above is for, and it remains
+/// `#[ignore]`d for reasons this test does not touch.
+///
+/// One iteration each — enough for argmin to build and step the simplex, which is where the
+/// crash was.
+#[test]
+fn cli_tuned_run_completes_for_every_tuning_mode() {
+    for mode in ["surface-only", "surface-and-mesh", "all"] {
+        let start = std::time::Instant::now();
+        let run = run_calibrate(&[
+            "--tune-parameters",
+            "--tuning-mode",
+            mode,
+            "--max-tuning-iterations",
+            "1",
+        ]);
+        println!(
+            "--tuning-mode {mode} completed in {:.1} s",
+            start.elapsed().as_secs_f64()
+        );
+
+        // `run_calibrate` already asserts exit status; this pins that tuning actually ran
+        // rather than being silently skipped.
+        let metadata: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&run.metadata).expect("read --metadata sidecar"),
+        )
+        .expect("parse --metadata sidecar");
+        assert_eq!(
+            metadata["parameters_tuned"], true,
+            "--tuning-mode {mode} should record that tuning ran"
+        );
+
+        antenna_model::data::loader::load_calibration_artifact(&run.artifact).unwrap_or_else(|e| {
+            panic!("--tuning-mode {mode} produced an unloadable artifact: {e}")
+        });
+    }
 }

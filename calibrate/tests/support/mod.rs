@@ -142,6 +142,31 @@ pub struct FixtureRow {
 
 /// Generate the full perturbed-truth grid.
 pub fn generate_rows() -> Vec<FixtureRow> {
+    generate_grid(injected_bias_db)
+}
+
+/// Generate the same grid with the systematic bias omitted.
+///
+/// The tuner and the correction surface are each exercised by a known answer, and on one
+/// fixture those two answers fight each other. The injected bias averages **+1.22 dB**,
+/// while the entire 2.0 → 2.6 mm surface-RMS perturbation moves G/T by only **0.003 dB at
+/// 400 MHz and 0.010 dB at 700 MHz** — Ruze loss is `exp(-(4πσ/λ)²)` and λ is 43–75 cm in
+/// this band, so surface RMS is very nearly inert here. The bias is 120–360× larger *and*
+/// has the same near-constant shape, so the two are confounded: minimising RMSE against
+/// biased data is best served by raising gain, which means driving surface RMS to its
+/// **lower** bound, away from truth. Measured 2026-07-31, once the degenerate-simplex crash
+/// was fixed: the tuned run reported 0.1 mm against a 2.6 mm truth.
+///
+/// Removing the bias makes surface RMS the only thing that can explain the residual, so the
+/// objective's minimum sits exactly at `PERTURBED_SURFACE_RMS_MM` and the tuner has a
+/// genuine known answer to recover. The correction-surface recovery assertions keep using
+/// [`generate_rows`], which is what the bias is for.
+pub fn generate_rows_without_bias() -> Vec<FixtureRow> {
+    generate_grid(|_, _, _| 0.0)
+}
+
+/// Shared grid walk. `bias` is `(frequency_mhz, e_cone_deg, e_clock_deg) -> dB`.
+fn generate_grid(bias: impl Fn(f64, f64, f64) -> f64) -> Vec<FixtureRow> {
     let config = fixture_config(PERTURBED_SURFACE_RMS_MM);
     let params = IntegrationParams::default();
     let mut rows = Vec::with_capacity(FIXTURE_ROW_COUNT);
@@ -168,7 +193,7 @@ pub fn generate_rows() -> Vec<FixtureRow> {
                     e_clock_deg,
                     e_cone_deg,
                     frequency_mhz,
-                    g_over_t_db: truth + injected_bias_db(frequency_mhz, e_cone_deg, e_clock_deg),
+                    g_over_t_db: truth + bias(frequency_mhz, e_cone_deg, e_clock_deg),
                     temperature_k: FIXTURE_TEMPERATURE_K,
                 });
             }

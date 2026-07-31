@@ -149,17 +149,53 @@ pub struct ParameterBounds {
     pub wire_diameter_mm: (f64, f64),
 }
 
-impl Default for ParameterBounds {
-    fn default() -> Self {
-        Self {
-            surface_rms_mm: (0.1, 2.0),
-            mesh_spacing_mm: (1.0, 10.0),
-            wire_diameter_mm: (0.05, 1.0),
-        }
+/// Width of the multiplicative search bracket around a class nominal, as a factor.
+///
+/// Log-symmetric: the bracket runs from `nominal / BRACKET_FACTOR` to
+/// `nominal * BRACKET_FACTOR`. Wide enough that a design-spec nominal being off by a
+/// factor of a few is still recoverable, narrow enough that the optimizer cannot wander
+/// into unphysical territory.
+const BRACKET_FACTOR: f64 = 5.0;
+
+/// Fallback bounds for a class whose nominal is non-positive or non-finite, where a
+/// multiplicative bracket is undefined. These are the historical class-agnostic ranges.
+const FALLBACK_SURFACE_RMS_MM: (f64, f64) = (0.1, 2.0);
+const FALLBACK_MESH_SPACING_MM: (f64, f64) = (1.0, 10.0);
+const FALLBACK_WIRE_DIAMETER_MM: (f64, f64) = (0.05, 1.0);
+
+/// The search bracket around one nominal value.
+fn bracket(nominal: f64, fallback: (f64, f64)) -> (f64, f64) {
+    if nominal.is_finite() && nominal > 0.0 {
+        (nominal / BRACKET_FACTOR, nominal * BRACKET_FACTOR)
+    } else {
+        fallback
     }
 }
 
 impl ParameterBounds {
+    /// Search bounds bracketed around an antenna class's own nominal parameters.
+    ///
+    /// Deliberately **not** a fixed absolute range shared by every class. The previous
+    /// class-agnostic ranges — surface RMS `(0.1, 2.0)` mm, mesh spacing `(1.0, 10.0)` mm,
+    /// wire diameter `(0.05, 1.0)` mm — put *every* tunable of `UHF_Array_Element` exactly
+    /// on its upper bound, so the tuner began its search standing on its own boundary with
+    /// no room to move upward, and `NelderMead`'s seed vertices landed in the out-of-bounds
+    /// penalty region. Bracketing around the nominal makes the starting point interior by
+    /// construction, for every class, including ones added later.
+    ///
+    /// It also reflects the physics: a 0.3 mm precision reflector and a 2.0 mm UHF array
+    /// element do not share a plausible surface-quality range, and what actually governs
+    /// gain loss is `σ/λ` (the Ruze exponent), not `σ` in absolute millimetres. Scaling the
+    /// bracket with the class nominal is the cheap approximation to that — the nominal
+    /// already encodes the design's intended quality for its band.
+    pub fn from_class(class: &AntennaClass) -> Self {
+        Self {
+            surface_rms_mm: bracket(class.surface.rms_mm, FALLBACK_SURFACE_RMS_MM),
+            mesh_spacing_mm: bracket(class.mesh.spacing_mm, FALLBACK_MESH_SPACING_MM),
+            wire_diameter_mm: bracket(class.mesh.wire_diameter_mm, FALLBACK_WIRE_DIAMETER_MM),
+        }
+    }
+
     /// Validate that parameters are within bounds
     pub fn validate(&self, params: &TunableParameters, class: &AntennaClass) -> Result<(), String> {
         let surface_rms = params.effective_surface_rms(class);
@@ -395,7 +431,7 @@ impl AntennaConfiguration {
             .ok_or_else(|| format!("Antenna class '{}' not found", self.class_id))?;
 
         // Validate tunable parameters are within reasonable bounds
-        let bounds = ParameterBounds::default();
+        let bounds = ParameterBounds::from_class(class);
         bounds.validate(&self.tunable_parameters, class)?;
 
         Ok(())
@@ -500,8 +536,10 @@ mod tests {
 
     #[test]
     fn test_parameter_bounds_validation() {
+        // Class nominals are rms 1.0, spacing 5.0, wire 0.5 mm, so the brackets are
+        // (0.2, 5.0), (1.0, 25.0) and (0.1, 2.5) respectively.
         let class = create_test_class();
-        let bounds = ParameterBounds::default();
+        let bounds = ParameterBounds::from_class(&class);
 
         let valid_params = TunableParameters {
             surface_rms_mm: Some(1.0),

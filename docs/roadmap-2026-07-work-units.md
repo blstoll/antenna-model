@@ -85,7 +85,16 @@ G1 ─┬─ G2 ── G3
     │      The 4D interpolator was never      │
     │      defective; artifacts were fitted   │
     │      wrong, not served wrong.           │
-    │      tune-parameters still open.        │
+    │  D16 DONE 2026-07-31: --tune-parameters │
+    │      closes D12's 2nd finding. FOUR     │
+    │      defects, not the filed two —       │
+    │      simplex, class-agnostic bounds,    │
+    │      bias/RMS confounding, and the      │
+    │      tuner optimising under fast()      │
+    │      while the pipeline fitted under    │
+    │      default(). Tuner now recovers      │
+    │      2.0 -> 2.6000 mm exactly; D12's    │
+    │      tuned test un-ignored.             │
     │  D2 DONE 2026-07-30 (branch fix/d2-     │
     │      artifact-version-axes): container  │
     │      vs schema axis reconciled +        │
@@ -2514,6 +2523,22 @@ troubleshooting now distinguishes the two rejection messages and adds the CRC on
      section's math without verification.
   4. review-findings-2026-06-10.md gets a status column mapping each finding to
      resolved-commit or roadmap unit ID.
+- **Inherited 2026-07-31 from D16 — "differential evolution" is wrong everywhere.**
+  `parameter_tuner.rs` uses **Nelder-Mead** (`argmin::solver::neldermead::NelderMead`), and
+  its own module doc says so, but six docs describe the tuner as a differential-evolution
+  optimizer — one of them (`implementation-plan-sprints-1-4-summary.md:101`) even naming a
+  specific DE strategy, "DE/rand/1/bin", that appears nowhere in the code:
+  `docs/implementation-plan-sprints-1-4-summary.md:101,160`,
+  `docs/antenna-model-design-doc.md:271,277`, `docs/partial-calibration-design.md:313,921`,
+  `docs/calibration-workflow-guide.md:723`,
+  `docs/partial-calibration-implementation-plan.md:734`. D16 corrected the two occurrences in
+  CLAUDE.md (the onboarding doc, G2's charter) and left these for this unit rather than
+  drifting a bugfix into a six-file docs sweep. **These were never true, so they are plain
+  corrections, not "historical" markers** — checked 2026-07-31:
+  `git log --all -S` for `DifferentialEvolution` and `differential_evolution` over
+  `calibrate/` returns nothing, and the only commit ever to contain the string `DE/rand` is
+  `b2aaaf5`, which introduced it into `implementation-plan-sprints-1-4-summary.md` — a doc,
+  not code. No DE optimizer was ever implemented under any name.
 - **Gotchas:** docs-only. Standing rule 2 applies doubly here.
 - **Depends on:** P6, G2 (after physics docs settle); after D4 if D4 happens (module map).
 
@@ -2878,6 +2903,14 @@ carried out** — the run never completes. The test exists, is `#[ignore]`d with
 reproduction command, and is ready to enable once the defect lands; the timing measurement was
 not done.
 
+> **✅ CLOSED 2026-07-31 by D16.** The test is un-ignored and green, and Task 5's original
+> charter is discharged: tuned recovery 19.7 s, three-mode completion 18.3 s, whole suite
+> 34.6 s (debug), running in CI unconditionally. The tuner recovers 2.0 → **2.6000 mm**
+> exactly. Two of the four defects were **not** visible from this task's vantage point and
+> only surfaced once the crash was fixed — the fixture's injected bias is confounded with
+> surface RMS at UHF, and the tuner was optimising under `IntegrationParams::fast()` while
+> the pipeline fitted residuals under `default()`. See unit D16.
+
 **Three findings, none fixed here** (standing rule 5 — D12 doing its job):
 
 1. `docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md` (commit `921b6ca`) —
@@ -2939,7 +2972,11 @@ recover the perturbation, and the correction surface must recover the injected b
      report (pins D10).
 - **Runtime:** the default CI variant runs **without** `--tune-parameters` (the
   differential-evolution tuner has its own unit tests); add one tuned end-to-end run and
-  measure it before deciding whether it needs `#[ignore]`/nightly.
+  measure it before deciding whether it needs `#[ignore]`/nightly. *(Settled 2026-07-31 by
+  D16: measured at 19.7 s, kept in CI unconditionally, no `#[ignore]`. Note the parenthetical
+  above is stale in two ways — the tuner is Nelder-Mead, not differential evolution, and its
+  unit tests did not drive it through argmin at all, which is why the crash survived to be
+  found here.)*
 - **Exit criteria:** the CLI e2e test above exists, runs in CI, and each listed assertion
   is present; the generator is deterministic (two runs produce byte-identical CSV); a
   fixture-level comment documents the injected truth so tolerances are auditable.
@@ -3032,6 +3069,68 @@ representable.
 **This fix does not make the correction-surface fit well-determined** — it corrects a basis
 evaluation bug that was corrupting fitted coefficients at every axis maximum; item 2 above is
 the concrete mechanism by which the fit remains underdetermined today.
+
+### D16 — Make `calibrate --tune-parameters` work (D12 finding 2) — Effort: S/M
+
+**✅ DONE 2026-07-31.** Closes the second of D12's two filed findings (D15 closed the first).
+Full diagnosis and measurements:
+`docs/findings-2026-07-30-full-mode-parameter-tuning-broken.md`, which now carries all four
+defects rather than the two originally filed.
+
+**The filed defects (2):**
+1. **The crash.** `tune_parameters` seeded `NelderMead` with one vertex where `N + 1` are
+   required, so argmin underflowed `usize` computing `params[num_param_vecs - 2]` and panicked
+   ~0.7 s in, for every tuning mode and every iteration cap. Fixed by
+   `build_initial_simplex`. A *straight* port of the sibling fix in
+   `boresight_calibration.rs` would not have worked — it perturbs upward unconditionally, and
+   all three `UHF_Array_Element` tunables sat exactly on their upper cap, so every non-origin
+   vertex would have seeded in the 1e10 penalty region. The port steps away from the nearer
+   bound.
+2. **Class-agnostic bounds.** `ParameterBounds::default()` applied one absolute range to every
+   class. Replaced by `ParameterBounds::from_class`, a log-symmetric bracket
+   (`nominal / 5` … `nominal × 5`) around each class's own nominal, so the start point is
+   interior **by construction** rather than by choosing better absolute numbers a future class
+   could again sit on. `Default` removed so the class-agnostic path cannot come back.
+   `[DECIDED 2026-07-31 — maintainer, per-class]`
+
+**The two found while fixing those, both of which had to be fixed for the tuner to work:**
+3. **The fixture confounded two known answers.** D12's grid injects a +1.22 dB bias for the
+   *correction surface* to recover, but the *tuner*'s 2.0 → 2.6 mm surface-RMS perturbation is
+   worth only 0.0034 dB at 400 MHz / 0.0103 dB at 700 MHz — Ruze loss `exp(-(4πσ/λ)²)` with
+   λ = 43–75 cm makes surface RMS nearly inert at UHF. The bias is 120–360× larger and
+   near-constant in shape, so it is confounded with surface RMS, and minimising RMSE against it
+   drives surface RMS to its *lower* bound (measured: 0.1 mm against a 2.6 mm truth). Fixed by
+   `support::generate_rows_without_bias` — the tuner gets a bias-free fixture, the correction
+   surface keeps the biased one. `[DECIDED 2026-07-31 — maintainer, separate fixture]`
+4. **The tuner optimised a different model than the pipeline fitted.** `tune_parameters`
+   evaluated its objective under `IntegrationParams::fast()` while
+   `main.rs::compute_model_predictions` computed the residuals the correction surface is fitted
+   to under `default()`. The presets disagree by up to **0.088 dB at 24° cone — 26× the
+   0.0034 dB signal being fitted** — so the tuner was minimising integrator discretisation
+   error, then handing its parameters to a pipeline that recomputed everything under a
+   different integrator. The deep-sidelobe rows dominate the mismatch, so this worsened when
+   D11 stopped discarding them. Fixed by evaluating under `default()`. **This is a pipeline
+   correctness defect, not a test artifact.**
+
+- **Result:** the tuner recovers the injected perturbation **exactly** — 2.6000 mm from a
+  2.0 mm nominal start, four iterations. D12's
+  `cli_tuned_run_recovers_the_surface_rms_perturbation` is un-ignored, and its assertion
+  strengthened from directional (`tuned > nominal`) to known-answer (`|tuned − 2.6| < 0.15`).
+- **Coverage added:** `tune_parameters` is now driven through argmin at N = 1, 2, 3 at library
+  level (the gap that let the crash hide — the pre-existing unit tests only exercised the
+  RMSE-evaluation machinery), plus `cli_tuned_run_completes_for_every_tuning_mode` at CLI
+  level, plus `every_shipped_class_nominal_is_interior_to_its_own_bounds` checking the real
+  `antenna_classes.yaml` rather than a fixture.
+- **CI cost (debug, measured):** tuned recovery 19.7 s, three-mode completion 18.3 s, whole
+  `cli_full_mode_e2e` suite 34.6 s. Runs unconditionally — this is the only end-to-end coverage
+  of the tuner, and it is what surfaced defects 3 and 4.
+- **Filed, not fixed:** nothing systematically checks that every stage of the calibrate
+  pipeline evaluates the same `IntegrationParams`. Defect 4 was found by inspecting one pair
+  of call sites; a future divergence would not be caught. Also, `BRACKET_FACTOR = 5.0` is a
+  judgement call with no data behind the specific value.
+- **Depends on:** D12 (which filed it). **Unblocks:** nothing hard — but D13 and D14 both run
+  the tuner, and D14's real-anchored artifact would otherwise have been fitted with parameters
+  chosen under the wrong integrator.
 
 ### D13 — Real-data boresight calibration test (NTIA frequency sweeps) — Effort: S/M
 
