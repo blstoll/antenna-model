@@ -224,29 +224,32 @@ pub fn compute_gain_from_request_with_budget(
     // Canonical served-path integration params. Radial density is derived adaptively
     // from (D/λ, θ), so this satisfies the <100ms target near boresight while remaining
     // numerically correct off-axis (P10).
-    let mut integration_params = IntegrationParams::adaptive();
+    //
+    // The two uncorrected-physics gates (P11) come from one shared setter, which
+    // `calibrate` calls with the same predicate for the artifact it writes — see
+    // `IntegrationParams::with_uncorrected_physics_gates` and roadmap D17. Setting either
+    // flag by hand here would reopen the calibrate/service split that unit closed.
+    //
+    // What the gates mean:
+    //   * spillover — a double-counting gate: physical spillover is folded in only when NO
+    //     correction surface exists (the surface otherwise absorbs it empirically). Note
+    //     the model layer further restricts spillover to StandardPhysicalOptics mode, so a
+    //     large feed offset may leave the flag on yet apply no spillover. The
+    //     ideal-reference computation below tracks the ACTUAL result's spillover state (not
+    //     this flag) so base spillover cancels in loss_db without a one-sided bias.
+    //   * sidelobe floor — F7 (redesign 2026-07-16): incoherent power sum forward,
+    //     floor-only behind the dish (see model::pattern::compute_gain). Calibrated
+    //     antennas keep it off for the same double-counting reason.
+    //
+    // Both are whole-antenna gates — never per query — so no discontinuity is introduced
+    // between covered and out-of-coverage queries on a calibrated antenna.
+    let mut integration_params = IntegrationParams::adaptive()
+        .with_uncorrected_physics_gates(calibration.physics_is_uncorrected());
     // S3: bound each aperture integration to the configured wall-clock budget. Carried in
     // IntegrationParams so `integrate_aperture`'s signature stays stable; both integrations
     // behind this gain (off-axis + boresight anchor, and the ideal reference below) each get
     // a fresh deadline of this duration.
     integration_params.time_budget = Some(time_budget);
-    // Double-counting gate: physical spillover is folded in only when NO correction surface
-    // exists (the surface otherwise absorbs it empirically). Whole-antenna gate — never per
-    // query — so no discontinuity is introduced between covered and out-of-coverage queries on
-    // a calibrated antenna. Note the model layer further restricts spillover to
-    // StandardPhysicalOptics mode, so a large feed offset may leave that flag on yet apply no
-    // spillover. The ideal-reference computation below tracks the ACTUAL result's spillover
-    // state (not this raw flag) so that base spillover cancels in loss_db without introducing a
-    // one-sided bias.
-    integration_params.apply_spillover = calibration.physics_is_uncorrected();
-    // F7 statistical sidelobe floor (redesign landed 2026-07-16): ON for every antenna
-    // whose served gain is raw (uncorrected) physics — the SAME P11 predicate as the
-    // spillover fold-in above, so the floor's gate and the off-axis honesty warning can
-    // never diverge (roadmap P11). Calibrated antennas keep the floor OFF: their
-    // correction surface absorbs real sidelobe behavior empirically (double-counting
-    // gate, as for spillover). Model-layer semantics: incoherent power sum forward,
-    // floor-only behind the dish (see model::pattern::compute_gain).
-    integration_params.apply_sidelobe_floor = calibration.physics_is_uncorrected();
 
     // Convert frequency from MHz to Hz for physics model
     let frequency_hz = request.frequency_mhz * 1e6;
@@ -355,6 +358,12 @@ pub fn compute_gain_from_request_with_budget(
         // reference too so the base spillover cancels in loss_db; if the actual did NOT get
         // spillover (large offset / non-standard mode, or calibrated), the reference must
         // not either, keeping loss_db free of a one-sided spillover bias.
+        //
+        // This is the ONE place that sets a P11-gated flag without going through
+        // `with_uncorrected_physics_gates`, and that is deliberate — the setter's docs name
+        // this exception. Routing this line through the setter would derive the flag from
+        // the *predicate* rather than from what the actual evaluation applied, reintroducing
+        // exactly the one-sided bias the paragraph above exists to prevent.
         let mut reference_params = integration_params.clone();
         reference_params.apply_spillover = result.spillover_loss_db.is_some();
         // `apply_sidelobe_floor` is carried unchanged from the clone. For the ideal

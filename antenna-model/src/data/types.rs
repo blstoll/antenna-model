@@ -111,6 +111,12 @@ impl AntennaCalibration {
     /// as `CalibrationStatus::Uncalibrated` — a `PartiallyCalibrated` antenna produced with no
     /// frequency correction (see calibrate/boresight_calibration.rs) also has uncorrected
     /// physics and must be gated the same way.
+    ///
+    /// Feed this to
+    /// [`IntegrationParams::with_uncorrected_physics_gates`](crate::model::IntegrationParams::with_uncorrected_physics_gates)
+    /// rather than setting the gated flags by hand — `calibrate` answers the same question
+    /// about the artifact it is *about to write*, and the two answers have to be produced by
+    /// the same code or they drift (roadmap D17).
     pub fn physics_is_uncorrected(&self) -> bool {
         self.correction_surface.is_none()
     }

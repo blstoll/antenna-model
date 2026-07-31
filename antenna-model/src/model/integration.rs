@@ -350,6 +350,52 @@ impl IntegrationParams {
         }
     }
 
+    /// Set the two gates that key off the P11 "physics is uncorrected" predicate.
+    ///
+    /// `physics_is_uncorrected` is [`crate::data::types::AntennaCalibration::physics_is_uncorrected`]
+    /// — true iff the artifact carries **no** correction surface. Both
+    /// [`Self::apply_spillover`] and [`Self::apply_sidelobe_floor`] are gated on exactly
+    /// that predicate when deriving the params for a **served gain**, and this setter is how
+    /// that is done (roadmap P11).
+    ///
+    /// **Every producer of a gain number for a given artifact must call this with the same
+    /// argument** — the service when it serves the artifact, and `calibrate` when it fits
+    /// the artifact's parameters. They are different crates evaluating the same physics for
+    /// the same antenna, and if they disagree the calibrator optimizes one model while the
+    /// service serves another: the tuner's own residuals stop describing the served value.
+    /// That is roadmap **D17**, which measured a constant −0.326 dB (and −0.953 dB on a
+    /// broader feed) of served error from precisely this disagreement. Routing both sides
+    /// through one function is what stops it recurring — there is no second place to
+    /// forget.
+    ///
+    /// Note the argument is a property of the **artifact**, not of the query: it is decided
+    /// once per antenna, so no discontinuity is introduced between covered and
+    /// out-of-coverage queries.
+    ///
+    /// # The one place that deliberately does not use this
+    ///
+    /// `service::evaluator`'s **ideal-reference** computation (the `loss_db` denominator)
+    /// sets `apply_spillover` alone, from `result.spillover_loss_db.is_some()` — the
+    /// spillover the actual evaluation *applied*, not the predicate. That is correct and
+    /// must stay: the model layer restricts spillover to `StandardPhysicalOptics`, so a
+    /// large-offset feed can have the flag on and yet fold in no spillover. Deriving the
+    /// reference's flag from the predicate there would apply spillover to the ideal
+    /// reference that the actual never got, leaving a one-sided bias in `loss_db`. Its
+    /// sibling `apply_sidelobe_floor` is carried unchanged from the clone and is inert on
+    /// that path anyway (the ideal reflector has `surface_rms = 0.0`, so the floor is
+    /// identically zero).
+    ///
+    /// So the rule is not "these flags are never set individually" — it is that **every
+    /// producer of a gain for a given artifact derives them from the same predicate through
+    /// this setter**. The reference is not a served gain for the artifact; it is a
+    /// deliberately matched counterfactual. Do not "unify" that call site into this one.
+    #[must_use]
+    pub fn with_uncorrected_physics_gates(mut self, physics_is_uncorrected: bool) -> Self {
+        self.apply_spillover = physics_is_uncorrected;
+        self.apply_sidelobe_floor = physics_is_uncorrected;
+        self
+    }
+
     /// Create adaptive integration parameters with doubled sampling density
     ///
     /// Used near pattern nulls where rapid phase changes require finer sampling
@@ -1915,6 +1961,54 @@ mod tests {
         // Fast should use fewer points
         assert!(params.min_rho_points <= default_params.min_rho_points);
         assert!(params.max_rho_points <= default_params.max_rho_points);
+    }
+
+    /// The two P11-gated flags move together, from every preset, in both directions.
+    ///
+    /// They are one decision — "is this artifact's physics uncorrected" — wearing two names,
+    /// and the whole point of the setter is that no caller can set one without the other.
+    /// The preset sweep is deliberate: `calibrate` builds from `default()` and the service
+    /// from `adaptive()`, so a setter that only worked off one of them would reopen roadmap
+    /// D17's calibrate/service split from the other side.
+    #[test]
+    fn uncorrected_physics_gates_move_together_from_every_preset() {
+        for base in [
+            IntegrationParams::default(),
+            IntegrationParams::adaptive(),
+            IntegrationParams::fast(),
+            IntegrationParams::high_accuracy(),
+        ] {
+            for uncorrected in [true, false] {
+                let params = base.clone().with_uncorrected_physics_gates(uncorrected);
+                assert_eq!(
+                    params.apply_spillover, uncorrected,
+                    "apply_spillover must track the predicate"
+                );
+                assert_eq!(
+                    params.apply_sidelobe_floor, uncorrected,
+                    "apply_sidelobe_floor must track the SAME predicate as apply_spillover \
+                     (roadmap P11) — they are one decision, not two knobs"
+                );
+            }
+        }
+    }
+
+    /// The setter touches the gates and nothing else — it must not quietly reshape the
+    /// integration a caller chose, or `calibrate` and the service would agree about
+    /// spillover while disagreeing about sampling.
+    #[test]
+    fn uncorrected_physics_gates_leave_the_rest_of_the_preset_alone() {
+        let base = IntegrationParams::default();
+        let gated = base.clone().with_uncorrected_physics_gates(true);
+
+        assert_eq!(gated.min_rho_points, base.min_rho_points);
+        assert_eq!(gated.max_rho_points, base.max_rho_points);
+        assert_eq!(gated.min_phi_points, base.min_phi_points);
+        assert_eq!(gated.max_phi_points, base.max_phi_points);
+        assert_eq!(gated.relative_tolerance, base.relative_tolerance);
+        assert_eq!(gated.absolute_tolerance, base.absolute_tolerance);
+        assert_eq!(gated.max_iterations, base.max_iterations);
+        assert_eq!(gated.time_budget, base.time_budget);
     }
 
     #[test]

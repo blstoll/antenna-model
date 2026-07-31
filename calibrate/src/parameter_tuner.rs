@@ -423,7 +423,11 @@ pub fn tune_parameters(
     // parameters to a pipeline that then computed its residuals under `default()`. The
     // tuner must minimise the residuals the correction surface will actually be fitted to,
     // so it has to evaluate the same model. Measured 2026-07-31.
-    let integration_params = IntegrationParams::default();
+    //
+    // The gates match that call site for the same reason and are set the same way (roadmap
+    // D17): full mode always attaches a correction surface, so the service evaluates its
+    // artifacts with both uncorrected-physics terms off.
+    let integration_params = IntegrationParams::default().with_uncorrected_physics_gates(false);
 
     // Initial parameter values from tunable parameters or class defaults
     let mut initial_params_vec = Vec::new();
