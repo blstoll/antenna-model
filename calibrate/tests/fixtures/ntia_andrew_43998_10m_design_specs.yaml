@@ -1,0 +1,50 @@
+# Design specs for the Andrew 43998 10 m NTIA boresight fixture (roadmap D13).
+#
+# Schema: DesignSpecs (calibrate/src/design_specs_loader.rs) — the standalone `--design-specs`
+# INPUT to `calibrate --calibration-mode boresight`, not the service's antennas.yaml format.
+#
+# This file lives under calibrate/tests/fixtures/ and NOT under calibration_data/design_specs/
+# deliberately: every geometry value below except the diameter is an ASSUMPTION, and shipping
+# it beside the worked examples would invite it to be read as a manufacturer specification.
+#
+#   diameter_m      10.0  — PUBLISHED (NTIA 84-164 table A-2/A-3, "dia_m" column).
+#   focal_length_m  3.75  — ASSUMED. f/D is not published for this model. 0.375 is a typical
+#                           prime-focus commercial earth-station value and is the only number
+#                           here chosen by the fixture author rather than by the tuner or the
+#                           report. It sets the reflector's subtended edge angle (67.4 deg)
+#                           and so the illumination efficiency the q_factor below trades
+#                           against; a different assumed f/D would move the tuned q_factor
+#                           without much changing the achieved fit.
+#   surface_rms_mm  1.4   — ASSUMED starting estimate, and one of the two parameters the
+#                           boresight tuner adjusts (bounds are 0.3x..3.0x this value, so
+#                           0.42..4.2 mm). 1.4 mm is what the published 3.7->6.4 GHz
+#                           efficiency rolloff implies under the Ruze relation alone, so the
+#                           tuner starts near the answer rather than being handed it: it
+#                           converges to ~1.6 mm.
+#   q_factor        1.4   — ASSUMED starting estimate for the cos^q FIELD pattern, and the
+#                           other tuned parameter (bounds 0.5x..2.0x, so 0.7..2.8). At
+#                           f/D = 0.375 a ~-11 dB edge taper wants q ~ 0.9; 1.4 is a modest
+#                           over-taper start, kept at/above the loader's q_factor >= 1.0
+#                           validation floor. Tuning bounds are multiplicative and are NOT
+#                           subject to that floor, so the optimizer can still go below 1.0.
+#
+# The feed's frequency_range spans BOTH the receive and transmit bands. On the real hardware
+# those are almost certainly separate feeds — see ASSUMPTION 2 in the companion CSV. This
+# single-feed spec is the simplification that lets one boresight run see all six published
+# frequencies; the reflector, which is what the tuner adjusts, is genuinely shared.
+
+antenna_id: "ntia_and_43998_10m"
+antenna_name: "Andrew 43998 10 m C-band earth station (NTIA 84-164)"
+
+reflector:
+  diameter_m: 10.0
+  focal_length_m: 3.75 # f/D = 0.375 (assumed)
+  surface_rms_mm: 1.4
+
+feeds:
+  - feed_id: "c_band"
+    name: "C-Band Feed (Rx + Tx bands modeled as one feed)"
+    position: [0.0, 0.0, 0.0]
+    q_factor: 1.4
+    phase_center_offset_m: 0.0
+    frequency_range: [3700.0, 6425.0]

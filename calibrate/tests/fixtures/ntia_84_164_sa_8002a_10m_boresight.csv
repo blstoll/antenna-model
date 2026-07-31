@@ -1,0 +1,56 @@
+# ntia_84_164_sa_8002a_10m_boresight.csv — REAL measured boresight gains, converted to G/T.
+#
+# Source: NTIA Report 84-164, F.H. Harman & R.L. Jennings, "Sidelobe characteristics of
+#         earth station antennas" (1984), public domain.
+#         https://its.ntia.gov/publications/download/84-164_ocr.pdf
+#         Backing antenna/gain table digitized under F8 and committed at
+#         antenna-model/tests/fixtures/reference_datasets/sidelobe_data/ntia_84_164_antennas.psv
+#
+# Antenna: Scientific-Atlanta 8002A, 10.0 m commercial C-band earth station. The second
+# multi-frequency candidate in the table, and the one whose residuals do NOT flatten out:
+#
+#   table | freq_mhz | D/lambda | gain_dbi     band
+#   A-2   |   3700   |   123    |  50.6        receive (3.7-4.2 GHz)
+#   A-2   |   3950   |   132    |  50.8        receive
+#   A-2   |   4000   |   133    |  50.8        receive
+#   A-2   |   4200   |   140    |  51.0        receive
+#   A-3   |   6175   |   206    |  50.8        transmit (5.925-6.425 GHz)
+#
+# The gain_dbi column above is REAL PUBLISHED DATA, transcribed verbatim. Everything below
+# is an assumption or an observation this fixture adds.
+#
+# ASSUMPTION 1 — system noise temperature. Identical to the Andrew 43998 fixture beside this
+#   one: a single constant T_sys = 100 K, written verbatim into temperature_k, so
+#       g_over_t_db = gain_dbi - 20.0
+#   exactly and the model's G/T = gain - 10*log10(temperature_k) inverts it exactly. Not from
+#   the report; constant so that it cancels rather than shaping the frequency trend.
+#
+# ASSUMPTION 2 — the A-2 and A-3 rows are the same antenna. Table A-2 lists the model as
+#   "8002A" and table A-3 as "8002 A"; the whitespace is a digitization artifact of the
+#   scanned tables. The neighbouring "8002A-HP" / "8002 A-HP" rows are a DIFFERENT
+#   (high-performance) variant and are deliberately not mixed in here.
+#
+# OBSERVATION — this antenna's published transmit-band figure is inconsistent with its
+#   receive-band figures under any single-reflector model, and that is precisely why this
+#   fixture exists. 50.8 dBi at 6175 MHz is an aperture efficiency of ~0.28, against ~0.63 at
+#   3950 MHz: a 10 m reflector cannot lose that much between 4 and 6 GHz through surface
+#   error alone. The likeliest explanation is the same one flagged on the Andrew fixture —
+#   the two bands were measured through different feeds, and here they disagree loudly rather
+#   than quietly. So the boresight tuner cannot reconcile the five rows, the residuals stay
+#   above the 0.5 dB threshold, and the run fits and attaches a FREQUENCY CORRECTION SURFACE.
+#   The Andrew fixture stays on the other side of that threshold. Between them the two cover
+#   both branches of the boresight path on real data.
+#
+#   Consequence: the parameters this fixture tunes to are NOT a physical characterization of
+#   an SA 8002A. The optimizer is reconciling inconsistent data and lands against its q_factor
+#   bound doing it. Tests here assert what the pipeline does with real inconsistent data — a
+#   loadable artifact whose correction is actually reached on the served path — not that the
+#   recovered surface RMS means anything.
+#
+# This file is TEST DATA, not a measurement record. It must not be presented as one.
+frequency_mhz,g_over_t_db,temperature_k
+3700,30.6,100
+3950,30.8,100
+4000,30.8,100
+4200,31.0,100
+6175,30.8,100

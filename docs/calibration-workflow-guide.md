@@ -347,6 +347,17 @@ frequency_mhz,g_over_t_db,temperature_k
 - All measurements at azimuth=0°, elevation=0° (boresight)
 - Frequency range should cover or be within feed's operating range
 
+**Provenance comments:** lines beginning with `#` are skipped, so a measurement file can carry
+its own provenance and assumptions ahead of the header and still be run unmodified. Record
+anything that had to be assumed to produce the `g_over_t_db` column — most importantly the
+system noise temperature, if the source published *gain* rather than G/T. The committed
+real-data fixtures at `calibrate/tests/fixtures/ntia_84_164_*_boresight.csv` are the worked
+example.
+
+**Malformed rows are a hard error, not a dropped row.** Unlike the full-mode parser, which
+reports bad rows and continues, this parser aborts the run and names the offending file line: a
+boresight sweep is a handful of points, so a silently dropped one changes the fit.
+
 ### 3.3 Running Boresight Calibration
 
 **Command:**

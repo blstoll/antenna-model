@@ -1,0 +1,38 @@
+# Design specs for the Scientific-Atlanta 8002A 10 m NTIA boresight fixture (roadmap D13).
+#
+# Schema: DesignSpecs (calibrate/src/design_specs_loader.rs) — the standalone `--design-specs`
+# INPUT to `calibrate --calibration-mode boresight`, not the service's antennas.yaml format.
+#
+# Lives under calibrate/tests/fixtures/ rather than calibration_data/design_specs/ for the same
+# reason as its Andrew 43998 sibling: only the diameter is published, so this must not be read
+# as a manufacturer specification.
+#
+#   diameter_m      10.0  — PUBLISHED (NTIA 84-164 table A-2/A-3, "dia_m" column).
+#   focal_length_m  3.75  — ASSUMED, f/D = 0.375. Not published. Held identical to the Andrew
+#                           fixture on purpose: the two runs then differ only in their
+#                           MEASUREMENTS, so the difference in outcome (correction fitted vs
+#                           not) is attributable to the data and not to the spec.
+#   surface_rms_mm  1.4   — ASSUMED starting estimate; tuned (bounds 0.42..4.2 mm).
+#   q_factor        1.4   — ASSUMED starting estimate; tuned (bounds 0.7..2.8).
+#
+# Do not read the tuned output of this fixture as a characterization of an SA 8002A. The
+# published receive- and transmit-band gains are mutually inconsistent under any single
+# reflector model (see the companion CSV's OBSERVATION block), so the optimizer is
+# reconciling contradictory data and settles against its q_factor lower bound doing it. That
+# is the point of the fixture: it drives the correction-fitting branch with real data.
+
+antenna_id: "ntia_sa_8002a_10m"
+antenna_name: "Scientific-Atlanta 8002A 10 m C-band earth station (NTIA 84-164)"
+
+reflector:
+  diameter_m: 10.0
+  focal_length_m: 3.75 # f/D = 0.375 (assumed)
+  surface_rms_mm: 1.4
+
+feeds:
+  - feed_id: "c_band"
+    name: "C-Band Feed (Rx + Tx bands modeled as one feed)"
+    position: [0.0, 0.0, 0.0]
+    q_factor: 1.4
+    phase_center_offset_m: 0.0
+    frequency_range: [3700.0, 6175.0]

@@ -101,10 +101,20 @@ G1 ─┬─ G2 ── G3
     │      enforced; ONE artifact writer, so  │
     │      boresight is ANTC-framed too.      │
     │      D13/D14's D2 dependency is clear.  │
-    │      D13, D14 open (filed 2026-07-29:   │
-    │      real-data boresight + NASA-        │
-    │      anchored full-mode artifacts;      │
-    │      D13/D14 also need D2; D14 feeds D9)│
+    │  D13 DONE 2026-07-31 (branch fix/d13-   │
+    │      boresight-correction-flat-axes):   │
+    │      two NTIA 84-164 real-data boresight│
+    │      fixtures — Andrew 43998 (6 freqs,  │
+    │      0.0828 dB RMSE, uncorrected branch)│
+    │      and SA 8002A (5 freqs, correction  │
+    │      fitted AND reached on the served   │
+    │      path). Filed: no-correction        │
+    │      boresight artifacts are served with│
+    │      a spillover term the tuner never   │
+    │      saw (-0.326 dB here).              │
+    │  D14 open (filed 2026-07-29: NASA-      │
+    │      anchored full-mode artifact;       │
+    │      also needs D2; feeds D9)           │
     └─ (Phases 1–3 done) ─ D4 ─ D7
 Superseded by C8 (do not implement): S7, C5, C6
 Phase 5: F1..F9 (F8 done) gated on register rows (P3, P5/F4, F5, D9, F9); P1 + C8 DECIDED 2026-07-08;
@@ -3135,6 +3145,85 @@ defects rather than the two originally filed.
 
 ### D13 — Real-data boresight calibration test (NTIA frequency sweeps) — Effort: S/M
 
+**✅ DONE 2026-07-31**, branch `fix/d13-boresight-correction-flat-axes` (which also carries the
+two inherited/discovered blockers recorded further down this entry). The unit shipped **two**
+real-data fixtures rather than the one filed, because the primary candidate turned out to cover
+only one branch of the boresight path:
+
+- **Andrew 43998, 10 m, six frequencies 3700–6425 MHz** (the filed candidate) —
+  `calibrate/tests/fixtures/ntia_84_164_andrew_43998_10m_boresight.csv`. Tuned physics
+  reconciles all six published gains at **0.0828 dB RMSE** (0.4040 dB before tuning, from the
+  assumed design specs), which is *below* the 0.5 dB `should_fit_correction` threshold — so no
+  correction surface is fitted and this fixture covers the **uncorrected** branch.
+- **Scientific-Atlanta 8002A, 10 m, five frequencies 3700–6175 MHz** (the filed alternative,
+  promoted to a second fixture) — `ntia_84_164_sa_8002a_10m_boresight.csv`. Its published
+  transmit-band gain (50.8 dBi at 6175 MHz — aperture efficiency ~0.28, against ~0.63 at
+  3950 MHz) cannot be reconciled with its receive-band gains by any single-reflector model;
+  the residual stays at **0.6214 dB** and a frequency correction *is* fitted, attached, and
+  reached on the served path. This is the Rx/Tx different-feed caveat the scope anticipated,
+  showing up loudly instead of quietly — and it is what gives the unit real-data coverage of
+  the **corrected** branch, which the Andrew fixture cannot provide.
+
+Measured tolerances, all recorded as named constants in the test with the measurement beside
+them (`calibrate/tests/cli_boresight_real_data_e2e.rs`, 10 tests, **0.94 s** in the debug
+profile — each fixture is calibrated once per binary through a `OnceLock`):
+- Andrew served-vs-published: worst **0.483 dB**, tolerance **0.75 dB**.
+- Andrew with the spillover term removed (see the finding below): worst **0.157 dB**,
+  tolerance **0.25 dB**, and the six residuals reproduce the artifact's own reported
+  0.0828 dB RMSE to four decimals.
+- SA 8002A served-vs-published *with the correction applied*: worst **0.055 dB**, tolerance
+  **0.25 dB** — deliberately far tighter, because a correction evaluated at its own knots
+  should reproduce the residuals it was fitted to.
+
+**Filed, not fixed — a boresight artifact with no correction surface is served with a
+spillover loss its own calibration never saw.** `calibrate`'s boresight objective evaluates
+under `IntegrationParams::default()`, whose `apply_spillover` is `false`; the service sets
+`integration_params.apply_spillover = calibration.physics_is_uncorrected()`
+(`evaluator.rs:241`), i.e. **on** for exactly the artifacts that carry no correction. So every
+no-correction boresight artifact is served with a constant offset the tuner never accounted
+for — measured **−0.326 dB** for the Andrew fixture, and **−0.953 dB** at the SA fixture's
+tuned q of 0.70, which is most of a dB. Decomposition (probe run 2026-07-31): at boresight
+`default()` and `adaptive()` agree to 1e-4 dB and the F7 floor contributes ~1e-4 dB, so
+spillover is the *entire* discrepancy. Removing it recovers the tuner's own fit exactly. This
+is the same defect *class* D16 filed ("nothing systematically checks that every stage of the
+calibrate pipeline evaluates the same `IntegrationParams`"), one seam further out: the
+divergence here is between `calibrate` and **the service**, not between two calibrate stages.
+Full mode is unaffected in practice — it always attaches a correction surface, so the service
+turns spillover off for its artifacts too, and calibrate and service agree. Not fixed under
+D13 because the fix changes what the boresight objective optimises and therefore every
+boresight artifact's tuned parameters (it also plausibly explains the SA fixture's q pinning
+against its lower bound: with spillover invisible, nothing penalises a broad feed pattern).
+Both halves are **pinned by tests** — `andrew_43998_served_gain_lands_within_tolerance_of_the_
+published_gains` holds the served number and asserts the deviation's *sign*, and
+`andrew_43998_matches_the_published_gains_exactly_once_the_spillover_term_is_removed` asserts
+that stripping the reported `spillover_loss_db` reproduces `metadata.rmse_db` to within
+0.01 dB. So the gap cannot widen unnoticed, and closing it surfaces as a test failure rather
+than a silent improvement.
+
+**One supporting production change:** `BoresightMeasurements::from_csv` now skips `#` lines
+(`.comment(Some(b'#'))`), so a committed measurement fixture can carry its provenance and
+assumptions ahead of the column header and still be runnable **as committed** — the convention
+the F8 reference `.psv` files already use, and the scope's "fixture header documents provenance
+and every assumption" is not otherwise satisfiable for a CSV. Error messages switched from a
+record ordinal to `record.position().line()` in the same change, so this fail-hard parser still
+names the real file line once a provenance block sits above the data. This is **not** a step
+toward harmonizing the two parsers: the drop-vs-fail difference the gotcha warns about is
+untouched, and is now stated explicitly in the parser's doc comment. Pinned by
+`a_provenance_block_ahead_of_the_header_is_skipped` and
+`a_malformed_row_reports_its_real_file_line_past_a_provenance_block`.
+
+**Where the fixtures live and why:** `calibrate/tests/fixtures/`, *not*
+`calibration_data/design_specs/`. Only the diameter is published; f/D (0.375), the starting
+surface RMS (1.4 mm) and the starting q-factor (1.4) are assumptions of the fixture, and
+shipping the design-spec YAMLs beside the worked examples would invite them to be read as
+manufacturer specifications. Both fixtures use *identical* geometry assumptions so the
+difference in outcome is attributable to the measurements and not to the spec. Every
+assumption — the assumed constant `T_sys` = 100 K that turns published gain into the
+`g_over_t_db` column (it cancels exactly, since the model's own G/T inverts it), the Rx/Tx
+different-feed caveat, the unpublished f/D, the `8002A`/`8002 A` whitespace in the scanned
+tables — is written into the fixture headers themselves, and both files close with "This file
+is TEST DATA, not a measurement record."
+
 **Filed 2026-07-29.** The 2026-07-29 assessment of the digitized reference data (see the
 narrative roadmap, Addendum 2026-07-29) found that **boresight mode is the one calibration
 path real published data can drive today**: boresight calibration is a frequency-sweep fit
@@ -3164,7 +3253,11 @@ Best candidate: **Andrew 43998, 10 m — 6 frequencies spanning 3700–6425 MHz*
      tolerance** — the tolerance alone would not have caught the silent coverage-gate skip
      recorded below, and this is what guards the gate against regressing.
 - **Exit criteria:** the fixture + test above in CI; provenance header complete; tolerance
-  stated with a one-line justification in the test.
+  stated with a one-line justification in the test. **✅ All met — see the DONE block at the
+  top of this entry.** Scope item 3's `correction_applied` assertion is carried by the SA 8002A
+  fixture (`sa_8002a_served_gain_applies_the_correction_and_matches_the_published_gains`); the
+  Andrew fixture cannot carry it, because its residuals stay below the correction-fit threshold
+  and there is no correction to apply — which is why the unit shipped two fixtures.
 - **Gotchas:** the boresight CSV parser is separate from the full-mode parser and fails
   hard rather than dropping rows — D11's gate does not apply here; do not "harmonize" the
   two parsers in this unit. Real data means real residuals: pick the tolerance from the

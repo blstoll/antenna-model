@@ -63,36 +63,54 @@ pub struct BoresightMeasurements {
 impl BoresightMeasurements {
     /// Parse boresight measurements from CSV.
     ///
-    /// CSV format: frequency_mhz,g_over_t_db,temperature_k
+    /// CSV format: `frequency_mhz,g_over_t_db,temperature_k`.
+    ///
+    /// Lines beginning with `#` are ignored, so a measurement file can carry its own
+    /// provenance block ahead of the column header. Real published data always arrives
+    /// with assumptions attached — the assumed system noise temperature that turned a
+    /// published *gain* into the `g_over_t_db` column, the digitization method, which
+    /// rows came from which table — and a fixture that cannot record them beside the
+    /// numbers invites them to be forgotten (roadmap D13; the reference `.psv` datasets
+    /// under `antenna-model/tests/fixtures/reference_datasets/` use the same convention).
+    ///
+    /// Unlike full mode's parser this one **fails hard** on a malformed row rather than
+    /// dropping it: a boresight sweep is a handful of points and a silently dropped one
+    /// changes the fit. That difference is deliberate — see roadmap D11/D13.
     pub fn from_csv(csv_content: &str) -> Result<Self> {
         let mut points = Vec::new();
         let mut reader = csv::ReaderBuilder::new()
             .has_headers(true)
+            .comment(Some(b'#'))
             .from_reader(csv_content.as_bytes());
 
-        for (line_num, result) in reader.records().enumerate() {
+        for (record_idx, result) in reader.records().enumerate() {
+            // Report the real file line, not the record ordinal: a provenance block or a
+            // blank line makes those two disagree, and a fail-hard parser whose error
+            // points at the wrong line is worse than no line number at all.
+            let fallback_line = record_idx + 2;
             let record =
-                result.with_context(|| format!("Failed to parse CSV line {}", line_num + 2))?;
+                result.with_context(|| format!("Failed to parse CSV record {}", record_idx + 1))?;
+            let line_num = record.position().map_or(fallback_line as u64, |p| p.line()) as usize;
 
             if record.len() != 3 {
                 anyhow::bail!(
                     "Invalid CSV format at line {}: expected 3 columns, got {}",
-                    line_num + 2,
+                    line_num,
                     record.len()
                 );
             }
 
             let frequency_mhz: f64 = record[0]
                 .parse()
-                .with_context(|| format!("Invalid frequency at line {}", line_num + 2))?;
+                .with_context(|| format!("Invalid frequency at line {}", line_num))?;
 
             let g_over_t_db: f64 = record[1]
                 .parse()
-                .with_context(|| format!("Invalid g_over_t at line {}", line_num + 2))?;
+                .with_context(|| format!("Invalid g_over_t at line {}", line_num))?;
 
             let temperature_k: f64 = record[2]
                 .parse()
-                .with_context(|| format!("Invalid temperature at line {}", line_num + 2))?;
+                .with_context(|| format!("Invalid temperature at line {}", line_num))?;
 
             points.push(BoresightMeasurement {
                 frequency_mhz,
@@ -784,6 +802,49 @@ mod tests {
         assert_eq!(measurements.points.len(), 4);
         assert_eq!(measurements.points[0].frequency_mhz, 7100.0);
         assert_eq!(measurements.points[3].g_over_t_db, 42.1);
+    }
+
+    /// A committed measurement fixture must be able to carry its own provenance ahead of the
+    /// column header and still be runnable **as committed** (roadmap D13). A data file whose
+    /// documentation stops the tool from reading it is a file nobody can re-derive from.
+    #[test]
+    fn a_provenance_block_ahead_of_the_header_is_skipped() {
+        let csv_content = "\
+# Source: NTIA Report 84-164, table A-2.
+# ASSUMPTION: T_sys = 100 K, so g_over_t_db = gain_dbi - 20.0.
+#
+frequency_mhz,g_over_t_db,temperature_k
+3700,30.4,100
+3950,31.0,100
+";
+
+        let measurements = BoresightMeasurements::from_csv(csv_content).unwrap();
+        assert_eq!(measurements.points.len(), 2);
+        assert_eq!(measurements.points[0].frequency_mhz, 3700.0);
+        assert_eq!(measurements.points[1].g_over_t_db, 31.0);
+        assert_eq!(measurements.points[0].temperature_k, 100.0);
+    }
+
+    /// The parser fails hard rather than dropping rows (unlike full mode's — see D11), so the
+    /// line it names has to be the line in the file. Counting records instead would point at
+    /// line 3 here, inside the provenance block.
+    #[test]
+    fn a_malformed_row_reports_its_real_file_line_past_a_provenance_block() {
+        let csv_content = "\
+# provenance line 1
+# provenance line 2
+frequency_mhz,g_over_t_db,temperature_k
+3700,30.4,100
+3950,not-a-number,100
+";
+
+        let err = BoresightMeasurements::from_csv(csv_content)
+            .expect_err("a non-numeric G/T must be an error, not a dropped row");
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("line 5"),
+            "error must name the real file line (5), got: {rendered}"
+        );
     }
 
     #[test]
