@@ -382,6 +382,20 @@ fn cli_full_mode_writes_a_service_loadable_artifact() {
         calibration.correction_surface.is_some(),
         "full mode must ship a correction surface"
     );
+
+    // The premise `main.rs::compute_model_predictions` fits its residuals under: because a
+    // full-mode artifact always carries a correction surface, the service evaluates it with
+    // the uncorrected-physics terms (spillover, F7 floor) OFF, which is what
+    // `with_uncorrected_physics_gates(false)` asserts there. Boresight mode has to decide
+    // this per artifact; full mode gets to hard-code it, but only while this holds — so it
+    // is pinned rather than assumed (roadmap D17).
+    assert!(
+        !calibration.physics_is_uncorrected(),
+        "a full-mode artifact must present as corrected physics to the service; if full mode \
+         ever ships without a correction surface, calibrate/src/main.rs must stop hard-coding \
+         `with_uncorrected_physics_gates(false)` and choose per artifact the way \
+         calibrate_boresight does"
+    );
 }
 
 #[test]

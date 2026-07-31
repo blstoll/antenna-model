@@ -229,18 +229,28 @@ struct BoresightObjectiveFunction {
 }
 
 impl BoresightObjectiveFunction {
+    /// `physics_will_be_uncorrected` says whether the artifact this tuning run feeds will
+    /// ship **without** a correction surface, and therefore be served as raw physics.
+    ///
+    /// It is not a tuning knob: it selects the model the service will evaluate this
+    /// artifact under, via the one shared setter the service also uses (roadmap D17).
+    /// Getting it wrong does not make the fit worse in any way the calibrator can see — the
+    /// tuner still converges, still reports a small RMSE — it just makes that RMSE describe
+    /// a gain nobody will ever be served.
     fn new(
         design_specs: Arc<DesignSpecs>,
         feed_id: String,
         measurements: Arc<BoresightMeasurements>,
         bounds: TuningBounds,
+        physics_will_be_uncorrected: bool,
     ) -> Self {
         Self {
             design_specs,
             feed_id,
             measurements,
             bounds,
-            integration_params: IntegrationParams::default(),
+            integration_params: IntegrationParams::default()
+                .with_uncorrected_physics_gates(physics_will_be_uncorrected),
             eval_counter: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -403,6 +413,20 @@ impl CostFunction for BoresightObjectiveFunction {
     }
 }
 
+/// One completed tuning run, together with the residuals it leaves behind.
+///
+/// A run is only meaningful alongside the gate setting it was tuned under — the residuals
+/// are `measured − predicted` under *that* model — so the two travel together.
+struct TuningPass {
+    params: BoresightTunableParameters,
+    initial_rmse_db: f64,
+    final_rmse_db: f64,
+    iterations: usize,
+    function_evaluations: usize,
+    /// `measured − predicted` at every measurement point, under the pass's own gates.
+    residuals: Vec<f64>,
+}
+
 /// Perform boresight calibration.
 ///
 /// # Arguments
@@ -415,6 +439,30 @@ impl CostFunction for BoresightObjectiveFunction {
 /// # Returns
 ///
 /// Calibration result with tuned parameters and statistics
+///
+/// # Why this runs the tuner up to twice (roadmap D17)
+///
+/// The service decides how to evaluate an artifact's physics from whether that artifact
+/// carries a correction surface: no surface means the served gain is raw physics, so
+/// spillover and the F7 sidelobe floor are folded in; a surface means they are left off
+/// because the surface absorbs them empirically. Calibration has to optimize against
+/// whichever of those two models the artifact it produces will actually be served under, or
+/// the tuner's own reported RMSE describes a number the service never returns.
+///
+/// That is circular — whether a correction is fitted depends on the residuals, which depend
+/// on the gates, which depend on whether a correction is fitted — so it is resolved in the
+/// order the pipeline already runs in:
+///
+/// 1. Tune with the gates **on**, i.e. under the model a *correction-free* artifact is
+///    served with, and decide from those residuals whether a correction is needed. If not,
+///    that pass is the answer and it is self-consistent by construction.
+/// 2. If a correction *is* needed, the artifact will carry one and the service will
+///    therefore serve it with the gates **off** — so re-tune under those gates and fit the
+///    correction to the residuals from that second pass.
+///
+/// The branch is decided once, in pass 1, and never revisited: pass 2 fits its correction
+/// regardless of how small its residuals turn out to be. Deciding twice would let the two
+/// passes disagree about which branch applies and leave the choice oscillating.
 pub fn calibrate_boresight(
     design_specs: &DesignSpecs,
     feed_id: &str,
@@ -425,6 +473,110 @@ pub fn calibrate_boresight(
     info!("  Antenna: {}", design_specs.antenna_id);
     info!("  Feed: {}", feed_id);
     info!("  Measurements: {}", measurements.points.len());
+
+    // Pass 1 — tune under the model a correction-free artifact is served with.
+    let uncorrected_pass = tune_boresight_parameters(
+        design_specs,
+        feed_id,
+        measurements,
+        max_iterations,
+        true, // physics_will_be_uncorrected
+    )?;
+
+    info!("  Checking if frequency correction is needed...");
+    if !frequency_correction::should_fit_correction(&uncorrected_pass.residuals) {
+        info!("    Max residual < 0.5 dB, frequency correction not needed");
+        info!("    Artifact ships without a correction; the service will serve it with the");
+        info!("    same spillover and sidelobe-floor terms this tuning run applied.");
+        return Ok(uncorrected_pass.into_result(None));
+    }
+
+    // Pass 2 — a correction WILL be attached, so the service will serve this artifact with
+    // the uncorrected-physics gates off. Re-tune under those gates and fit the correction to
+    // the residuals they leave, so the shipped surface corrects the model that is served.
+    info!("    Max residual exceeds 0.5 dB threshold, a frequency correction is needed");
+    info!("    Re-tuning without the uncorrected-physics terms, which the service leaves");
+    info!("    off for an artifact that carries a correction surface (roadmap D17)");
+    let corrected_pass = tune_boresight_parameters(
+        design_specs,
+        feed_id,
+        measurements,
+        max_iterations,
+        false, // physics_will_be_uncorrected
+    )?;
+
+    info!("    Fitting frequency correction...");
+    let frequencies: Vec<f64> = measurements
+        .points
+        .iter()
+        .map(|p| p.frequency_mhz)
+        .collect();
+
+    let frequency_correction = match frequency_correction::fit_frequency_correction(
+        &frequencies,
+        &corrected_pass.residuals,
+    ) {
+        Ok(correction) => {
+            info!("    ✓ Frequency correction fitted successfully");
+            info!("      Shape: {:?}", correction.shape);
+            info!("      Frequency control points: {}", correction.shape[2]);
+            Some(correction)
+        }
+        Err(e) => {
+            info!("    ⚠ Failed to fit frequency correction: {}", e);
+            info!("      Continuing without frequency correction");
+            None
+        }
+    };
+
+    // A failed fit drops the artifact back onto the correction-free branch, which the
+    // service serves with the gates ON — so pass 2's parameters would then be tuned under
+    // the wrong model. Fall back to pass 1, which is the self-consistent result for that
+    // branch, rather than shipping pass 2's parameters with no correction to carry them.
+    if frequency_correction.is_none() {
+        info!("      Falling back to the parameters tuned for a correction-free artifact");
+        return Ok(uncorrected_pass.into_result(None));
+    }
+
+    Ok(corrected_pass.into_result(frequency_correction))
+}
+
+impl TuningPass {
+    fn into_result(
+        self,
+        frequency_correction: Option<BSplineModel4D>,
+    ) -> BoresightCalibrationResult {
+        BoresightCalibrationResult {
+            tuned_params: self.params,
+            initial_rmse_db: self.initial_rmse_db,
+            final_rmse_db: self.final_rmse_db,
+            improvement_db: self.initial_rmse_db - self.final_rmse_db,
+            iterations: self.iterations,
+            function_evaluations: self.function_evaluations,
+            frequency_correction,
+        }
+    }
+}
+
+/// Run the Nelder-Mead tuner once, under one fixed setting of the uncorrected-physics gates.
+///
+/// See [`calibrate_boresight`] for why this is called up to twice and what
+/// `physics_will_be_uncorrected` selects.
+fn tune_boresight_parameters(
+    design_specs: &DesignSpecs,
+    feed_id: &str,
+    measurements: &BoresightMeasurements,
+    max_iterations: Option<u64>,
+    physics_will_be_uncorrected: bool,
+) -> Result<TuningPass> {
+    info!(
+        "  Tuning with uncorrected-physics terms {} (spillover + sidelobe floor)",
+        if physics_will_be_uncorrected {
+            "APPLIED"
+        } else {
+            "off"
+        }
+    );
 
     // Get initial parameters from design specs
     let initial_params = BoresightTunableParameters::from_design_specs(design_specs, feed_id)?;
@@ -448,6 +600,7 @@ pub fn calibrate_boresight(
         feed_id.to_string(),
         Arc::new(measurements.clone()),
         bounds.clone(),
+        physics_will_be_uncorrected,
     );
 
     let initial_rmse = objective
@@ -520,13 +673,10 @@ pub fn calibrate_boresight(
         info!("    wire_diameter: {:.3} mm", diameter);
     }
 
-    // Step: Compute residuals and fit frequency correction if needed
-    info!("  Checking if frequency correction is needed...");
-
-    // Compute predictions with tuned parameters
+    // Residuals under THIS pass's gates — `measured − predicted` for the model the service
+    // will evaluate an artifact carrying these parameters under. The caller reads them both
+    // to decide whether a correction is needed and, on the corrected branch, to fit it.
     let predictions = objective.compute_predictions(&final_params)?;
-
-    // Compute residuals (measured - predicted)
     let residuals: Vec<f64> = measurements
         .points
         .iter()
@@ -534,44 +684,13 @@ pub fn calibrate_boresight(
         .map(|(meas, pred)| meas.g_over_t_db - pred)
         .collect();
 
-    // Check if frequency correction should be fitted
-    let frequency_correction = if frequency_correction::should_fit_correction(&residuals) {
-        info!("    Max residual exceeds 0.5 dB threshold, fitting frequency correction...");
-
-        // Extract frequencies from measurements
-        let frequencies: Vec<f64> = measurements
-            .points
-            .iter()
-            .map(|p| p.frequency_mhz)
-            .collect();
-
-        // Fit 1D frequency correction surface
-        match frequency_correction::fit_frequency_correction(&frequencies, &residuals) {
-            Ok(correction) => {
-                info!("    ✓ Frequency correction fitted successfully");
-                info!("      Shape: {:?}", correction.shape);
-                info!("      Frequency control points: {}", correction.shape[2]);
-                Some(correction)
-            }
-            Err(e) => {
-                info!("    ⚠ Failed to fit frequency correction: {}", e);
-                info!("      Continuing without frequency correction");
-                None
-            }
-        }
-    } else {
-        info!("    Max residual < 0.5 dB, frequency correction not needed");
-        None
-    };
-
-    Ok(BoresightCalibrationResult {
-        tuned_params: final_params,
+    Ok(TuningPass {
+        params: final_params,
         initial_rmse_db: initial_rmse,
         final_rmse_db: final_rmse,
-        improvement_db: initial_rmse - final_rmse,
         iterations: iterations as usize,
         function_evaluations: function_evals,
-        frequency_correction,
+        residuals,
     })
 }
 

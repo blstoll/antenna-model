@@ -20,21 +20,40 @@
 //! Provenance and every added assumption live in the fixture headers themselves. Read
 //! `tests/fixtures/ntia_84_164_*_boresight.csv` before changing any number here.
 //!
-//! # What this file measured, and the defect it records
+//! # The defect this file found, and what closing it moved (roadmap D17)
 //!
-//! `calibrate`'s boresight objective evaluates the physics with `IntegrationParams::default()`,
-//! whose `apply_spillover` is **false**. The service turns spillover **on** for exactly those
-//! artifacts that carry no correction surface (`evaluator.rs`: `integration_params
-//! .apply_spillover = calibration.physics_is_uncorrected()`). A boresight artifact with no
-//! frequency correction is therefore *served with a loss term its own calibration never saw* —
-//! here a constant −0.326 dB across the whole sweep. Strip that term back off and the served
-//! values reproduce the published gains at 0.083 dB RMSE, exactly the tuner's own reported
-//! figure. Both halves are pinned below
-//! (`andrew_43998_served_gain_lands_within_tolerance_of_the_published_gains` and
-//! `andrew_43998_matches_the_published_gains_exactly_once_the_spillover_term_is_removed`), so
-//! the gap cannot widen unnoticed and closing it will be visible as a test failure rather than
-//! a silent improvement. Filing, not fixing, is deliberate: the fix changes what the tuner
-//! optimizes and therefore every boresight artifact's parameters, which is its own unit.
+//! As committed on 2026-07-31 this file recorded a live defect: `calibrate`'s boresight
+//! objective evaluated the physics with the uncorrected-physics terms **off**, while the
+//! service turns them **on** for exactly those artifacts that carry no correction surface.
+//! A boresight artifact with no frequency correction was therefore *served with a loss term
+//! its own calibration never saw* — a constant −0.326 dB across the Andrew sweep, which was
+//! the entire served-vs-published gap.
+//!
+//! **D17 closed it the same day** by making the tuner optimize under the gates the service
+//! will use for the artifact it is about to write (`IntegrationParams::
+//! with_uncorrected_physics_gates`, called by both sides). The measurements below moved
+//! accordingly, and the direction is the point:
+//!
+//! | | before D17 | after D17 |
+//! |---|---|---|
+//! | Andrew, worst served-vs-published | 0.483 dB | **0.1813 dB** |
+//! | …of which a constant bias | −0.326 dB at every frequency | none — the residuals straddle zero |
+//! | Andrew, RMSE the artifact reports | 0.0828 dB, describing a model nobody is served | **0.1065 dB, equal to the served residual RMSE** |
+//! | SA 8002A, worst served-vs-published | 0.055 dB | 0.055 dB (unchanged) |
+//!
+//! The tuner's reported RMSE rose (0.0828 → 0.1065 dB) because it is now fitting the model
+//! that is actually served rather than a spillover-free one; the *served* error more than
+//! halved. A calibration figure that describes a gain nobody is served is worse than a
+//! larger one that describes the gain they are.
+//!
+//! `andrew_43998_served_residual_rmse_equals_the_rmse_the_artifact_reports` is the standing
+//! guard: it asserts calibrate's own reported figure still describes the served value, with
+//! the spillover term present and folded in. It is the assertion that would have caught the
+//! original defect, and it fails if the two sides ever diverge again.
+//!
+//! The SA fixture is unchanged because its residuals cross the correction-fit threshold, so
+//! its artifact carries a correction and the service serves it with the same gates off that
+//! calibrate already used — the branch that was consistent all along.
 
 use antenna_model::api::schemas::{GainRequest, GainResponse, Position3D};
 use antenna_model::data::repository::CalibrationRepository;
@@ -93,18 +112,23 @@ fn published_gain_to_g_over_t(gain_dbi: f64) -> f64 {
 
 /// Served-vs-published tolerance for the **uncorrected** (Andrew) artifact, in dB.
 ///
-/// Measured worst case is 0.483 dB at 3950 MHz, of which a constant 0.326 dB is the
-/// spillover term the tuner never saw (see the module header) and the rest is the tuner's own
-/// 0.083 dB RMSE against real data. 0.75 dB keeps ~35% headroom while staying inside both the
-/// project's <1 dB main-lobe requirement and the artifact's own ±1.5 dB accuracy claim, so a
-/// pass here is still a meaningful statement about accuracy.
-const ANDREW_SERVED_TOLERANCE_DB: f64 = 0.75;
+/// Measured worst case 0.1813 dB at 3950 MHz — the tuner's own fit error against real data,
+/// with nothing else in it. This was 0.75 dB before D17, sized around a 0.326 dB spillover
+/// bias the calibrator never saw; the term is still folded into the served value, but the
+/// tuner now accounts for it, so the tolerance no longer has to. 0.25 dB is the nearest round
+/// number above the measurement and is a real statement about accuracy: it is 4× tighter than
+/// the project's <1 dB main-lobe requirement and 6× tighter than the artifact's own ±1.5 dB
+/// claim.
+const ANDREW_SERVED_TOLERANCE_DB: f64 = 0.25;
 
-/// Per-point tolerance once the spillover term is removed from the served value, in dB.
+/// How closely the served residual RMSE must reproduce the RMSE the artifact reports, in dB.
 ///
-/// Measured worst case 0.157 dB at 3950 MHz; the six residuals reproduce the tuner's reported
-/// 0.0828 dB RMSE to the digit. 0.25 dB is the nearest round number above the measurement.
-const ANDREW_SPILLOVER_FREE_TOLERANCE_DB: f64 = 0.25;
+/// Measured: identical to four decimals (0.1065 dB both sides) — calibrate and the service
+/// evaluate the same model at boresight, so the only differences left are the two integration
+/// presets' agreement at θ=0 (~1e-4 dB) and the F7 floor's boresight contribution (~1e-4 dB).
+/// 0.01 dB is two orders above that floor and two below the 0.326 dB divergence D17 closed,
+/// so this catches a recurrence long before it reaches the served number.
+const ANDREW_RMSE_AGREEMENT_DB: f64 = 0.01;
 
 /// Served-vs-published tolerance for the **corrected** (SA 8002A) artifact, in dB.
 ///
@@ -389,17 +413,22 @@ fn andrew_43998_tuning_fits_the_published_gains() {
         .physics_only_rmse_db
         .expect("boresight metadata records the pre-tuning RMSE");
 
-    // Measured: 0.4040 dB untuned -> 0.0828 dB tuned. The bounds are loose enough to survive
-    // an integrator refinement and tight enough that a regression to "fits nothing" fails.
+    // Measured: 0.1402 dB untuned -> 0.1065 dB tuned, both under the served model (D17).
+    // Both figures moved when D17 landed and both are now measured on the gain the service
+    // returns: untuned improved 0.4040 -> 0.1402 dB because the spillover term the design
+    // specs were being scored without is real and moves the prediction toward the
+    // measurement, and tuned rose 0.0828 -> 0.1065 dB because the tuner is no longer free to
+    // fit a model with that term missing. The bounds are loose enough to survive an
+    // integrator refinement and tight enough that a regression to "fits nothing" fails.
     assert!(
         untuned_rmse < 1.0,
         "the assumed design specs should already be within 1 dB of the published gains \
-         (measured 0.404 dB); got {untuned_rmse:.4} dB — check the fixture's assumed f/D"
+         (measured 0.140 dB); got {untuned_rmse:.4} dB — check the fixture's assumed f/D"
     );
     assert!(
         tuned_rmse < 0.20,
         "tuned physics must reproduce the six published Andrew 43998 gains to well under \
-         the project's 1 dB main-lobe requirement (measured 0.0828 dB); got {tuned_rmse:.4} dB"
+         the project's 1 dB main-lobe requirement (measured 0.1065 dB); got {tuned_rmse:.4} dB"
     );
     assert!(
         tuned_rmse < untuned_rmse,
@@ -430,11 +459,12 @@ fn andrew_43998_stays_below_the_correction_fit_threshold() {
 #[test]
 fn andrew_43998_served_gain_lands_within_tolerance_of_the_published_gains() {
     let run = andrew();
-    let mut worst = (0.0_f64, 0.0_f64);
+    let mut deltas = Vec::with_capacity(ANDREW_PUBLISHED.len());
 
     for &(frequency_mhz, published_dbi) in &ANDREW_PUBLISHED {
         let response = serve(run, frequency_mhz);
         let delta = response.gain_db - published_dbi;
+        deltas.push(delta);
 
         assert!(
             response
@@ -452,33 +482,51 @@ fn andrew_43998_served_gain_lands_within_tolerance_of_the_published_gains() {
              {ANDREW_SERVED_TOLERANCE_DB} dB tolerance",
             response.gain_db
         );
-
-        if delta.abs() > worst.1.abs() {
-            worst = (frequency_mhz, delta);
-        }
     }
 
-    // The deviation is systematic, not scatter — see the next test for why. Asserting the
-    // sign here is what makes a *sign flip* (a real physics change) visible rather than
-    // silently absorbed by the tolerance.
+    // Before D17 the deviation was systematic: negative at every frequency, because a
+    // spillover term the tuner never saw was subtracted from all six. Now that the tuner
+    // optimizes the served model, the residuals are scatter about zero — measured −0.181 dB
+    // at the bottom of the band to +0.117 dB at the top. Asserting that BOTH signs appear is
+    // the cheap standing check that no constant bias has crept back in: any term applied by
+    // one side and not the other lands on every point in the same direction, which is
+    // exactly what this now rejects.
+    let (positive, negative): (Vec<f64>, Vec<f64>) = deltas.iter().partition(|d| **d > 0.0);
     assert!(
-        worst.1 < 0.0,
-        "the served-vs-published deviation is expected to be negative at every frequency \
-         (the spillover term the tuner never saw); worst was {:+.4} dB at {} MHz",
-        worst.1,
-        worst.0
+        !positive.is_empty() && !negative.is_empty(),
+        "served-vs-published residuals must straddle zero once calibrate and the service \
+         evaluate the same model; got all-{} residuals {deltas:?}, which is the signature of \
+         a term one side applies and the other does not (roadmap D17)",
+        if negative.is_empty() {
+            "positive"
+        } else {
+            "negative"
+        }
     );
 }
 
-/// Isolates the calibrate/service model mismatch described in the module header.
+/// **The D17 guard.** Calibrate's reported accuracy must describe the gain the service
+/// actually returns.
 ///
-/// `spillover_loss_db` is the loss the service folded into `gain_db` and the calibrator's
-/// objective never applied. Remove it and the served values reproduce the published gains at
-/// the tuner's own reported RMSE — which simultaneously proves the physics genuinely fits real
-/// measurements to 0.16 dB per point, and that the entire served-vs-published gap above is
-/// that one term.
+/// The tuner minimizes `measured − predicted` and stamps the resulting RMSE into the
+/// artifact, where it is the only machine-readable claim the pipeline makes about its own
+/// accuracy. That claim is worth nothing unless `predicted` is what the service serves. Here
+/// the two are computed by different crates — `calibrate`'s objective and the service's
+/// evaluator — from the same physics, so the RMSE of the *served* residuals must reproduce
+/// the stamped figure.
+///
+/// Note this test insists the spillover term is **present** in the served value: an artifact
+/// with no correction surface is served as raw physics, so the response must report the term
+/// the service folded in. That is the pre-D17 shape of the bug, kept as an assertion — the
+/// defect was never that the service applies spillover, it was that calibrate didn't.
+///
+/// A failure here means calibrate and the service have started evaluating different models
+/// again. The likely culprits, in order: a gate set by hand instead of through
+/// `IntegrationParams::with_uncorrected_physics_gates`; the two sides' base presets
+/// diverging (they agree at boresight today, see the module header); or a new term added to
+/// one path only.
 #[test]
-fn andrew_43998_matches_the_published_gains_exactly_once_the_spillover_term_is_removed() {
+fn andrew_43998_served_residual_rmse_equals_the_rmse_the_artifact_reports() {
     let run = andrew();
     let calibration = run.load();
     let mut sum_sq = 0.0;
@@ -496,26 +544,18 @@ fn andrew_43998_matches_the_published_gains_exactly_once_the_spillover_term_is_r
             "spillover is a loss and must be reported negative; got {spillover_db}"
         );
 
-        let spillover_free = response.gain_db - spillover_db;
-        let delta = spillover_free - published_dbi;
-        assert!(
-            delta.abs() < ANDREW_SPILLOVER_FREE_TOLERANCE_DB,
-            "with the {spillover_db:.4} dB spillover term removed, {frequency_mhz} MHz \
-             serves {spillover_free:.4} dBi against a published {published_dbi} dBi \
-             ({delta:+.4} dB) — outside {ANDREW_SPILLOVER_FREE_TOLERANCE_DB} dB"
-        );
+        let delta = response.gain_db - published_dbi;
         sum_sq += delta * delta;
     }
 
-    // The spillover-free residuals ARE what the tuner minimized, so their RMSE must be the
-    // RMSE the artifact reports. Any drift means calibrate and the service have started
-    // disagreeing about something *else* as well, which is the failure this pins.
-    let rmse = (sum_sq / ANDREW_PUBLISHED.len() as f64).sqrt();
+    let served_rmse = (sum_sq / ANDREW_PUBLISHED.len() as f64).sqrt();
+    let reported_rmse = calibration.metadata.rmse_db;
     assert!(
-        (rmse - calibration.metadata.rmse_db).abs() < 0.01,
-        "spillover-free served residuals give {rmse:.4} dB RMSE, but the artifact reports \
-         {:.4} dB — calibrate and the service now differ by more than the spillover term",
-        calibration.metadata.rmse_db
+        (served_rmse - reported_rmse).abs() < ANDREW_RMSE_AGREEMENT_DB,
+        "the served residuals give {served_rmse:.4} dB RMSE against the published gains, but \
+         the artifact claims {reported_rmse:.4} dB. calibrate is no longer measuring the \
+         model the service serves — see roadmap D17, where this gap was 0.326 dB of \
+         unaccounted spillover"
     );
 }
 

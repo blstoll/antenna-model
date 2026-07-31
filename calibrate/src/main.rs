@@ -245,8 +245,18 @@ fn compute_model_predictions(
         .build()
         .context("Failed to build antenna configuration")?;
 
-    // Integration parameters (default settings for good accuracy)
-    let integration_params = IntegrationParams::default();
+    // Integration parameters (default settings for good accuracy).
+    //
+    // The uncorrected-physics gates are OFF because full mode always attaches a correction
+    // surface — `run_full_calibration` propagates a fit failure rather than shipping an
+    // artifact without one — so the service will always evaluate a full-mode artifact with
+    // these terms off (`AntennaCalibration::physics_is_uncorrected()` is false for it).
+    // Stated through the shared setter rather than left implicit in `default()`, so this
+    // reads as the decision it is; see roadmap D17 for what happens when the two sides of
+    // that decision disagree. `false` here is load-bearing on the invariant above: if full
+    // mode ever learns to ship a correction-free artifact, this has to become conditional
+    // the way `calibrate_boresight` already is.
+    let integration_params = IntegrationParams::default().with_uncorrected_physics_gates(false);
 
     // Compute predictions for all measurement points
     let mut predictions = Vec::with_capacity(measurements.len());

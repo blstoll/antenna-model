@@ -373,19 +373,17 @@ pub fn compute_h3_link_budget_with_budget(
     let cells: Vec<h3o::CellIndex> = center_cell.grid_disk(request.n_rings);
 
     // 4. Build antenna configuration
-    let mut integration_params = IntegrationParams::adaptive();
+    // P11 unified predicate for BOTH uncorrected-physics behaviors (spillover fold-in and
+    // the F7 sidelobe floor), through the one shared setter `calibrate` also calls for the
+    // artifact it writes (roadmap D17) — matching the evaluator gain path exactly, so the
+    // /gain, heatmap, and h3 endpoints agree on an uncalibrated antenna's gain. Shared by
+    // both `compute_gain_db` call sites below (boresight reference and per-cell).
+    // Whole-antenna gate — never per query.
+    let mut integration_params = IntegrationParams::adaptive()
+        .with_uncorrected_physics_gates(calibration.physics_is_uncorrected());
     // S3: bound each per-cell aperture integration to the configured wall-clock budget
     // (carried in IntegrationParams; shared by both compute_gain_db call sites below).
     integration_params.time_budget = Some(time_budget);
-    // Double-counting gate: physical spillover is folded in only when NO correction surface
-    // exists (the surface otherwise absorbs it). Whole-antenna gate — never per query. Shared
-    // by both `compute_gain_db` call sites below (boresight reference and per-cell), matching
-    // `service::evaluator::compute_gain_from_request` so the /gain, heatmap, and h3 endpoints
-    // agree on an uncalibrated antenna's gain.
-    // P11 unified predicate for BOTH uncorrected-physics behaviors (spillover fold-in and
-    // the F7 sidelobe floor), matching the evaluator gain path exactly.
-    integration_params.apply_spillover = calibration.physics_is_uncorrected();
-    integration_params.apply_sidelobe_floor = calibration.physics_is_uncorrected();
     let frequency_hz = request.frequency_mhz * 1e6;
 
     let (antenna_config, feed_x, feed_y, feed_z) = build_antenna_config(calibration, request)?;

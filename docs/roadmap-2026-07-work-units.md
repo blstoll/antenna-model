@@ -112,6 +112,16 @@ G1 ─┬─ G2 ── G3
     │      boresight artifacts are served with│
     │      a spillover term the tuner never   │
     │      saw (-0.326 dB here).              │
+    │  D17 DONE 2026-07-31: closes D13's      │
+    │      filed spillover finding. calibrate │
+    │      now tunes under the gates the      │
+    │      service will use, via ONE shared   │
+    │      setter. Andrew worst served error  │
+    │      0.483 -> 0.181 dB. FILED: the      │
+    │      density axis (default vs adaptive) │
+    │      still diverges — 1.16 dB silently, │
+    │      no radial self-check on the mode   │
+    │      path. P10 family, not D17.         │
     │  D14 open (filed 2026-07-29: NASA-      │
     │      anchored full-mode artifact;       │
     │      also needs D2; feeds D9)           │
@@ -504,6 +514,29 @@ gap that let this ship.
   still apply); the rear-hemisphere half of the original latency concern is moot for antennas
   served with uncorrected physics and unchanged (still slow, still correct) for calibrated
   antennas that still run the rear PO integral.
+
+**INHERITED 2026-07-31 from D17 — the mode path never checks radial convergence, and the
+served preset is where that bites.** Filed here rather than as its own unit because it is the
+same `radial_points_for` budget this unit already re-scopes, and any fix interacts with the
+sample counts this unit exists to reduce. The finding, source-confirmed at
+`model/integration.rs:526-541`: the asymmetric (azimuthal-mode) branch's runtime self-check
+compares `I(M)` vs `I(M+1)` — **mode truncation only**. `n_rho` is computed once and never
+verified, unlike the symmetric branch's N-vs-2N radial check (`:495-511`). Consequence
+measured on D12's `UHF_Array_Element` fixture (8 m, f/D 0.45, `asymmetry_factor` 1.1, D/λ =
+16) at θ=16°, φ=90°, 600 MHz: `compute_gain_db` returns **−50.7668 dBi** under the served
+`adaptive()` (radial floor 16) against **−49.6090** under `default()` (floor 32) and
+**−49.5426** under `high_accuracy()` (floor 64) — the two denser presets agreeing to 0.066 dB
+— i.e. **1.16 dB of silent error with `converged = true` and no warning**. A direct
+`integrate_aperture` call at the same point reports 32.6 % relative error at floor 16, 2.98 %
+at 32, converging only at 64. Binding condition: `4·(D/λ)·sinθ < min_rho_points`, so it is a
+low-`D/λ` + asymmetric-geometry defect — **latent** on the four enabled antennas (asymmetric
+feeds at D/λ ≈ 97 for gs_3.7m X-band up to ≈ 3600 for dsn_34m Ka, so the floor binds only
+within a couple of degrees of boresight where the integrand is smooth), **live** in the
+calibration pipeline's own fixture. Two things to decide together: whether the mode path
+gains a radial N-vs-2N check (cost: one more radial sweep per mode-path evaluation, which
+this unit is trying to *reduce*), and whether `adaptive()`'s floor of 16 is simply too low.
+Note CLAUDE.md's integrator description was corrected the same day — it had claimed the
+self-check was "never silent" without qualification.
 
 ### P10-tail — Rear-hemisphere radial budget + physicality coverage beyond 90° — Effort: S
 
@@ -3354,6 +3387,117 @@ Best candidate: **Andrew 43998, 10 m — 6 frequencies spanning 3700–6425 MHz*
 - **Depends on:** D2 (✅ done 2026-07-30 — the headered artifact format is final, so this
   test pins that rather than the legacy one), D12 (reuses its CLI-harness pattern; the
   boresight harness in `cli_boresight_mode_e2e.rs` is the closer starting point).
+
+### D17 — calibrate and the service must evaluate the same model — Effort: S/M
+
+**✅ DONE 2026-07-31** — filed and closed the same day, out of D13's "filed, not fixed" finding.
+
+**The defect.** `calibrate`'s boresight objective evaluated the physics with
+`IntegrationParams::default()`, whose `apply_spillover` and `apply_sidelobe_floor` are
+**false**. The service sets both from `calibration.physics_is_uncorrected()` — **true**, i.e.
+gates ON, for exactly those artifacts that carry no correction surface. A boresight artifact
+with no frequency correction was therefore *served with loss terms its own calibration never
+saw*: measured a constant **−0.326 dB** on the Andrew 43998 fixture and **−0.953 dB** at the
+SA 8002A fixture's tuned q of 0.70. At boresight the two integration presets agree to 1e-4 dB
+and the F7 floor contributes ~1e-4 dB, so spillover was the *entire* gap — removing it
+recovered the tuner's own reported RMSE exactly.
+
+Same defect class as D16's defect 4 (the tuner minimising under `fast()` while the pipeline
+fitted under `default()`), one seam further out: there the divergence was between two stages
+of `calibrate`, here it is between `calibrate` and **the service**. The failure mode is what
+makes the class worth a standing guard — nothing is visibly broken. The tuner converges, the
+artifact loads, the reported RMSE is small and *wrong about the served value*, and the only
+symptom is a systematic bias in a number nobody was comparing.
+
+**Why the service side was not the thing to change.** The alternative fix — have the service
+treat a boresight-tuned artifact as "corrected physics", since its tuned `q_factor` already
+absorbed spillover empirically — is self-consistent in isolation but breaks P11. That
+predicate is *unified*: it gates the spillover fold-in, the F7 sidelobe floor **and** the
+off-axis honesty warning together. A boresight artifact is reconciled with measurements *at
+boresight only*; off-axis it is still raw idealised PO and must keep both the floor and the
+warning. Splitting the predicate to buy the spillover half would re-open exactly what P11
+closed. So calibrate moves to the service's model, not the reverse.
+
+**The circularity, and how it is resolved.** Which gates apply depends on whether a
+correction surface is attached, which depends on the residuals, which depend on the gates.
+`calibrate_boresight` now runs the tuner in up to two passes, in the order the pipeline
+already had:
+
+1. Tune with the gates **on** — the model a *correction-free* artifact is served under — and
+   decide from those residuals whether a correction is needed. If not, that pass ships and is
+   self-consistent by construction.
+2. If a correction *is* needed, the artifact will carry one and the service will serve it with
+   the gates **off**, so re-tune under those and fit the correction to the second pass's
+   residuals.
+
+The branch is decided **once**, in pass 1, and never revisited — pass 2 fits its correction
+however small its residuals turn out to be. Deciding twice would let the passes disagree
+about which branch applies and leave the choice oscillating. A *failed* correction fit falls
+back to pass 1's parameters rather than shipping pass 2's, since a correction-free artifact is
+served with the gates on.
+
+**As landed.**
+- `IntegrationParams::with_uncorrected_physics_gates(physics_is_uncorrected)` in
+  `model/integration.rs` is now the only way either crate sets these two flags — the same
+  structural move D2 made with `write_antc_artifact` and D13 with `flat_axis`. Four
+  production call sites route through it: `service/evaluator.rs`, `service/h3_link_budget.rs`,
+  `calibrate/boresight_calibration.rs` (per artifact) and `calibrate/main.rs` +
+  `parameter_tuner.rs` (hard-coded `false`, because full mode always attaches a correction —
+  `fit_correction_surface` propagates a failure rather than shipping without one).
+- Measured on the D13 real-data fixtures. **Andrew (uncorrected branch): worst
+  served-vs-published 0.483 → 0.1813 dB**, and the served residual RMSE now equals the RMSE
+  the artifact reports (0.1065 dB, four decimals). The reported RMSE *rose* 0.0828 → 0.1065 dB
+  and that is the fix working: the tuner is no longer free to fit a spillover-free model. The
+  untuned figure improved 0.4040 → 0.1402 dB for the same reason — the design specs were
+  being scored without a term that is real. **SA 8002A (corrected branch) is unchanged**
+  (3.792 mm, q 0.70, RMSE 0.6214, worst served 0.055 dB): its residuals cross the threshold in
+  pass 1, so pass 2 reproduces exactly what the single-pass tuner did.
+- Tolerance `ANDREW_SERVED_TOLERANCE_DB` tightened 0.75 → **0.25 dB**, which is a real
+  accuracy claim (4× inside the project's <1 dB main-lobe requirement) rather than a bias
+  allowance.
+- The D13 test that pinned the defect is inverted into the standing guard:
+  `andrew_43998_served_residual_rmse_equals_the_rmse_the_artifact_reports` asserts calibrate's
+  own accuracy figure still describes the served gain, **with** the spillover term present and
+  folded in. The sign assertion in the served-tolerance test became "the residuals must
+  straddle zero" — an all-one-sign residual set is the signature of a term one side applies
+  and the other does not, so the recurrence is caught by shape, not just magnitude.
+- Full mode's premise is pinned instead of assumed: `cli_full_mode_e2e` asserts a full-mode
+  artifact presents as corrected physics, with a failure message naming the hard-coded `false`
+  that would have to become conditional.
+
+**Filed, not fixed — the density axis of the same question is still open, and it is bigger
+than the gate axis was.** D13's closeout noted that nothing systematically checks that every
+stage of the calibrate pipeline evaluates the same `IntegrationParams`. This unit closed the
+**gate** axis structurally; the **base preset** axis is still divergent by construction:
+`calibrate` builds from `default()` (radial floor 32) and the service from `adaptive()`
+(floor 16). Measured on D12's own `UHF_Array_Element` fixture geometry, `compute_gain_db`
+returns **−50.7668 dBi** under `adaptive()` against **−49.6090 / −49.5426 dBi** under
+`default()` / `high_accuracy()` — the two denser presets agreeing to 0.066 dB — at θ=16°,
+φ=90°, 600 MHz. **1.16 dB, silently**, with `converged = true` and no warning.
+
+The mechanism is source-confirmed at `model/integration.rs:526-541`: on the **asymmetric
+(azimuthal-mode) path** the runtime self-check compares `I(M)` vs `I(M+1)` — azimuthal mode
+truncation **only**. `n_rho` is computed once and never verified. The symmetric path
+(`:495-511`) does run the N-vs-2N radial check. So on the mode path `converged = true` does
+not mean the radial quadrature converged, and CLAUDE.md's "a runtime N-vs-2N / M-vs-(M+1)
+self-check flags non-convergence (surfaced as a response warning, never silent)" is only half
+true — which half depends on the geometry. A direct `integrate_aperture` call at the same
+point reports 32.6% relative error at floor 16 and 2.98% at 32, converging only at 64.
+
+Binding condition: the radial floor binds when `4·(D/λ)·sinθ < min_rho_points`, so this is a
+**low-D/λ, asymmetric-geometry** defect. On the four *enabled* antennas it is **latent** —
+their asymmetric feeds sit at D/λ ≈ 97 (gs_3.7m X-band) to ≈ 3600 (dsn_34m Ka), so the floor
+binds only inside a couple of degrees of boresight where the integrand is smooth. It is
+**live in the calibration pipeline's own fixture** (`asymmetry_factor` 1.1, D/λ = 16), which
+is why it surfaced here. Not fixed under D17 because the fix changes served values on every
+antenna and belongs with the P10 family (P10-perf / P10-tail own the radial budget) — it is
+not a calibrate/service consistency question, it is a "the served preset is under-converged
+and says otherwise" question.
+
+- **Depends on:** D13 (which measured the defect), D2 (artifact format). **Feeds:** D14 —
+  a full-mode artifact fitted for the served path wants both axes settled, though only the
+  gate axis is load-bearing for it (full mode always attaches a correction, so its gates are
+  off on both sides).
 
 ### D14 — Real-anchored full-mode artifact: NASA CR-159703 hybrid fill — Effort: M/L
 
