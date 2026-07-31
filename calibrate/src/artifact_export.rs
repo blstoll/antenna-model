@@ -38,6 +38,7 @@
 //! Because azimuth := clock, these orderings differ; coefficients must be
 //! reindexed (not memcpy'd).
 
+use antenna_model::data::loader::{ANTC_ARTIFACT_VERSION, ANTC_HEADER_LEN, ANTC_MAGIC};
 use antenna_model::data::types::{
     AntennaCalibration, AntennaCalibrationBuilder, BSplineModel4D, CalibrationCoverageBuilder,
     CalibrationMetadataBuilder, CalibrationStatus, FeedParameters as DataFeedParameters,
@@ -50,6 +51,7 @@ use antenna_model::model::PHYSICS_MODEL_VERSION;
 
 use crate::correction_surface::CorrectionSurface;
 use crate::parser::MeasurementPoint;
+use std::path::Path;
 
 /// Errors that can occur while exporting a full-calibration artifact.
 #[derive(Debug, thiserror::Error)]
@@ -63,6 +65,22 @@ pub enum ArtifactExportError {
     BuildFailed {
         /// Which structure failed to build.
         what: String,
+        /// The underlying reason.
+        reason: String,
+    },
+
+    /// The artifact could not be postcard-encoded.
+    #[error("failed to serialize calibration artifact: {reason}")]
+    SerializeFailed {
+        /// The underlying reason.
+        reason: String,
+    },
+
+    /// The encoded artifact could not be written to disk.
+    #[error("failed to write artifact to {path}: {reason}")]
+    WriteFailed {
+        /// Destination path.
+        path: String,
         /// The underlying reason.
         reason: String,
     },
@@ -384,6 +402,50 @@ pub fn export_full_calibration(
         })?;
 
     Ok(calibration)
+}
+
+/// Serialize an [`AntennaCalibration`] in the ANTC container format and write it to `path`.
+///
+/// **This is the only artifact writer in the tool.** Both producers — full-grid export
+/// (`export_full_calibration`) and boresight export (`build_calibration_artifact`) — go
+/// through it, so a boresight artifact and a full-mode artifact cannot disagree about
+/// their framing. They diverged until 2026-07-30 (roadmap D2): boresight wrote a bare
+/// `postcard::to_allocvec` with no magic, no version, and no CRC, which the service loader
+/// accepted only via its legacy headerless fallback — so a boresight artifact carried no
+/// container version stamp (a future framing change would have mis-decoded it silently
+/// instead of being rejected) and no integrity check (truncation surfaced as a decode
+/// error at best, wrong numbers at worst).
+///
+/// The layout is `[magic "ANTC"][version u32 LE][crc32 u32 LE][payload len u64 LE]`
+/// followed by the postcard payload, matching the CRC-checked path in
+/// [`antenna_model::data::loader::load_calibration_artifact`]. The magic, version, and
+/// header length come from that module's public constants rather than being restated here,
+/// so reader and writer share one definition of the container format.
+///
+/// Note this stamps the **container** axis only. The **schema** axis
+/// (`metadata.format_version`) rides inside the payload and is set by whichever builder
+/// produced `calibration`; see [`antenna_model::data::types::CALIBRATION_SCHEMA_VERSION`].
+pub fn write_calibration_artifact(calibration: &AntennaCalibration, path: &Path) -> Result<()> {
+    let payload =
+        postcard::to_allocvec(calibration).map_err(|e| ArtifactExportError::SerializeFailed {
+            reason: e.to_string(),
+        })?;
+
+    let crc = crc32fast::hash(&payload);
+    let mut bytes = Vec::with_capacity(ANTC_HEADER_LEN + payload.len());
+    bytes.extend_from_slice(ANTC_MAGIC);
+    bytes.extend_from_slice(&ANTC_ARTIFACT_VERSION.to_le_bytes());
+    bytes.extend_from_slice(&crc.to_le_bytes());
+    bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(&payload);
+    debug_assert_eq!(bytes.len() - payload.len(), ANTC_HEADER_LEN);
+
+    std::fs::write(path, &bytes).map_err(|e| ArtifactExportError::WriteFailed {
+        path: path.display().to_string(),
+        reason: e.to_string(),
+    })?;
+
+    Ok(())
 }
 
 #[cfg(test)]

@@ -307,17 +307,28 @@ ERROR Service startup failed: Invalid calibration artifact
 ```
 
 **Solutions:**
-1. **Verify postcard format:**
-   - Calibrate tool must use same postcard version as service
-   - Check Cargo.toml versions match, and that the ANTC artifact version matches
-     `ANTC_SUPPORTED_VERSION` in the service (currently 2)
+1. **Verify the version stamps.** An artifact carries two of them, and the loader's
+   error message says which one it rejected (see `docs/calibration-workflow-guide.md`
+   §10.5.1):
+   - `unsupported ANTC artifact version N` — the **container** version in the file
+     header does not match `ANTC_ARTIFACT_VERSION` in the service (currently 2).
+     The calibrate binary that wrote the file is from a different framing/codec era.
+   - `incompatible calibration schema version X` — the **schema** stamp inside the
+     payload has a different MAJOR than `CALIBRATION_SCHEMA_VERSION` (currently
+     `"2.0"`). Recalibrate with a matching `calibrate` build.
+
+   In both cases, check that `calibrate` and the service were built from the same
+   revision; mixing a stale binary with a current service is the usual cause.
 
 2. **Check artifact integrity:**
    ```bash
    ls -lh calibration_data/antenna_1_xband_boresight.bin
+   head -c 4 calibration_data/antenna_1_xband_boresight.bin   # must print: ANTC
    ```
    - File should be 500-1000 bytes typically
    - Zero-byte or very large files indicate corruption
+   - A `CRC32 mismatch — artifact corrupted` error means the payload was damaged
+     after it was written (truncated copy, bad transfer); regenerate it.
 
 3. **Regenerate artifact:**
    - Re-run calibration with `--verbose` flag

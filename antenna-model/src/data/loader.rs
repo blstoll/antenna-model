@@ -2,25 +2,70 @@
 //!
 //! This module provides functionality for loading and validating calibration artifacts
 //! from binary files.
+//!
+//! # The two version axes
+//!
+//! A `.bin` calibration artifact carries **two** independent version stamps. They are easy
+//! to confuse, so state plainly what each one guards (a third axis,
+//! [`crate::data::types::CalibrationMetadata::physics_model_version`], is about physics
+//! staleness rather than decoding — see `docs/calibration-workflow-guide.md` §10.5):
+//!
+//! | Axis | Where | Type | Guards |
+//! |---|---|---|---|
+//! | **Container** ([`ANTC_ARTIFACT_VERSION`]) | ANTC file header, *outside* the payload | `u32` | How file bytes become a payload byte string: the `[magic][version][crc32][len]` framing and which codec decodes the payload. |
+//! | **Schema** ([`crate::data::types::CALIBRATION_SCHEMA_VERSION`]) | `metadata.format_version`, *inside* the payload | `String` `"MAJOR.MINOR"` | What the decoded [`AntennaCalibration`] means: which fields exist, in what order, meaning what. |
+//!
+//! **Why both are needed, and why neither subsumes the other.** The container stamp is
+//! readable *before* decoding, so it is the only thing that can reject a file this build
+//! cannot parse at all — a pre-2026-07-18 bincode payload, say. It cannot see inside the
+//! payload, so it says nothing about field meanings. The schema stamp is the reverse: it
+//! is only readable *after* a successful decode, so it cannot protect the decode itself,
+//! but it catches the class the container stamp structurally cannot — a payload that
+//! decodes cleanly and means something different. That class is real here because postcard
+//! is positional and non-self-describing: swapping two `f64` fields, or redefining what an
+//! existing field measures, produces bytes that decode without complaint into wrong
+//! numbers.
+//!
+//! **Bump policy.** Any change to the postcard byte layout (adding, removing, reordering,
+//! or retyping a field reachable from [`AntennaCalibration`]) bumps **both**: the schema
+//! MAJOR, because the meaning changed, and the container version, because existing files
+//! can no longer be decoded. A change confined to *documented meaning* with the layout
+//! untouched bumps the schema MINOR only. A change to framing or codec alone — the
+//! bincode → postcard migration, which is why the container version is 2 — bumps the
+//! container version only.
+//!
+//! **Enforcement.** Container mismatch and schema-MAJOR mismatch are hard errors; a
+//! differing schema MINOR warns and loads. Both producers in `calibrate` write the ANTC
+//! header via one shared writer, so every artifact this repo produces carries a container
+//! stamp. The headerless reader below survives only for artifacts written before that was
+//! true; it is deliberately *not* a supported output format.
 
-use crate::data::types::AntennaCalibration;
+use crate::data::types::{AntennaCalibration, CALIBRATION_SCHEMA_VERSION};
 use crate::error::DataError;
 use crate::model::PHYSICS_MODEL_VERSION;
 use std::path::Path;
 use tracing::{debug, info, warn};
 
 /// Magic bytes identifying an ANTC-format calibration artifact.
-const ANTC_MAGIC: &[u8; 4] = b"ANTC";
+pub const ANTC_MAGIC: &[u8; 4] = b"ANTC";
 
-/// The only ANTC artifact version this build can decode.
+/// The ANTC **container** version this build writes and the only one it can decode.
+///
+/// Covers the on-disk framing (`[magic 4][version u32 LE][crc32 u32 LE][len u64 LE]`
+/// followed by the payload) and the codec that decodes the payload — not the payload's
+/// schema, which is [`CALIBRATION_SCHEMA_VERSION`]. See the module docs for the split.
 ///
 /// Bumped 1 → 2 on the bincode → postcard migration (2026-07-18): the payload
 /// encoding changed, so any pre-migration ANTC file is rejected loudly rather than
 /// risking a garbled decode.
-const ANTC_SUPPORTED_VERSION: u32 = 2;
+///
+/// Writers use this constant through
+/// `calibrate::artifact_export::write_calibration_artifact`, so the reader and both
+/// producers cannot disagree about the framing.
+pub const ANTC_ARTIFACT_VERSION: u32 = 2;
 
-/// Minimum byte length of an ANTC header: 4 (magic) + 4 (version) + 4 (crc) + 8 (len) = 20.
-const ANTC_HEADER_LEN: usize = 20;
+/// Byte length of an ANTC header: 4 (magic) + 4 (version) + 4 (crc) + 8 (len) = 20.
+pub const ANTC_HEADER_LEN: usize = 20;
 
 /// Load a calibration artifact from a binary file
 ///
@@ -78,11 +123,11 @@ pub fn load_calibration_artifact<P: AsRef<Path>>(path: P) -> Result<AntennaCalib
             "Detected ANTC-format artifact"
         );
 
-        if version != ANTC_SUPPORTED_VERSION {
+        if version != ANTC_ARTIFACT_VERSION {
             return Err(DataError::LoadError {
                 path: path.display().to_string(),
                 reason: format!(
-                    "unsupported ANTC artifact version {version} (this build supports version {ANTC_SUPPORTED_VERSION})"
+                    "unsupported ANTC artifact version {version} (this build supports version {ANTC_ARTIFACT_VERSION})"
                 ),
             });
         }
@@ -119,6 +164,17 @@ pub fn load_calibration_artifact<P: AsRef<Path>>(path: P) -> Result<AntennaCalib
             path: path.display().to_string(),
             reason: format!("Failed to deserialize calibration data: {}", e),
         })?;
+
+    // Validate the schema axis before anything reads a field. The payload decoded, but a
+    // foreign MAJOR means its fields do not necessarily mean what this build thinks they
+    // mean — so do not apply this build's validation rules to them, and do not log them as
+    // if they were understood.
+    check_schema_version(&calibration.metadata.format_version).map_err(|reason| {
+        DataError::LoadError {
+            path: path.display().to_string(),
+            reason,
+        }
+    })?;
 
     // Validate the calibration
     calibration
@@ -164,14 +220,6 @@ pub fn load_calibration_artifact<P: AsRef<Path>>(path: P) -> Result<AntennaCalib
         calibration.validity_ranges.frequency_min_max.1
     );
 
-    // Warn about old format versions
-    if calibration.metadata.format_version != "2.0" {
-        warn!(
-            "Calibration format version {} may be outdated (expected 2.0)",
-            calibration.metadata.format_version
-        );
-    }
-
     // Warn if this artifact was fitted against a different physics-model version.
     if let Some(msg) = physics_model_version_mismatch(
         calibration.metadata.physics_model_version,
@@ -181,6 +229,66 @@ pub fn load_calibration_artifact<P: AsRef<Path>>(path: P) -> Result<AntennaCalib
     }
 
     Ok(calibration)
+}
+
+/// Split a `MAJOR.MINOR` schema stamp into its two numeric components.
+///
+/// Returns `None` for anything that is not exactly two non-negative integers separated by
+/// a single `.` — an unparseable stamp is not "probably fine", it is a stamp whose meaning
+/// cannot be reasoned about at all, and the caller treats it as a hard failure.
+fn parse_schema_version(version: &str) -> Option<(u32, u32)> {
+    let (major, minor) = version.split_once('.')?;
+    if minor.contains('.') {
+        return None;
+    }
+    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+/// Enforce the schema axis of an artifact's version stamp.
+///
+/// A foreign MAJOR (or an unparseable stamp) is `Err`: postcard decodes positionally, so a
+/// payload from a different schema major can decode without error and still mean something
+/// else entirely. A differing MINOR is `Ok` with a `warn!` — by the bump policy on
+/// [`CALIBRATION_SCHEMA_VERSION`], a minor bump leaves the layout and every existing
+/// field's meaning intact.
+///
+/// The supported major/minor are derived from [`CALIBRATION_SCHEMA_VERSION`] itself rather
+/// than restated, so the constant is the single source of truth for both writing and
+/// reading (pinned by `supported_schema_version_constant_is_parseable`).
+fn check_schema_version(artifact: &str) -> Result<(), String> {
+    let (supported_major, supported_minor) = parse_schema_version(CALIBRATION_SCHEMA_VERSION)
+        .ok_or_else(|| {
+            format!(
+                "internal error: CALIBRATION_SCHEMA_VERSION {CALIBRATION_SCHEMA_VERSION:?} is not MAJOR.MINOR"
+            )
+        })?;
+
+    let Some((major, minor)) = parse_schema_version(artifact) else {
+        return Err(format!(
+            "unreadable calibration schema version {artifact:?} (expected MAJOR.MINOR, \
+             e.g. {CALIBRATION_SCHEMA_VERSION:?}); refusing to interpret the artifact"
+        ));
+    };
+
+    if major != supported_major {
+        return Err(format!(
+            "incompatible calibration schema version {artifact} (this build reads schema \
+             major {supported_major}, i.e. {CALIBRATION_SCHEMA_VERSION}); the payload's \
+             field layout or field meanings differ, so decoded values cannot be trusted — \
+             recalibrate with a matching `calibrate` build"
+        ));
+    }
+
+    if minor != supported_minor {
+        warn!(
+            "Calibration schema version {} differs in MINOR from this build's {} — the \
+             field layout is compatible, but the artifact was authored against a different \
+             minor revision of the schema",
+            artifact, CALIBRATION_SCHEMA_VERSION
+        );
+    }
+
+    Ok(())
 }
 
 /// Warning to emit when an artifact was fitted against a different physics-model
@@ -439,7 +547,7 @@ mod tests {
         let calibration = create_test_calibration();
 
         let payload = postcard::to_allocvec(&calibration).unwrap();
-        let bytes = make_antc_bytes(&payload, ANTC_SUPPORTED_VERSION, None);
+        let bytes = make_antc_bytes(&payload, ANTC_ARTIFACT_VERSION, None);
 
         let mut temp_file = NamedTempFile::new().unwrap();
         temp_file.write_all(&bytes).unwrap();
@@ -464,7 +572,7 @@ mod tests {
         if let Some(last) = payload.last_mut() {
             *last ^= 0xff;
         }
-        let bytes = make_antc_bytes(&payload, ANTC_SUPPORTED_VERSION, Some(correct_crc));
+        let bytes = make_antc_bytes(&payload, ANTC_ARTIFACT_VERSION, Some(correct_crc));
 
         let mut temp_file = NamedTempFile::new().unwrap();
         temp_file.write_all(&bytes).unwrap();
@@ -496,7 +604,7 @@ mod tests {
 
         let mut bytes = Vec::new();
         bytes.extend_from_slice(b"ANTC");
-        bytes.extend_from_slice(&ANTC_SUPPORTED_VERSION.to_le_bytes());
+        bytes.extend_from_slice(&ANTC_ARTIFACT_VERSION.to_le_bytes());
         bytes.extend_from_slice(&crc.to_le_bytes());
         bytes.extend_from_slice(&inflated_len.to_le_bytes());
         bytes.extend_from_slice(&payload); // actual payload is shorter than claimed
@@ -549,6 +657,128 @@ mod tests {
             }
             other => panic!("Expected LoadError, got {:?}", other),
         }
+    }
+
+    /// The loader derives the major/minor it supports from `CALIBRATION_SCHEMA_VERSION`
+    /// rather than restating them, so an unparseable constant would turn every load into
+    /// an "internal error". Pin that it parses.
+    #[test]
+    fn supported_schema_version_constant_is_parseable() {
+        let parsed = parse_schema_version(CALIBRATION_SCHEMA_VERSION);
+        assert!(
+            parsed.is_some(),
+            "CALIBRATION_SCHEMA_VERSION {CALIBRATION_SCHEMA_VERSION:?} must be MAJOR.MINOR"
+        );
+        assert!(check_schema_version(CALIBRATION_SCHEMA_VERSION).is_ok());
+    }
+
+    #[test]
+    fn test_parse_schema_version() {
+        assert_eq!(parse_schema_version("2.0"), Some((2, 0)));
+        assert_eq!(parse_schema_version("10.37"), Some((10, 37)));
+        // Not MAJOR.MINOR: no separator, three components, empty parts, non-numeric,
+        // signed. Each must be unparseable rather than silently coerced.
+        for bad in [
+            "2", "2.0.1", "", ".", "2.", ".0", "v2.0", "two.zero", "-1.0", "2.0 ",
+        ] {
+            assert_eq!(parse_schema_version(bad), None, "{bad:?} must not parse");
+        }
+    }
+
+    #[test]
+    fn schema_major_mismatch_is_an_error() {
+        // Older major (the pre-2.0 schema) and newer major alike: neither can be
+        // interpreted by this build's field layout.
+        for foreign in ["1.0", "3.0"] {
+            let err = check_schema_version(foreign)
+                .expect_err("a foreign schema major must be rejected, not warned about");
+            assert!(
+                err.contains(foreign) && err.contains(CALIBRATION_SCHEMA_VERSION),
+                "the error must name both the artifact's version and this build's: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn schema_minor_mismatch_loads() {
+        // A minor bump leaves the byte layout and every field's meaning intact, so it
+        // warns rather than failing (see CALIBRATION_SCHEMA_VERSION's bump policy).
+        assert!(check_schema_version("2.7").is_ok());
+        assert!(check_schema_version(CALIBRATION_SCHEMA_VERSION).is_ok());
+    }
+
+    #[test]
+    fn unreadable_schema_version_is_an_error() {
+        let err = check_schema_version("garbage")
+            .expect_err("an unparseable schema stamp must not be treated as compatible");
+        assert!(
+            err.contains("garbage"),
+            "the error must quote the offending stamp: {err}"
+        );
+    }
+
+    /// The wrong-version fixture required by roadmap unit D2, driven through the real
+    /// loading path: a well-framed, CRC-clean, decodable artifact whose *schema* stamp
+    /// this build cannot interpret must be rejected — the container check cannot catch
+    /// this class, because the container is perfectly valid.
+    #[test]
+    fn test_load_rejects_foreign_schema_version() {
+        let mut calibration = create_test_calibration();
+        calibration.metadata.format_version = "1.0".to_string();
+
+        let payload = postcard::to_allocvec(&calibration).unwrap();
+        let bytes = make_antc_bytes(&payload, ANTC_ARTIFACT_VERSION, None);
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(&bytes).unwrap();
+        temp_file.flush().unwrap();
+
+        let result = load_calibration_artifact(temp_file.path());
+        match result {
+            Err(DataError::LoadError { reason, .. }) => {
+                assert!(
+                    reason.contains("1.0"),
+                    "expected the message to name the artifact's schema version, got: {reason}"
+                );
+            }
+            other => panic!("expected LoadError for a foreign schema major, got {other:?}"),
+        }
+    }
+
+    /// The legacy headerless path is guarded by the schema axis too — it is the *only*
+    /// version check such a file gets, since it carries no container stamp at all.
+    #[test]
+    fn test_load_rejects_foreign_schema_version_headerless() {
+        let mut calibration = create_test_calibration();
+        calibration.metadata.format_version = "1.0".to_string();
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file
+            .write_all(&postcard::to_allocvec(&calibration).unwrap())
+            .unwrap();
+        temp_file.flush().unwrap();
+
+        assert!(
+            load_calibration_artifact(temp_file.path()).is_err(),
+            "a headerless artifact with a foreign schema major must still be rejected"
+        );
+    }
+
+    #[test]
+    fn test_load_accepts_differing_schema_minor() {
+        let mut calibration = create_test_calibration();
+        calibration.metadata.format_version = "2.9".to_string();
+
+        let payload = postcard::to_allocvec(&calibration).unwrap();
+        let bytes = make_antc_bytes(&payload, ANTC_ARTIFACT_VERSION, None);
+
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(&bytes).unwrap();
+        temp_file.flush().unwrap();
+
+        let loaded = load_calibration_artifact(temp_file.path())
+            .expect("a differing schema MINOR must warn and load, not fail");
+        assert_eq!(loaded.metadata.format_version, "2.9");
     }
 
     #[test]

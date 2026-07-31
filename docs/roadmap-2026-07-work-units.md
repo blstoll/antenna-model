@@ -86,6 +86,12 @@ G1 ─┬─ G2 ── G3
     │      defective; artifacts were fitted   │
     │      wrong, not served wrong.           │
     │      tune-parameters still open.        │
+    │  D2 DONE 2026-07-30 (branch fix/d2-     │
+    │      artifact-version-axes): container  │
+    │      vs schema axis reconciled +        │
+    │      enforced; ONE artifact writer, so  │
+    │      boresight is ANTC-framed too.      │
+    │      D13/D14's D2 dependency is clear.  │
     │      D13, D14 open (filed 2026-07-29:   │
     │      real-data boresight + NASA-        │
     │      anchored full-mode artifacts;      │
@@ -2353,6 +2359,66 @@ being written separately (2026-07-29) and is not tracked as a unit here.
 
 ### D2 — Reconcile the two artifact version axes — Effort: S
 
+**✅ DONE 2026-07-30** — branch `fix/d2-artifact-version-axes`. Neither version was bumped:
+the container stays `2`, the schema stays `"2.0"`.
+
+**The reconciliation.** The two axes are not redundant and neither can be derived from the
+other, because they are readable at *different moments*. The **container** stamp (renamed
+`ANTC_SUPPORTED_VERSION` → **`ANTC_ARTIFACT_VERSION`**, now `pub`, in `data/loader.rs`) sits
+in the header and is readable *before* the payload is decoded, so it is the only thing that
+can reject a file this build cannot parse at all — a pre-2026-07-18 bincode payload, say. It
+is outside the payload, so it can say nothing about field meanings. The **schema** stamp
+(`metadata.format_version`, now sourced from a single new constant
+**`CALIBRATION_SCHEMA_VERSION`** in `data/types.rs`) is the mirror image: only readable
+*after* a successful decode, so it cannot protect the decode, but it catches the one class
+the container stamp structurally cannot — a payload that decodes cleanly and **means
+something different**. That class is real precisely because postcard is positional and
+non-self-describing: swapping two `f64` fields, or redefining what an existing field
+measures, yields bytes that decode without complaint into wrong numbers. Written up in the
+`data/loader.rs` module docs (authoritative) and `calibration-workflow-guide.md` §10.5.1
+(with the bump-policy and loader-enforcement tables); §10.5 was retitled and the
+physics-model axis moved to §10.5.2.
+
+**Enforcement.** `format_version` was a `warn!`-only "may be outdated" string compare. It is
+now parsed as `MAJOR.MINOR` and enforced: a foreign **MAJOR is an error** (the fields may not
+mean what this build thinks), an unparseable stamp is an **error** (a stamp whose meaning
+cannot be reasoned about is not "probably fine"), a differing **MINOR warns and loads** (by
+the bump policy a minor bump leaves the layout and every field's meaning intact). The check
+now runs *before* `calibration.validate()` and before any field is logged — if the major does
+not match, nothing should be reading those fields. Supported major/minor are derived from
+`CALIBRATION_SCHEMA_VERSION` rather than restated, so the constant is the single source of
+truth for both writing and reading (pinned by `supported_schema_version_constant_is_parseable`).
+
+**The inherited D1 finding — boresight's headerless artifact — is fixed structurally, not by
+convention.** `main.rs::write_antc_artifact` moved into the library as
+`artifact_export::write_calibration_artifact` and is now the tool's **only** artifact writer;
+both producers call it, so they cannot drift apart on framing again. It takes the magic,
+container version and header length from `data/loader`'s public constants instead of
+restating `b"ANTC"` / `2u32` / `20`, so reader and writer share one definition. Boresight
+mode's bare `postcard::to_allocvec` is gone.
+
+**Tests.** New `calibrate/tests/cli_boresight_mode_e2e.rs` (4 tests) is the boresight half of
+the both-producers round trip, alongside D12's existing full-mode file: ANTC magic, the
+container version stamp, a declared payload length matching the file exactly, load through
+the *service's* loader, `PartiallyCalibrated` status, and the schema stamp inside the payload.
+`corrupting_a_boresight_artifact_is_detected` flips one payload bit and asserts the
+`CRC32 mismatch` — the integrity check a headerless artifact had no way to provide. Loader
+side: 8 new tests including the required wrong-version fixture, driven through the real
+`load_calibration_artifact` path in **both** framings (headered and legacy headerless — the
+schema stamp is the *only* version guard a headerless file gets).
+
+**One deliberate constraint on the boresight fixture, documented in the test.** Its
+measurements are chosen to keep the tuner's max |residual| under 0.5 dB, i.e. on the near side
+of `should_fit_correction`'s threshold, because a boresight artifact that *does* carry a
+frequency correction currently fails to load — the degenerate-axes defect recorded on **D13**,
+which owns the fix. `boresight_fixture_stays_below_the_correction_fit_threshold` asserts the
+fixture has not drifted across that line, so the framing tests cannot silently start
+exercising the D13 defect instead. Coordinate when D13 lands: both units reshape what
+boresight mode writes.
+
+Also refreshed: `examples/README_boresight.md`'s "Artifact Incompatible with Service"
+troubleshooting now distinguishes the two rejection messages and adds the CRC one.
+
 - **Entrance / read first:** `data/loader.rs` — ANTC header `u32` version (=1) vs
   `metadata.format_version` string ("2.0" expected, warned at `loader.rs:165`); the writer
   side in `calibrate/src/artifact_export.rs`.
@@ -2987,8 +3053,10 @@ Best candidate: **Andrew 43998, 10 m — 6 frequencies spanning 3700–6425 MHz*
      uses an assumed typical value, stated in the header.
   2. A design-specs file entry for the dish (boresight mode requires `--design-specs`).
   3. CLI e2e test: run the binary with `--calibration-mode boresight`; assert exit 0, the
-     artifact carries the ANTC header (this pins D2's fix for D1-finding-1 — boresight
-     currently writes bare headerless postcard, `main.rs:340-345`), it loads through the
+     artifact carries the ANTC header (D2 landed this 2026-07-30 — boresight now goes
+     through the shared `artifact_export::write_calibration_artifact`, and
+     `cli_boresight_mode_e2e.rs` already pins the framing on a synthetic fixture; what this
+     unit adds is the same round trip on **real** data), it loads through the
      service loader, the antenna serves with `PartiallyCalibrated` status plus the
      partial-calibration warning, and served boresight gain at the measured frequencies
      lands within a stated tolerance of the NTIA values.
@@ -3014,8 +3082,9 @@ Best candidate: **Andrew 43998, 10 m — 6 frequencies spanning 3700–6425 MHz*
   has no evaluable span. Pinned as a known defect by
   `frequency_correction::tests::frequency_correction_is_rejected_by_the_service_side_validator`,
   which must flip to `is_ok` when fixed.
-- **Depends on:** D2 (so the test pins the final headered artifact format, not the legacy
-  one), D12 (reuses its CLI-harness pattern).
+- **Depends on:** D2 (✅ done 2026-07-30 — the headered artifact format is final, so this
+  test pins that rather than the legacy one), D12 (reuses its CLI-harness pattern; the
+  boresight harness in `cli_boresight_mode_e2e.rs` is the closer starting point).
 
 ### D14 — Real-anchored full-mode artifact: NASA CR-159703 hybrid fill — Effort: M/L
 
@@ -3059,8 +3128,8 @@ are meaningful rather than dominated by a topology gap.
   digitization uncertainty budget, not just fit error. If the fitted surface cannot
   reproduce the anchors within budget, that is a *finding about the pipeline or the fill*,
   to be reported — not a reason to widen the budget.
-- **Depends on:** D10, D11, D12 (infrastructure and prerequisite fixes), D2 (artifact
-  format settled). Feeds D9.
+- **Depends on:** D10, D11, D12 (infrastructure and prerequisite fixes), D2 (✅ done
+  2026-07-30 — artifact format settled). Feeds D9.
 
 ---
 

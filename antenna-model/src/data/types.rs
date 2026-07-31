@@ -20,6 +20,29 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// Semantic schema version of the calibration payload this build reads and writes.
+///
+/// This is the **schema axis** of an artifact's two version axes; the other is the ANTC
+/// **container axis** ([`crate::data::loader::ANTC_ARTIFACT_VERSION`]). The container axis
+/// says how to get from file bytes to a payload byte string; this axis says what the
+/// decoded [`AntennaCalibration`] *means*. See the module docs on
+/// [`crate::data::loader`] for the full relationship, and
+/// `docs/calibration-workflow-guide.md` §10.5.
+///
+/// Formatted `MAJOR.MINOR`:
+///
+/// - **MAJOR** — the field set, field order, or the meaning of an existing field changed.
+///   A decode against a different major is not trustworthy (postcard is positional, so a
+///   reordered or retyped field can decode "successfully" into the wrong meaning), so the
+///   loader **rejects** a foreign major.
+/// - **MINOR** — a change that leaves the byte layout and every existing field's meaning
+///   intact: documentation, tightened validation, a newly *documented* convention for a
+///   value that was already there. The loader **warns** on a differing minor and loads.
+///
+/// Anything that changes the postcard byte layout must bump MAJOR here **and**
+/// [`crate::data::loader::ANTC_ARTIFACT_VERSION`] — see that constant's docs for why both.
+pub const CALIBRATION_SCHEMA_VERSION: &str = "2.0";
+
 /// Complete calibration data for a single antenna-feed combination (v2.0 physics-based).
 ///
 /// Contains all information needed to evaluate antenna G/T (Gain-to-Temperature)
@@ -138,7 +161,11 @@ pub struct CalibrationMetadata {
     /// ISO 8601 timestamp of calibration
     pub calibration_date: String,
 
-    /// Version of calibration format (v2.0 uses "2.0")
+    /// Semantic schema version this artifact was authored against, `MAJOR.MINOR`.
+    ///
+    /// See [`CALIBRATION_SCHEMA_VERSION`] for the bump policy and for how this axis
+    /// differs from the ANTC container version in the file header. The loader rejects a
+    /// foreign MAJOR and warns on a differing MINOR.
     pub format_version: String,
 
     /// Source of measurement data (e.g., S3 path, file name)
@@ -1125,7 +1152,9 @@ impl CalibrationMetadataBuilder {
             calibration_date: self
                 .calibration_date
                 .ok_or("calibration_date is required")?,
-            format_version: self.format_version.unwrap_or_else(|| "2.0".to_string()),
+            format_version: self
+                .format_version
+                .unwrap_or_else(|| CALIBRATION_SCHEMA_VERSION.to_string()),
             data_source: self.data_source.ok_or("data_source is required")?,
             rmse_db: self.rmse_db.ok_or("rmse_db is required")?,
             r_squared: self.r_squared.ok_or("r_squared is required")?,

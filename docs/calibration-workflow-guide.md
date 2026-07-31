@@ -1685,26 +1685,88 @@ pub calibration_status: Option<CalibrationStatusInfo>
 - If present: use accuracy estimates and warnings
 - If absent: assume fully calibrated or unknown quality
 
-### 10.5 Physics-Model Versioning
+### 10.5 Artifact Versioning — the three axes
 
 A calibration artifact has **three independent version axes**. They are easy to
 confuse because they all sound like "the version" — they answer different questions:
 
 | Axis | Type | Location | Question it answers |
 |------|------|----------|----------------------|
-| ANTC container version | `u32` (header) | `ANTC_SUPPORTED_VERSION` in `data/loader.rs` | Can this build parse the on-disk byte layout (magic/CRC/postcard framing)? Bumped 1→2 on the bincode→postcard migration. |
-| Format version | `String` (e.g. `"2.0"`) | `CalibrationMetadata::format_version` | Which semantic schema (which fields exist / mean what) was this artifact authored against? |
-| Physics-model version | `u32` | `CalibrationMetadata::physics_model_version` | Which `gain_physics` implementation was this artifact's correction surface fitted against? |
+| ANTC **container** version | `u32` (file header, *outside* the payload) | `ANTC_ARTIFACT_VERSION` in `data/loader.rs` | How do file bytes become a payload byte string — the `[magic][version][crc32][len]` framing and which codec decodes the payload? Bumped 1→2 on the bincode→postcard migration. |
+| **Schema** version (`format_version`) | `String` `"MAJOR.MINOR"` (*inside* the payload) | `CALIBRATION_SCHEMA_VERSION` in `data/types.rs`, stamped into `CalibrationMetadata::format_version` | What does the decoded `AntennaCalibration` **mean** — which fields exist, in what order, meaning what? |
+| **Physics-model** version | `u32` (inside the payload) | `CalibrationMetadata::physics_model_version` | Which `gain_physics` implementation was this artifact's correction surface fitted against? |
 
-The first two axes are about **decoding and schema**; full reconciliation of them
-(e.g. deriving one from the other, or collapsing them into a single axis) is
-tracked separately as roadmap unit D2. `physics_model_version` is orthogonal to
-both: an artifact can decode fine and use a current-schema `format_version`, yet
-still be fitted against a **stale physics model** — because the correction surface
-is `measured − physics`, any change to `gain_physics` for the same inputs
-(new efficiency terms, phase-model changes, defocus semantics, etc.) makes an
-old correction surface subtly wrong even though the file itself is perfectly
-readable.
+`physics_model_version` is orthogonal to the other two: an artifact can decode
+fine and use a current schema version, yet still be fitted against a **stale
+physics model** — because the correction surface is `measured − physics`, any
+change to `gain_physics` for the same inputs (new efficiency terms, phase-model
+changes, defocus semantics, etc.) makes an old correction surface subtly wrong
+even though the file itself is perfectly readable. It is covered in §10.5.2.
+
+#### 10.5.1 Container vs schema: why both exist
+
+*(Reconciled by roadmap unit D2, 2026-07-30. Authoritative statement of the
+relationship: the module docs on `antenna-model/src/data/loader.rs`.)*
+
+The two decoding-side axes are **not** redundant, and neither can be derived from
+the other, because they are readable at different moments:
+
+- The **container** stamp sits in the header, so it is readable *before* the
+  payload is decoded. It is therefore the only thing that can reject a file this
+  build cannot parse at all — a pre-2026-07-18 bincode payload, say. Being outside
+  the payload, it says nothing about what the fields mean.
+- The **schema** stamp sits inside the payload, so it is only readable *after* a
+  successful decode. It cannot protect the decode itself, but it catches the class
+  the container stamp structurally cannot: a payload that decodes cleanly and
+  means something different. That class is real here because postcard is
+  positional and non-self-describing — swapping two `f64` fields, or redefining
+  what an existing field measures, produces bytes that decode without complaint
+  into wrong numbers.
+
+**Bump policy:**
+
+| Change | Container | Schema |
+|---|---|---|
+| Framing or codec only (e.g. bincode → postcard) | **bump** | — |
+| Add / remove / reorder / retype any field reachable from `AntennaCalibration` | **bump** | **bump MAJOR** |
+| Meaning of an existing field documented or clarified, byte layout untouched | — | bump MINOR |
+| Correction-surface fitting improvements, API-layer changes, new sidecar fields | — | — |
+
+A layout change bumps **both**: the schema MAJOR because the meaning changed, and
+the container version because existing files can no longer be decoded. Do not bump
+either axis for a change that does not appear in this table — see the constants'
+doc comments before deciding.
+
+**Loader enforcement** (`load_calibration_artifact`):
+
+| Condition | Result |
+|---|---|
+| Container version ≠ `ANTC_ARTIFACT_VERSION` | **Error** — `unsupported ANTC artifact version N` |
+| CRC32 over the payload disagrees with the header | **Error** — `CRC32 mismatch — artifact corrupted` |
+| Schema MAJOR ≠ this build's | **Error** — `incompatible calibration schema version`, naming both |
+| Schema stamp not parseable as `MAJOR.MINOR` | **Error** — refuses to interpret the artifact |
+| Schema MINOR differs | **Warn**, loads |
+
+The schema check runs *before* this build's validation rules and before any field
+is logged: if the major does not match, those fields do not necessarily mean what
+this build thinks they mean, so nothing should read them.
+
+**Both writers stamp both axes.** `calibrate` has exactly one artifact writer,
+`artifact_export::write_calibration_artifact`, used by full mode
+(`export_full_calibration`) and boresight mode (`build_calibration_artifact`)
+alike, so the two producers cannot drift apart on framing. Until 2026-07-30
+boresight mode wrote a bare `postcard::to_allocvec` with no magic, no container
+version and no CRC; the service accepted it only through the legacy headerless
+fallback below. Round-tripped by `calibrate/tests/cli_full_mode_e2e.rs` and
+`calibrate/tests/cli_boresight_mode_e2e.rs`, one per producer.
+
+**The headerless reader is backward compatibility only.** `load_calibration_artifact`
+still accepts a payload with no ANTC header (no magic → decode the whole file).
+Nothing this repo produces relies on that path any more, and it is not a supported
+output format: such a file has no container stamp to check and no checksum, so its
+only version guard is the schema stamp inside the payload.
+
+#### 10.5.2 Physics-model versioning
 
 **Bump policy:** bump `antenna_model::model::PHYSICS_MODEL_VERSION` whenever a
 change alters `gain_physics` output for identical inputs. It does **not** need to
@@ -1712,17 +1774,19 @@ bump for changes that don't touch physics output (API-layer changes, new metadat
 fields, correction-surface fitting improvements, etc.).
 
 **Where it's stamped:**
-- `calibrate`'s two artifact writers (`artifact_export.rs` full-grid export,
+- `calibrate`'s two artifact *builders* (`artifact_export.rs` full-grid export,
   `boresight_calibration.rs` boresight export) stamp the `PHYSICS_MODEL_VERSION`
-  that was compiled into the `calibrate` binary at fit time.
+  that was compiled into the `calibrate` binary at fit time. (They share a single
+  file *writer* — see §10.5.1 — but each fills its own metadata.)
 - The service's uncalibrated (design-spec) path (`data/repository.rs`) stamps the
   *current* `PHYSICS_MODEL_VERSION`, since design-spec antennas compute live
   against the running physics model rather than a pre-fitted correction surface.
 
 **Loader behavior:** `data/loader.rs` compares `metadata.physics_model_version`
 against the running service's `PHYSICS_MODEL_VERSION` and emits a `warn!` (never
-an error — matching the `format_version` mismatch handling above) naming both
-values when they differ. `0` means the artifact predates the version stamp
+an error — unlike a schema MAJOR mismatch, which *is* an error: a stale physics
+model still decodes to fields that mean exactly what they say, it is the fitted
+residuals that have gone stale) naming both values when they differ. `0` means the artifact predates the version stamp
 (pre-P1b) and is always treated as a mismatch worth flagging. A mismatch does not
 block loading; it is a signal that the artifact should be recalibrated against the
 current physics model to avoid a stale correction surface.
