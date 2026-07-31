@@ -356,11 +356,30 @@ Unless a decision-register row flips them:
   factor is that D12's fixture (288 points against 960 fitted coefficients) is badly
   underdetermined, letting the surface overfit the points it was fitted to while oscillating
   between them — which is exactly what a near-zero on-grid RMSE next to unmoved off-grid probe
-  errors demonstrates; and `calibrate --tune-parameters` does not work at all — every full-mode tuned run crashes in
-  argmin's Nelder-Mead before completing, so the tuner's own recovery of a perturbed physical
-  parameter (as opposed to the correction surface's recovery of an injected bias) remains
-  unverified end-to-end. The service side is unaffected throughout: the four enabled antennas
-  are uncalibrated design-spec entries that load no correction surface.
+  errors demonstrates. ~~and `calibrate --tune-parameters` does not work at all — every
+  full-mode tuned run crashes in argmin's Nelder-Mead before completing, so the tuner's own
+  recovery of a perturbed physical parameter (as opposed to the correction surface's recovery
+  of an injected bias) remains unverified end-to-end.~~ **Resolved 2026-07-31** — the tuner
+  now recovers a perturbed physical parameter end to end (2.0 → **2.6000 mm**, exact, four
+  iterations), so both halves of the perturbed-truth design are verified. Four defects, not
+  the two filed: (1) the degenerate one-vertex Nelder-Mead simplex (the filed crash);
+  (2) `ParameterBounds` was class-agnostic and put every `UHF_Array_Element` tunable exactly
+  on its cap — now bracketed per-class around the nominal, so the start point is interior by
+  construction; (3) D12's fixture confounded the tuner's known answer with the correction
+  surface's — the +1.22 dB injected bias is 120–360× the 0.003–0.010 dB surface-RMS signal at
+  UHF and has the same shape, so the tuner ran to its *lower* bound; the tuner now uses a
+  bias-free fixture; and (4) — the one that actually blocked recovery — the tuner minimised
+  its objective under `IntegrationParams::fast()` while `main.rs::compute_model_predictions`
+  computed the fitted residuals under `default()`, a mismatch reaching **0.088 dB at 24° cone,
+  26× the signal being fitted**, so the tuner was fitting integrator discretisation error and
+  handing the result to a pipeline using a different model. Defects 3 and 4 were found while
+  fixing 1 and 2; fixing only the two filed defects left the tuner reporting 0.1 mm against a
+  2.6 mm truth. See `docs/findings-2026-07-30-full-mode-parameter-tuning-broken.md`, now
+  carrying all four. **Still open from this thread:** nothing systematically checks that every
+  stage of the calibrate pipeline evaluates the same `IntegrationParams` — defect 4 was found
+  by inspecting one pair of call sites, and a future divergence would not be caught. The
+  service side is unaffected throughout: the four enabled antennas are uncalibrated
+  design-spec entries that load no correction surface.
 - ~~**The correction surface returns ~0 across the topmost knot span of every axis**
   (2026-07-29/30, filed by D12): both calibrate's 3D `CorrectionSurface::evaluate` and the
   service-side 4D `evaluate_correction` collapse to zero correction near the upper edge of the

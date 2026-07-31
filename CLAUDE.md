@@ -88,7 +88,7 @@ antenna-model/           # Cargo workspace root
 ├── calibrate/          # CLI calibration tool binary
 │   └── src/
 │       ├── parser.rs             # CSV measurement parsing
-│       ├── parameter_tuner.rs    # Differential evolution optimizer
+│       ├── parameter_tuner.rs    # Nelder-Mead simplex optimizer
 │       ├── correction_surface.rs # B-spline/RBF fitting
 │       ├── validator.rs          # Cross-validation
 │       ├── artifact_export.rs    # Service-loadable AntennaCalibration (3D→4D bridge)
@@ -179,7 +179,7 @@ the ray-tracing stub (roadmap P3). This is why `PHYSICS_MODEL_VERSION` is 4.
 The `calibrate` tool processes measurement data:
 
 1. **Parse CSV** (`parser.rs`) - Read G/T measurements (azimuth, elevation, frequency, temperature, g_over_t_db)
-2. **Tune Parameters** (`parameter_tuner.rs`) - Differential evolution optimizer adjusts physical parameters
+2. **Tune Parameters** (`parameter_tuner.rs`) - Nelder-Mead simplex optimizer adjusts physical parameters (surface RMS, mesh spacing, wire diameter). Search bounds come from `ParameterBounds::from_class` — a multiplicative bracket around each antenna class's own nominal, **not** a fixed global range (D16, 2026-07-31). The objective must be evaluated under the same `IntegrationParams` as `main.rs::compute_model_predictions` (`default()`), or the tuner optimizes against integrator discretisation error rather than the physics — see `docs/findings-2026-07-30-full-mode-parameter-tuning-broken.md` defect 4.
 3. **Fit Correction Surface** (`correction_surface.rs`) - B-spline/RBF fitted to residuals (measured - physics)
 4. **Validate** (`validator.rs`) - Cross-validation, ensure <1 dB error in main lobe/first sidelobe
 5. **Serialize** (`artifact_export::write_calibration_artifact` — the tool's **only** artifact writer, shared by full and boresight mode since D2, 2026-07-30) - Generate binary `.bin` artifact: an `AntennaCalibration` encoded with **postcard** (documented, versioned wire format), wrapped in the ANTC header (magic + version + CRC32 + length). Migrated off the unmaintained `bincode` crate 2026-07-18. An artifact carries **two** version axes and the loader enforces both: the ANTC header `u32` (`ANTC_ARTIFACT_VERSION` = 2) is the *container* axis, readable before the decode; `metadata.format_version` (`CALIBRATION_SCHEMA_VERSION` = "2.0") is the *schema* axis, readable only after it, and a foreign MAJOR is a hard error. See `data/loader.rs`'s module docs and `docs/calibration-workflow-guide.md` §10.5.1 before touching either. Do NOT add `#[serde(skip_serializing_if)]`/`skip`/`flatten` to any serialized calibration type — postcard is positional and non-self-describing, so those attributes silently corrupt the format (see the note atop `data/types.rs`).
