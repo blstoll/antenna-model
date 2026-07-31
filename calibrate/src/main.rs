@@ -9,7 +9,9 @@ use std::path::PathBuf;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::{fmt, EnvFilter};
 
-use calibrate::artifact_export::{export_full_calibration, ExportPhysicalParams};
+use calibrate::artifact_export::{
+    export_full_calibration, write_calibration_artifact, ExportPhysicalParams,
+};
 use calibrate::{
     build_calibration_artifact,
     // Boresight calibration imports
@@ -134,32 +136,6 @@ struct Args {
     /// Maximum iterations for parameter tuning
     #[arg(long, default_value = "100")]
     max_tuning_iterations: u64,
-}
-
-/// Serialize an [`AntennaCalibration`] with an ANTC header and write it to `path`.
-///
-/// The ANTC header is `[magic "ANTC"][version u32 LE][crc32 u32 LE][len u64 LE]`
-/// followed by the postcard payload, matching the service loader's CRC-checked
-/// path in `antenna_model::data::loader::load_calibration_artifact`.
-fn write_antc_artifact(
-    calibration: &antenna_model::data::types::AntennaCalibration,
-    path: &std::path::Path,
-) -> Result<()> {
-    let payload = postcard::to_allocvec(calibration)
-        .context("Failed to postcard-encode calibration artifact")?;
-
-    let crc = crc32fast::hash(&payload);
-    let mut bytes = Vec::with_capacity(20 + payload.len());
-    bytes.extend_from_slice(b"ANTC");
-    // ANTC artifact version 2 (postcard payload; see loader::ANTC_SUPPORTED_VERSION).
-    bytes.extend_from_slice(&2u32.to_le_bytes());
-    bytes.extend_from_slice(&crc.to_le_bytes());
-    bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
-    bytes.extend_from_slice(&payload);
-
-    std::fs::write(path, &bytes)
-        .with_context(|| format!("Failed to write artifact to {}", path.display()))?;
-    Ok(())
 }
 
 /// Parameters the shipped correction surface is fitted with (full-mode step 5).
@@ -387,12 +363,10 @@ async fn run_boresight_calibration(args: Args) -> Result<()> {
         .validate()
         .context("Calibration artifact failed validation")?;
 
-    // Serialize and save (headerless legacy format)
-    let artifact_bytes =
-        postcard::to_allocvec(&calibration).context("Failed to serialize calibration artifact")?;
-
-    std::fs::write(&args.output, &artifact_bytes)
-        .with_context(|| format!("Failed to write artifact to {}", args.output.display()))?;
+    // Serialize and save. Same ANTC container framing as full mode — one writer, so the
+    // two producers cannot drift apart on version stamping or CRC (roadmap D2).
+    write_calibration_artifact(&calibration, &args.output)
+        .context("Failed to write calibration artifact")?;
 
     let file_size = std::fs::metadata(&args.output)?.len();
     info!(
@@ -749,7 +723,7 @@ async fn run_calibration(args: Args) -> Result<()> {
         .validate()
         .map_err(|e| anyhow::anyhow!("Service calibration failed validation: {}", e))?;
 
-    write_antc_artifact(&service_calibration, &args.output)
+    write_calibration_artifact(&service_calibration, &args.output)
         .context("Failed to write service calibration artifact")?;
 
     let file_size = std::fs::metadata(&args.output)?.len();
