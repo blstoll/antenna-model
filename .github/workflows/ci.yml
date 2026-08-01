@@ -38,10 +38,19 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
-        run: cargo test --workspace
+        # full profile = both test tiers (see .config/nextest.toml, roadmap
+        # unit D18). The default profile is the dev inner loop and excludes
+        # the slow tier; the gate must run everything.
+        run: cargo nextest run --workspace --profile full
+      - name: Doc tests
+        # nextest doesn't run doctests (https://github.com/nextest-rs/nextest/issues/16);
+        # `cargo test --workspace` used to cover these, so run them separately or they
+        # silently stop executing in CI.
+        run: cargo test --doc --workspace
 
   audit:
     name: cargo audit (non-blocking)

@@ -142,7 +142,12 @@ UNBLOCKED by P10 2026-07-15; REDESIGN DECIDED 2026-07-16 (power-sum + obliquity 
 floor-only rear hemisphere) — sequence WITH P10-perf (they interact);
 P10 DONE 2026-07-15; post-P10 assessment follow-ups filed 2026-07-15: P10-perf, P10-tail, P11
 (P10-tail + P11 DONE 2026-07-15/16); P12 filed 2026-07-31 [DECISION: D-A radial-check form,
-D-B adaptive() floor] — served-path correctness, blocks P10-perf; P2 DECIDED 2026-07-16 (REMOVE the Seidel mode; Stage-1
+D-B adaptive() floor] — served-path correctness, blocks P10-perf; P12 DONE 2026-07-31
+(PHYSICS_MODEL_VERSION 6 then 7 — radial check + φ' cap; pending commit), filing P13
+(validate/retire the pre-gate constants) and PROMOTING P10-perf to a served-coverage item
+2026-08-01 (steered in-scope geometries can now 504 against S3's budget);
+order: P10-perf → P13 (a cheap full check leg may delete what P13 would validate);
+D18 filed 2026-08-01 (test-suite latency budget + tiers); P2 DECIDED 2026-07-16 (REMOVE the Seidel mode; Stage-1
 gate tripped and removal re-affirmed same day — the terms are wrong-sign/wrong-scale additions
 on top of complete exact physics, not duplicates); P3 DECIDED + EXECUTED 2026-07-16 (document +
 flag; warning pinned on all four endpoints, H3 cache-hit gap fixed)
@@ -485,7 +490,28 @@ gap that let this ship.
 > "idealised levels, not calibrated-grade" warning). Exit criterion 5 (latency) is met near-boresight
 > and for symmetric large dishes, but see **P10-perf** below.
 
-### P10-perf — Azimuthal-mode integrator wide-angle latency (fast-follow) — Effort: M
+### P10-perf — Azimuthal-mode integrator wide-angle cost: served coverage + latency — Effort: M
+
+**RE-PRIORITIZED 2026-08-01 (triage): promoted from latency fast-follow to a served-coverage
+item — schedule immediately after P12 commits, ahead of everything else in the P series.**
+P12's φ' fix (`PHYSICS_MODEL_VERSION` 7) removed the caps that were hiding this unit's cost
+problem inside wrong answers: `n_phi` is now sized from the true azimuthal bandwidth, so a
+steered geometry *inside* PO scope (`δ/f ≤ 0.5`) costs ~69× the capped version and can exhaust
+S3's wall-clock budget — a **504 instead of a gain**, on a query the model claims to serve.
+That is a coverage hole on the served path, not a latency annoyance; the FFT `gₘ` + O(M)
+Bessel-recurrence work below is what buys those geometries back. Two further inputs since the
+original filing: P12's refinement loop multiplies radial work exactly where this unit makes a
+leg cheaper, and unit **P13**'s pre-gate question should be re-asked once this lands — a cheap
+full check leg may let `RADIAL_PRE_GATE_SAFETY` be deleted rather than validated (see P13).
+The test suite already demonstrates the hole (2026-08-01):
+`feed_steering_test::test_feed_steering_large_offset` — a ~5° steer, `include_reference: true`
+— costs ~22 s of CPU post-P12 and measured **31.6 s under a 10-wide parallel run, breaching
+S3's 30 s budget inside the test** (`TimeBudgetExceeded`, `azimuthal_mode_field`) while passing
+in isolation at 22.3 s. The pin was decoupled from the budget the same day (the test now
+passes an explicit 300 s budget — it pins steering physics; `timeout_tests` owns the budget
+contract), but the **served** path keeps the 30 s default: a production request at this
+geometry on server-class hardware plausibly 504s today. That is this unit's coverage case in
+miniature, demonstrated from inside the repo.
 
 - **Filed 2026-07-15 by the P10 final review; maintainer chose "ship correctness now, track latency."**
   The P0 correctness fix (P10) is complete and validated. The **asymmetric** (coma) served path
@@ -727,6 +753,7 @@ cone (which ends at 2.21° for that geometry), returning a 0.82 dB error.
   branch — and did not survive contact with this one); and **why** m=0 and m=1 carry the error is
   not understood, while they are demonstrably *not* the largest modes by `|gₘ|`. Picking the
   subset by fitting to three failures is the same kind of mistake the budget formula made.
+  **Both caveats are now unit P13's charter (filed 2026-08-01), sequenced after P10-perf.**
 - **D-B — Is `adaptive()`'s floor of 16 simply wrong?** Raising it to 32 (matching `default()`)
   fixes sub-defect (a) at rows 2 and 3 and closes D17's remaining calibrate-vs-service preset
   divergence as a side effect. It does nothing for (b). **Recommended: raise to 32** as a cheap
@@ -885,6 +912,54 @@ to preserve a number that is off by a dB.
   through the shared `radial_points_for` budget, P10-tail. **Feeds:** D17's remaining open item
   — the `calibrate` (`default()`, floor 32) vs service (`adaptive()`, floor 16) preset
   divergence is a *symptom* of this defect and closes with D-B.
+
+### P13 — Validate or retire P12's empirical guards (`RADIAL_PRE_GATE_SAFETY`, probe-mode set) — Effort: S/M
+
+**Filed 2026-08-01 (triage), collecting P12's "filed, not fixed" close-out items
+(findings doc §4a caveats + §5 discrepancies) into one unit so they stop living in prose.**
+This is served-correctness guard validation — the same defect class P12 fixed (an unvalidated
+constant deciding whether a served number gets checked), one layer up: P12's *fix* now rests on
+two constants that were fitted to the failures that motivated them, not derived or bounded.
+
+- **What P12 shipped without validation:**
+  - **`RADIAL_PRE_GATE_SAFETY = 32`.** The `{0,1}` probe's error estimate is **not a bound** —
+    it underestimates the full-sweep delta by up to **26×** where it passes (measured over five
+    geometries). 32 was picked empirically to cover that sample; nothing bounds the
+    probe-to-total ratio in general, and the pre-gate *certifies* `converged = true` on the
+    geometries where the full check leg is too expensive to run — i.e. exactly where a miss
+    would be invisible. This is the highest-risk residue of P12.
+  - **`RADIAL_PROBE_MODES = {0,1}`.** 5/5 on the measured geometries, but chosen by fitting to
+    three failures. *Why* m=0 and m=1 carry the radial error is not understood, and they are
+    demonstrably **not** the largest modes by `|gₘ|` (`gs_3.7m`: magnitude ranking 5,7,2,3,4 vs
+    error ranking 0,1,5,7,3). P12's own caveat: picking the subset by fit "is the same kind of
+    mistake the budget formula made."
+- **Work:**
+  1. **θ × D/λ sweep** over both branches of the pre-gate's applicability, measuring the
+     probe-estimate-to-true-error ratio across the plane (not at the five points we have).
+     Outcome is binary: a **derived bound** (replace the magic 32 with it, or retire the margin
+     entirely), or a **counterexample** (the pre-gate cannot certify; it may only *decline* to
+     certify, and the honest loop runs wherever it would have certified).
+  2. **Explain the m={0,1} concentration** — mechanism, not fit. Either derive why the
+     low-order modes carry the radial error (plausibly: they integrate the slowly-oscillating
+     part of the integrand where cancellation, not resolution, sets the error — connect to the
+     findings doc's cancellation analysis) or replace the subset selection with a criterion
+     computed from the geometry.
+  3. **Correct D17's record** (findings doc §5, "recorded not resolved"): re-measure D17's
+     `default()` vs `adaptive()` table post-P12 and fix the roadmap/findings text — the filed
+     UHF row reads 1.23 dB where the φ=0 measurement is **−7.08 dB**, and D17's
+     `default()`/`adaptive()` accuracy labels appear transposed (on the mode path
+     `min_rho_points` is the only preset field `radial_points_for` reads, so pre-P12 `default()`
+     (32) was strictly *more* accurate than `adaptive()` (16), the opposite of what D17's
+     numbers say). The record is load-bearing: D17's table is what justified P12's D-B call.
+- **Exit criteria:** `RADIAL_PRE_GATE_SAFETY` is derived-with-a-bound or deleted; the probe set
+  is justified by mechanism or replaced by a computed criterion; the cost guard
+  `p12_pre_gate_keeps_expensive_ka_at_two_legs` and all P12 anchors stay green; D17's table and
+  the §5 discrepancies are corrected in place with post-P12 numbers.
+- **Depends on:** P12 (landed 2026-07-31, pending commit). **Sequence AFTER P10-perf:** the
+  pre-gate exists *only because* a full check leg is expensive (`FULL_RADIAL_CHECK_WORK_LIMIT`).
+  If P10-perf's FFT + O(M) recurrence make the full N-vs-2N leg affordable everywhere, the
+  right move is to **delete the pre-gate**, and this unit collapses to tasks 2–3. Do not spend
+  the sweep before knowing whether the constant it validates survives.
 
 ### P2 `[DECISION]` — Seidel higher-order aberration terms: REMOVE (double-counted) — Effort: S/M
 
@@ -3844,6 +3919,56 @@ are meaningful rather than dominated by a topology gap.
   to be reported — not a reason to widen the budget.
 - **Depends on:** D10, D11, D12 (infrastructure and prerequisite fixes), D2 (✅ done
   2026-07-30 — artifact format settled). Feeds D9.
+
+### D18 — Test-suite latency budget + tiering — Effort: S/M (tiering ✅ landed 2026-08-01; tasks 2–3 open)
+
+**Filed 2026-08-01 (maintainer).** The full suite reached **505 s** under `cargo test`; the
+2026-08-01 nextest adoption cut the same coverage to ~190–226 s. No unit owned the budget, so
+it only ratcheted: every fix lands pins, physics pins are expensive, and P12 legitimately made
+steered fixtures ~69× dearer. An unowned suite time is a process defect — an 8-minute loop
+changes *how often tests get run*, which is a correctness input, not a comfort.
+
+- **Measured 2026-08-01** (M-series laptop, warm build; idle-machine figures, a contended run
+  inflates both): 985 tests, **1193 s total CPU, ~190–226 s wall**. The tail is extreme: the
+  **22 excluded tests hold 653 s of that CPU** (15 exceed 10 s; the rest ride along because
+  `cli_full_mode_e2e` is excluded whole-binary) — the two worst are
+  `p12_phi_cap_removed_steered_feed_matches_converged_reference` (125 s) and
+  `cli_full_mode_e2e::cli_tuned_run_completes_for_every_tuning_mode` (122 s). The timing run
+  also caught a load-flake: `test_feed_steering_large_offset` breached S3's 30 s wall-clock
+  budget under parallel contention (31.6 s FAIL vs 22.3 s pass in isolation). **Fixed
+  2026-08-01:** the test now passes an explicit generous budget
+  (`compute_gain_from_request_with_budget`, 300 s) — it pins steering *physics*, and the
+  budget contract belongs to `integration::timeout_tests`. The served-path implication (a
+  production request at that geometry can 504 on server-class hardware) is recorded under
+  P10-perf, which owns the real fix.
+- **Mechanism (✅ landed 2026-08-01, `.config/nextest.toml`):** two nextest profiles.
+  `default` = the dev inner loop — excludes the slow tail via `default-filter`;
+  measured **72.8 s wall, 963 tests**. `full` = everything — run by `scripts/check.sh` and CI,
+  so the slow tier stays CI-blocking and coverage is moved, never lost. Fail-safe direction: a
+  renamed slow test drops out of the filter and silently rejoins the dev loop — slower, never
+  less covered.
+- **Budget + policy (standing):** dev loop (default profile) stays **under 90 s wall** on the
+  reference machine; the `slow-timeout = 10 s` marker flags any new slow test at review time.
+  A test crossing 10 s either gets faster or joins the exclusion list in the same PR — with
+  the addition justified the way a `#[ignore]` would be. CI latency has no hard budget, but
+  additions to the slow tier are one-in-one-out aspirational: prefer speeding the top offender.
+- **Open tasks:**
+  2. **Audit the mid-tier for structural waste.** The remaining 963 fast tests still cost
+     ~590 s CPU, dominated by `tests/integration/*` at 4–9 s *per test* with high sys time —
+     suggesting per-test server spin-up / repeated calibration loading rather than physics.
+     If a shared fixture (or `OnceLock`'d app) cuts that class to <1 s, the dev loop drops
+     toward 30 s. Measure before restructuring; do not weaken any assertion to win time.
+  3. **Right-size the two 2-minute tests.** `cli_tuned_run_completes_for_every_tuning_mode`
+     runs a full Nelder-Mead per tuning mode — check whether reduced iteration caps or a
+     smaller fixture grid preserve the assertion (mode completes + recovers truth) at a
+     fraction of the cost. `p12_phi_cap_removed...` sweeps four steered angles against a
+     converged reference — ask P10-perf to revisit after the FFT lands (it directly shrinks
+     this test).
+- **Exit criteria:** tiering config committed (✅); check.sh + CI on the `full` profile (✅);
+  CLAUDE.md documents both tiers (✅); dev loop measured < 90 s and re-measured after tasks
+  2–3; the slow-tier list justified test-by-test or shrunk by the audits.
+- **Depends on:** nothing. **Coupled to:** P10-perf (owns the flake fix and the two heaviest
+  physics tests' future cost).
 
 ---
 

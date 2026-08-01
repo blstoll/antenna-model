@@ -78,8 +78,9 @@ antenna-model/
 # Build both the service and calibration tool
 cargo build --release
 
-# Run tests
-cargo test --all
+# Run tests (nextest runs each test in its own process, in parallel)
+cargo nextest run --workspace
+cargo test --doc --workspace   # nextest does not run doctests
 
 # Run benchmarks
 cargo bench
@@ -338,13 +339,13 @@ enabled = true
 
 ```bash
 # Install development dependencies
-cargo install cargo-watch cargo-edit cargo-tarpaulin
+cargo install cargo-nextest cargo-watch cargo-edit cargo-tarpaulin
 
 # Run with auto-reload
 cargo watch -x run
 
 # Run specific test
-cargo test test_name -- --nocapture
+cargo nextest run test_name -- --nocapture
 
 # Generate code coverage
 cargo tarpaulin --out Html --output-dir coverage/
@@ -354,10 +355,13 @@ cargo tarpaulin --out Html --output-dir coverage/
 
 ```bash
 # Unit tests
-cargo test --lib
+cargo nextest run --lib
 
 # Integration tests
-cargo test --test '*'
+cargo nextest run --test '*'
+
+# Doc tests (not covered by nextest)
+cargo test --doc --workspace
 
 # Performance benchmarks
 cargo bench

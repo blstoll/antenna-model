@@ -11,7 +11,10 @@ use antenna_model::data::types::{
     AntennaCalibration, CalibrationMetadata, CalibrationStatus, FeedParameters, MeshParameters,
     PhysicalAntennaConfig, ReflectorGeometry, ValidityRanges,
 };
-use antenna_model::service::evaluator::compute_gain_from_request;
+use antenna_model::service::evaluator::{
+    compute_gain_from_request, compute_gain_from_request_with_budget,
+};
+use std::time::Duration;
 
 fn create_test_calibration(antenna_id: &str, feed_id: &str) -> AntennaCalibration {
     let metadata = CalibrationMetadata::builder()
@@ -144,7 +147,13 @@ fn test_feed_steering_large_offset() {
         vehicle_attitude: None,
     };
 
-    let response = compute_gain_from_request(&request, &repo)
+    // This test pins the steering *physics* (gain reduction, coma) — not the S3
+    // wall-clock budget, which `integration::timeout_tests` owns. Post-P12 the
+    // correctly-resolved φ' sizing makes this ~5° steer cost ~22 s of CPU
+    // (roadmap P10-perf), so the 30 s default budget fails on slow or contended
+    // hardware while asserting nothing this test is about. Budget generously;
+    // P10-perf brings the cost back down.
+    let response = compute_gain_from_request_with_budget(&request, &repo, Duration::from_secs(300))
         .expect("Failed to compute gain for large feed offset");
 
     println!("\n=== Large Feed Offset ===");
