@@ -19,15 +19,21 @@ Sprints 1–7 of 8 are complete (see `docs/implementation-plan.md`): physics eng
 # Build both service and calibration tool
 cargo build --release
 
-# Run all tests
-cargo test --all
+# Run all tests — dev inner loop. The default nextest profile excludes the
+# slow tier (tests > 10 s: heavy physics pins + calibrate full-mode e2e); see
+# .config/nextest.toml and roadmap unit D18.
+cargo nextest run --workspace
+
+# Run BOTH tiers — what scripts/check.sh and CI run
+cargo nextest run --workspace --profile full
 
 # Run specific workspace member tests
-cargo test -p antenna-model
-cargo test -p calibrate
+cargo nextest run -p antenna-model
+cargo nextest run -p calibrate
 
-# Run single test with output
-cargo test test_name -- --nocapture
+# Run single test with output. Use --profile full for a slow-tier test — the
+# default profile filters it out and reports 0 tests run.
+cargo nextest run --profile full --no-capture test_name
 
 # Run benchmarks
 cargo bench
