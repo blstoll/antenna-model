@@ -2635,7 +2635,14 @@ mod tests {
             Some(mesh),
         )
         .unwrap();
-        let mut params_off = IntegrationParams::fast();
+        // Must be `adaptive()` — the preset the evaluator itself uses. It was `fast()` until
+        // P12 (2026-07-31), which passed only because the two presets were field-for-field
+        // identical; D-B then raised `adaptive()`'s `min_rho_points` 16 → 32 and they diverged,
+        // failing this test on a 0.0003 dB preset difference that has nothing to do with the
+        // sidelobe floor it exists to isolate. At θ=0 the radial budget is zero cycles, so
+        // `min_rho_points` is the ONLY thing setting the density — this test is unusually
+        // sensitive to that field.
+        let mut params_off = IntegrationParams::adaptive();
         params_off.apply_sidelobe_floor = false;
         // Match the actual's spillover state so this isolates the floor only.
         params_off.apply_spillover = response.metadata.spillover_loss_db.is_some();

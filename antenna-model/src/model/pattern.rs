@@ -1319,15 +1319,28 @@ mod tests {
                 .gain
         };
 
-        // Pin the exact-only boresight gain. At this 0.4f offset the coma is severe enough
-        // that boresight remains the pattern peak (the beam is degraded, not cleanly
-        // steered) at ~16.05 dBi. This is the exact-coma result AFTER removing the
-        // wrong-sign Seidel double-count — the value the served path produces for this
-        // band, and by construction it differs from the pre-P2 mode output.
+        // Pin the exact-only boresight gain. This is the exact-coma result AFTER removing the
+        // wrong-sign Seidel double-count — the value the served path produces for this band,
+        // and by construction it differs from the pre-P2 mode output.
+        //
+        // This value is ORACLE-VALIDATED, and getting there took two corrections on 2026-07-31:
+        //   16.05 → 13.72 dBi  when P12 gave the mode path a radial convergence check, and
+        //   13.72 → −14.95 dBi when the φ' cap was removed.
+        // The second move is the big one and it was found only because the first was checked
+        // against something that is not the integrator. This geometry's `δ/f = 0.4` used to trip
+        // `MODE_PHI_STEERED_MAX`, clamping `n_phi` to 64 against a true azimuthal bandwidth of
+        // `k·δ·(R/f) ≈ 106` modes and folding high modes into `g_0` — which at θ=0 IS the answer,
+        // since `Jₘ(0) = 0` for m > 0. Against the 2D Simpson quadrature (a trustworthy oracle at
+        // this `D/λ = 84`), `n_phi = 64` converged to +28.67 dB above the oracle at ANY radial
+        // density while reporting `converged = true`; `n_phi ≥ 256` reproduces the oracle to
+        // −0.017 dB. `mode_count_for` now sizes this geometry at `n_phi = 256`
+        // (`azimuthally_resolved = true`) and the served value agrees with the oracle.
+        // A deep boresight null like this is physical: at 0.4f the beam is steered ~23° away.
+        // See `docs/findings-2026-07-31-p12-mode-path-radial-budget.md` §7 for the full sweep.
         let g0 = g(0.0);
         assert!(
-            (g0 - 16.05).abs() < 0.30,
-            "exact-only (mode-removed) boresight gain should be ~16.05 dBi, got {g0:.2}"
+            (g0 - (-14.95)).abs() < 0.30,
+            "exact-only (mode-removed) boresight gain should be ~-14.95 dBi, got {g0:.2}"
         );
 
         // P10 non-aliasing guard: the wide-angle backlobe stays far below the peak.

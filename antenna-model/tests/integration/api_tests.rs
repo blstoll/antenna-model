@@ -81,12 +81,23 @@ async fn test_single_gain_computation_ecef() {
     assert_eq!(response.antenna_id, request.antenna_id);
     assert_eq!(response.feed_id, request.feed_id);
 
-    // Check gain is reasonable. This request steers the feed far off boresight
-    // (feed near the vehicle, boresight at the satellite), so the gain is well below
-    // the antenna's boresight maximum. With the aperture-directivity formula (no
-    // hardcoded 0.55 efficiency) the 5 m test_simple antenna yields ≈ 8.7 dBi here.
+    // Check gain is plausible. This shared fixture steers the feed to **3.06f** (feed near
+    // the vehicle, boresight at the satellite — a ~96.6° cone offset), which is six times
+    // past the 0.5f ray-tracing threshold: the response carries `SevereFeedOffset` and
+    // `RayTraceDegraded`, and the value is a deep steered null, not an operating point.
+    //
+    // Recalibrated 2026-07-31 (φ'-cap removal, ≈ 8.7 → −8.94 dBi). The old lower bound of
+    // 5.0 dBi encoded an ALIASED value: this geometry's azimuthal bandwidth is `k·δ·(R/f)`,
+    // far past the `n_phi = 64` the former `MODE_PHI_STEERED_MAX` clamped it to, so high
+    // modes folded into `g₀`. The corrected value is stable to 12 significant figures across
+    // `n_phi` 512 → 628, i.e. converged.
+    //
+    // The bound is deliberately a PLAUSIBILITY band, not an accuracy claim — this is an API
+    // integration test. The upper bound is the one that carries weight (gain cannot approach
+    // the 5 m dish's uniform-aperture maximum this far off boresight); the lower bound only
+    // has to reject NaN and absurdity, and must admit deep steered nulls.
     assert!(
-        response.gain_db > 5.0 && response.gain_db < 60.0,
+        response.gain_db > -40.0 && response.gain_db < 60.0,
         "Gain {} is outside expected range",
         response.gain_db
     );
@@ -335,8 +346,14 @@ async fn test_heatmap_generation_rectangular() {
     assert!(response.metadata.points_evaluated > 0);
     assert!(response.metadata.computation_time_ms > 0.0);
 
-    // Peak gain should be reasonable
-    assert!(response.metadata.peak_gain_db > 10.0);
+    // Peak gain should be plausible. Same 3.06f-steered fixture as the gain test above, so
+    // every grid point sits in a deep steered null; the grid peak measures −6.52 dBi.
+    // Recalibrated 2026-07-31 (φ'-cap removal) — the old `> 10.0` encoded the aliased level.
+    assert!(
+        response.metadata.peak_gain_db > -40.0 && response.metadata.peak_gain_db < 60.0,
+        "Heatmap peak gain {} outside plausible range",
+        response.metadata.peak_gain_db
+    );
 
     server.shutdown().await;
 }

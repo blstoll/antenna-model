@@ -673,6 +673,60 @@ cone (which ends at 2.21° for that geometry), returning a 0.82 dB error.
   (iii) derive a *validated* budget with proven margin and check only periodically / in tests
   rather than per-call. **Recommended: (ii)**, with (i) implemented first as the correctness
   reference that (ii) is measured against — never ship (ii) without (i) to grade it.
+
+  **✅ PRICED 2026-07-31 (task 1 follow-on) — the premise above does not survive measurement.
+  Full numbers in [the findings doc §4a](findings-2026-07-31-p12-mode-path-radial-budget.md).**
+  Three things changed:
+
+  1. **Cost and need are anti-correlated across all five geometries measured.** The Ka
+     geometries this decision is built around
+     **do not need the check**: `dsn_34m` Ka θ=90° serves −0.0226 dB from converged and θ=5°
+     serves +0.0126 dB. Every geometry that *is* wrong is sub-millisecond — `gs_3.7m` 0.42 ms
+     (−0.82 dB), `dsn_34m` X 0.45 ms (−1.17 dB), D12 UHF 0.17 ms (−7.08 dB). The budget is
+     adequate at high `D/λ`, where `kernel_cycles` dominates; it fails at low `D/λ` / low θ,
+     where the cycle count is small and the answer is a heavily cancelled residue.
+  2. **A subset check is NOT proportional to `|subset|/m_max`.** The φ' sweep evaluates
+     `aperture_plane_g` at `n_rho × n_phi` points regardless of mode count, so a 2-mode sweep
+     costs **52–62%** of a full sweep on the small-`m_max` rows and only **18%** on Ka. It is
+     cheap exactly where cost matters and no help where it does not — which is the right way
+     round, but not for the reason the option was proposed.
+  3. **Option (iii) is dominated — drop it.** A 3N fixed density measures 3.00×, identical to
+     the honest N-vs-2N, and delivers no runtime verdict. At a 2× margin it simply *is* the
+     unlisted option (A) below.
+
+  Measured multiples of today's served cost (min-of-N wall clock, `--release`):
+
+  | option | `gs_3.7m` 0.42 ms | `dsn_34m` X 0.45 ms | UHF 0.17 ms | Ka θ=90° 3706 ms |
+  |---|---|---|---|---|
+  | baseline (return N, no check) | 1.00× | 1.00× | 1.00× | 1.00× |
+  | **(A)** fine leg only, return 2N *(unlisted)* | 2.08× | 1.97× | 1.96× | 2.00× — 7.41 s |
+  | **(i)** full N-vs-2N, return 2N | 3.08× | 2.97× | 2.96× | 3.00× — **11.12 s** |
+  | **(ii-a)** subset@2N check, return N | 2.03× | 2.22× | 2.02× | **1.37× — 5.08 s** |
+  | **(ii-b)** subset@N check, return 2N | 2.60× | 2.59× | 2.48× | 2.19× — 8.10 s |
+  | **(iii)** 3N, checked in tests only | 2.94× | 3.01× | 3.13× | 3.00× — 11.13 s |
+
+  **Two options are not on the original list and both matter.** **(A)** returning the fine leg
+  with no check at all captures most of the gap at 2× (−0.0445 / −0.0553 dB on rows 1–2) but
+  leaves **−0.3494 dB** on the UHF row — no fixed multiplier is right for every geometry.
+  **(R) refine-until-converged** doubles until the N-vs-2N estimate clears the 2% floor; cost is
+  linear in `n_rho`, so `d` doublings cost `2^(d+1) − 1` baselines: `gs_3.7m` 2 doublings
+  (**2.9 ms**, −0.0027 dB), `dsn_34m` X 2 (**3.2 ms**, −0.0033 dB), UHF 3 (**2.6 ms**,
+  −0.0013 dB), Ka θ=5° 1 (0.9 s, +0.0008 dB).
+
+  **Revised recommendation: (ii-a) as the gate, (R) as the response** — compute at N, run the
+  `{0,1}` subset check, refine only when it fires. Priced at **+37% on Ka** (5.08 s at θ=90°
+  against 11.12 s for (i)), with the check correctly declining to refine there, and **~3 ms on
+  every geometry that is actually wrong**, converging all of them below 0.01 dB. Cheaper than
+  (i) everywhere; the only priced option that fixes the −7.08 dB UHF row; keeps P12's stated
+  fallback (bound refinement by S3's wall-clock budget, return honest `converged = false`).
+  P12's "build (i) first to grade (ii)" instruction stands and was followed — (i) is what
+  produced the grading column.
+
+  **Two caveats for task 4, both real:** the `{0,1}` subset is 5/5 on these geometries but five
+  points is a signal, not a validation (`radial_points_for` was itself validated — on the other
+  branch — and did not survive contact with this one); and **why** m=0 and m=1 carry the error is
+  not understood, while they are demonstrably *not* the largest modes by `|gₘ|`. Picking the
+  subset by fitting to three failures is the same kind of mistake the budget formula made.
 - **D-B — Is `adaptive()`'s floor of 16 simply wrong?** Raising it to 32 (matching `default()`)
   fixes sub-defect (a) at rows 2 and 3 and closes D17's remaining calibrate-vs-service preset
   divergence as a side effect. It does nothing for (b). **Recommended: raise to 32** as a cheap
@@ -687,24 +741,134 @@ is still wrong, and optimizing against an unverified radial budget risks tuning 
 to preserve a number that is off by a dB.
 
 - **Work:**
-  1. **Establish the mechanism for (b) before changing any constant.** Instrument the per-mode
-     radial integrand at the `gs_3.7m` θ=5° point; determine what radial content
-     `radial_points_for` is not counting. Report it — a wrong budget formula is a finding in
-     its own right.
-  2. Implement the radial self-check per D-A. Honest `converged = false` + `error_estimate` is
-     an acceptable outcome for expensive geometries; a silent wrong number is not.
-  3. Apply D-B's floor decision.
-  4. Extend the P10 validation protocol (`antenna-model/tests/reference_validation.rs`) to
-     cover the **mode path** at radial-convergence-sensitive points, not just the symmetric
-     path. The three table rows above are ready-made regression anchors.
-  5. Re-true CLAUDE.md's integrator paragraph and the `adaptive()` docstring
-     (`:271-294`) once the behavior is settled — both currently describe a self-check the mode
-     path does not perform.
-- **Exit criteria:** on the mode path, a radial-convergence claim is either *verified* or
-  *reported false* — never assumed; the three measured rows above are pinned as regression
-  tests; the mechanism behind (b) is documented; CLAUDE.md and the `adaptive()` docstring
-  match the shipped behavior; served values that move are recorded (this unit **will** move
-  served numbers, unlike D17).
+  1. ✅ **DONE 2026-07-31 — mechanism established; see
+     [`docs/findings-2026-07-31-p12-mode-path-radial-budget.md`](findings-2026-07-31-p12-mode-path-radial-budget.md).**
+     *(Original charter: establish the mechanism for (b) before changing any constant;
+     instrument the per-mode radial integrand at the `gs_3.7m` θ=5° point; determine what
+     radial content `radial_points_for` is not counting — a wrong budget formula is a finding
+     in its own right.)*
+     **`radial_points_for` is not failing to count anything.** Measured radial bandwidth of the
+     per-mode integrand at that point is **7–8 cycles** against the budget's predicted
+     **10.486** — the formula is ~30% conservative, and the flagged candidate ("the per-mode
+     integrand carries radial content the m=0 budget does not model") is **falsified**. So is
+     the other obvious suspect: a **symmetric-branch control** on the same dish at the same θ
+     and the same 4.07 samples/cycle is **0.043 dB** off, against the mode path's 0.816 dB at
+     4.10 — the samples-per-cycle constant is not the discriminator.
+     **The real mechanism is error amplification by cancellation**, which no term in the budget
+     references. The budget sizes for *resolving* the integrand and does that correctly; the
+     delivered accuracy is set by how far the integral **cancels**. At `gs_3.7m` θ=5° the modes
+     sum to a residue **111.3×** smaller than `Σ|Rₘ|`, so per-mode errors of 0.06–1.3% *of
+     their own mode* become 0.5–7.5% *of the answer* (⇒ −0.8157 dB); `dsn_34m` is the same at
+     58.9×. D12's UHF fixture shows the second form — its modes do **not** cancel
+     (Σ|Rₘ|/|I| ≈ 1.1) yet m=0's own radial integral is 13.8 dB wrong, i.e. cancellation
+     *within* one mode.
+     **The symmetric branch escapes only because of what it does with the same budget**: it
+     returns the **fine (2N)** leg and checks. Applying that unchanged to the mode path takes
+     `gs_3.7m` 0.82 → **0.045 dB** and `dsn_34m` 1.17 → **0.055 dB**, and the existing 2%
+     radial floor flags both remainders `converged=false` (8.7% / 15.7%).
+     **Both decisions are revised by this — read the findings doc before making them:** the
+     `adaptive()` floor of **16 is not binding at any of the three rows** (the budget asks for
+     42/28/18 points), so sub-defect (a) as filed is not the mechanism anywhere measured, and
+     D-B's floor raise is partial mitigation at two of four measured points rather than a fix;
+     and for D-A, a subset check must anchor on **m=0** (the largest error contributor in all
+     three geometries) but must **not** pick its second probe by `|gₘ|` — the magnitude and
+     error rankings disagree at the top (`gs_3.7m`: 5,7,2,3,4 by magnitude vs **0,1**,5,7,3 by
+     error). D-A also gains an option the list did not have: *returning the fine leg* alone,
+     with no comparison, buys most of the accuracy at 2× rather than 3× cost.
+     **Two discrepancies with what is filed, recorded not resolved** (findings doc §5): the UHF
+     row measures **−7.08 dB** at φ=0 (φ is unrecorded in the table above), not 1.23 dB; and
+     D17's `default()`/`adaptive()` labels appear transposed — on the mode path
+     `min_rho_points` is the only preset field `radial_points_for` reads, so `default()` (32) is
+     strictly *more* accurate than `adaptive()` (16), the opposite of what D17's numbers say.
+     The direction of the divergence D17 filed is unaffected; which preset is the worse one is
+     not.
+     Instrument: six `#[ignore]`d diagnostics in `model/integration.rs::p12_radial_diagnostic`
+     (`cargo test --release -p antenna-model --lib p12_ -- --ignored --nocapture`), gated by the
+     non-ignored `per_mode_decomposition_reproduces_the_integrator`, which pins the module's
+     per-mode replica to the real integrator's total at `rel < 1e-12`. **No production code
+     changed.**
+  2. ✅ **DONE 2026-07-31.** Radial self-check per D-A: the mode path compares `N` vs `2N` and
+     **returns the fine leg** (the property that made the symmetric branch accurate at the same
+     budget), refines until converged (`MAX_RADIAL_REFINEMENTS = 4`), and uses the cheap
+     `RADIAL_PROBE_MODES = {0,1}` pre-gate only where a full check leg is expensive
+     (`use_radial_pre_gate`, `FULL_RADIAL_CHECK_WORK_LIMIT`). The pre-gate may only *certify*;
+     once it says the answer is moving, control falls through to the honest loop. Its estimate
+     is **not a bound** (underestimates by up to 26× where it passes), hence
+     `RADIAL_PRE_GATE_SAFETY = 32`. Error estimates are **summed** across the two axes and
+     `converged = mode_converged && radially_converged` (the explicit combination decision this
+     unit demanded).
+  3. ✅ **DONE 2026-07-31.** `adaptive()` `min_rho_points` 16 → 32, documented as closing D17's
+     preset divergence, explicitly not as the fix for sub-defect (a). Not 64 (would reopen the
+     divergence inverted).
+  4. ✅ **DONE 2026-07-31.** Three anchors in `antenna-model/tests/reference_validation.rs`:
+     `p12_mode_path_radial_convergence_anchors` (all four measured rows incl. UHF **φ=0**),
+     `p12_symmetric_branch_control_still_accurate_and_cheap` (asserts accuracy **and** that the
+     work did not grow — so a future "fix" cannot pass by globally raising density), and
+     `p12_pre_gate_keeps_expensive_ka_at_two_legs` (cost guard on the P10-perf case).
+  5. ✅ **DONE 2026-07-31.** CLAUDE.md's integrator paragraph and pitfall 2, and the
+     `adaptive()` docstring, all re-trued.
+- **Exit criteria — ✅ all met (2026-07-31).** Radial convergence on the mode path is now
+  verified or reported false, never assumed; the measured rows are pinned; the mechanism is
+  documented (`docs/findings-2026-07-31-p12-mode-path-radial-budget.md`); CLAUDE.md and the
+  `adaptive()` docstring match shipped behavior; served values that moved are recorded below.
+  `PHYSICS_MODEL_VERSION` **5 → 6**.
+
+  | geometry | pre-P12 | post-P12 | `converged` |
+  |---|---|---|---|
+  | `gs_3.7m`/`x_band_feed` 8.4 GHz θ=5° | −0.8157 dB | **−0.0027 dB** | true |
+  | `dsn_34m`/`x_band` 8.45 GHz θ=0.10° | −1.1671 dB | **−0.0033 dB** | true |
+  | D12 UHF 600 MHz θ=16° φ=0 | −7.0761 dB | **−0.0013 dB** | true |
+  | D12 UHF 600 MHz θ=16° φ=90 | −3.8546 dB | **−0.0027 dB** | true |
+  | `dsn_34m`/`ka_band` 32 GHz θ=5° | +0.0126 dB | +0.0126 dB (pre-gate, 2 legs) | true |
+
+  Symmetric-branch anchors did **not** move — the change did not leak onto the J₀ path. Two
+  existing tests moved and both are explained in the findings doc §6a: the sidelobe-floor
+  reference test was reconstructing with `fast()` while the evaluator uses `adaptive()` (a
+  latent cross-preset comparison that D-B exposed), and `p2_moderate_offset`'s pin moved
+  16.05 → 13.72 dBi — see the new unit below, because **neither value is right**.
+
+- **✅ FIXED 2026-07-31, same unit (`PHYSICS_MODEL_VERSION` 7) — see findings doc §7a.** Filed
+  first as "not fixed", then fixed immediately because re-measuring it on a *second* geometry
+  showed it was far worse than the p2 case suggested: on `coma_aberration_test`'s 34 m dish with
+  a 1.19 m offset — `δ/f = 0.0875`, a **routine ~5° beam steer**, nowhere near the 0.5f
+  ray-tracing regime — the cap was wrong by **+82 dB** (θ=1°), not 28.7. Three caps came out,
+  each exposed by removing the one before it: the φ' cap itself (`n_phi` now sized from the
+  azimuthal bandwidth, no power-of-two rounding, `MODE_PHI_MAX` 512 → 2048,
+  `azimuthally_resolved` gating `converged`); `MODE_RADIAL_CYCLE_CAP`, which after P12's
+  refinement was strictly harmful — the same geometry was 0.34 dB *worse* and 2× *more*
+  expensive with it than without (997 vs 506 radial units), because a refinement loop started
+  below the physics discards every wasted leg; and `m_theta`'s flat `+6` margin, which cut into
+  live spectrum (+0.49 dB at θ=3°) because `Jₘ` has an Airy turning point of width `~x^(1/3)`,
+  now `x + 4·x^(1/3) + 6`. `MODE_STEERING_RATIO` had no users left and went with them.
+  An effort ceiling **does** remain, but re-keyed to `SEVERE_OFFSET_THRESHOLD` (0.5f) — the
+  model's own PO scope boundary, where it already emits `SevereFeedOffset`/`RayTraceDegraded`
+  and routes to the stub — and it now announces itself via `azimuthally_resolved` instead of
+  being silent. Removing it outright over-corrected: seven integration tests failed on latency
+  because the shared fixture steers to **3.06f** and the integrator was converging a number the
+  model had already disclaimed (suite 5.5 s → 66 s). Same shape as the deleted constant,
+  differing on the two things that made it a defect — the threshold and the silence.
+  All four steered angles now land within **0.007 dB** of converged, `converged = true`.
+  `p2_moderate_offset`'s pin moved 13.72 → **−14.95 dBi**, exactly the oracle-consistent value.
+  Two enabled geometries got *cheaper* (`dsn_34m` X `n_phi` 128 → 76, Ka 512 → 260). **Cost:**
+  steered geometries are ~69× more expensive and can now reach S3's budget (504) instead of
+  returning an aliased number; P10-perf's FFT is what recovers it, so that unit is now a
+  coverage item too. New non-ignored guard
+  `served_n_phi_sizing_is_sufficient_on_every_asymmetric_geometry` — the only automatic check on
+  the φ' axis, since the radial and truncation checks both read `gₘ` that φ' aliasing has
+  already corrupted. *Original filing follows.*
+  Found arbitrating the `p2_moderate_offset` move against the 2D Simpson oracle (trustworthy at
+  that geometry's `D/λ = 84`). `MODE_PHI_STEERED_MAX` clamps `n_phi` to 64 whenever
+  `δ/f > MODE_STEERING_RATIO` (0.05); at `δ/f = 0.4` the true azimuthal bandwidth is
+  `k·δ·(R/f) ≈ 106` modes, so high modes alias into `g₀`. The mode path then converges
+  **radially** to a value **+28.67 dB above the oracle** and stays there at any radial density,
+  reporting `converged = true`; at `n_phi ≥ 256` the same integrator reproduces the oracle to
+  −0.017 dB. Same defect class as P12 (a deliberate performance cap silently returning a wrong
+  number), P10-class in magnitude, on the **azimuthal** axis. No enabled *design* feed trips the
+  threshold (`gs_3.7m` 0.027, `dsn_34m` 0.011) but runtime steering adds to the design offset,
+  so the first question is whether real steering crosses 0.05. Note the interaction: on such a
+  geometry P12's refinement now spends up to 15× the radial work converging to a value dominated
+  by azimuthal aliasing — an argument for fixing the two axes together. Evidence and the full
+  sweep: findings doc §7.
 - **Gotchas:**
   - **This changes served gain on every antenna with an offset or asymmetric feed** — five of
     the enabled feeds. Expect the reference-validation anchors to move; they are boresight

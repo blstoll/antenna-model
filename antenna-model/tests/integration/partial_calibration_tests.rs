@@ -98,12 +98,16 @@ async fn test_uncalibrated_antenna_loss() {
 
     let loss = response.loss_db.unwrap();
 
-    // loss_db = reference(ideal boresight) − actual. The shared request steers the
-    // feed far off boresight, so the actual gain is tens of dB below the ideal
-    // reference; loss is ≈ 30 dB. (loss_db no longer carries the old ~2.6 dB
-    // efficiency offset, so this is pure pointing/aberration loss.) Range: [0, 40] dB.
+    // loss_db = reference(ideal boresight) − actual. The shared request steers the feed to
+    // 3.06f, so the actual gain is tens of dB below the ideal reference. (loss_db no longer
+    // carries the old ~2.6 dB efficiency offset, so this is pure pointing/aberration loss.)
+    //
+    // Recalibrated 2026-07-31 (φ'-cap removal): ≈ 30 → 52.79 dB. The loss grew because the
+    // *actual* gain fell to its converged value — the old figure was computed against an
+    // aliased actual (`n_phi` clamped to 64 for this strongly-steered geometry). Range widened
+    // to [0, 80] dB; a deep steered null legitimately produces a large loss.
     assert!(
-        (0.0..40.0).contains(&loss),
+        (0.0..80.0).contains(&loss),
         "Loss {} outside expected range",
         loss
     );
@@ -331,19 +335,21 @@ async fn test_physics_model_computation() {
         .await
         .expect("Gain computation failed");
 
-    // Physics model should compute reasonable gain. The shared request steers the
-    // feed far off boresight (feed near vehicle, boresight at the satellite; a ~96.6°
-    // cone-angle offset), so the 3.7 m test_uncalibrated antenna (f/D = 0.5) is
-    // evaluated well off its boresight maximum.
+    // Physics model should compute a plausible gain. The shared request steers the feed to
+    // **3.06f** (feed near vehicle, boresight at the satellite; a ~96.6° cone-angle offset),
+    // so the 3.7 m test_uncalibrated antenna (f/D = 0.5) is evaluated in a deep steered null,
+    // six times past the 0.5f ray-tracing threshold. The response carries `SevereFeedOffset`
+    // and `RayTraceDegraded` accordingly.
     //
-    // Since the beam-deviation-factor fix (2026-07), `compute_feed_position_from_pointing`
-    // divides the steering displacement by BDF(f/D=0.5) ≈ 0.872 so the physical-optics
-    // beam peak lands at the requested angle. That larger displacement produces more
-    // defocus loss at this extreme steering angle, dropping off-axis gain from the
-    // pre-BDF ≈ 14.1 dBi (with the Task-1 sign fix but bdf=1) to ≈ 8.9 dBi.
-    // Bound to [5, 50] dBi.
+    // Recalibrated 2026-07-31 (φ'-cap removal): ≈ 8.9 → −6.796 dBi. The old [5, 50] band
+    // encoded an aliased value — the former `MODE_PHI_STEERED_MAX` clamped `n_phi` to 64 for
+    // any feed past δ/f = 0.05, folding high azimuthal modes into `g₀`. The new value is
+    // converged: it is identical to 12 significant figures at `n_phi` 512 and 628.
+    //
+    // Bound to [-40, 50] dBi as a plausibility check (this is an API integration test, not an
+    // accuracy test); the lower bound must admit deep steered nulls.
     assert!(
-        response.gain_db > 5.0 && response.gain_db < 50.0,
+        response.gain_db > -40.0 && response.gain_db < 50.0,
         "Gain {} outside physically reasonable range",
         response.gain_db
     );

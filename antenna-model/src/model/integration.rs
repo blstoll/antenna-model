@@ -55,32 +55,13 @@ const MODE_PHI_MIN: usize = 64;
 /// heavily-steered-feed case (the ray-tracing regime, D-5). Empirically 512 resolves the
 /// `g_0` DFT to convergence even for a feed steered a full aperture-radius off-axis
 /// (`k·R ≈ 443`), where n_phi=64/128 alias badly — the root of the interim off-axis error.
-const MODE_PHI_MAX: usize = 512;
-
-/// Reduced `n_phi` ceiling for the large-steering regime (feed steered past `δ/f >`
-/// [`MODE_STEERING_RATIO`]). Such a feed's aperture-plane phase has a very wide azimuthal
-/// spectrum whose exact resolution is neither affordable within the latency budget (a
-/// dense off-axis sweep would need hundreds of modes per point) nor calibrated-grade for
-/// an idealized PO model (beyond a few degrees of beam-steer, blockage/aberration/
-/// diffraction dominate the real off-axis level, not coma). Beyond the threshold the mode
-/// count is capped and the `M`-vs-`M+1` self-check honestly reports `converged=false`.
-/// Physical offset feeds (δ/f ≪ threshold) keep the full [`MODE_PHI_MAX`]. Kept above
-/// `2·(steered M cap)` — see [`mode_count_for`].
-const MODE_PHI_STEERED_MAX: usize = 64;
-
-/// Feed-steering ratio `δ/f` (≈ the beam-steer angle in radians) above which the coma is
-/// strong enough that the azimuthal-mode expansion is performance-capped rather than fully
-/// resolved. `radial_points_for` / `mode_count_for` apply reduced caps beyond it (fewer
-/// φ' samples, capped mode count, capped coma radial density), and the self-check flags the
-/// resulting under-resolution.
-///
-/// Every physical served offset feed sits an order of magnitude below this (the largest,
-/// gs_3.7m X-band, is δ/f ≈ 0.027; dsn_34m/13m ≈ 0.01–0.02), so they are always fully
-/// resolved. It trips only for strongly steered feeds — a beam-steer test displacement
-/// (δ/f ≈ 0.09, ~5°) or request-driven steering of order the focal length (the D-5
-/// ray-tracing regime), where the exact off-axis level is neither affordable nor
-/// PO-trustworthy.
-const MODE_STEERING_RATIO: f64 = 0.05;
+/// Raised 512 → 2048 on 2026-07-31 when the steered-feed φ' cap was removed. 512 was chosen
+/// when strongly-steered geometries were clamped to 64 anyway; with the clamp gone it became
+/// the binding ceiling for ordinary beam-steering — a 5° steer on the 34 m dish at X-band asks
+/// for `n_phi ≈ 536`, and rounding-to-power-of-two would have asked for 1024. `B` is itself
+/// bounded by `k·R` (a purely azimuthal phase gradient cannot exceed `k`), so this covers every
+/// geometry with `k·R ≲ 1020`; past that the sizing clamps and `azimuthally_resolved` says so.
+const MODE_PHI_MAX: usize = 2048;
 
 /// Azimuthal-mode truncation ceiling `M_max`. The runtime count is sized adaptively from
 /// the coma strength AND the observation angle by [`mode_count_for`] (only modes with
@@ -153,13 +134,107 @@ impl IntegrationDeadline {
     }
 }
 
-/// Performance ceiling (in radial cycles) on the θ-independent aperture-plane coma
-/// contribution to [`radial_points_for`], applied ONLY in the large-steering regime
-/// (`δ/f >` [`MODE_STEERING_RATIO`]). Physical offset feeds resolve their coma fully (up
-/// to the physical `D/(2λ)` ceiling); this bounds only strongly-steered feeds, keeping a
-/// dense off-axis sweep (or a metres-steered ray-tracing evaluation) within budget. See
-/// the call site.
-const MODE_RADIAL_CYCLE_CAP: f64 = 8.0;
+/// Effort cap (in radial cycles) on the coma term of [`radial_points_for`], applied ONLY past
+/// [`crate::model::edge_cases::SEVERE_OFFSET_THRESHOLD`] — i.e. where the feed offset has
+/// already taken the evaluation outside physical-optics scope, the caller has
+/// `SevereFeedOffset`/`RayTraceDegraded`, and this integral is only the ray-tracing stub's
+/// normalization anchor. Converging the radial axis of a number the model has disclaimed is
+/// effort with no consumer.
+///
+/// The predecessor constant (`MODE_RADIAL_CYCLE_CAP`, same value) applied from `δ/f > 0.05`,
+/// which caught ordinary beam-steering and there made the answer *both* less accurate and more
+/// expensive — see the call site. Unlike it, this one is not silent: P12's radial N-vs-2N check
+/// reports `converged = false` whenever the clamp costs accuracy.
+const BEYOND_SCOPE_COMA_CYCLE_CAP: f64 = 8.0;
+
+/// Azimuthal modes used by the cheap radial-convergence **pre-gate** (P12, D-A).
+///
+/// Chosen by measurement, not by magnitude: at both failing coma geometries the two largest
+/// contributors to the *radial quadrature error* are `m = 0` and `m = 1`, and they are **not**
+/// the largest modes by `|gₘ|` (`gs_3.7m` ranks 5,7,2,3,4 by magnitude but 0,1,5,7,3 by error;
+/// `dsn_34m` ranks 4,3,6,1,5 by magnitude but 0,1,3,4,5 by error). A pre-gate that picked its
+/// probes by mode magnitude — the form originally proposed for D-A option (ii) — would watch
+/// the wrong modes. See `docs/findings-2026-07-31-p12-mode-path-radial-budget.md` §4a.
+const RADIAL_PROBE_MODES: [u32; 2] = [0, 1];
+
+/// Safety factor applied to the radial pre-gate's error estimate before comparing it against
+/// the tolerance (P12, D-A).
+///
+/// **The pre-gate's estimate is not a bound.** Measured against the honest full N-vs-2N
+/// estimate on five geometries, the `{0,1}` probe is *conservative* where it fires (1.17×,
+/// 1.43×, 2.18× the full estimate) but *anti-conservative* where it passes — it underestimates
+/// by **3.5×** at `dsn_34m` Ka θ=5° and **26×** at θ=90°, because when the total is nearly
+/// converged the probe's own movement is a poor proxy for the residual of the ~195 modes it
+/// does not watch. Multiplying by 32 covers the measured worst case with margin, and errs
+/// toward escalating to the honest check — the fail-safe direction.
+///
+/// This constant is the price of shipping the pre-gate on five data points. Retire it (or
+/// re-derive it) once P12 task 4's θ × D/λ sweep bounds the probe-to-total ratio properly.
+const RADIAL_PRE_GATE_SAFETY: f64 = 32.0;
+
+/// Work estimate (`n_rho × n_phi × modes`) above which a full radial check leg is judged too
+/// expensive to spend unconditionally, so the cheap [`RADIAL_PROBE_MODES`] pre-gate runs first.
+///
+/// Below it, the honest full N-vs-2N check runs directly — which is deliberate rather than
+/// merely thrifty: **every measured radial failure is in the cheap regime** (`gs_3.7m` 0.42 ms,
+/// `dsn_34m` X 0.45 ms, D12 UHF 0.17 ms), while the expensive geometries (`dsn_34m` Ka, 299 ms
+/// and 3.7 s) are already converged to ±0.02 dB. Placing the under-validated pre-gate only
+/// where nothing has been observed to fail keeps the heuristic out of the regime that matters.
+///
+/// Calibrated from the same measurements: `dsn_34m` Ka θ=5° is ~1.4·10⁸ work units at 299 ms,
+/// i.e. ~2.2 ms per 10⁶, so 4·10⁶ is a full check leg of roughly 10 ms. The five measured
+/// geometries straddle it by five orders of magnitude (2·10⁴…1.7·10⁹), so the exact value is
+/// not delicate.
+const FULL_RADIAL_CHECK_WORK_LIMIT: u64 = 4_000_000;
+
+/// Maximum radial doublings in the mode path's refinement loop (P12, D-A).
+///
+/// Cost is linear in `n_rho` and the legs sum geometrically, so `d` doublings cost
+/// `2^(d+1) − 1` baseline legs; 4 caps that at 31× while letting the density grow 16×. The
+/// measured worst case needs 3 (D12 UHF: 19 → 145). Running out of refinements is NOT an
+/// error — it returns the best estimate with `converged = false` and an honest
+/// `error_estimate`, which is what P12 asks for on geometries that cannot be resolved cheaply.
+const MAX_RADIAL_REFINEMENTS: usize = 4;
+
+/// Adaptive azimuthal sizing for one `(geometry, θ)` — see [`mode_count_for`].
+#[derive(Debug, Clone, Copy)]
+struct ModeSizing {
+    /// Highest azimuthal mode actually summed.
+    m_max: u32,
+    /// φ' sample count for the `gₘ(ρ)` Fourier coefficients.
+    n_phi: usize,
+    /// Whether `n_phi` Nyquist-covers the aperture function's azimuthal bandwidth. When
+    /// false, high modes of `g(ρ,φ')` fold down into the low `gₘ` and the result can be
+    /// arbitrarily wrong (measured: **+28.7 dB**) — a failure neither the radial N-vs-2N
+    /// check nor the `M`-vs-`M+1` truncation check can detect, because both operate on the
+    /// already-corrupted coefficients. Propagates into `IntegrationResult::converged`.
+    azimuthally_resolved: bool,
+}
+
+/// One azimuthal-mode sweep at a fixed radial density.
+///
+/// Carries the three quantities the two independent self-checks need, all from a single φ'
+/// sweep: the full mode sum, the top mode's contribution (azimuthal **truncation** check) and
+/// the [`RADIAL_PROBE_MODES`] partial sum (**radial** pre-gate).
+#[derive(Debug, Clone, Copy)]
+struct ModeSweep {
+    /// `I(θ,φ)` summed over all modes `0..=m_probe` (both `±m`).
+    total: Complex64,
+    /// The part of `total` contributed by the top mode `±m_probe`.
+    top_mode: Complex64,
+    /// The part of `total` contributed by [`RADIAL_PROBE_MODES`].
+    radial_probe: Complex64,
+}
+
+/// Whether this geometry gets the cheap radial pre-gate instead of paying for a full check
+/// leg outright. See [`FULL_RADIAL_CHECK_WORK_LIMIT`].
+#[inline]
+fn use_radial_pre_gate(n_rho: usize, n_phi: usize, m_probe: u32) -> bool {
+    let work = (n_rho as u64)
+        .saturating_mul(n_phi as u64)
+        .saturating_mul(m_probe as u64 + 1);
+    work > FULL_RADIAL_CHECK_WORK_LIMIT
+}
 
 /// Complex integration result
 ///
@@ -283,18 +358,32 @@ impl IntegrationParams {
     ///
     /// They no longer gate the served pattern's correctness.
     ///
+    /// `min_rho_points` was **16 until P12 (2026-07-31) raised it to 32**, matching
+    /// `default()`. Deliberately *not* framed as a correctness fix, because it is not one:
+    /// measured against the three geometries P12 filed, the floor of 16 was **not binding at
+    /// any of them** (the budget asked for 42 / 28 / 18 points), so it was never the source of
+    /// the silent radial error — the missing self-check was, and that is fixed in
+    /// [`integrate_aperture`]. The floor moved for a different and real reason: `calibrate`
+    /// tunes under `default()` while the service evaluates under `adaptive()`, and D17 left
+    /// that preset divergence open; matching the two closes it. It was deliberately NOT raised
+    /// to 64, which would reopen the same divergence inverted — the service would then be more
+    /// converged than the tuner that produced the artifact it is serving.
+    ///
     /// INERT on the served path: `min_phi_points`, `max_phi_points`, and `max_iterations`
     /// are NOT read by either production integrator. The served φ' sample count comes from
     /// `mode_count_for` (not `min/max_phi_points`), the radial density from
-    /// `radial_points_for`, and there is no adaptive refinement loop (the runtime
-    /// convergence check is a single N-vs-2N / M-vs-(M+1) comparison, not an iteration
-    /// count). These three fields survive only for the `#[cfg(test)]`-only 2D reference
+    /// `radial_points_for`, and the refinement loop's bound is
+    /// [`MAX_RADIAL_REFINEMENTS`], not `max_iterations`. These three fields survive only for
+    /// the `#[cfg(test)]`-only 2D reference
     /// (`integrate_2d_adaptive` / `integrate_2d_simpson_public_shim`) and for struct
     /// compatibility with the other presets — tuning them here does nothing to a served
     /// evaluation.
     pub fn adaptive() -> Self {
         Self {
-            min_rho_points: 16,
+            // P12 / D-B (2026-07-31): 16 → 32, matching `default()`. See the docstring —
+            // this closes D17's calibrate-vs-service preset divergence; it is NOT the fix
+            // for the silent radial error (that is the self-check in `integrate_aperture`).
+            min_rho_points: 32,
             max_rho_points: 64,
             min_phi_points: 32,
             max_phi_points: 128,
@@ -542,21 +631,97 @@ pub fn integrate_aperture(
     // sum (modes 0..=M+1) and the contribution of the top probe mode (M+1). If that top
     // mode contributes more than the relative tolerance, the truncation is insufficient
     // ⇒ converged=false with an honest error estimate.
-    let n_rho = radial_points_for(config, theta, wavelength, params);
-    let (m_max, n_phi) = mode_count_for(config, wavelength, theta);
+    let ModeSizing {
+        m_max,
+        n_phi,
+        azimuthally_resolved,
+    } = mode_count_for(config, wavelength, theta);
     // Probe one extra mode (M+1) so the self-check can measure its contribution in a
     // single φ' sweep. `mode_count_for` kept m_max ≤ n_phi/2 − 2, so the probe is alias-free.
     let m_probe = m_max + 1;
-    let (field, top_contrib) =
+    let mut n_rho = radial_points_for(config, theta, wavelength, params);
+    let mut sweep =
         azimuthal_mode_field_inner(config, theta, phi, k, n_rho, n_phi, m_probe, deadline)?;
+    let mut evaluations = n_rho * n_phi;
+
+    // ---- P12: the RADIAL axis, which before this unit was never verified at all ----
+    //
+    // The mode-truncation check below and this one answer different questions, and the
+    // integrator is only honest when BOTH are answered. Radial convergence is established
+    // exactly as the symmetric branch establishes it — compare N against 2N and return the
+    // FINE leg — with two additions the symmetric branch does not need:
+    //
+    //   * a cheap pre-gate on geometries where a full 2N leg is expensive (`dsn_34m` Ka is
+    //     ~3.7 s, so an unconditional check would make it ~11 s), and
+    //   * refinement, because no single density is right everywhere: at the same budget the
+    //     2N leg lands at −0.045 dB on `gs_3.7m` but −0.349 dB on D12's UHF fixture.
+    let radial_rtol = params.relative_tolerance.max(HANKEL_SELF_CHECK_RTOL);
+    let mut radial_error = 0.0_f64;
+    let mut radially_converged = false;
+
+    if use_radial_pre_gate(n_rho, n_phi, m_probe) {
+        // Cheap leg: repeat ONLY the low modes at 2N and watch how far they move. Compared
+        // against `|total|` — the scale the answer's accuracy is measured on — not against
+        // the probe's own magnitude, which is not the quantity at risk.
+        let n_fine = radial_check_points(n_rho);
+        let probe_fine = radial_probe_field(config, theta, phi, k, n_fine, n_phi, deadline)?;
+        evaluations += n_fine * n_phi;
+        let probe_diff = (probe_fine - sweep.radial_probe).norm();
+        let scale = sweep.total.norm().max(params.absolute_tolerance);
+        if probe_diff * RADIAL_PRE_GATE_SAFETY <= radial_rtol * scale {
+            radial_error = probe_diff * RADIAL_PRE_GATE_SAFETY;
+            radially_converged = true;
+        }
+        // Otherwise fall through to the honest loop. The pre-gate is allowed to be wrong in
+        // the direction of "spend more"; it is never allowed to certify on its own once it
+        // has said the answer is moving.
+    }
+
+    if !radially_converged {
+        for _ in 0..MAX_RADIAL_REFINEMENTS {
+            if n_rho >= RADIAL_POINTS_SAFETY_MAX {
+                break;
+            }
+            let n_fine = radial_check_points(n_rho);
+            let fine = azimuthal_mode_field_inner(
+                config, theta, phi, k, n_fine, n_phi, m_probe, deadline,
+            )?;
+            evaluations += n_fine * n_phi;
+            radial_error = (fine.total - sweep.total).norm();
+            // Return the FINE leg: with Simpson's O(h⁴) the returned estimate's own error is
+            // ≈ diff/15, which is the entire reason the symmetric branch is accurate at the
+            // same budget the mode path was under-delivering on.
+            n_rho = n_fine;
+            sweep = fine;
+            radially_converged = radial_error
+                <= radial_rtol * sweep.total.norm().max(params.absolute_tolerance)
+                || radial_error < params.absolute_tolerance;
+            if radially_converged {
+                break;
+            }
+        }
+    }
+
+    // ---- The AZIMUTHAL axis: mode truncation, unchanged in kind since P10 ----
     // I(M) = I(M+1) − (top-mode contribution); the self-check compares I(M) vs I(M+1).
-    let f_m = field - top_contrib;
-    let (field, error_estimate, converged) = self_check(f_m, field, params, MODE_SELF_CHECK_RTOL);
+    let f_m = sweep.total - sweep.top_mode;
+    let (field, mode_error, mode_converged) =
+        self_check(f_m, sweep.total, params, MODE_SELF_CHECK_RTOL);
+
+    // The two estimates bound errors on DIFFERENT axes of the same returned field, so they
+    // are summed rather than either overwriting the other (P12 required this be decided
+    // explicitly). Summing is the conservative combination: it never understates, and both
+    // are already absolute field-magnitude differences in the same units.
+    //
+    // `azimuthally_resolved` is the THIRD axis and carries no magnitude — φ' aliasing has no
+    // cheap estimator, only a yes/no from the sampling theorem — so it gates `converged`
+    // without contributing to `error_estimate`. A false here means the number may be wrong by
+    // tens of dB, which is exactly why it must not be silent.
     Ok(IntegrationResult {
         field,
-        error_estimate,
-        num_evaluations: n_rho * n_phi,
-        converged,
+        error_estimate: mode_error + radial_error,
+        num_evaluations: evaluations,
+        converged: mode_converged && radially_converged && azimuthally_resolved,
     })
 }
 
@@ -868,21 +1033,35 @@ fn radial_points_for(
     let radial_cycle_ceiling = 0.5 * d_lambda;
     let delta = config.feed.position.radial_displacement();
     let axial = (config.feed.position.z - f + config.feed.axial_defocus).abs();
+    // Outside physical-optics scope — see `BEYOND_SCOPE_COMA_CYCLE_CAP`. Same predicate
+    // `mode_count_for` uses for the φ' ceiling, so the two axes agree on where scope ends.
+    let beyond_po_scope = delta / f > crate::model::edge_cases::SEVERE_OFFSET_THRESHOLD;
 
-    // In the large-steering regime (δ/f above the threshold — a strongly steered or
-    // metres-steered feed) the coma radial oscillation is capped for performance:
-    // resolving it exactly would need thousands of radial × azimuthal samples per point
-    // and blow the latency budget, and the exact off-axis level is not PO-trustworthy
-    // there anyway. Physical offset feeds (δ/f ≪ threshold, every served feed) keep the
-    // full physical resolution up to the D/(2λ) ceiling.
-    let coma_cap = if delta / f > MODE_STEERING_RATIO {
-        MODE_RADIAL_CYCLE_CAP.min(radial_cycle_ceiling)
+    // Coma radial content, bounded by the physical `D/(2λ)` ceiling — and, past the model's
+    // own PO scope boundary, by an effort cap.
+    //
+    // A former `MODE_RADIAL_CYCLE_CAP` clamped this to 8 cycles for `δ/f > 0.05`. That
+    // threshold was wrong for the same reason its φ' sibling's was: it caught ordinary
+    // beam-steering. On a 34 m dish with δ/f = 0.0875 (a routine ~5° steer) at θ=0 the true
+    // content is 41.9 cycles, and capping made the answer *both* worse and more expensive —
+    // the budget asked for 8, so `n_rho` started at 33 and four doublings (997 radial units)
+    // still ended 0.34 dB short with an honest `converged = false`, where starting at the
+    // physics' 169 converges on the first check for 506 units. Starting a refinement loop
+    // below the physics saves nothing: every wasted leg is discarded.
+    //
+    // Past `SEVERE_OFFSET_THRESHOLD` the calculus inverts. There the feed is outside PO
+    // scope, the caller already has `SevereFeedOffset`/`RayTraceDegraded`, and this integral
+    // is only the ray-tracing stub's normalization anchor — so converging its radial axis is
+    // effort spent on a number the model has disclaimed. The cap returns, keyed to that
+    // boundary rather than 0.05, and it is not silent: the N-vs-2N check P12 added reports
+    // `converged = false` when the clamp costs accuracy.
+    let coma_effort_cap = if beyond_po_scope {
+        BEYOND_SCOPE_COMA_CYCLE_CAP.min(radial_cycle_ceiling)
     } else {
         radial_cycle_ceiling
     };
-
     let kernel_cycles = d_lambda * theta.sin().abs();
-    let coma_cycles = ((delta / wavelength) * r_over_f).min(coma_cap);
+    let coma_cycles = ((delta / wavelength) * r_over_f).min(coma_effort_cap);
     let defocus_cycles = ((axial / wavelength) * r_over_f * r_over_f).min(radial_cycle_ceiling);
     // Dish-depth chirp k·ρ²/(4f)·(1−cosθ): (R²/(4fλ))·(1−cosθ) cycles across [0,R].
     // Subdominant forward, DOMINANT behind the dish (θ→180°: kernel_cycles→0 while this peaks).
@@ -907,9 +1086,9 @@ fn radial_points_for(
     }
 }
 
-/// Adaptive azimuthal sizing `(m_max, n_phi)` for the coma / asymmetric path (P10 Task 3).
+/// Adaptive azimuthal sizing for the coma / asymmetric path (P10 Task 3).
 ///
-/// Two distinct quantities are derived here:
+/// Three quantities are derived here:
 ///
 /// - **`n_phi`** (φ' DFT sample count) must resolve the azimuthal spectrum of the INPUT
 ///   aperture-plane function `g(ρ,φ')`, whose maximum significant mode `B` is the wider of
@@ -918,23 +1097,52 @@ fn radial_points_for(
 ///   `spread = k·δ·(R/f)` from a lateral feed offset, OR an illumination floor of `6` when
 ///   `asymmetry_factor != 1.0` (an elliptical feed modulates the effective q-factor by
 ///   `cos(2φ')`, so `g` carries m=±2 plus weaker ±4, ±6 harmonics even for a CENTERED feed,
-///   δ=0). We take `n_phi ≈ 2·B` (rounded up to a power of two), floored/capped at
-///   [`MODE_PHI_MIN`] / [`MODE_PHI_MAX`]. Under-sizing `n_phi` aliases high input modes into
-///   `g_0` and is the exact defect that made a heavily-steered feed read far too high
-///   off-axis. Only the pure-symmetric, pure-axial-defocus case (`asymmetry_factor==1.0`
-///   AND no lateral coma) has no azimuthal content and takes the cheap `(1, MODE_PHI_MIN)`
-///   fast path.
+///   δ=0). Under-sizing `n_phi` aliases high input modes into `g_0`. Only the pure-symmetric,
+///   pure-axial-defocus case (`asymmetry_factor==1.0` AND no lateral coma) has no azimuthal
+///   content and takes the cheap `(1, MODE_PHI_MIN)` fast path.
 ///
 /// - **`m_max`** (modes actually summed) need only include modes that survive the
-///   `Jₘ(kρ·sinθ)` kernel: `Jₘ(x) ≈ 0` for `m ≳ x`, so at observation angle θ only
-///   `m ≲ k·R·sinθ` contribute. `m_max = min(1.5·B + 6, k·R·|sinθ| + 6)`, clamped to
-///   [`MODE_M_MAX`] and to `n_phi/2 − 2` (so the `M+1` self-check probe stays alias-free).
-///   At θ=0 only `m=0` survives (`Jₘ(0)=0, m>0`), so `m_max` collapses to the margin and
-///   the sum is cheap even when `n_phi` is large.
+///   `Jₘ(kρ·sinθ)` kernel. `Jₘ(x)` does NOT switch off at `m = x` — it has an Airy-type
+///   turning point there and decays over a width `~x^(1/3)` — so with `x = k·R·|sinθ|`,
+///   `m_max = min(1.5·B + 6, x + 4·x^(1/3) + 6)`, clamped to [`MODE_M_MAX`] and to
+///   `n_phi/2 − 2` (so the `M+1` self-check probe stays alias-free). The `x^(1/3)` term
+///   replaced a flat `+6` on 2026-07-31: the flat margin sat far inside the transition
+///   region for large `x` and cost +0.49 dB at θ=3° on a strongly-comaed feed. At θ=0 only
+///   `m=0` survives (`Jₘ(0)=0, m>0`), so `m_max` collapses to the margin and the sum is
+///   cheap even when `n_phi` is large.
+///
+/// - **`azimuthally_resolved`** — whether the φ' grid actually Nyquist-covers `B`. This is a
+///   THIRD failure axis, invisible to both existing self-checks, and it was silently wrong
+///   until 2026-07-31.
+///
+/// # Why `azimuthally_resolved` exists (and why the two other checks cannot substitute)
+///
+/// A former constant `MODE_PHI_STEERED_MAX` clamped `n_phi` to 64 whenever
+/// `δ/f > MODE_STEERING_RATIO`, documented as safe because "the `M`-vs-`M+1` self-check
+/// honestly reports `converged=false`". **It does not, and cannot.** That check compares
+/// `I(M)` against `I(M+1)`, i.e. it measures mode *truncation* — but φ' under-sampling
+/// corrupts every `gₘ` including the ones being compared, so the difference stays small while
+/// both terms are wrong. At θ=0 it is worse than uninformative: `Jₘ(0) = 0` for `m > 0`, so the
+/// increment is identically zero and the check is trivially satisfied.
+///
+/// Measured on a 3 m dish at 8.4 GHz with `δ/f = 0.4` (true bandwidth `k·δ·(R/f) ≈ 106`), against
+/// the 2D Simpson quadrature — a trustworthy oracle at `D/λ = 84`: at `n_phi = 64` the mode path
+/// converges radially to **+28.67 dB above the oracle** and stays there at ANY radial density,
+/// reporting `converged = true`. At `n_phi ≥ 256` it reproduces the oracle to −0.017 dB. The
+/// cap was a P10-class silent error hiding behind a check that structurally could not see it.
+///
+/// Re-measured on the `coma_aberration_test` geometry — 34 m, `δ/f = 0.0875`, i.e. a **routine
+/// ~5° beam steer**, nowhere near the 0.5f ray-tracing regime — the same clamp was wrong by
+/// **+77 dB at θ=0 and +82 dB at θ=1°**. This was not a graceful degradation for exotic inputs.
+///
+/// Now `n_phi` is sized from the physics — enough to Nyquist-cover `B` — bounded only by
+/// [`MODE_PHI_MAX`], and when that bound binds the caller is
+/// told so instead of being handed a plausible wrong number. Cost is bounded by S3's wall-clock
+/// budget, which is what that budget is for.
 ///
 /// Validated: `spread ≈ 8.8` needs `M ≈ 16`; `dsn_34m` X-band `spread ≈ 33` needs
 /// `M ≈ 46`; a feed steered a full aperture radius off-axis needs `n_phi ≈ 512`.
-fn mode_count_for(config: &AntennaConfiguration, wavelength: f64, theta: f64) -> (u32, usize) {
+fn mode_count_for(config: &AntennaConfiguration, wavelength: f64, theta: f64) -> ModeSizing {
     let k = wavenumber(wavelength);
     let r = config.reflector.diameter / 2.0;
     let delta = config.feed.position.radial_displacement();
@@ -968,35 +1176,86 @@ fn mode_count_for(config: &AntennaConfiguration, wavelength: f64, theta: f64) ->
     // they keep the cheap (1, MODE_PHI_MIN) fast path.
     let bandwidth = coma_bandwidth.max(asym_bandwidth);
     if bandwidth <= 0.0 {
-        return (1, MODE_PHI_MIN);
+        return ModeSizing {
+            m_max: 1,
+            n_phi: MODE_PHI_MIN,
+            azimuthally_resolved: true,
+        };
     }
 
-    // In the ray-tracing regime (δ/f ≫ 1, D-5 stub) cap n_phi low for performance; every
-    // physical offset feed (δ/f ≪ 1) keeps the full MODE_PHI_MAX so its coma spectrum
-    // resolves exactly. (dsn_34m Ka-band, the widest physical spectrum at ~125 modes,
-    // needs n_phi ≈ 512 = MODE_PHI_MAX.)
-    let n_phi_cap = if delta / config.reflector.focal_length > MODE_STEERING_RATIO {
-        MODE_PHI_STEERED_MAX
+    // Modes that survive the Jₘ(kρ·sinθ) kernel at this θ, BEFORE any sampling ceiling. This
+    // is what the geometry needs; the ceilings below are what we can afford.
+    //
+    // `Jₘ(x)` does not switch off at `m = x`; it has an Airy-type turning point there and
+    // decays over a transition region of width `~x^(1/3)`. A flat `+6` margin (what this used
+    // until 2026-07-31) is far inside that region for large `x`, so it truncates live spectrum
+    // whenever `gₘ` is still strong at the kernel cutoff — i.e. exactly on strongly-comaed
+    // feeds. Measured on the 34 m / δ = 1.19 m geometry against an `m = 382` reference:
+    // `+6` cost **+0.103 dB at θ=1°** and **+0.490 dB at θ=3°**, both fully recovered by ~16
+    // more modes. `4·x^(1/3)` covers the measured cases (15 and 22 modes respectively) and
+    // scales the way the transition region does, rather than being a constant fitted to two
+    // points. The `M`-vs-`M+1` self-check — which flagged this correctly, at 14% top-mode
+    // contribution, while the value-level anchors could not see it because they truncated
+    // their references identically — remains the backstop.
+    let kernel_arg = k_r * theta.sin().abs();
+    let m_theta = kernel_arg.ceil() + 4.0 * kernel_arg.cbrt() + 6.0;
+    let m_spectrum = (1.5 * bandwidth).ceil() + 6.0;
+    let m_needed = m_spectrum.min(m_theta).max(1.0);
+
+    // `n_phi` must Nyquist-cover the INPUT bandwidth `B`, or high modes of `g(ρ,φ')` fold down
+    // into the low `gₘ` — including `g₀`, which at θ=0 IS the answer.
+    //
+    // NOT rounded to a power of two: the φ' transform here is a naive O(n_phi·M) DFT, not an
+    // FFT, so nothing requires it — and rounding up doubled the cost of every geometry that
+    // landed just past a boundary (B ≈ 263 asked for 536 and would have been given 1024).
+    // Kept even so the ±m pairs stay symmetric on the grid.
+    let n_phi_needed = ((2.0 * bandwidth).ceil() as usize + 8).next_multiple_of(2);
+
+    // Effort ceiling, keyed to the model's OWN scope boundary. Past
+    // `SEVERE_OFFSET_THRESHOLD` (0.5f) the feed is outside physical-optics scope: the caller
+    // is already told so (`SevereFeedOffset` + `RayTraceDegraded`), gain routes to the
+    // ray-tracing stub, and this aperture integral survives only as that stub's normalization
+    // anchor. Resolving its azimuthal spectrum exactly there is expensive and buys nothing —
+    // a request steering the feed to 3.06f asks for `n_phi ≈ 628` to converge a number the
+    // model has already disclaimed.
+    //
+    // This is the same *shape* as the deleted `MODE_PHI_STEERED_MAX`, and deliberately so, but
+    // it differs on the two things that made that constant a defect: it triggers at the
+    // documented 0.5f scope boundary rather than an arbitrary 0.05 (which caught ordinary
+    // beam-steering — a 5° steer is δ/f = 0.0875 — and was wrong there by up to +82 dB), and
+    // it is NOT silent: `azimuthally_resolved` below goes false, so `converged` does too.
+    let beyond_po_scope =
+        delta / config.reflector.focal_length > crate::model::edge_cases::SEVERE_OFFSET_THRESHOLD;
+    let n_phi_ceiling = if beyond_po_scope {
+        MODE_PHI_MIN
     } else {
         MODE_PHI_MAX
     };
+    let n_phi = n_phi_needed.clamp(MODE_PHI_MIN, n_phi_ceiling);
 
-    // n_phi ≈ 2·B, rounded to a power of two, floored/capped.
-    let n_phi_target = (2.0 * bandwidth).ceil() as usize + 8;
-    let n_phi = n_phi_target
-        .next_power_of_two()
-        .clamp(MODE_PHI_MIN, n_phi_cap);
-
-    // Modes that survive the Jₘ(kρ·sinθ) kernel at this θ.
-    let m_theta = (k_r * theta.sin().abs()).ceil() + 6.0;
-    let m_spectrum = (1.5 * bandwidth).ceil() + 6.0;
+    // The mode sum is separately clamped by the φ' Nyquist (`n_phi/2 − 2`, keeping the `M+1`
+    // probe alias-free) and by MODE_M_MAX. Truncation here is NOT silent: it is exactly what
+    // the `M`-vs-`M+1` self-check measures, so it needs no flag of its own.
     let m_cap = (n_phi / 2).saturating_sub(2) as f64;
-    let m_max = m_spectrum
-        .min(m_theta)
-        .min(m_cap)
-        .min(MODE_M_MAX as f64)
-        .max(1.0) as u32;
-    (m_max, n_phi)
+    let m_max = m_needed.min(m_cap).min(MODE_M_MAX as f64).max(1.0) as u32;
+
+    // Resolved iff the φ' grid covers the input bandwidth. The test is `n_phi ≥ 2·B` — a
+    // straight Nyquist line on `B` — and it is deliberately the *conservative* reading:
+    // `gₘ(ρ) = jᵐ Jₘ(k·δ·ρ/f)` and `Jₘ(a)` decays super-exponentially for `m > a`, while `a`
+    // reaches `B` only at the rim and is further damped by the illumination taper, so real
+    // content dies out somewhat below `B`. Measured on the 34 m / δ=1.19 m coma geometry
+    // (`B = 263`, Nyquist line 527): `n_phi = 512` already reproduces `n_phi = 4096` to
+    // **0.000 dB** at every angle sampled, i.e. this flag would call a converged answer
+    // unresolved. Erring that way is deliberate — a spurious `converged = false` costs a
+    // warning, a spurious `true` costs up to +82 dB (the measured error of the old capped
+    // `n_phi = 64` at this same geometry).
+    let azimuthally_resolved = (n_phi as f64) >= 2.0 * bandwidth;
+
+    ModeSizing {
+        m_max,
+        n_phi,
+        azimuthally_resolved,
+    }
 }
 
 /// Symmetric-aperture (no lateral feed offset) Hankel radial field.
@@ -1184,16 +1443,19 @@ fn azimuthal_mode_field(
     // No deadline in the test oracle path (None never errors); unwrap is test-only.
     azimuthal_mode_field_inner(config, theta, phi, k, n_rho, n_phi_coeff, m_max, None)
         .expect("azimuthal_mode_field_inner with no time budget cannot error")
-        .0
+        .total
 }
 
-/// Azimuthal-mode field, returning `(total, top_contribution)`:
+/// Azimuthal-mode field, returning a [`ModeSweep`] — all three observables the two runtime
+/// self-checks need, from a SINGLE φ' sweep:
 /// - `total` = `I(θ,φ)` summed over all modes `0..=m_max` (both `±m`).
-/// - `top_contribution` = the part of `total` contributed by the top mode `±m_max`.
+/// - `top_mode` = the part of `total` contributed by the top mode `±m_max`, so the caller has
+///   both `I(M+1)` (`total`, calling with `m_max = M+1`) and `I(M) = total − top_mode` without
+///   a second integration — the M-vs-(M+1) azimuthal truncation check (D-6).
+/// - `radial_probe` = the part of `total` contributed by [`RADIAL_PROBE_MODES`], the `N`-density
+///   half of P12's cheap radial pre-gate, likewise free here.
 ///
-/// This lets the caller obtain BOTH `I(M+1)` (`total`, calling with `m_max = M+1`) and
-/// `I(M) = total − top_contribution` from a SINGLE φ' sweep, so the runtime M-vs-(M+1)
-/// convergence self-check (D-6) costs no extra integration. See [`azimuthal_mode_field`].
+/// See [`azimuthal_mode_field`].
 #[allow(clippy::too_many_arguments)]
 fn azimuthal_mode_field_inner(
     config: &AntennaConfiguration,
@@ -1204,7 +1466,7 @@ fn azimuthal_mode_field_inner(
     n_phi_coeff: usize,
     m_max: u32,
     deadline: Option<IntegrationDeadline>,
-) -> ComputationResult<(Complex64, Complex64)> {
+) -> ComputationResult<ModeSweep> {
     let f = config.reflector.focal_length;
     let r_max = config.reflector.diameter / 2.0;
     // Config-derived constants for g(ρ,φ'), computed once (hoisted out of the hot loop).
@@ -1297,9 +1559,15 @@ fn azimuthal_mode_field_inner(
     let scale = h / 3.0;
     // I(θ,φ) = 2π Σ_{m=−M}^{M} (−j)^m e^{jmφ} R_m(θ). Track the top mode's (±m_max)
     // contribution separately so the caller can form I(M) = total − top for the D-6
-    // self-check without a second sweep.
+    // self-check without a second sweep, and the low-mode partial sum separately so the
+    // P12 radial pre-gate has its N-density observable without a second sweep either.
     let mut acc = r_pos[0] * scale; // m = 0: (−j)^0 = 1, e^0 = 1
     let mut top = Complex64::new(0.0, 0.0);
+    let mut probe = if RADIAL_PROBE_MODES.contains(&0) {
+        acc
+    } else {
+        Complex64::new(0.0, 0.0)
+    };
     for m in 1..=mmax {
         let mf = m as f64;
         let epos = Complex64::new(0.0, mf * phi).exp();
@@ -1307,11 +1575,111 @@ fn azimuthal_mode_field_inner(
         let contrib = pow_neg_j(m as i32) * epos * r_pos[m] * scale
             + pow_neg_j(-(m as i32)) * eneg * r_neg[m] * scale;
         acc += contrib;
+        if RADIAL_PROBE_MODES.contains(&(m as u32)) {
+            probe += contrib;
+        }
         if m == mmax {
             top = contrib;
         }
     }
-    Ok((acc * 2.0 * PI, top * 2.0 * PI))
+    Ok(ModeSweep {
+        total: acc * 2.0 * PI,
+        top_mode: top * 2.0 * PI,
+        radial_probe: probe * 2.0 * PI,
+    })
+}
+
+/// The `Σ_{m ∈ RADIAL_PROBE_MODES}` partial sum on its own, at an arbitrary radial density.
+///
+/// This is the **cheap leg** of P12's radial pre-gate: it repeats only the low modes at `2N`
+/// so their movement can be compared against the same modes' movement inside the `N` sweep
+/// ([`ModeSweep::radial_probe`]).
+///
+/// It is NOT proportionally cheap. The φ' sweep must still evaluate [`aperture_plane_g`] at
+/// every `(ρ, φ')` point regardless of how few modes are wanted, so this costs a floor of
+/// ~18% of a full sweep at `m_max ≈ 195` (`dsn_34m` Ka) but ~52–62% at `m_max ≈ 12–20`. That
+/// is precisely why [`use_radial_pre_gate`] only reaches for it on geometries where a full
+/// check leg is expensive.
+fn radial_probe_field(
+    config: &AntennaConfiguration,
+    theta: f64,
+    phi: f64,
+    k: f64,
+    n_rho: usize,
+    n_phi_coeff: usize,
+    deadline: Option<IntegrationDeadline>,
+) -> ComputationResult<Complex64> {
+    let f = config.reflector.focal_length;
+    let r_max = config.reflector.diameter / 2.0;
+    let apc = AperturePlaneConst::new(config);
+    let n = if n_rho.is_multiple_of(2) {
+        n_rho + 1
+    } else {
+        n_rho
+    };
+    let h = r_max / (n - 1) as f64;
+    let dphi = 2.0 * PI / n_phi_coeff as f64;
+    let sin_theta = theta.sin();
+    let one_minus_cos = 1.0 - theta.cos();
+
+    const P: usize = RADIAL_PROBE_MODES.len();
+    let mut r_pos = [Complex64::new(0.0, 0.0); P];
+    let mut r_neg = [Complex64::new(0.0, 0.0); P];
+
+    for i in 0..n {
+        if i % BUDGET_CHECK_STRIDE == 0 {
+            if let Some(dl) = deadline {
+                dl.check("radial_probe_field")?;
+            }
+        }
+        let rho = i as f64 * h;
+        let w = simpson_weight(i, n);
+        let chirp = k * rho * rho / (4.0 * f) * one_minus_cos;
+        let chirp_factor = Complex64::new(0.0, chirp).exp();
+        let a = k * rho * sin_theta;
+
+        let mut gm_pos = [Complex64::new(0.0, 0.0); P];
+        let mut gm_neg = [Complex64::new(0.0, 0.0); P];
+        for jj in 0..n_phi_coeff {
+            let phip = jj as f64 * dphi;
+            let g = aperture_plane_g(&apc, rho, phip, k);
+            for (idx, &m) in RADIAL_PROBE_MODES.iter().enumerate() {
+                let t = Complex64::new(0.0, -(m as f64) * jj as f64 * dphi).exp();
+                gm_pos[idx] += g * t;
+                gm_neg[idx] += g * t.conj();
+            }
+        }
+        let norm = dphi / (2.0 * PI);
+        for idx in 0..P {
+            gm_pos[idx] *= norm;
+            gm_neg[idx] *= norm;
+        }
+
+        for (idx, &m) in RADIAL_PROBE_MODES.iter().enumerate() {
+            let jm = bessel_jn(m, a);
+            let base = chirp_factor * jm * rho * w;
+            r_pos[idx] += base * gm_pos[idx];
+            if m > 0 {
+                let sign = if m % 2 == 0 { 1.0 } else { -1.0 };
+                r_neg[idx] += base * gm_neg[idx] * sign;
+            }
+        }
+    }
+
+    let scale = h / 3.0;
+    let mut acc = Complex64::new(0.0, 0.0);
+    for (idx, &m) in RADIAL_PROBE_MODES.iter().enumerate() {
+        if m == 0 {
+            acc += r_pos[idx] * scale;
+        } else {
+            let mf = m as f64;
+            let epos = Complex64::new(0.0, mf * phi).exp();
+            let eneg = Complex64::new(0.0, -mf * phi).exp();
+            acc += pow_neg_j(m as i32) * epos * r_pos[idx] * scale
+                + pow_neg_j(-(m as i32)) * eneg * r_neg[idx] * scale;
+        }
+    }
+    Ok(acc * 2.0 * PI)
 }
 
 /// Simpson's rule weight for index i in array of n points
@@ -1781,7 +2149,9 @@ mod tests {
         let f_hz = 8.4e9;
         let wl = wavelength_from_frequency(f_hz);
         for deg in [0.0_f64, 1.0, 5.0, 20.0, 90.0] {
-            let (m, n_phi) = mode_count_for(&config, wl, deg.to_radians());
+            let ModeSizing {
+                m_max: m, n_phi, ..
+            } = mode_count_for(&config, wl, deg.to_radians());
             println!("dsn_34m x-band θ={deg:>4}°: adaptive M={m} n_phi={n_phi}");
         }
 
@@ -1918,7 +2288,7 @@ mod tests {
         hi.max_rho_points = 513;
         hi.max_phi_points = 1025;
         let ref_field = integrate_2d_simpson_public_shim(theta, 0.0, &config, f_hz, &hi);
-        let (m_max, n_phi) = mode_count_for(&config, wl, theta);
+        let ModeSizing { m_max, n_phi, .. } = mode_count_for(&config, wl, theta);
         assert!(
             m_max >= 6,
             "asym illumination must resolve at least ~m=6, got M={m_max}"
@@ -2330,5 +2700,1558 @@ mod tests {
             "5 cm axial_defocus must cost >1 dB defocus at 8.4 GHz: \
              focused={g_focused:.2}, defocused={g_defocused:.2}"
         );
+    }
+}
+
+/// P12 task 1 — diagnostic instrument for the azimuthal-mode path's radial quadrature.
+///
+/// Roadmap unit **P12** ("The azimuthal-mode path never checks radial convergence") task 1
+/// requires establishing *why* `radial_points_for`'s ~2× Nyquist budget is insufficient on
+/// the mode path **before** any constant is changed, because a wrong budget formula is a
+/// finding in its own right. These are `#[ignore]`d measurement harnesses, not assertions
+/// about desired behavior — they print, they do not gate. The regression anchors that DO
+/// gate come later, in P12 task 4.
+///
+/// Run with:
+/// ```text
+/// cargo test --release -p antenna-model --lib p12_ -- --ignored --nocapture
+/// ```
+///
+/// This module lives inside `integration.rs` because the quantities under investigation
+/// (`radial_points_for`, `azimuthal_mode_field_inner`, `aperture_plane_g`,
+/// `AperturePlaneConst`) are private to it.
+#[cfg(test)]
+mod p12_radial_diagnostic {
+    use super::*;
+    use crate::model::geometry::{
+        FeedParameters, FeedPosition, MeshParameters, MeshPattern, ReflectorGeometry,
+    };
+
+    /// The **exact** served `gs_3.7m_uncalibrated` / `x_band_feed` geometry, transcribed from
+    /// `calibration_data/antennas.yaml:100-134`: D = 3.7 m, f = 1.85 m (f/D = 0.5),
+    /// surface RMS 1.5 mm, feed q = 2.04 at a 0.05 m lateral (+x) offset with the phase
+    /// centre at the focus, 5 mm / 0.5 mm mesh.
+    ///
+    /// Deliberately NOT `tests::offset_feed_test_antenna`, which is close but not the served
+    /// configuration (q = 2.0, no mesh, ideal surface). P12's measured rows are against the
+    /// real entry, so the diagnostic must be too.
+    fn gs_3_7m_x_band() -> AntennaConfiguration {
+        let reflector = ReflectorGeometry::new(3.7, 1.85, 0.0015).unwrap();
+        let mut pos = FeedPosition::at_focus(1.85);
+        pos.x = 0.05;
+        let feed = FeedParameters::new(pos, 2.04, 0.0, 1.0).unwrap();
+        let mesh = MeshParameters::new(0.005, 0.0005, MeshPattern::Square).unwrap();
+        AntennaConfiguration::new(
+            "gs_3.7m_uncalibrated".into(),
+            "Ground Station 3.7m - Uncalibrated".into(),
+            reflector,
+            feed,
+            Some(mesh),
+        )
+        .unwrap()
+    }
+
+    /// The **exact** served `dsn_34m_uncalibrated` / `x_band` geometry, for the second of
+    /// P12's three measured rows (θ = 0.10°, where the `min_rho_points` floor DOES bind).
+    fn dsn_34m_x_band() -> AntennaConfiguration {
+        let reflector = ReflectorGeometry::new(34.0, 13.6, 0.00025).unwrap();
+        let mut pos = FeedPosition::at_focus(13.6);
+        pos.x = 0.15;
+        // `phase_center_offset_m: 0.015` is a recorded feed property only — P7 auto-refocus
+        // keeps it out of the aperture phase, so it is deliberately not an axial defocus here.
+        let feed = FeedParameters::new(pos, 1.14, 0.015, 1.0).unwrap();
+        AntennaConfiguration::new(
+            "dsn_34m_uncalibrated".into(),
+            "DSN 34m - Uncalibrated".into(),
+            reflector,
+            feed,
+            None,
+        )
+        .unwrap()
+    }
+
+    /// D12's `UHF_Array_Element` calibration fixture (`calibrate/tests/support/mod.rs:98-132`,
+    /// transcribed from `calibrate/antenna_classes.yaml:96-113`): D = 8 m, f/D = 0.45,
+    /// surface RMS 2.0 mm, q = 5.0 feed **at the focus**, 10 mm / 1.0 mm mesh.
+    ///
+    /// This is P12's third measured row, and it is the instructive one: the feed has **no
+    /// lateral offset at all**. It reaches the mode path purely through
+    /// `asymmetry_factor = 1.1`, so its coma cycle budget is exactly zero — which makes it a
+    /// clean check that the defect is not about coma.
+    fn d12_uhf_fixture() -> AntennaConfiguration {
+        let reflector = ReflectorGeometry::new(8.0, 8.0 * 0.45, 0.002).unwrap();
+        let feed = FeedParameters::new(FeedPosition::at_focus(8.0 * 0.45), 5.0, 0.0, 1.1).unwrap();
+        let mesh = MeshParameters::new(0.010, 0.001, MeshPattern::Square).unwrap();
+        AntennaConfiguration::new(
+            "UHF_Array_Element".into(),
+            "UHF phased array element".into(),
+            reflector,
+            feed,
+            Some(mesh),
+        )
+        .unwrap()
+    }
+
+    /// `dsn_34m_uncalibrated` / `ka_band` (`antennas.yaml:221-226`): the same 34 m dish with the
+    /// Ka feed offset 0.15 m along **+y**. This is P10-perf's pathological latency case — the
+    /// widest azimuthal spectrum on any served antenna (~195 modes at 32 GHz) — and therefore
+    /// the geometry that decides what a per-call radial check can afford.
+    fn dsn_34m_ka_band() -> AntennaConfiguration {
+        let reflector = ReflectorGeometry::new(34.0, 13.6, 0.00025).unwrap();
+        let mut pos = FeedPosition::at_focus(13.6);
+        pos.y = 0.15;
+        let feed = FeedParameters::new(pos, 1.14, 0.008, 1.0).unwrap();
+        AntennaConfiguration::new(
+            "dsn_34m_uncalibrated".into(),
+            "DSN 34m - Uncalibrated".into(),
+            reflector,
+            feed,
+            None,
+        )
+        .unwrap()
+    }
+
+    /// Wall-clock of `f`, in milliseconds, as the **minimum** over `reps` runs (min rather than
+    /// mean: we want the cost of the work, not of whatever else the machine was doing).
+    fn time_ms<F: FnMut() -> Complex64>(reps: usize, mut f: F) -> f64 {
+        let mut best = f64::INFINITY;
+        for _ in 0..reps {
+            let t = Instant::now();
+            let v = f();
+            std::hint::black_box(v);
+            best = best.min(t.elapsed().as_secs_f64() * 1e3);
+        }
+        best
+    }
+
+    /// `radial_points_for`'s cycle budget, broken into the four terms it sums, so the
+    /// measured radial content can be attributed term by term. Mirrors `:884-893` exactly.
+    struct CycleBudget {
+        kernel: f64,
+        coma: f64,
+        defocus: f64,
+        chirp: f64,
+        total: f64,
+        n_rho: usize,
+    }
+
+    fn cycle_budget(
+        config: &AntennaConfiguration,
+        theta: f64,
+        wavelength: f64,
+        params: &IntegrationParams,
+    ) -> CycleBudget {
+        let d_lambda = config.reflector.diameter / wavelength;
+        let r = config.reflector.diameter / 2.0;
+        let f = config.reflector.focal_length;
+        let r_over_f = r / f;
+        let radial_cycle_ceiling = 0.5 * d_lambda;
+        let delta = config.feed.position.radial_displacement();
+        let axial = (config.feed.position.z - f + config.feed.axial_defocus).abs();
+        let kernel = d_lambda * theta.sin().abs();
+        let coma_effort_cap = if delta / f > crate::model::edge_cases::SEVERE_OFFSET_THRESHOLD {
+            BEYOND_SCOPE_COMA_CYCLE_CAP.min(radial_cycle_ceiling)
+        } else {
+            radial_cycle_ceiling
+        };
+        let coma = ((delta / wavelength) * r_over_f).min(coma_effort_cap);
+        let defocus = ((axial / wavelength) * r_over_f * r_over_f).min(radial_cycle_ceiling);
+        let chirp = r * r / (4.0 * f * wavelength) * (1.0 - theta.cos());
+        CycleBudget {
+            kernel,
+            coma,
+            defocus,
+            chirp,
+            total: kernel + coma + defocus + chirp,
+            n_rho: radial_points_for(config, theta, wavelength, params),
+        }
+    }
+
+    /// Per-mode radial contributions to `I(θ,φ)`, i.e. the `m`-th term of
+    /// `I = 2π Σ_m (−j)^m e^{jmφ} R_m(θ)` with the `±m` pair combined, for `m = 0..=m_max`.
+    ///
+    /// This replicates `azimuthal_mode_field_inner`'s math line for line rather than calling
+    /// it, because that function deliberately exposes only the total and the top mode. The
+    /// replication is **self-validated** by `per_mode_decomposition_reproduces_the_integrator`
+    /// below: the sum of what this returns must equal `azimuthal_mode_field_inner`'s total to
+    /// round-off. If that test fails, every number this module prints is suspect.
+    fn per_mode_contributions(
+        config: &AntennaConfiguration,
+        theta: f64,
+        phi: f64,
+        k: f64,
+        n_rho: usize,
+        n_phi_coeff: usize,
+        m_max: u32,
+    ) -> Vec<Complex64> {
+        let f = config.reflector.focal_length;
+        let r_max = config.reflector.diameter / 2.0;
+        let apc = AperturePlaneConst::new(config);
+        let n = if n_rho.is_multiple_of(2) {
+            n_rho + 1
+        } else {
+            n_rho
+        };
+        let h = r_max / (n - 1) as f64;
+        let dphi = 2.0 * PI / n_phi_coeff as f64;
+        let sin_theta = theta.sin();
+        let one_minus_cos = 1.0 - theta.cos();
+        let mmax = m_max as usize;
+
+        let mut r_pos = vec![Complex64::new(0.0, 0.0); mmax + 1];
+        let mut r_neg = vec![Complex64::new(0.0, 0.0); mmax + 1];
+
+        for i in 0..n {
+            let rho = i as f64 * h;
+            let w = simpson_weight(i, n);
+            let chirp = k * rho * rho / (4.0 * f) * one_minus_cos;
+            let chirp_factor = Complex64::new(0.0, chirp).exp();
+            let a = k * rho * sin_theta;
+
+            let mut gm_pos = vec![Complex64::new(0.0, 0.0); mmax + 1];
+            let mut gm_neg = vec![Complex64::new(0.0, 0.0); mmax + 1];
+            for jj in 0..n_phi_coeff {
+                let phip = jj as f64 * dphi;
+                let g = aperture_plane_g(&apc, rho, phip, k);
+                for m in 0..=mmax {
+                    let t = Complex64::new(0.0, -(m as f64) * jj as f64 * dphi).exp();
+                    gm_pos[m] += g * t;
+                    gm_neg[m] += g * t.conj();
+                }
+            }
+            let norm = dphi / (2.0 * PI);
+            for m in 0..=mmax {
+                gm_pos[m] *= norm;
+                gm_neg[m] *= norm;
+            }
+
+            for (m, (rp, rn)) in r_pos.iter_mut().zip(r_neg.iter_mut()).enumerate() {
+                let jm = bessel_jn(m as u32, a);
+                let base = chirp_factor * jm * rho * w;
+                *rp += base * gm_pos[m];
+                if m > 0 {
+                    let sign = if m % 2 == 0 { 1.0 } else { -1.0 };
+                    *rn += base * gm_neg[m] * sign;
+                }
+            }
+        }
+
+        let scale = h / 3.0;
+        let mut out = vec![Complex64::new(0.0, 0.0); mmax + 1];
+        out[0] = r_pos[0] * scale * 2.0 * PI;
+        for m in 1..=mmax {
+            let mf = m as f64;
+            let epos = Complex64::new(0.0, mf * phi).exp();
+            let eneg = Complex64::new(0.0, -mf * phi).exp();
+            out[m] = (pow_neg_j(m as i32) * epos * r_pos[m] * scale
+                + pow_neg_j(-(m as i32)) * eneg * r_neg[m] * scale)
+                * 2.0
+                * PI;
+        }
+        out
+    }
+
+    /// The mode-`m` radial integrand `F_m(ρ) = exp(j·k·ρ²/(4f)·(1−cosθ)) · g_m(ρ) · J_m(kρ sinθ) · ρ`
+    /// — i.e. everything inside `∫₀^R … dρ`, sampled on a uniform grid of `n` points over
+    /// `[0, R]`. This is the function the Simpson rule actually has to resolve, and the
+    /// function whose radial bandwidth `radial_points_for` is trying to predict.
+    fn radial_integrand_samples(
+        config: &AntennaConfiguration,
+        theta: f64,
+        k: f64,
+        m: u32,
+        n_phi_coeff: usize,
+        n: usize,
+    ) -> Vec<Complex64> {
+        let f = config.reflector.focal_length;
+        let r_max = config.reflector.diameter / 2.0;
+        let apc = AperturePlaneConst::new(config);
+        let dphi = 2.0 * PI / n_phi_coeff as f64;
+        let sin_theta = theta.sin();
+        let one_minus_cos = 1.0 - theta.cos();
+        let h = r_max / (n - 1) as f64;
+
+        (0..n)
+            .map(|i| {
+                let rho = i as f64 * h;
+                let mut gm = Complex64::new(0.0, 0.0);
+                for jj in 0..n_phi_coeff {
+                    let phip = jj as f64 * dphi;
+                    let t = Complex64::new(0.0, -(m as f64) * jj as f64 * dphi).exp();
+                    gm += aperture_plane_g(&apc, rho, phip, k) * t;
+                }
+                gm *= dphi / (2.0 * PI);
+                let chirp = k * rho * rho / (4.0 * f) * one_minus_cos;
+                let chirp_factor = Complex64::new(0.0, chirp).exp();
+                chirp_factor * gm * bessel_jn(m, k * rho * sin_theta) * rho
+            })
+            .collect()
+    }
+
+    /// Hann-windowed magnitude spectrum of a complex sequence, evaluated at integer
+    /// frequencies `0..=f_max` **cycles across the whole `[0, R]` span** (both signs of
+    /// frequency folded together, since a complex signal's ± content is independent).
+    ///
+    /// The Hann window is what makes the answer trustworthy: `F_m(ρ)` is not periodic on
+    /// `[0, R]` (the illumination taper leaves ≈ −11 dB of amplitude at the rim), so a bare
+    /// DFT would smear endpoint discontinuity across the whole band and manufacture
+    /// "bandwidth" that is an artifact of the transform, not a property of the integrand.
+    fn windowed_spectrum(samples: &[Complex64], f_max: usize) -> Vec<f64> {
+        let n = samples.len();
+        let windowed: Vec<Complex64> = samples
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let w = 0.5 * (1.0 - (2.0 * PI * i as f64 / (n - 1) as f64).cos());
+                s * w
+            })
+            .collect();
+        (0..=f_max)
+            .map(|freq| {
+                let mut pos = Complex64::new(0.0, 0.0);
+                let mut neg = Complex64::new(0.0, 0.0);
+                for (i, s) in windowed.iter().enumerate() {
+                    let ang = 2.0 * PI * freq as f64 * i as f64 / n as f64;
+                    pos += s * Complex64::new(0.0, -ang).exp();
+                    neg += s * Complex64::new(0.0, ang).exp();
+                }
+                (pos.norm_sqr() + if freq == 0 { 0.0 } else { neg.norm_sqr() }).sqrt()
+            })
+            .collect()
+    }
+
+    /// Lowest frequency (in cycles across `[0, R]`) below which `fraction` of the spectrum's
+    /// total energy lies.
+    fn bandwidth_containing(spectrum: &[f64], fraction: f64) -> usize {
+        let total: f64 = spectrum.iter().map(|s| s * s).sum();
+        let mut acc = 0.0;
+        for (i, s) in spectrum.iter().enumerate() {
+            acc += s * s;
+            if acc >= fraction * total {
+                return i;
+            }
+        }
+        spectrum.len() - 1
+    }
+
+    /// `Σ_{m∈modes} (−j)^m e^{jmφ} R_m(θ)·2π` at an explicit radial density — the mode sum
+    /// restricted to a chosen subset, which is what D-A option (ii) would recompute at 2N.
+    ///
+    /// The cost structure this exposes is the whole point of pricing D-A: the φ' sweep
+    /// evaluates `aperture_plane_g` at `n_rho × n_phi` points **regardless of how few modes are
+    /// requested**, while only the inner accumulation scales with the subset size. A subset
+    /// check is therefore NOT proportional to `|subset| / m_max` — it is floored by the
+    /// g-evaluation, and how binding that floor is depends entirely on the geometry.
+    fn mode_subset_field(
+        config: &AntennaConfiguration,
+        theta: f64,
+        phi: f64,
+        k: f64,
+        n_rho: usize,
+        n_phi_coeff: usize,
+        modes: &[u32],
+    ) -> Complex64 {
+        let f = config.reflector.focal_length;
+        let r_max = config.reflector.diameter / 2.0;
+        let apc = AperturePlaneConst::new(config);
+        let n = if n_rho.is_multiple_of(2) {
+            n_rho + 1
+        } else {
+            n_rho
+        };
+        let h = r_max / (n - 1) as f64;
+        let dphi = 2.0 * PI / n_phi_coeff as f64;
+        let sin_theta = theta.sin();
+        let one_minus_cos = 1.0 - theta.cos();
+
+        let mut r_pos = vec![Complex64::new(0.0, 0.0); modes.len()];
+        let mut r_neg = vec![Complex64::new(0.0, 0.0); modes.len()];
+        let mut gm_pos = vec![Complex64::new(0.0, 0.0); modes.len()];
+        let mut gm_neg = vec![Complex64::new(0.0, 0.0); modes.len()];
+
+        for i in 0..n {
+            let rho = i as f64 * h;
+            let w = simpson_weight(i, n);
+            let chirp = k * rho * rho / (4.0 * f) * one_minus_cos;
+            let chirp_factor = Complex64::new(0.0, chirp).exp();
+            let a = k * rho * sin_theta;
+
+            for g in gm_pos.iter_mut() {
+                *g = Complex64::new(0.0, 0.0);
+            }
+            for g in gm_neg.iter_mut() {
+                *g = Complex64::new(0.0, 0.0);
+            }
+            for jj in 0..n_phi_coeff {
+                let phip = jj as f64 * dphi;
+                let g = aperture_plane_g(&apc, rho, phip, k);
+                for (idx, &m) in modes.iter().enumerate() {
+                    let t = Complex64::new(0.0, -(m as f64) * jj as f64 * dphi).exp();
+                    gm_pos[idx] += g * t;
+                    gm_neg[idx] += g * t.conj();
+                }
+            }
+            let norm = dphi / (2.0 * PI);
+            for idx in 0..modes.len() {
+                gm_pos[idx] *= norm;
+                gm_neg[idx] *= norm;
+            }
+
+            for (idx, &m) in modes.iter().enumerate() {
+                let jm = bessel_jn(m, a);
+                let base = chirp_factor * jm * rho * w;
+                r_pos[idx] += base * gm_pos[idx];
+                if m > 0 {
+                    let sign = if m % 2 == 0 { 1.0 } else { -1.0 };
+                    r_neg[idx] += base * gm_neg[idx] * sign;
+                }
+            }
+        }
+
+        let scale = h / 3.0;
+        let mut acc = Complex64::new(0.0, 0.0);
+        for (idx, &m) in modes.iter().enumerate() {
+            if m == 0 {
+                acc += r_pos[idx] * scale;
+            } else {
+                let mf = m as f64;
+                let epos = Complex64::new(0.0, mf * phi).exp();
+                let eneg = Complex64::new(0.0, -mf * phi).exp();
+                acc += pow_neg_j(m as i32) * epos * r_pos[idx] * scale
+                    + pow_neg_j(-(m as i32)) * eneg * r_neg[idx] * scale;
+            }
+        }
+        acc * 2.0 * PI
+    }
+
+    /// Mode field at an explicitly chosen radial density, bypassing `radial_points_for`.
+    fn mode_field_at(
+        config: &AntennaConfiguration,
+        theta: f64,
+        phi: f64,
+        k: f64,
+        n_rho: usize,
+        n_phi: usize,
+        m_max: u32,
+    ) -> Complex64 {
+        azimuthal_mode_field_inner(config, theta, phi, k, n_rho, n_phi, m_max, None)
+            .expect("no deadline")
+            .total
+    }
+
+    /// **Load-bearing consistency gate for P12's radial pre-gate.**
+    ///
+    /// The pre-gate compares `ModeSweep::radial_probe` (accumulated inside the full sweep) at
+    /// `N` against [`radial_probe_field`] (a separate, standalone implementation) at `2N`. Those
+    /// are two independently written code paths, and the comparison is only meaningful if they
+    /// compute the *same* quantity. If they ever drift, the pre-gate would be differencing two
+    /// different functions and could certify an arbitrarily wrong answer as converged — a
+    /// silent-wrong-number failure of exactly the kind P12 exists to remove.
+    ///
+    /// Not `#[ignore]`d: this must fail loudly in CI.
+    #[test]
+    fn radial_probe_field_matches_the_full_sweeps_probe_accumulation() {
+        let k_of = |f: f64| wavenumber(wavelength_from_frequency(f));
+        let cases: Vec<(&str, AntennaConfiguration, f64, f64, f64)> = vec![
+            ("gs_3.7m", gs_3_7m_x_band(), 8.4e9, 5.0_f64, 0.0_f64),
+            ("dsn_34m X", dsn_34m_x_band(), 8.45e9, 0.10, 0.0),
+            // Asymmetric-illumination door into the mode path (feed at focus, δ = 0).
+            ("D12 UHF", d12_uhf_fixture(), 600.0e6, 16.0, 90.0),
+            // φ ≠ 0 matters: the probe carries the m=1 term's e^{±jφ} factors.
+            ("gs_3.7m φ=37°", gs_3_7m_x_band(), 8.4e9, 3.0, 37.0),
+        ];
+        for (name, config, freq, theta_deg, phi_deg) in cases {
+            let lambda = wavelength_from_frequency(freq);
+            let k = k_of(freq);
+            let theta = theta_deg.to_radians();
+            let phi = phi_deg.to_radians();
+            let ModeSizing { m_max, n_phi, .. } = mode_count_for(&config, lambda, theta);
+            let n_rho = 129;
+
+            let sweep =
+                azimuthal_mode_field_inner(&config, theta, phi, k, n_rho, n_phi, m_max + 1, None)
+                    .expect("sweep");
+            let standalone =
+                radial_probe_field(&config, theta, phi, k, n_rho, n_phi, None).expect("probe");
+
+            let rel = (sweep.radial_probe - standalone).norm()
+                / sweep.radial_probe.norm().max(f64::MIN_POSITIVE);
+            assert!(
+                rel < 1e-12,
+                "{name}: radial_probe_field disagrees with the full sweep's probe accumulation \
+                 (rel={rel:.3e}); the P12 pre-gate would be differencing two different functions"
+            );
+        }
+    }
+
+    /// **φ'-axis sufficiency gate.** `mode_count_for` now sizes `n_phi` from the aperture
+    /// function's azimuthal bandwidth and asserts `azimuthally_resolved`; this checks that the
+    /// claim is true, by comparing the served sizing against a 4× denser φ' grid on every
+    /// served geometry plus the steered case that exposed the old cap.
+    ///
+    /// Not `#[ignore]`d. It is the only automatic guard on this axis: the radial N-vs-2N check
+    /// and the `M`-vs-`M+1` truncation check both operate on `gₘ` coefficients that φ'
+    /// aliasing has already corrupted, so neither can see it — which is exactly how a +82 dB
+    /// error survived with `converged = true`.
+    ///
+    /// It also guards the 2026-07-31 change that stopped rounding `n_phi` up to a power of two:
+    /// that halved `n_phi` on `dsn_34m` X-band (128 → 76) and Ka (512 → 260), and "still ≥ 2B"
+    /// is an argument, not a measurement.
+    #[test]
+    fn served_n_phi_sizing_is_sufficient_on_every_asymmetric_geometry() {
+        let cases: Vec<(&str, AntennaConfiguration, f64, Vec<f64>)> = vec![
+            (
+                "gs_3.7m X",
+                gs_3_7m_x_band(),
+                8.4e9,
+                vec![0.0, 1.0, 5.0, 20.0],
+            ),
+            (
+                "dsn_34m X",
+                dsn_34m_x_band(),
+                8.45e9,
+                vec![0.0, 0.1, 1.0, 5.0],
+            ),
+            ("dsn_34m Ka", dsn_34m_ka_band(), 32.0e9, vec![0.0, 0.5, 2.0]),
+            ("D12 UHF", d12_uhf_fixture(), 600.0e6, vec![0.0, 5.0, 16.0]),
+            (
+                // δ/f = 0.0875 — a routine ~5° beam steer, and the geometry the former
+                // MODE_PHI_STEERED_MAX clamp was wrong by up to +82 dB on.
+                "steered coma 34 m",
+                {
+                    let reflector = ReflectorGeometry::new(34.0, 13.6, 0.0).unwrap();
+                    let feed =
+                        FeedParameters::new(FeedPosition::new(1.19, 0.0, 13.6), 10.0, 0.0, 1.0)
+                            .unwrap();
+                    AntennaConfiguration::new("c".into(), "c".into(), reflector, feed, None)
+                        .unwrap()
+                },
+                8450.0e6,
+                vec![0.0, 1.0, 3.0],
+            ),
+        ];
+
+        for (name, config, freq, angles) in cases {
+            let lambda = wavelength_from_frequency(freq);
+            let k = wavenumber(lambda);
+            for theta_deg in angles {
+                let theta = theta_deg.to_radians();
+                let sizing = mode_count_for(&config, lambda, theta);
+                // Radial density held FIXED on both sides so only the φ' axis varies. It
+                // deliberately does NOT need to be converged: this compares two computations
+                // that share it, so radial error cancels in the ratio. Keeping it modest is
+                // what makes this affordable in the DEBUG build `scripts/check.sh` uses.
+                let n_rho = 257;
+                let served =
+                    azimuthal_mode_field(&config, theta, 0.0, k, n_rho, sizing.n_phi, sizing.m_max);
+                // 2× is enough to expose aliasing: φ' under-sampling fails
+                // catastrophically (tens of dB), never marginally.
+                let denser = azimuthal_mode_field(
+                    &config,
+                    theta,
+                    0.0,
+                    k,
+                    n_rho,
+                    sizing.n_phi * 2,
+                    sizing.m_max,
+                );
+                let d_db = 20.0 * (served.norm() / denser.norm()).log10();
+                assert!(
+                    sizing.azimuthally_resolved,
+                    "{name} θ={theta_deg}°: sizing reports azimuthally_resolved=false \
+                     (n_phi={}) — a served geometry must be resolvable",
+                    sizing.n_phi
+                );
+                assert!(
+                    d_db.abs() < 0.01,
+                    "{name} θ={theta_deg}°: served n_phi={} differs from 2× denser by \
+                     {d_db:+.4} dB — the φ' sizing is insufficient and nothing else would \
+                     catch it",
+                    sizing.n_phi
+                );
+            }
+        }
+    }
+
+    /// Gate on the replica: the per-mode decomposition must reconstruct the integrator's own
+    /// total. Not `#[ignore]`d — if this drifts, the diagnostic is lying and should fail loudly.
+    #[test]
+    fn per_mode_decomposition_reproduces_the_integrator() {
+        let config = gs_3_7m_x_band();
+        let freq = 8.4e9;
+        let k = wavenumber(wavelength_from_frequency(freq));
+        let theta = 5.0_f64.to_radians();
+        let ModeSizing { m_max, n_phi, .. } =
+            mode_count_for(&config, wavelength_from_frequency(freq), theta);
+        let n_rho = 129;
+
+        let modes = per_mode_contributions(&config, theta, 0.0, k, n_rho, n_phi, m_max);
+        let summed: Complex64 = modes.iter().sum();
+        let direct = mode_field_at(&config, theta, 0.0, k, n_rho, n_phi, m_max);
+
+        let rel = (summed - direct).norm() / direct.norm();
+        assert!(
+            rel < 1e-12,
+            "per-mode replica must reproduce azimuthal_mode_field_inner: rel={rel:.3e} \
+             (replica={summed:?}, direct={direct:?})"
+        );
+    }
+
+    /// **P12 task 1, part A** — where does the 0.82 dB live, mode by mode, and how does the
+    /// error fall as radial density rises?
+    #[test]
+    #[ignore = "diagnostic: prints measurements, asserts nothing"]
+    fn p12_per_mode_radial_convergence_ladder() {
+        for (name, config, freq, theta_deg, phi_deg) in [
+            (
+                "gs_3.7m/x_band_feed",
+                gs_3_7m_x_band(),
+                8.4e9,
+                5.0_f64,
+                0.0_f64,
+            ),
+            ("dsn_34m/x_band", dsn_34m_x_band(), 8.45e9, 0.10, 0.0),
+            ("D12 UHF fixture", d12_uhf_fixture(), 600.0e6, 16.0, 0.0),
+        ] {
+            let lambda = wavelength_from_frequency(freq);
+            let k = wavenumber(lambda);
+            let theta = theta_deg.to_radians();
+            let phi = phi_deg.to_radians();
+            let adaptive = IntegrationParams::adaptive();
+            let b = cycle_budget(&config, theta, lambda, &adaptive);
+            let ModeSizing { m_max, n_phi, .. } = mode_count_for(&config, lambda, theta);
+
+            println!("\n================ {name}  θ={theta_deg}° φ={phi_deg}° ================");
+            println!(
+                "D/λ={:.1}  budget cycles: kernel={:.3} coma={:.3} defocus={:.3} chirp={:.3} \
+                 → total={:.3}",
+                config.reflector.diameter / lambda,
+                b.kernel,
+                b.coma,
+                b.defocus,
+                b.chirp,
+                b.total
+            );
+            println!(
+                "served n_rho={} (adaptive floor={}, 4·cycles={:.1})  m_max={m_max}  n_phi={n_phi}",
+                b.n_rho,
+                adaptive.min_rho_points,
+                4.0 * b.total
+            );
+
+            // Converged reference: far past any plausible budget, same n_phi and m_max so
+            // every delta below is PURELY radial.
+            let reference = mode_field_at(&config, theta, phi, k, 8193, n_phi, m_max);
+            let ref_modes = per_mode_contributions(&config, theta, phi, k, 8193, n_phi, m_max);
+
+            println!("\n  n_rho | pts/cycle |  total field Δ  | per-mode field Δ (dB), m=0,1,2,…");
+            for n_rho in [b.n_rho, 65, 85, 129, 257, 513, 1025, 2049] {
+                let total = mode_field_at(&config, theta, phi, k, n_rho, n_phi, m_max);
+                let d_total = 20.0 * (total.norm() / reference.norm()).log10();
+                let modes = per_mode_contributions(&config, theta, phi, k, n_rho, n_phi, m_max);
+                let per_mode: Vec<String> = modes
+                    .iter()
+                    .zip(ref_modes.iter())
+                    .take(6)
+                    .map(|(a, r)| {
+                        if r.norm() == 0.0 {
+                            "  --  ".to_string()
+                        } else {
+                            format!("{:+6.3}", 20.0 * (a.norm() / r.norm()).log10())
+                        }
+                    })
+                    .collect();
+                println!(
+                    "  {n_rho:5} |   {:6.2}  |  {d_total:+8.4} dB  | {}",
+                    n_rho as f64 / b.total,
+                    per_mode.join(" ")
+                );
+            }
+
+            // Per-mode weight, so a large per-mode dB error on a negligible mode is not
+            // mistaken for the driver of the total.
+            let weights: Vec<String> = ref_modes
+                .iter()
+                .take(6)
+                .map(|r| format!("{:6.3}", r.norm() / reference.norm()))
+                .collect();
+            println!("  |R_m| / |I| (converged), m=0..5:  {}", weights.join(" "));
+        }
+    }
+
+    /// **P12 task 1, part B** — the decisive experiment. Is radial content MISSING from
+    /// `radial_points_for`'s cycle count, or is the count right and the 4-samples-per-cycle
+    /// constant simply too coarse for the accuracy the mode path is expected to deliver?
+    ///
+    /// Measures the true radial bandwidth of each mode's integrand and compares it with the
+    /// budget's predicted cycle count.
+    #[test]
+    #[ignore = "diagnostic: prints measurements, asserts nothing"]
+    fn p12_measured_radial_bandwidth_vs_budget() {
+        let config = gs_3_7m_x_band();
+        let freq = 8.4e9;
+        let lambda = wavelength_from_frequency(freq);
+        let k = wavenumber(lambda);
+        let theta = 5.0_f64.to_radians();
+        let ModeSizing { m_max, n_phi, .. } = mode_count_for(&config, lambda, theta);
+        let b = cycle_budget(&config, theta, lambda, &IntegrationParams::adaptive());
+
+        const N_DENSE: usize = 4096;
+        const F_MAX: usize = 200;
+
+        println!("\n=========== gs_3.7m/x_band_feed θ=5°: measured radial bandwidth ===========");
+        println!(
+            "budget predicts {:.3} cycles across [0,R] (kernel {:.3} + coma {:.3} + \
+             defocus {:.3} + chirp {:.3}); served n_rho={} ⇒ {:.2} samples/cycle",
+            b.total,
+            b.kernel,
+            b.coma,
+            b.defocus,
+            b.chirp,
+            b.n_rho,
+            b.n_rho as f64 / b.total
+        );
+        println!("\n   m | energy share | 99% BW | 99.9% BW | 99.99% BW  (cycles across [0,R])");
+        for m in 0..=m_max.min(5) {
+            let samples = radial_integrand_samples(&config, theta, k, m, n_phi, N_DENSE);
+            let energy: f64 = samples.iter().map(|s| s.norm_sqr()).sum::<f64>().sqrt();
+            let spec = windowed_spectrum(&samples, F_MAX);
+            println!(
+                "  {m:2} |   {energy:10.3e} |  {:5} |   {:5}  |   {:5}",
+                bandwidth_containing(&spec, 0.99),
+                bandwidth_containing(&spec, 0.999),
+                bandwidth_containing(&spec, 0.9999),
+            );
+        }
+    }
+
+    /// **P12 task 1, part C** — the delivered-density asymmetry between the two branches.
+    ///
+    /// Both branches size themselves with the SAME `radial_points_for` budget, but the
+    /// symmetric branch **returns the fine (2N) leg** of its N-vs-2N self-check
+    /// (`:519-523`, `self_check` returns `fine`), while the mode branch returns the budget
+    /// density N directly (`:545-551`). This measures how much of the served error that
+    /// single structural difference accounts for, and asks what the symmetric branch's
+    /// self-check would have reported had it been run on these numbers.
+    #[test]
+    #[ignore = "diagnostic: prints measurements, asserts nothing"]
+    fn p12_delivered_density_asymmetry_between_branches() {
+        for (name, config, freq, theta_deg) in [
+            ("gs_3.7m/x_band_feed", gs_3_7m_x_band(), 8.4e9, 5.0_f64),
+            ("dsn_34m/x_band", dsn_34m_x_band(), 8.45e9, 0.10),
+        ] {
+            let lambda = wavelength_from_frequency(freq);
+            let k = wavenumber(lambda);
+            let theta = theta_deg.to_radians();
+            let params = IntegrationParams::adaptive();
+            let b = cycle_budget(&config, theta, lambda, &params);
+            let ModeSizing { m_max, n_phi, .. } = mode_count_for(&config, lambda, theta);
+
+            let n1 = b.n_rho;
+            let n2 = radial_check_points(n1);
+            let f1 = mode_field_at(&config, theta, 0.0, k, n1, n_phi, m_max);
+            let f2 = mode_field_at(&config, theta, 0.0, k, n2, n_phi, m_max);
+            let reference = mode_field_at(&config, theta, 0.0, k, 8193, n_phi, m_max);
+
+            let (_, err, converged_hankel) = self_check(f1, f2, &params, HANKEL_SELF_CHECK_RTOL);
+            let (_, _, converged_mode) = self_check(f1, f2, &params, MODE_SELF_CHECK_RTOL);
+
+            println!("\n================ {name}  θ={theta_deg}° ================");
+            println!(
+                "  served (mode path returns N)      n={n1:5}: {:+8.4} dB vs converged",
+                20.0 * (f1.norm() / reference.norm()).log10()
+            );
+            println!(
+                "  what a 2N leg would return        n={n2:5}: {:+8.4} dB vs converged",
+                20.0 * (f2.norm() / reference.norm()).log10()
+            );
+            println!(
+                "  hypothetical radial N-vs-2N check: |Δ|/|fine| = {:.4} ⇒ \
+                 converged={converged_hankel} at the 2% radial floor, \
+                 converged={converged_mode} at the 0.5% mode floor",
+                err / f2.norm()
+            );
+        }
+    }
+
+    /// **P12 task 1, part D — the control.** Parts A–C show the mode path's N leg is ~0.8–1.2 dB
+    /// short while its 2N leg is within 0.05 dB. Two hypotheses survive:
+    ///
+    /// 1. **Mode-specific**: the mode sum cancels (per-mode `|R_m|` far exceeds `|I|`), so a
+    ///    per-mode quadrature error that is small *relative to that mode* is large relative to
+    ///    the total. The symmetric branch, having only `m = 0`, has no such amplification.
+    /// 2. **Universal**: 4 samples/cycle is simply not enough for the accuracy this integrator
+    ///    claims, on EITHER branch — and the symmetric branch only looks correct because it
+    ///    returns the fine (2N) leg, i.e. it silently runs at 8 samples/cycle.
+    ///
+    /// These imply different fixes, so they must be told apart. The control is the same dish at
+    /// the same θ with the feed moved to the focus (δ = 0), which routes to the symmetric branch
+    /// and reduces the mode sum to a single term. If the symmetric N leg is ALSO ~0.8 dB short,
+    /// hypothesis 2 holds and cancellation is not the driver.
+    #[test]
+    #[ignore = "diagnostic: prints measurements, asserts nothing"]
+    fn p12_symmetric_control_at_the_same_budget() {
+        let mut config = gs_3_7m_x_band();
+        config.feed.position.x = 0.0; // feed at focus ⇒ symmetric branch, single mode
+        let freq = 8.4e9;
+        let lambda = wavelength_from_frequency(freq);
+        let k = wavenumber(lambda);
+        let params = IntegrationParams::adaptive();
+
+        println!("\n===== CONTROL: gs_3.7m with the feed AT FOCUS (symmetric branch) =====");
+        println!(
+            "  θ    | n_rho | pts/cycle | N leg vs converged | 2N leg vs converged | N-vs-2N check"
+        );
+        for theta_deg in [0.5_f64, 2.0, 5.0, 20.0] {
+            let theta = theta_deg.to_radians();
+            let b = cycle_budget(&config, theta, lambda, &params);
+            let n1 = b.n_rho;
+            let n2 = radial_check_points(n1);
+            let f1 = hankel_radial_field(&config, theta, 0.0, k, n1, None).unwrap();
+            let f2 = hankel_radial_field(&config, theta, 0.0, k, n2, None).unwrap();
+            let reference = hankel_radial_field(&config, theta, 0.0, k, 16385, None).unwrap();
+            let (_, err, converged) = self_check(f1, f2, &params, HANKEL_SELF_CHECK_RTOL);
+            println!(
+                "  {theta_deg:4}° | {n1:5} |   {:6.2}  |     {:+8.4} dB    |     {:+8.4} dB     | \
+                 |Δ|/|fine|={:.4} converged={converged}",
+                n1 as f64 / b.total,
+                20.0 * (f1.norm() / reference.norm()).log10(),
+                20.0 * (f2.norm() / reference.norm()).log10(),
+                err / f2.norm(),
+            );
+        }
+    }
+
+    /// **P12 task 1, part E** — the cancellation-amplification measurement.
+    ///
+    /// Quantifies hypothesis 1 of part D directly. For each mode it reports the COMPLEX
+    /// quadrature error `|R_m(N) − R_m(∞)|` normalized by the TOTAL field `|I|`, not by
+    /// `|R_m|`. Magnitude-ratio dB (part A) understates this badly: a mode whose magnitude is
+    /// perfect but whose phase is off by 0.02 rad contributes `0.02·|R_m|` of error, which
+    /// matters enormously when `|R_m|` is 25× `|I|`.
+    ///
+    /// Also reports the cancellation ratio `Σ|R_m| / |I|` — the factor by which a per-mode
+    /// relative error is amplified into a total relative error in the worst case. That factor
+    /// is exactly what `radial_points_for` does not look at.
+    #[test]
+    #[ignore = "diagnostic: prints measurements, asserts nothing"]
+    fn p12_mode_cancellation_amplification() {
+        for (name, config, freq, theta_deg) in [
+            ("gs_3.7m/x_band_feed", gs_3_7m_x_band(), 8.4e9, 5.0_f64),
+            ("dsn_34m/x_band", dsn_34m_x_band(), 8.45e9, 0.10),
+        ] {
+            let lambda = wavelength_from_frequency(freq);
+            let k = wavenumber(lambda);
+            let theta = theta_deg.to_radians();
+            let params = IntegrationParams::adaptive();
+            let b = cycle_budget(&config, theta, lambda, &params);
+            let ModeSizing { m_max, n_phi, .. } = mode_count_for(&config, lambda, theta);
+
+            let ref_modes = per_mode_contributions(&config, theta, 0.0, k, 8193, n_phi, m_max);
+            let served = per_mode_contributions(&config, theta, 0.0, k, b.n_rho, n_phi, m_max);
+            let total: Complex64 = ref_modes.iter().sum();
+            let sum_abs: f64 = ref_modes.iter().map(|r| r.norm()).sum();
+
+            println!(
+                "\n================ {name}  θ={theta_deg}°  n_rho={} ================",
+                b.n_rho
+            );
+            println!(
+                "  |I| = {:.6e};  Σ|R_m| = {:.6e};  cancellation ratio Σ|R_m|/|I| = {:.1}×",
+                total.norm(),
+                sum_abs,
+                sum_abs / total.norm()
+            );
+            println!(
+                "\n    m | |R_m|/|I| | per-mode err |R_m(N)−R_m(∞)| as % of |R_m| | … as % of |I|"
+            );
+            let mut err_sum = 0.0;
+            for m in 0..=m_max as usize {
+                let e = (served[m] - ref_modes[m]).norm();
+                err_sum += e;
+                if m <= 7 {
+                    println!(
+                        "   {m:2} |  {:7.2}  |                       {:8.4} %          |  {:8.3} %",
+                        ref_modes[m].norm() / total.norm(),
+                        100.0 * e / ref_modes[m].norm().max(f64::MIN_POSITIVE),
+                        100.0 * e / total.norm(),
+                    );
+                }
+            }
+            let served_total: Complex64 = served.iter().sum();
+            println!(
+                "  ---\n  Σ per-mode error = {:.3} % of |I|   (worst case if they aligned)\n  \
+                 actual total error = {:.3} % of |I|  ⇒ {:+.4} dB",
+                100.0 * err_sum / total.norm(),
+                100.0 * (served_total - total).norm() / total.norm(),
+                20.0 * (served_total.norm() / total.norm()).log10(),
+            );
+
+            // Which modes a "dominant-mode subset" check (P12 decision D-A option ii) would
+            // select, vs which modes actually carry the error. If these rankings disagree, a
+            // subset check can miss the very error it exists to catch.
+            let mut by_magnitude: Vec<(usize, f64)> = ref_modes
+                .iter()
+                .enumerate()
+                .map(|(m, r)| (m, r.norm()))
+                .collect();
+            by_magnitude.sort_by(|a, b| b.1.total_cmp(&a.1));
+            let mut by_error: Vec<(usize, f64)> = ref_modes
+                .iter()
+                .enumerate()
+                .map(|(m, r)| (m, (served[m] - r).norm()))
+                .collect();
+            by_error.sort_by(|a, b| b.1.total_cmp(&a.1));
+            println!(
+                "  D-A(ii) ranking check — top-5 modes by |R_m|: {:?}\n  \
+                 \x20                      top-5 modes by ERROR: {:?}",
+                by_magnitude.iter().take(5).map(|x| x.0).collect::<Vec<_>>(),
+                by_error.iter().take(5).map(|x| x.0).collect::<Vec<_>>(),
+            );
+        }
+    }
+
+    /// **P12 task 1, part F — the D-B probe.** P12's decision D-B asks whether `adaptive()`'s
+    /// `min_rho_points: 16` is simply wrong against `default()`'s 32, and its recommendation
+    /// rests on the premise that the floor binds and "costs >1 dB there (rows 2 and 3)".
+    ///
+    /// This measures the premise directly: for each of P12's three measured rows it reports the
+    /// `n_rho` the budget asks for, whether the floor is actually binding at 16 / 32 / 64, and
+    /// what each floor delivers.
+    #[test]
+    #[ignore = "diagnostic: prints measurements, asserts nothing"]
+    fn p12_floor_probe_for_decision_d_b() {
+        for (name, config, freq, theta_deg, phi_deg) in [
+            (
+                "gs_3.7m/x_band_feed  ",
+                gs_3_7m_x_band(),
+                8.4e9,
+                5.0_f64,
+                0.0_f64,
+            ),
+            ("dsn_34m/x_band       ", dsn_34m_x_band(), 8.45e9, 0.10, 0.0),
+            // P12's third row does not record φ, and this fixture's pattern is
+            // φ-dependent (asymmetry_factor = 1.1), so measure both principal planes.
+            (
+                "D12 UHF fixture φ=0  ",
+                d12_uhf_fixture(),
+                600.0e6,
+                16.0,
+                0.0,
+            ),
+            (
+                "D12 UHF fixture φ=90 ",
+                d12_uhf_fixture(),
+                600.0e6,
+                16.0,
+                90.0,
+            ),
+        ] {
+            let lambda = wavelength_from_frequency(freq);
+            let k = wavenumber(lambda);
+            let theta = theta_deg.to_radians();
+            let phi = phi_deg.to_radians();
+            let ModeSizing { m_max, n_phi, .. } = mode_count_for(&config, lambda, theta);
+            let reference = mode_field_at(&config, theta, phi, k, 8193, n_phi, m_max);
+
+            let budget_only = cycle_budget(&config, theta, lambda, &IntegrationParams::adaptive());
+            println!(
+                "\n{name} θ={theta_deg}°: budget asks for {:.1} cycles ⇒ 4·cycles = {:.0}",
+                budget_only.total,
+                (4.0 * budget_only.total).ceil()
+            );
+            for floor in [16_usize, 32, 64] {
+                let mut params = IntegrationParams::adaptive();
+                params.min_rho_points = floor;
+                let n = radial_points_for(&config, theta, lambda, &params);
+                let field = mode_field_at(&config, theta, phi, k, n, n_phi, m_max);
+                // The floor binds only when it EXCEEDS what the budget asked for. (`n` can
+                // still exceed `4·cycles` by one from the odd-count adjustment, which is not
+                // the floor binding.)
+                let binding = floor > (4.0 * budget_only.total).ceil() as usize;
+                println!(
+                    "   floor {floor:3} ⇒ n_rho={n:4} (floor binding: {:5}) ⇒ {:+8.4} dB vs converged",
+                    binding,
+                    20.0 * (field.norm() / reference.norm()).log10(),
+                );
+            }
+        }
+    }
+
+    /// The five geometries D-A is priced against: P12's three measured rows plus the two
+    /// `dsn_34m` Ka points that set the cost ceiling (P10-perf's pathological θ=90° case and a
+    /// realistic wide angle). Returns `(label, config, frequency_hz, θ°, φ°, timing reps)`.
+    fn d_a_pricing_geometries() -> Vec<(&'static str, AntennaConfiguration, f64, f64, f64, usize)> {
+        vec![
+            ("gs_3.7m X   θ=5°   ", gs_3_7m_x_band(), 8.4e9, 5.0, 0.0, 20),
+            (
+                "dsn_34m X   θ=0.1° ",
+                dsn_34m_x_band(),
+                8.45e9,
+                0.10,
+                0.0,
+                20,
+            ),
+            (
+                "D12 UHF     θ=16°  ",
+                d12_uhf_fixture(),
+                600.0e6,
+                16.0,
+                0.0,
+                20,
+            ),
+            (
+                "dsn_34m Ka  θ=5°   ",
+                dsn_34m_ka_band(),
+                32.0e9,
+                5.0,
+                0.0,
+                3,
+            ),
+            (
+                "dsn_34m Ka  θ=90°  ",
+                dsn_34m_ka_band(),
+                32.0e9,
+                90.0,
+                0.0,
+                1,
+            ),
+        ]
+    }
+
+    /// **P12 decision D-A — cost.** Wall-clock price of each candidate radial-check design,
+    /// measured rather than counted, because the mode path's cost does NOT decompose the way an
+    /// operation count suggests: the φ' sweep evaluates `aperture_plane_g` at `n_rho × n_phi`
+    /// points independently of the mode count, so a "check only 2 of 195 modes" design is
+    /// floored by the g-evaluation, not proportional to 2/195.
+    ///
+    /// Candidates priced (N = `radial_points_for`, 2N = `radial_check_points(N)`):
+    /// - **baseline** — today: compute at N over all modes, return N, check nothing.
+    /// - **(A) fine-leg only** — compute at 2N, return it, no comparison. Not on P12's option
+    ///   list; task 1 found it captures ~95% of the accuracy gap on its own.
+    /// - **(i) full N-vs-2N** — both legs over all modes, return 2N, compare. The honest option.
+    /// - **(ii-a) subset check, return N** — full N, plus a subset recompute at 2N.
+    /// - **(ii-b) subset check, return 2N** — full 2N (the accurate answer), plus a cheap subset
+    ///   at N purely to detect non-convergence. The sensible form of (ii) given task 1.
+    /// - **(iii) 3N, no runtime check** — validated budget with margin, checked in tests only.
+    #[test]
+    #[ignore = "diagnostic: prints timings, asserts nothing"]
+    fn p12_price_decision_d_a_options() {
+        println!(
+            "\n#### D-A cost. N = radial_points_for; 2N = radial_check_points(N). \
+             Subset = modes {{0,1}}.\n"
+        );
+        for (name, config, freq, theta_deg, phi_deg, reps) in d_a_pricing_geometries() {
+            let lambda = wavelength_from_frequency(freq);
+            let k = wavenumber(lambda);
+            let theta = theta_deg.to_radians();
+            let phi = phi_deg.to_radians();
+            let params = IntegrationParams::adaptive();
+            let n1 = radial_points_for(&config, theta, lambda, &params);
+            let n2 = radial_check_points(n1);
+            let ModeSizing { m_max, n_phi, .. } = mode_count_for(&config, lambda, theta);
+            let subset = [0_u32, 1];
+
+            let t_full_n = time_ms(reps, || {
+                mode_field_at(&config, theta, phi, k, n1, n_phi, m_max)
+            });
+            let t_full_2n = time_ms(reps, || {
+                mode_field_at(&config, theta, phi, k, n2, n_phi, m_max)
+            });
+            let t_sub_n = time_ms(reps, || {
+                mode_subset_field(&config, theta, phi, k, n1, n_phi, &subset)
+            });
+            let t_sub_2n = time_ms(reps, || {
+                mode_subset_field(&config, theta, phi, k, n2, n_phi, &subset)
+            });
+            let t_full_3n = time_ms(reps, || {
+                mode_field_at(&config, theta, phi, k, 3 * n1 / 2 * 2 + 1, n_phi, m_max)
+            });
+
+            println!("=== {name} n_rho={n1} n_phi={n_phi} m_max={m_max} (reps={reps}) ===");
+            println!(
+                "  g-evaluation floor: a 2-mode sweep at N costs {:.2} ms = {:.1}% of the \
+                 full N-mode sweep ({:.2} ms)",
+                t_sub_n,
+                100.0 * t_sub_n / t_full_n,
+                t_full_n
+            );
+            let rows: [(&str, f64); 6] = [
+                ("baseline (return N, no check)", t_full_n),
+                ("(A)    fine leg only, return 2N", t_full_2n),
+                ("(i)    full N-vs-2N, return 2N", t_full_n + t_full_2n),
+                ("(ii-a) subset@2N check, return N", t_full_n + t_sub_2n),
+                ("(ii-b) subset@N check, return 2N", t_full_2n + t_sub_n),
+                ("(iii)  3N, checked in tests only", t_full_3n),
+            ];
+            for (label, ms) in rows {
+                println!("    {label:34}  {ms:10.2} ms   {:5.2}×", ms / t_full_n);
+            }
+            println!();
+        }
+    }
+
+    /// **P12 decision D-A — efficacy.** A cost number for a check that does not fire is
+    /// worthless, so this grades the cheap candidates against the honest one, exactly as P12
+    /// requires ("never ship (ii) without (i) to grade it").
+    ///
+    /// Each candidate produces an error *estimate*; the question is whether that estimate is
+    /// large enough to trip a tolerance when the true error is large. All estimates are
+    /// normalized by the returned field, which is how `self_check` gates.
+    #[test]
+    #[ignore = "diagnostic: prints measurements, asserts nothing"]
+    fn p12_grade_decision_d_a_options() {
+        println!(
+            "\n#### D-A efficacy. `true err` = returned vs converged (n=8193). \
+             Estimates are |Δ|/|returned|, gated at the 2% radial floor.\n"
+        );
+        for (name, config, freq, theta_deg, phi_deg, _) in d_a_pricing_geometries() {
+            let lambda = wavelength_from_frequency(freq);
+            let k = wavenumber(lambda);
+            let theta = theta_deg.to_radians();
+            let phi = phi_deg.to_radians();
+            let params = IntegrationParams::adaptive();
+            let n1 = radial_points_for(&config, theta, lambda, &params);
+            let n2 = radial_check_points(n1);
+            let ModeSizing { m_max, n_phi, .. } = mode_count_for(&config, lambda, theta);
+            let subset = [0_u32, 1];
+
+            // The Ka rows start at n_rho ≫ 8193, so a fixed reference would be COARSER than
+            // the thing it is grading. Scale it: at least 4× the served density.
+            let n_ref = (4 * n1 + 1).max(8193);
+            let reference = mode_field_at(&config, theta, phi, k, n_ref, n_phi, m_max);
+            let f_n = mode_field_at(&config, theta, phi, k, n1, n_phi, m_max);
+            let f_2n = mode_field_at(&config, theta, phi, k, n2, n_phi, m_max);
+            let s_n = mode_subset_field(&config, theta, phi, k, n1, n_phi, &subset);
+            let s_2n = mode_subset_field(&config, theta, phi, k, n2, n_phi, &subset);
+
+            let db = |f: Complex64| 20.0 * (f.norm() / reference.norm()).log10();
+            // (i) compares full legs; (ii) compares only the subset's movement, but must
+            // normalize by the RETURNED field — the subset's own magnitude is not the scale
+            // the answer's accuracy is measured against.
+            let est_full = (f_2n - f_n).norm() / f_2n.norm();
+            let est_sub_a = (s_2n - s_n).norm() / f_n.norm();
+            let est_sub_b = (s_2n - s_n).norm() / f_2n.norm();
+
+            println!("=== {name} n_rho={n1}→{n2} m_max={m_max} (ref n={n_ref}) ===");
+            println!(
+                "  returned N  : true err {:+8.4} dB      | (ii-a) estimate {:7.4} ⇒ fires={}",
+                db(f_n),
+                est_sub_a,
+                est_sub_a > HANKEL_SELF_CHECK_RTOL
+            );
+            println!(
+                "  returned 2N : true err {:+8.4} dB      | (i)    estimate {:7.4} ⇒ fires={}",
+                db(f_2n),
+                est_full,
+                est_full > HANKEL_SELF_CHECK_RTOL
+            );
+            println!(
+                "                                          | (ii-b) estimate {:7.4} ⇒ fires={}",
+                est_sub_b,
+                est_sub_b > HANKEL_SELF_CHECK_RTOL
+            );
+            println!();
+        }
+    }
+
+    /// Is `m_theta = k·R·sinθ + 6` a sufficient truncation, or does the `+6` margin cut into
+    /// live spectrum when the coma is strong?
+    ///
+    /// This has to be measured against a reference that varies `m_max` ALONE — the earlier
+    /// anchors derive `m_max` internally from θ, so both sides truncate identically and the
+    /// axis is invisible to them. That blind spot is why the `M`-vs-`M+1` self-check, which
+    /// does measure it, disagreed with them.
+    #[test]
+    #[ignore = "diagnostic: prints measurements, asserts nothing"]
+    fn p12_mode_truncation_margin_on_a_strongly_comaed_feed() {
+        let reflector = ReflectorGeometry::new(34.0, 13.6, 0.0).unwrap();
+        let feed = FeedParameters::new(FeedPosition::new(1.19, 0.0, 13.6), 10.0, 0.0, 1.0).unwrap();
+        let config =
+            AntennaConfiguration::new("coma".into(), "coma".into(), reflector, feed, None).unwrap();
+        let freq = 8450.0e6;
+        let lambda = wavelength_from_frequency(freq);
+        let k = wavenumber(lambda);
+        let k_r = k * 17.0;
+        let bandwidth = k * 1.19 * (17.0 / 13.6);
+        let n_phi = 768;
+        let n_rho = 1025;
+
+        println!(
+            "\n===== mode-truncation margin (B = {bandwidth:.0}, n_phi={n_phi}, n_rho={n_rho}) ====="
+        );
+        for theta_deg in [1.0_f64, 3.0, 5.0, 10.0] {
+            let theta = theta_deg.to_radians();
+            let m_theta = (k_r * theta.sin().abs()).ceil() + 6.0;
+            let m_spectrum = (1.5 * bandwidth).ceil() + 6.0;
+            let served_m = m_theta.min(m_spectrum).min(MODE_M_MAX as f64) as u32;
+            let full_m = m_spectrum.min((n_phi / 2 - 2) as f64) as u32;
+            let reference = azimuthal_mode_field(&config, theta, 0.0, k, n_rho, n_phi, full_m);
+            print!(
+                "  θ={theta_deg:>5}° m_theta={m_theta:>5.0} served_m={served_m:>4} \
+                 full_m={full_m:>4} |"
+            );
+            for m in [served_m, served_m + 16, served_m + 48, served_m + 96] {
+                let m = m.min(full_m);
+                let f = azimuthal_mode_field(&config, theta, 0.0, k, n_rho, n_phi, m);
+                print!(
+                    " m={m}:{:+7.3}",
+                    20.0 * (f.norm() / reference.norm()).log10()
+                );
+            }
+            println!("  (dB vs m={full_m})");
+        }
+    }
+
+    /// Which of the three convergence axes is unhappy on the steered coma geometry, and why.
+    #[test]
+    #[ignore = "diagnostic: prints measurements, asserts nothing"]
+    fn p12_which_axis_is_unconverged_on_the_steered_coma_geometry() {
+        let reflector = ReflectorGeometry::new(34.0, 13.6, 0.0).unwrap();
+        let feed = FeedParameters::new(FeedPosition::new(1.19, 0.0, 13.6), 10.0, 0.0, 1.0).unwrap();
+        let config =
+            AntennaConfiguration::new("coma".into(), "coma".into(), reflector, feed, None).unwrap();
+        let freq = 8450.0e6;
+        let lambda = wavelength_from_frequency(freq);
+        let k = wavenumber(lambda);
+        let params = IntegrationParams::fast();
+
+        println!("\n===== steered coma: which axis? =====");
+        for theta_deg in [0.0_f64, 1.0, 3.0, 5.0, 10.0] {
+            let theta = theta_deg.to_radians();
+            let sizing = mode_count_for(&config, lambda, theta);
+            let b = cycle_budget(&config, theta, lambda, &params);
+            let m_probe = sizing.m_max + 1;
+
+            // Walk the radial refinement by hand to see where it stops.
+            let mut n = b.n_rho;
+            let mut coarse =
+                azimuthal_mode_field_inner(&config, theta, 0.0, k, n, sizing.n_phi, m_probe, None)
+                    .unwrap();
+            let mut legs = 1;
+            let mut last_rel = f64::NAN;
+            let mut radial_ok = false;
+            for _ in 0..MAX_RADIAL_REFINEMENTS {
+                let nf = radial_check_points(n);
+                let fine = azimuthal_mode_field_inner(
+                    &config,
+                    theta,
+                    0.0,
+                    k,
+                    nf,
+                    sizing.n_phi,
+                    m_probe,
+                    None,
+                )
+                .unwrap();
+                legs += 1;
+                last_rel = (fine.total - coarse.total).norm() / fine.total.norm();
+                n = nf;
+                coarse = fine;
+                if last_rel <= HANKEL_SELF_CHECK_RTOL {
+                    radial_ok = true;
+                    break;
+                }
+            }
+            let mode_rel = coarse.top_mode.norm() / coarse.total.norm();
+
+            println!(
+                "  θ={theta_deg:>5}°  n_phi={:>5} m_max={:>4} azim_ok={:<5} | radial: n0={:>6} \
+                 →{n:>6} legs={legs} rel={last_rel:.5} ok={radial_ok} | mode rel={mode_rel:.5} \
+                 ok={}",
+                sizing.n_phi,
+                sizing.m_max,
+                sizing.azimuthally_resolved,
+                b.n_rho,
+                mode_rel <= MODE_SELF_CHECK_RTOL
+            );
+        }
+    }
+
+    /// **φ'-cap fix: is `MODE_PHI_MAX = 512` the right ceiling?**
+    ///
+    /// Removing `MODE_PHI_STEERED_MAX` made `coma_aberration_test`'s geometry (34 m, f = 13.6,
+    /// δ = 1.19 ⇒ δ/f = 0.0875, 8.45 GHz) ~65× more expensive: `n_phi` 64 → 512 and `m_max`
+    /// 30 → 254. Its azimuthal bandwidth is `B = k·δ·(R/f) ≈ 263`, so Nyquist wants
+    /// `n_phi > 527` — just past the ceiling, which is why it is flagged unresolved.
+    ///
+    /// Before accepting either the cost or the flag, this measures what the answer actually
+    /// does as `n_phi` grows, with `m_max` allowed to grow with it (otherwise the two axes are
+    /// confounded). It answers three things at once: whether 512 is nearly right, whether the
+    /// `azimuthally_resolved` line is drawn in a defensible place, and what the old capped
+    /// `n_phi = 64` was really costing.
+    #[test]
+    #[ignore = "diagnostic: prints measurements, asserts nothing"]
+    fn p12_phi_ceiling_sufficiency_for_the_coma_test_geometry() {
+        let reflector = ReflectorGeometry::new(34.0, 13.6, 0.0).unwrap();
+        let feed = FeedParameters::new(FeedPosition::new(1.19, 0.0, 13.6), 10.0, 0.0, 1.0).unwrap();
+        let config =
+            AntennaConfiguration::new("coma".into(), "coma".into(), reflector, feed, None).unwrap();
+        let freq = 8450.0e6;
+        let lambda = wavelength_from_frequency(freq);
+        let k = wavenumber(lambda);
+        let r = 17.0;
+        let bandwidth = k * 1.19 * (r / 13.6);
+        println!(
+            "\n===== φ' ceiling sufficiency: B = k·δ·(R/f) = {bandwidth:.1} ⇒ Nyquist wants \
+             n_phi > {:.0} (MODE_PHI_MAX = {MODE_PHI_MAX}) =====",
+            2.0 * bandwidth
+        );
+
+        for theta_deg in [0.0_f64, 1.0, 3.0, 5.0, 10.0] {
+            let theta = theta_deg.to_radians();
+            let m_theta = (k * r * theta.sin().abs()).ceil() + 6.0;
+            let m_spectrum = (1.5 * bandwidth).ceil() + 6.0;
+            let m_needed = m_spectrum.min(m_theta).max(1.0);
+            // Dense radially so only the azimuthal axis varies.
+            let n_rho = 2049;
+            let reference = {
+                let n_phi = 4096;
+                let m = m_needed.min((n_phi / 2 - 2) as f64) as u32;
+                azimuthal_mode_field(&config, theta, 0.0, k, n_rho, n_phi, m)
+            };
+            print!("  θ={theta_deg:>5}° (m_needed={m_needed:>5.0}):");
+            for n_phi in [64_usize, 128, 256, 512, 1024, 2048] {
+                let m = m_needed.min((n_phi / 2 - 2) as f64) as u32;
+                let f = azimuthal_mode_field(&config, theta, 0.0, k, n_rho, n_phi, m);
+                print!(
+                    "  {n_phi}:{:+8.3}",
+                    20.0 * (f.norm() / reference.norm()).log10()
+                );
+            }
+            println!("   (dB vs n_phi=4096)");
+        }
+    }
+
+    /// **P12 post-fix acceptance** — what `integrate_aperture` now returns on the served path
+    /// for every geometry in play: error against a converged reference, the `converged` verdict,
+    /// and the work actually spent.
+    #[test]
+    #[ignore = "diagnostic: prints measurements, asserts nothing"]
+    fn p12_post_fix_served_behaviour() {
+        let p2_reflector = ReflectorGeometry::new(3.0, 1.5, 0.0005).unwrap();
+        let p2_feed = FeedParameters::new(FeedPosition::new(0.6, 0.0, 1.5), 8.0, 0.0, 1.0).unwrap();
+        let p2 =
+            AntennaConfiguration::new("p2mod".into(), "P2".into(), p2_reflector, p2_feed, None)
+                .unwrap();
+
+        let cases: Vec<(&str, AntennaConfiguration, f64, f64, f64)> = vec![
+            ("gs_3.7m X   θ=5°  ", gs_3_7m_x_band(), 8.4e9, 5.0, 0.0),
+            ("dsn_34m X   θ=0.1°", dsn_34m_x_band(), 8.45e9, 0.10, 0.0),
+            ("D12 UHF     θ=16° ", d12_uhf_fixture(), 600.0e6, 16.0, 0.0),
+            (
+                "D12 UHF     θ=16° φ=90",
+                d12_uhf_fixture(),
+                600.0e6,
+                16.0,
+                90.0,
+            ),
+            ("dsn_34m Ka  θ=5°  ", dsn_34m_ka_band(), 32.0e9, 5.0, 0.0),
+            ("p2 steered  θ=0°  ", p2, 8.4e9, 0.0, 0.0),
+        ];
+
+        println!("\n#### Post-fix served behaviour (IntegrationParams::adaptive())\n");
+        for (name, config, freq, theta_deg, phi_deg) in cases {
+            let lambda = wavelength_from_frequency(freq);
+            let k = wavenumber(lambda);
+            let theta = theta_deg.to_radians();
+            let phi = phi_deg.to_radians();
+            let params = IntegrationParams::adaptive();
+            let ModeSizing { m_max, n_phi, .. } = mode_count_for(&config, lambda, theta);
+            let n0 = radial_points_for(&config, theta, lambda, &params);
+            // Reference holds n_phi and m_max fixed, so this isolates the RADIAL axis only.
+            let reference = mode_field_at(&config, theta, phi, k, 32769, n_phi, m_max + 1);
+
+            let r = integrate_aperture(theta, phi, &config, freq, &params).unwrap();
+            println!(
+                "  {name}: n_rho started {n0:5}, n_phi={n_phi:3}, m_max={m_max:3}\n\
+                 {:22}radial error now {:+8.4} dB   converged={}   evals={}",
+                "",
+                20.0 * (r.field.norm() / reference.norm()).log10(),
+                r.converged,
+                r.num_evaluations
+            );
+        }
+    }
+
+    /// **P12 pre-gate yield** — how often does the `{0,1}` pre-gate actually *certify*, given
+    /// `RADIAL_PRE_GATE_SAFETY`? A pre-gate that always declines costs an extra leg and buys
+    /// nothing, so this is the measurement that decides whether it earns its complexity.
+    ///
+    /// `legs` is inferred from `num_evaluations / n_phi`: `N + (2N−1) = 3N−1` is two legs (the
+    /// pre-gate certified, or one refinement converged); `5N−2` is three, and so on.
+    #[test]
+    #[ignore = "diagnostic: prints measurements, asserts nothing"]
+    fn p12_pre_gate_yield_across_geometries() {
+        println!("\n#### Pre-gate yield (safety factor = {RADIAL_PRE_GATE_SAFETY})\n");
+        println!("  geometry                       work      pre-gate?   N     legs   evals");
+        for (name, config, freq, theta_deg) in [
+            ("gs_3.7m X    θ=5°  ", gs_3_7m_x_band(), 8.4e9, 5.0_f64),
+            ("dsn_34m X    θ=0.1°", dsn_34m_x_band(), 8.45e9, 0.10),
+            ("dsn_34m X    θ=5°  ", dsn_34m_x_band(), 8.45e9, 5.0),
+            ("dsn_34m X    θ=10° ", dsn_34m_x_band(), 8.45e9, 10.0),
+            ("dsn_34m X    θ=45° ", dsn_34m_x_band(), 8.45e9, 45.0),
+            ("D12 UHF      θ=16° ", d12_uhf_fixture(), 600.0e6, 16.0),
+            ("dsn_34m Ka   θ=1°  ", dsn_34m_ka_band(), 32.0e9, 1.0),
+            ("dsn_34m Ka   θ=5°  ", dsn_34m_ka_band(), 32.0e9, 5.0),
+            ("dsn_34m Ka   θ=45° ", dsn_34m_ka_band(), 32.0e9, 45.0),
+            ("dsn_34m Ka   θ=90° ", dsn_34m_ka_band(), 32.0e9, 90.0),
+        ] {
+            let lambda = wavelength_from_frequency(freq);
+            let theta = theta_deg.to_radians();
+            let params = IntegrationParams::adaptive();
+            let ModeSizing { m_max, n_phi, .. } = mode_count_for(&config, lambda, theta);
+            let n0 = radial_points_for(&config, theta, lambda, &params);
+            let gated = use_radial_pre_gate(n0, n_phi, m_max + 1);
+            let work = (n0 as u64) * (n_phi as u64) * (m_max as u64 + 2);
+
+            let r = integrate_aperture(theta, 0.0, &config, freq, &params).unwrap();
+            let radial_units = r.num_evaluations / n_phi;
+            // 3N−1 → 2 legs, 5N−2 → 3, 9N−4 → 4 …
+            let legs = if radial_units <= 3 * n0 {
+                2
+            } else if radial_units <= 5 * n0 {
+                3
+            } else {
+                4
+            };
+            println!(
+                "  {name}  {work:>10}   {:>7}   {n0:>5}   {legs:>4}   {}",
+                if gated { "yes" } else { "no" },
+                r.num_evaluations
+            );
+        }
+    }
+
+    /// **P12 implementation check** — the `p2_moderate_offset` pin moved 16.05 → 13.72 dBi at
+    /// **boresight**, a 2.3 dB change, so it has to be arbitrated by something that is not the
+    /// integrator being changed. This dish is 3 m at 8.4 GHz (`D/λ = 84`), squarely in the
+    /// regime where the retired 2D Simpson quadrature is a trustworthy oracle, so it can settle
+    /// which value is right — and separate the radial axis from the azimuthal one, since this
+    /// geometry (`δ/f = 0.4`) tripped BOTH of the former steering performance caps —
+    /// `MODE_RADIAL_CYCLE_CAP` (radial cycles clamped to 8) and `MODE_PHI_STEERED_MAX`
+    /// (`n_phi` clamped to 64) — until both were removed on 2026-07-31. Retained after that
+    /// fix as the standing witness: the `n_phi = 64` column is what the cap used to serve, and
+    /// the `n_phi ≥ 256` columns are what the geometry actually needs.
+    #[test]
+    #[ignore = "diagnostic: prints measurements, asserts nothing"]
+    fn p12_arbitrate_p2_moderate_offset_boresight() {
+        let reflector = ReflectorGeometry::new(3.0, 1.5, 0.0005).unwrap();
+        let feed = FeedParameters::new(FeedPosition::new(0.6, 0.0, 1.5), 8.0, 0.0, 1.0).unwrap();
+        let config =
+            AntennaConfiguration::new("p2mod".into(), "P2".into(), reflector, feed, None).unwrap();
+        let freq = 8.4e9;
+        let lambda = wavelength_from_frequency(freq);
+        let k = wavenumber(lambda);
+        let theta = 0.0;
+
+        let delta = 0.6;
+        let r_over_f = 1.5 / 1.5;
+        println!(
+            "\n===== p2_moderate_offset boresight arbitration (D/λ = {:.0}) =====",
+            3.0 / lambda
+        );
+        println!(
+            "  TRUE coma radial content = (δ/λ)(R/f) = {:.2} cycles; the former \
+             MODE_RADIAL_CYCLE_CAP clamped the budget's coma term to 8.0",
+            (delta / lambda) * r_over_f
+        );
+        let sizing = mode_count_for(&config, lambda, theta);
+        println!(
+            "  TRUE azimuthal bandwidth = k·δ·(R/f) = {:.1} modes; the former \
+             MODE_PHI_STEERED_MAX clamped n_phi to 64 (silently). Now sized to n_phi={} \
+             m_max={} azimuthally_resolved={}",
+            k * delta * r_over_f,
+            sizing.n_phi,
+            sizing.m_max,
+            sizing.azimuthally_resolved
+        );
+
+        // Independent oracle: the 2D quadrature, which has neither cap.
+        let mut hi = IntegrationParams::high_accuracy();
+        hi.min_rho_points = 2049;
+        hi.max_rho_points = 2049;
+        hi.min_phi_points = 1024;
+        hi.max_phi_points = 1024;
+        hi.max_iterations = 1;
+        let oracle = integrate_2d_simpson_public_shim(theta, 0.0, &config, freq, &hi);
+        println!(
+            "\n  2D Simpson oracle (n_rho=2049, n_phi=1024): |I| = {:.6e}",
+            oracle.norm()
+        );
+
+        println!("\n  mode path, sweeping BOTH axes (Δ vs oracle, dB):");
+        println!("   n_rho \\ n_phi |      64 (served cap) |        256 |        512");
+        for n_rho in [33_usize, 65, 129, 257, 513, 1025, 2049] {
+            let cell = |n_phi: usize| {
+                let f = mode_field_at(&config, theta, 0.0, k, n_rho, n_phi, 8);
+                20.0 * (f.norm() / oracle.norm()).log10()
+            };
+            println!(
+                "   {n_rho:12} | {:+18.4} | {:+10.4} | {:+10.4}",
+                cell(64),
+                cell(256),
+                cell(512)
+            );
+        }
+    }
+
+    /// **P12 decision D-A — the option the measurements point at, which is not on the list.**
+    ///
+    /// None of P12's options iterate: each computes a fixed density (or two) and either accepts
+    /// or flags the result. But the fixed-multiplier options do not deliver a uniform accuracy —
+    /// task 1 measured the 2N leg at −0.0445 dB (`gs_3.7m`), −0.0553 dB (`dsn_34m`) and
+    /// −0.3494 dB (D12 UHF). No single multiplier is right for all three.
+    ///
+    /// This prices **refine-until-converged**: double the radial density until the N-vs-2N
+    /// estimate is within the 2% floor, bounded by a doubling cap (in production, by S3's
+    /// existing wall-clock budget). Cost is exactly linear in `n_rho`, so `d` doublings cost
+    /// `2^(d+1) − 1` baselines and the multiple can be read off without running the expensive
+    /// geometries to completion.
+    #[test]
+    #[ignore = "diagnostic: prints measurements, asserts nothing"]
+    fn p12_price_refine_until_converged() {
+        const MAX_DOUBLINGS: usize = 5;
+        println!(
+            "\n#### D-A, emergent option: refine until the N-vs-2N estimate ≤ 2%.\n\
+             #### Cost is linear in n_rho, so d doublings = (2^(d+1) − 1)× the baseline leg.\n"
+        );
+        for (name, config, freq, theta_deg, phi_deg, _) in
+            d_a_pricing_geometries().into_iter().take(4)
+        {
+            let lambda = wavelength_from_frequency(freq);
+            let k = wavenumber(lambda);
+            let theta = theta_deg.to_radians();
+            let phi = phi_deg.to_radians();
+            let params = IntegrationParams::adaptive();
+            let n_start = radial_points_for(&config, theta, lambda, &params);
+            let ModeSizing { m_max, n_phi, .. } = mode_count_for(&config, lambda, theta);
+            let reference = mode_field_at(&config, theta, phi, k, 32769, n_phi, m_max);
+
+            println!("=== {name} n_rho starts at {n_start}, m_max={m_max} ===");
+            let mut n = n_start;
+            let mut coarse = mode_field_at(&config, theta, phi, k, n, n_phi, m_max);
+            let mut legs = 1;
+            for d in 1..=MAX_DOUBLINGS {
+                let n_fine = radial_check_points(n);
+                let fine = mode_field_at(&config, theta, phi, k, n_fine, n_phi, m_max);
+                legs += 1;
+                let est = (fine - coarse).norm() / fine.norm();
+                let true_err = 20.0 * (fine.norm() / reference.norm()).log10();
+                // Cost in baseline-leg units: legs at N, 2N, 4N… sum geometrically.
+                let cost: f64 = (0..d + 1).map(|j| (1_u64 << j) as f64).sum::<f64>();
+                println!(
+                    "  doubling {d}: n_rho={n_fine:6}  estimate={est:7.4}  \
+                     true err={true_err:+8.4} dB  cost≈{cost:5.0}×  ({legs} legs)"
+                );
+                if est <= HANKEL_SELF_CHECK_RTOL {
+                    println!("    ⇒ converged at doubling {d}");
+                    break;
+                }
+                n = n_fine;
+                coarse = fine;
+            }
+            println!();
+        }
     }
 }
