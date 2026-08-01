@@ -21,6 +21,67 @@ use antenna_model::model::{
     ReflectorGeometry,
 };
 
+/// `fast()` with the S3 per-integration wall-clock budget disabled.
+///
+/// These tests deliberately exercise a **steered** feed (δ/f = 0.0875, a routine ~5° beam
+/// steer). Since the steered-feed φ' cap was removed on 2026-07-31 that geometry is resolved
+/// rather than clamped — `n_phi` 64 → 536 and `m_max` 30 → 254, because its azimuthal
+/// bandwidth really is ≈263 modes — which costs ~69× more per evaluation and, in a DEBUG
+/// build, exceeds the 30 s default budget for a single integration.
+///
+/// Disabling the budget here is right for a *test* pinning physics, but the production
+/// implication is real and is NOT hidden by this: a steered wide-angle evaluation can now
+/// reach the S3 budget and return 504 rather than a silently-aliased number. That is the
+/// intended failure direction, and P10-perf (FFT for the `g_m` φ'-DFT, O(n_phi·log n_phi)
+/// instead of O(n_phi·M)) is what buys the headroom back.
+fn coma_params() -> IntegrationParams {
+    let mut p = IntegrationParams::fast();
+    p.time_budget = None;
+    p
+}
+
+/// Electrically-scaled twin of the 34 m coma geometry for the OFF-AXIS tests.
+///
+/// Same `f/D = 0.4` and the same `δ/f = 0.0875` (a ~5° beam steer) on a 10×-smaller dish, so
+/// every property these tests assert — steering angle `≈ δ/f`, steering direction, coma-lobe
+/// asymmetry — is reproduced exactly: they depend on `δ/f`, not on `D/λ`.
+///
+/// Introduced 2026-07-31, when removing the steered-feed φ' cap made the 34 m version cost
+/// ~64× more per evaluation (`n_phi` 64 → 536 and `m_max` 30 → 254, because its azimuthal
+/// bandwidth really is ≈263 modes — the cap had been wrong by up to +82 dB). A single θ=5°
+/// evaluation there now takes seconds in release and exceeds S3's 30 s budget in a DEBUG
+/// build, which `scripts/check.sh` uses. That cost is real and is tracked as a *production*
+/// item (P10-perf's FFT for the `g_m` φ'-DFT is what recovers it); it should not also be paid
+/// by a CI sweep that is not testing electrical size.
+///
+/// The expensive regime keeps dedicated coverage, at bounded angles:
+///   * `served_n_phi_sizing_is_sufficient_on_every_asymmetric_geometry` (model/integration.rs)
+///   * `p12_phi_cap_removed_steered_feed_matches_converged_reference` (reference_validation.rs)
+///
+/// A side benefit: at 3.4 m the beam is ≈0.73° wide, so a 0.1° peak search actually resolves
+/// it. On the 34 m dish HPBW is ≈0.06° and the same search was under-sampling the main lobe.
+fn scaled_coma_geometry() -> (AntennaConfiguration, f64, f64) {
+    let focal_length = 1.36; // f/D = 0.4 on a 3.4 m dish
+    let feed_displacement = 0.119; // δ/f = 0.0875, identical to the 34 m case
+    let reflector = ReflectorGeometry::new(3.4, focal_length, 0.0).unwrap();
+    let feed = FeedParameters::new(
+        FeedPosition::new(feed_displacement, 0.0, focal_length),
+        10.0,
+        0.0,
+        1.0,
+    )
+    .unwrap();
+    let config = AntennaConfiguration::new(
+        "test_scaled".to_string(),
+        "Test (electrically scaled)".to_string(),
+        reflector,
+        feed,
+        None,
+    )
+    .unwrap();
+    (config, focal_length, feed_displacement)
+}
+
 /// Test that feed at focal point produces maximum gain at boresight
 #[test]
 fn test_feed_at_focus_maximum_gain() {
@@ -53,7 +114,7 @@ fn test_feed_at_focus_maximum_gain() {
     let uniform_max =
         10.0 * (4.0 * std::f64::consts::PI * aperture_area / (wavelength * wavelength)).log10();
 
-    let result = compute_gain_db(0.0, 0.0, &config, freq_hz, &IntegrationParams::fast()).unwrap();
+    let result = compute_gain_db(0.0, 0.0, &config, freq_hz, &coma_params()).unwrap();
     let gain_boresight = result.gain;
 
     println!("Feed at focal point:");
@@ -85,8 +146,9 @@ fn test_feed_at_focus_maximum_gain() {
 #[test]
 fn test_beam_steering_from_feed_displacement() {
     let freq_hz = 8450.0e6;
-    let focal_length = 13.6;
-    let feed_displacement = 1.19; // meters
+    // Electrically-scaled twin: same f/D and same δ/f, 10× smaller dish. See
+    // `scaled_coma_geometry` for why (φ'-cap removal made the 34 m version ~64× costlier).
+    let (config, focal_length, feed_displacement) = scaled_coma_geometry();
 
     // Expected beam steering angle: θ ≈ δ/f
     let expected_steering_rad: f64 = feed_displacement / focal_length;
@@ -100,40 +162,52 @@ fn test_beam_steering_from_feed_displacement() {
         expected_steering_deg, expected_steering_rad
     );
 
-    let reflector = ReflectorGeometry::new(34.0, focal_length, 0.0).unwrap();
+    // Scan from -10° to +10° in the phi=0 plane, COARSE (0.5°) then FINE (0.1°) around the
+    // coarse winner. Resolution of the reported peak is unchanged at 0.1°; the point count
+    // drops 201 → 52.
+    //
+    // This became worth doing on 2026-07-31, when removing the steered-feed φ' cap made this
+    // geometry ~69× more expensive per evaluation: δ/f = 0.0875 crossed the old
+    // `MODE_STEERING_RATIO` threshold, so it had been served with `n_phi` clamped to 64 and
+    // `m_max` to 30 against a true azimuthal bandwidth of ≈263 modes. That clamp was measured
+    // at up to **+82 dB** of aliasing error here, so the extra cost is buying a correct pattern,
+    // not a nicer one. (`p12_phi_ceiling_sufficiency_for_the_coma_test_geometry` in
+    // `model/integration.rs` has the sweep.) P10-perf's FFT for the `g_m` φ'-DFT is what
+    // recovers the cost — O(n_phi·log n_phi) instead of O(n_phi·M).
+    let eval = |theta_deg: f64| {
+        compute_gain_db(
+            theta_deg.to_radians(),
+            0.0,
+            &config,
+            freq_hz,
+            &coma_params(),
+        )
+        .unwrap()
+        .gain
+    };
 
-    // Feed displaced in +X direction
-    let feed = FeedParameters::new(
-        FeedPosition::new(feed_displacement, 0.0, focal_length),
-        10.0,
-        0.0,
-        1.0,
-    )
-    .unwrap();
+    let mut coarse_peak_deg = 0.0;
+    let mut coarse_max = f64::NEG_INFINITY;
+    for i in -20..=20 {
+        let d = i as f64 * 0.5;
+        let g = eval(d);
+        if g > coarse_max {
+            coarse_max = g;
+            coarse_peak_deg = d;
+        }
+    }
 
-    let config = AntennaConfiguration::new(
-        "test".to_string(),
-        "Test".to_string(),
-        reflector,
-        feed,
-        None,
-    )
-    .unwrap();
-
-    // Scan pattern to find peak
     let mut max_gain = f64::NEG_INFINITY;
     let mut peak_theta = 0.0;
-
-    // Scan from -10° to +10° in phi=0 plane
-    for theta_deg in -100..=100 {
-        let theta = (theta_deg as f64 * 0.1).to_radians();
-        let result =
-            compute_gain_db(theta, 0.0, &config, freq_hz, &IntegrationParams::fast()).unwrap();
-        let gain = result.gain;
-
-        if gain > max_gain {
-            max_gain = gain;
-            peak_theta = theta;
+    for i in -5..=5 {
+        let d = coarse_peak_deg + i as f64 * 0.1;
+        if !(-10.0..=10.0).contains(&d) {
+            continue;
+        }
+        let g = eval(d);
+        if g > max_gain {
+            max_gain = g;
+            peak_theta = d.to_radians();
         }
     }
 
@@ -179,7 +253,7 @@ fn test_gain_loss_from_feed_displacement() {
     .unwrap();
 
     let result_at_focus =
-        compute_gain_db(0.0, 0.0, &config_focus, freq_hz, &IntegrationParams::fast()).unwrap();
+        compute_gain_db(0.0, 0.0, &config_focus, freq_hz, &coma_params()).unwrap();
     let gain_at_focus = result_at_focus.gain;
 
     // Test 2: Feed displaced
@@ -195,14 +269,8 @@ fn test_gain_loss_from_feed_displacement() {
     )
     .unwrap();
 
-    let result_displaced = compute_gain_db(
-        0.0,
-        0.0,
-        &config_displaced,
-        freq_hz,
-        &IntegrationParams::fast(),
-    )
-    .unwrap();
+    let result_displaced =
+        compute_gain_db(0.0, 0.0, &config_displaced, freq_hz, &coma_params()).unwrap();
     let gain_displaced = result_displaced.gain;
 
     let gain_loss = gain_at_focus - gain_displaced;
@@ -225,35 +293,12 @@ fn test_gain_loss_from_feed_displacement() {
 #[test]
 fn test_coma_lobe_asymmetry() {
     let freq_hz = 8450.0e6;
-    let focal_length = 13.6;
-
-    let reflector = ReflectorGeometry::new(34.0, focal_length, 0.0).unwrap();
-    let feed = FeedParameters::new(
-        FeedPosition::new(1.19, 0.0, focal_length), // Displaced in +X
-        10.0,
-        0.0,
-        1.0,
-    )
-    .unwrap();
-
-    let config = AntennaConfiguration::new(
-        "test".to_string(),
-        "Test".to_string(),
-        reflector,
-        feed,
-        None,
-    )
-    .unwrap();
+    // Electrically-scaled twin (same δ/f ⇒ same coma asymmetry). See `scaled_coma_geometry`.
+    let (config, _focal_length, _delta) = scaled_coma_geometry();
 
     // Sample pattern in +theta and -theta directions (phi=0 plane)
-    let result_plus_5deg = compute_gain_db(
-        5.0f64.to_radians(),
-        0.0,
-        &config,
-        freq_hz,
-        &IntegrationParams::fast(),
-    )
-    .unwrap();
+    let result_plus_5deg =
+        compute_gain_db(5.0f64.to_radians(), 0.0, &config, freq_hz, &coma_params()).unwrap();
     let gain_plus_5deg = result_plus_5deg.gain;
 
     let result_minus_5deg = compute_gain_db(
@@ -261,7 +306,7 @@ fn test_coma_lobe_asymmetry() {
         0.0,
         &config,
         freq_hz,
-        &IntegrationParams::fast(),
+        &coma_params(),
     )
     .unwrap();
     let gain_minus_5deg = result_minus_5deg.gain;
@@ -299,7 +344,7 @@ fn test_regression_feed_at_focus() {
     )
     .unwrap();
 
-    let result = compute_gain_db(0.0, 0.0, &config, freq_hz, &IntegrationParams::fast()).unwrap();
+    let result = compute_gain_db(0.0, 0.0, &config, freq_hz, &coma_params()).unwrap();
     let gain = result.gain;
 
     // Locks in current behavior to detect regressions. Re-baselined for the

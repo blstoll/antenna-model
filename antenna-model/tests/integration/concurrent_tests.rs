@@ -307,15 +307,23 @@ async fn test_concurrent_different_antennas() {
     // P10 (off-axis integrator): the feed-steering offset here is many focal lengths
     // (δ/f ≫ 1), so these route through the ray-tracing stub (D-5) whose boresight anchor
     // is the physical-optics aperture integral. The old `> 5.0` bound was calibrated to the
-    // pre-P10 aliased ≈ 8.7 dBi; the corrected physics gives ≈ 2.3 dBi for test_large (the
-    // value the P10 spec anchors to) and ≈ 11–16 dBi for the smaller test_uncalibrated /
-    // test_simple dishes. In this strongly-steered regime the mode integrator is
-    // performance-capped (the exact coma integral is neither affordable in the latency
-    // budget nor PO-trustworthy — D-5), so this asserts a broad physical-plausibility range
-    // rather than a converged level; the lower bound admits coma-lobe negatives.
+    // pre-P10 aliased ≈ 8.7 dBi; P10 moved it again.
+    //
+    // Widened 2026-07-31 (φ'-cap removal): the sentence that used to sit here — "in this
+    // strongly-steered regime the mode integrator is performance-capped … so this asserts a
+    // broad physical-plausibility range rather than a converged level" — described exactly
+    // the defect that was removed. That cap (`MODE_PHI_STEERED_MAX`, `n_phi` clamped to 64)
+    // was not a graceful degradation: measured against the 2D Simpson oracle it was wrong by
+    // up to +82 dB, silently, with `converged = true`. `n_phi` is now sized from the aperture
+    // function's actual azimuthal bandwidth and flagged when it cannot be met, so these values
+    // ARE converged; test_large lands at −15.27 dBi.
+    //
+    // Still a plausibility band rather than an accuracy claim — the ray-tracing stub (D-5)
+    // remains a stub, and these geometries are deep steered nulls. The lower bound must admit
+    // them; the upper bound is the meaningful one.
     for (antenna_id, gain) in &results {
         assert!(
-            (-10.0..60.0).contains(gain),
+            (-40.0..60.0).contains(gain),
             "Antenna {} got invalid gain {}",
             antenna_id,
             gain

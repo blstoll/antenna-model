@@ -68,7 +68,34 @@ pub mod ray_trace;
 ///   conversion (all antennas), and the statistical Ruze sidelobe floor re-enabled on the
 ///   uncorrected-physics path as an incoherent power sum forward / floor-only behind the
 ///   dish (gated on `physics_is_uncorrected()`).
-pub const PHYSICS_MODEL_VERSION: u32 = 5;
+/// - 6: P12 radial convergence on the azimuthal-mode path (2026-07-31) — the asymmetric
+///   (Jₘ) branch of `integration::integrate_aperture` now verifies its RADIAL quadrature
+///   instead of assuming it. Before this, that branch sized `n_rho` once and self-checked
+///   only azimuthal mode truncation, so `converged = true` asserted nothing about the axis
+///   that actually failed. Served gain moves on **every feed that is laterally offset or has
+///   `asymmetry_factor != 1.0`** — five of the enabled feeds — by up to several dB at some
+///   angles: measured against a converged reference, `gs_3.7m`/`x_band_feed` at θ=5° was
+///   0.82 dB low, `dsn_34m`/`x_band` at θ=0.10° 1.17 dB low, and D12's UHF fixture at θ=16°
+///   **7.08 dB** low; all now land within 0.013 dB. The symmetric (J₀) branch is untouched
+///   and its boresight reference anchors do not move. Also in this bump: `adaptive()`'s
+///   `min_rho_points` 16 → 32 (D-B), which matches `calibrate`'s `default()` and closes
+///   D17's leftover preset divergence. See
+///   `docs/findings-2026-07-31-p12-mode-path-radial-budget.md`.
+/// - 7: The steered-feed φ' cap removed (2026-07-31, same unit as 6, landed immediately
+///   after it). `MODE_PHI_STEERED_MAX` clamped the φ' DFT to 64 samples for any feed past
+///   `δ/f = 0.05`, documented as safe because the `M`-vs-`M+1` self-check would report
+///   non-convergence. It cannot: φ' under-sampling corrupts every `gₘ` including the two
+///   being compared, and at θ=0 the check is identically zero because `Jₘ(0) = 0` for
+///   `m > 0`. Measured against the 2D Simpson oracle on a 34 m dish with a 1.19 m offset
+///   (δ/f = 0.0875, a routine ~5° beam steer): the clamp was wrong by up to **+82 dB**,
+///   silently. `n_phi` is now sized from the aperture function's azimuthal bandwidth
+///   `B = k·δ·(R/f)`, no longer rounded to a power of two, with `MODE_PHI_MAX` raised
+///   512 → 2048; when the ceiling still binds, `ModeSizing::azimuthally_resolved` is false
+///   and `converged` follows. Served gain moves on any evaluation with `δ/f > 0.05` —
+///   which no enabled antenna's *design* feed reaches (max 0.027), but request-driven
+///   steering does. Costs ~69× more per evaluation in that regime; P10-perf's FFT for the
+///   `gₘ` φ'-DFT is what recovers it. See the findings doc §7.
+pub const PHYSICS_MODEL_VERSION: u32 = 7;
 
 // Re-export commonly used types
 pub use bessel::{bessel_j0, bessel_j1, bessel_jn};

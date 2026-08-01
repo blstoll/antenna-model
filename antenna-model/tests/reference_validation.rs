@@ -1720,3 +1720,358 @@ fn p10_bruteforce_2d_ground_truth() {
         "expected the sub-Nyquist 2D to alias well above the converged value"
     );
 }
+
+// ===========================================================================
+// P12 — the azimuthal-mode path's RADIAL convergence (2026-07-31).
+//
+// Before P12 the asymmetric (Jₘ) branch sized `n_rho` once and self-checked only
+// azimuthal mode truncation, so `converged = true` asserted nothing about the radial
+// quadrature — the axis that actually failed. These anchors pin the three geometries
+// P12 filed plus the symmetric control that proves the fix is a CHECK and not merely
+// more density everywhere.
+//
+// Mechanism and full measurements:
+// `docs/findings-2026-07-31-p12-mode-path-radial-budget.md`.
+// ===========================================================================
+
+/// Radial-only reference: force a density far above anything the budget would pick, so the
+/// returned value is radially converged. `n_phi` and `m_max` are derived internally from the
+/// geometry and θ alone, so they are IDENTICAL to the served call — every delta measured
+/// against this is purely radial, which is the axis under test.
+fn radially_converged_reference(
+    cfg: &AntennaConfiguration,
+    theta: f64,
+    phi: f64,
+    freq: f64,
+) -> f64 {
+    let mut p = integrator_params();
+    p.min_rho_points = 16385;
+    // A test reference must not be subject to the PRODUCTION wall-clock budget: it is
+    // deliberately far denser than anything served, and `scripts/check.sh` runs the suite in
+    // DEBUG, where that density can exceed S3's 30 s per-integration budget and turn a
+    // correctness anchor into a timeout. (This bit once, on the Ka geometry.)
+    p.time_budget = None;
+    field_dbi_at(cfg, theta, phi, freq, &p)
+}
+
+fn field_dbi_at(
+    cfg: &AntennaConfiguration,
+    theta: f64,
+    phi: f64,
+    freq: f64,
+    p: &IntegrationParams,
+) -> f64 {
+    use antenna_model::model::integrate_aperture;
+    let r = integrate_aperture(theta, phi, cfg, freq, p).expect("integration");
+    20.0 * r.field.norm().log10()
+}
+
+/// The three geometries P12 measured, at the angles it measured them. Each was served with a
+/// silent radial error and `converged = true`; each must now be radially converged AND say so.
+///
+/// Pre-P12 errors, measured 2026-07-31 against the same reference:
+///   gs_3.7m/x_band_feed  8.4 GHz  θ=5°    →  0.82 dB
+///   dsn_34m/x_band       8.45 GHz θ=0.10° →  1.17 dB
+///   D12 UHF fixture      600 MHz  θ=16°   →  7.08 dB (φ=0), 3.85 dB (φ=90)
+///
+/// The UHF row is deliberately included at **φ=0**: it is the worst case, it is the geometry
+/// whose feed sits AT THE FOCUS (it reaches the mode path through `asymmetry_factor`, not
+/// coma), and P12's filed table did not record φ at all.
+#[test]
+fn p12_mode_path_radial_convergence_anchors() {
+    use antenna_model::model::geometry::{
+        AntennaConfigurationBuilder, FeedParametersBuilder, MeshParametersBuilder,
+        ReflectorGeometryBuilder,
+    };
+    let repo = load_real_repository();
+
+    // D12's UHF_Array_Element calibration fixture (calibrate/antenna_classes.yaml):
+    // 8 m, f/D 0.45, q 5.0, feed AT FOCUS, asymmetry_factor 1.1, 10 mm / 1 mm mesh.
+    let uhf = AntennaConfigurationBuilder::default()
+        .id("UHF_Array_Element")
+        .name("UHF phased array element")
+        .reflector(
+            ReflectorGeometryBuilder::default()
+                .diameter(8.0)
+                .focal_length(3.6)
+                .surface_rms(0.002)
+                .build()
+                .unwrap(),
+        )
+        .feed(
+            FeedParametersBuilder::default()
+                .at_focus(3.6)
+                .q_factor(5.0)
+                .phase_center_offset(0.0)
+                .asymmetry_factor(1.1)
+                .build()
+                .unwrap(),
+        )
+        .mesh(
+            MeshParametersBuilder::default()
+                .spacing(0.010)
+                .wire_diameter(0.001)
+                .build()
+                .unwrap(),
+        )
+        .build()
+        .unwrap();
+
+    let gs = config_for(
+        &repo
+            .get_calibration("gs_3.7m_uncalibrated", "x_band_feed")
+            .expect("gs_3.7m x_band_feed enabled"),
+        Some((0.05, 0.0)),
+    );
+    let dsn = config_for(
+        &repo
+            .get_calibration("dsn_34m_uncalibrated", "x_band")
+            .expect("dsn_34m x_band enabled"),
+        Some((0.15, 0.0)),
+    );
+
+    // (label, config, freq, θ°, φ°, pre-P12 error dB)
+    let cases: Vec<(&str, &AntennaConfiguration, f64, f64, f64, f64)> = vec![
+        ("gs_3.7m/x_band_feed", &gs, 8.4e9, 5.0, 0.0, 0.82),
+        ("dsn_34m/x_band", &dsn, 8.45e9, 0.10, 0.0, 1.17),
+        ("D12 UHF fixture φ=0", &uhf, 600.0e6, 16.0, 0.0, 7.08),
+        ("D12 UHF fixture φ=90", &uhf, 600.0e6, 16.0, 90.0, 3.85),
+    ];
+
+    // 0.05 dB: an order of magnitude inside the smallest pre-P12 error (0.82 dB), and well
+    // above the 0.013 dB worst case measured after the fix, so this catches a regression of
+    // the defect without being brittle about quadrature noise.
+    const TOL_DB: f64 = 0.05;
+
+    println!("\n[P12] mode-path radial convergence");
+    for (label, cfg, freq, th, ph, was) in cases {
+        let p = integrator_params();
+        let served = field_dbi_at(cfg, deg(th), deg(ph), freq, &p);
+        let reference = radially_converged_reference(cfg, deg(th), deg(ph), freq);
+        let err = served - reference;
+
+        let result =
+            antenna_model::model::integrate_aperture(deg(th), deg(ph), cfg, freq, &p).unwrap();
+
+        println!(
+            "  {label:<24} θ={th:<6} φ={ph:<4} served={served:>10.4} ref={reference:>10.4} \
+             Δ={err:+.4} dB (was {was:.2}) converged={} evals={}",
+            result.converged, result.num_evaluations
+        );
+        assert!(
+            err.abs() < TOL_DB,
+            "{label} θ={th}° φ={ph}°: radial error {err:+.4} dB exceeds {TOL_DB} dB \
+             (this geometry was {was:.2} dB wrong before P12 — the defect is back)"
+        );
+        assert!(
+            result.converged,
+            "{label} θ={th}° φ={ph}°: must report converged once radially resolved"
+        );
+    }
+}
+
+/// The control that keeps P12's fix honest.
+///
+/// The symmetric (J₀) branch already verified its radial density and returned the fine leg, so
+/// it was accurate at the SAME 4-samples-per-cycle budget the mode path was failing at
+/// (measured: 0.043 dB vs 0.816 dB at matched density). That is the evidence the defect was a
+/// missing check rather than a too-coarse constant — so if a future change "fixes" the mode
+/// path by globally raising density, this control still passes while the real property is
+/// gone. It therefore asserts the symmetric branch is BOTH still accurate AND still cheap:
+/// its work must not have grown.
+#[test]
+fn p12_symmetric_branch_control_still_accurate_and_cheap() {
+    let repo = load_real_repository();
+    let cal = repo
+        .get_calibration("gs_3.7m_uncalibrated", "x_band_feed")
+        .expect("gs_3.7m x_band_feed enabled");
+    let cfg = config_for(&cal, None); // feed AT FOCUS -> symmetric branch
+    let freq = 8.4e9;
+    let p = integrator_params();
+
+    println!("\n[P12] symmetric-branch control (same dish, feed at focus)");
+    for th in [0.5_f64, 2.0, 5.0, 20.0] {
+        let served = field_dbi_at(&cfg, deg(th), 0.0, freq, &p);
+        let reference = radially_converged_reference(&cfg, deg(th), 0.0, freq);
+        let err = served - reference;
+        let r = antenna_model::model::integrate_aperture(deg(th), 0.0, &cfg, freq, &p).unwrap();
+        println!(
+            "  θ={th:<6} Δ={err:+.4} dB  converged={}  evals={}",
+            r.converged, r.num_evaluations
+        );
+        assert!(
+            err.abs() < 0.05,
+            "symmetric control θ={th}°: {err:+.4} dB — the symmetric branch must stay accurate"
+        );
+        assert!(
+            r.converged,
+            "symmetric control θ={th}° must report converged"
+        );
+        // Cheapness: the symmetric branch computes exactly two legs (N and 2N ≈ 3N total).
+        // If this grows, someone has bought accuracy with density instead of a check.
+        let n_budget = 4.0 * 103.7 * deg(th).sin().abs() + 4.0 * 1.4 + 8.0;
+        assert!(
+            (r.num_evaluations as f64) < 4.0 * n_budget.max(32.0) + 64.0,
+            "symmetric control θ={th}°: {} evaluations is far above the two-leg N+2N budget — \
+             density was raised instead of checked",
+            r.num_evaluations
+        );
+    }
+}
+
+/// Cost guard for P12's radial pre-gate.
+///
+/// The pre-gate exists so that geometries where a full check leg is expensive — and which
+/// measurement shows are ALREADY radially converged — get certified in **two legs** rather than
+/// paying 3× for refinement they do not need. If that regresses, the expensive mode path
+/// silently gets ~3× slower, which is exactly the trade D-A was decided to avoid on a path
+/// P10-perf exists to make faster.
+///
+/// Uses `dsn_34m` **Ka** at θ=1°: the cheapest geometry that both crosses
+/// `FULL_RADIAL_CHECK_WORK_LIMIT` and is certified by the pre-gate, at ~2% of the cost of the
+/// θ=90° case the decision was priced on. That matters because `scripts/check.sh` runs this
+/// suite in DEBUG. Measured yield across the Ka sweep (θ = 1°, 5°, 45°, 90°): the pre-gate
+/// certifies **all four** in two legs, so this point is representative of the whole expensive
+/// regime rather than a lucky pick.
+///
+/// Deliberately asserts **structure only** — no dense reference. A radially converged reference
+/// at this geometry is ~1.7·10⁹ work units, which in debug would take minutes and, before
+/// `radially_converged_reference` was given `time_budget = None`, tripped S3's 30 s budget and
+/// failed this test as a timeout. Radial *accuracy* is anchored by
+/// `p12_mode_path_radial_convergence_anchors` on four geometries; Ka accuracy specifically is
+/// measured by `p12_post_fix_served_behaviour` in `model/integration.rs` (+0.0126 dB).
+#[test]
+fn p12_pre_gate_certifies_an_already_converged_geometry_in_two_legs() {
+    let repo = load_real_repository();
+    let cal = repo
+        .get_calibration("dsn_34m_uncalibrated", "ka_band")
+        .expect("dsn_34m ka_band enabled");
+    let cfg = config_for(&cal, Some((0.0, 0.15)));
+    let freq = 32.0e9;
+    let p = integrator_params();
+    let th = deg(1.0);
+
+    let r = antenna_model::model::integrate_aperture(th, 0.0, &cfg, freq, &p).unwrap();
+    println!(
+        "\n[P12] pre-gate: converged={} evals={}",
+        r.converged, r.num_evaluations
+    );
+
+    assert!(r.converged, "Ka θ=1° must report converged");
+    // Two legs — the N sweep plus the cheap probe at 2N — is `N + (2N−1) = 3N−1` radial units.
+    // A third leg (`5N−2`) means the pre-gate declined and refinement ran, i.e. the expensive
+    // regime just got ~1.7× more work for an answer it already had.
+    // n_phi = 2·B + 8 (even) with B = k·δ·(R/f) ≈ 126 for this feed. Was 512 until 2026-07-31,
+    // when `n_phi` stopped being rounded up to a power of two — that rounding was costing this
+    // geometry a factor of ~2 for nothing.
+    let n_phi = 260;
+    let n0 = 335; // radial_points_for at this geometry
+    let radial_units = r.num_evaluations / n_phi;
+    assert!(
+        radial_units <= 3 * n0,
+        "spent {radial_units} radial units (two legs = {}) — the pre-gate should have \
+         certified this without refining",
+        3 * n0 - 1
+    );
+}
+
+/// The φ'-cap regression anchor (2026-07-31).
+///
+/// A former `MODE_PHI_STEERED_MAX` clamped the φ' DFT to 64 samples for any feed past
+/// `δ/f = MODE_STEERING_RATIO` (0.05), on the stated rationale that the `M`-vs-`M+1`
+/// self-check would then report `converged = false`. It cannot: φ' under-sampling corrupts
+/// every `gₘ` including the two being compared, and at θ=0 the increment is identically zero
+/// because `Jₘ(0) = 0` for `m > 0`. The result was silent, `converged = true`, and wrong by
+/// up to **+82 dB**.
+///
+/// This pins the two properties that must not regress, on the `coma_aberration_test`
+/// geometry (34 m, f = 13.6 m, δ = 1.19 m ⇒ δ/f = 0.0875 — a routine ~5° beam steer, well
+/// inside the 0.5f ray-tracing threshold, so it is a geometry the model is expected to get
+/// RIGHT):
+///
+/// 1. the served pattern matches a converged-`n_phi` reference across the steered lobe, and
+/// 2. it does so at angles where the old clamp was catastrophically wrong.
+///
+/// The reference varies `n_phi` ALONE (radial density pinned high, mode count allowed to
+/// track `n_phi`), so a regression cannot be masked by radial refinement.
+#[test]
+fn p12_phi_cap_removed_steered_feed_matches_converged_reference() {
+    use antenna_model::model::geometry::{
+        AntennaConfigurationBuilder, FeedParametersBuilder, ReflectorGeometryBuilder,
+    };
+    use antenna_model::model::integrate_aperture;
+
+    let cfg = AntennaConfigurationBuilder::default()
+        .id("coma_steered")
+        .name("34 m with 1.19 m lateral feed offset")
+        .reflector(
+            ReflectorGeometryBuilder::default()
+                .diameter(34.0)
+                .focal_length(13.6)
+                .surface_rms(0.0)
+                .build()
+                .unwrap(),
+        )
+        .feed(
+            FeedParametersBuilder::default()
+                .position(antenna_model::model::geometry::FeedPosition::new(
+                    1.19, 0.0, 13.6,
+                ))
+                .q_factor(10.0)
+                .phase_center_offset(0.0)
+                .asymmetry_factor(1.0)
+                .build()
+                .unwrap(),
+        )
+        .build()
+        .unwrap();
+
+    let freq = 8450.0e6;
+    // No S3 wall-clock budget: this geometry is ~64× costlier per evaluation since the φ' cap
+    // came off (`n_phi` 64 → 536, `m_max` 30 → 254), which is ~2–4 s in release but exceeds
+    // the 30 s default in the DEBUG build `scripts/check.sh` uses. The production implication
+    // — a steered wide-angle request can now hit the budget and return 504 rather than a
+    // silently-aliased number — is intended, and tracked on P10-perf; it should not turn a
+    // correctness anchor into a timeout.
+    let p = IntegrationParams {
+        time_budget: None,
+        ..integrator_params()
+    };
+
+    // Served field levels (dB re 1, from `integrate_aperture`), measured 2026-07-31 with the
+    // φ' cap removed, and the error the OLD `n_phi = 64` clamp produced at the same angle
+    // (against an `n_phi = 4096` reference). Nothing subtle: the regression this guards is
+    // tens of dB, so pinning the value IS the check.
+    //
+    // Deliberately pins values rather than differencing against a dense reference. A radially
+    // converged reference here costs ~1.7·10⁹ work units and pushed this test past 300 s in
+    // the DEBUG build `scripts/check.sh` uses — while testing the radial axis, which is
+    // already anchored by `p12_mode_path_radial_convergence_anchors`. The φ' axis proper is
+    // measured directly, per-geometry, by
+    // `integration::p12_radial_diagnostic::served_n_phi_sizing_is_sufficient_on_every_asymmetric_geometry`.
+    println!("\n[P12] φ'-cap removal: steered feed served levels");
+    for (theta_deg, expected, old_clamp_error_db) in [
+        (0.0_f64, -67.8727_f64, 77.4),
+        (1.0, -72.7210, 82.1),
+        (3.0, -80.0547, 80.6),
+    ] {
+        let served = field_dbi_at(&cfg, deg(theta_deg), 0.0, freq, &p);
+        let r = integrate_aperture(deg(theta_deg), 0.0, &cfg, freq, &p).unwrap();
+        println!(
+            "  θ={theta_deg:<5} served={served:>10.4} (expect {expected:.4}; old clamp was \
+             +{old_clamp_error_db:.1} dB wrong) converged={}",
+            r.converged
+        );
+        assert!(
+            (served - expected).abs() < 0.05,
+            "θ={theta_deg}°: served {served:.4} vs pinned {expected:.4} — the φ' sizing has \
+             regressed (the old clamp was +{old_clamp_error_db:.1} dB wrong here)"
+        );
+        // A δ/f = 0.0875 steered feed is an ordinary geometry, well inside the 0.5f
+        // ray-tracing threshold. It must be resolvable on all three axes, not merely served.
+        assert!(
+            r.converged,
+            "θ={theta_deg}°: a routine ~5° beam steer must report converged"
+        );
+    }
+}
