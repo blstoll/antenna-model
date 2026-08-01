@@ -32,10 +32,14 @@ use std::time::{Duration, Instant};
 
 use crate::error::{ComputationError, ComputationResult};
 use crate::model::{
-    bessel::{bessel_j0, bessel_jn},
+    // `bessel_jn` (the per-order call) is deliberately absent: since P10-perf every Jₘ on this
+    // path comes from `bessel_jn_array`'s single sweep, and mixing the two would reintroduce
+    // the branch mismatch documented on `radial_probe_field`.
+    bessel::{bessel_j0, bessel_jn_array},
     geometry::AntennaConfiguration,
     illumination::illumination_amplitude,
-    wavelength_from_frequency, wavenumber,
+    wavelength_from_frequency,
+    wavenumber,
 };
 // `phase_total` and `ApertureCoordinates` are only used by the retained 2D reference
 // integrand (`aperture_integrand`), which is now test-only: since P10 Task 2 the
@@ -224,6 +228,25 @@ struct ModeSweep {
     top_mode: Complex64,
     /// The part of `total` contributed by [`RADIAL_PROBE_MODES`].
     radial_probe: Complex64,
+}
+
+/// Work units in one azimuthal-mode radial sweep, reported through
+/// [`IntegrationResult::num_evaluations`].
+///
+/// Per radial sample the mode path does two separable pieces of work: `n_phi` evaluations of
+/// the aperture-plane function `g(ρ,φ')`, and `modes` mode-level accumulations (one `Jₘ`
+/// recurrence step plus the `±m` radial accumulation). Both are linear, so the sum is a
+/// faithful cost proxy and the leg count is recoverable as `num_evaluations / (n_phi + modes)`.
+///
+/// Before P10-perf this reported `n_rho · n_phi` alone, which understated the real cost by up
+/// to a factor of `M` — the φ' DFT was `O(n_phi · M)` per radial sample, so the mode dimension
+/// was the dominant term and the reported figure omitted it entirely (a P10-review finding).
+/// The FFT removed that `×M` term rather than hiding it; what remains genuinely is
+/// `n_phi + modes`, and the transform's own `O(n_phi log n_phi)` is folded into the `n_phi`
+/// term as a constant factor.
+#[inline]
+fn mode_sweep_work(n_rho: usize, n_phi: usize, modes: usize) -> usize {
+    n_rho.saturating_mul(n_phi.saturating_add(modes))
 }
 
 /// Whether this geometry gets the cheap radial pre-gate instead of paying for a full check
@@ -642,7 +665,7 @@ pub fn integrate_aperture(
     let mut n_rho = radial_points_for(config, theta, wavelength, params);
     let mut sweep =
         azimuthal_mode_field_inner(config, theta, phi, k, n_rho, n_phi, m_probe, deadline)?;
-    let mut evaluations = n_rho * n_phi;
+    let mut evaluations = mode_sweep_work(n_rho, n_phi, m_probe as usize + 1);
 
     // ---- P12: the RADIAL axis, which before this unit was never verified at all ----
     //
@@ -664,8 +687,9 @@ pub fn integrate_aperture(
         // against `|total|` — the scale the answer's accuracy is measured on — not against
         // the probe's own magnitude, which is not the quantity at risk.
         let n_fine = radial_check_points(n_rho);
-        let probe_fine = radial_probe_field(config, theta, phi, k, n_fine, n_phi, deadline)?;
-        evaluations += n_fine * n_phi;
+        let probe_fine =
+            radial_probe_field(config, theta, phi, k, n_fine, n_phi, m_probe, deadline)?;
+        evaluations += mode_sweep_work(n_fine, n_phi, RADIAL_PROBE_MODES.len());
         let probe_diff = (probe_fine - sweep.radial_probe).norm();
         let scale = sweep.total.norm().max(params.absolute_tolerance);
         if probe_diff * RADIAL_PRE_GATE_SAFETY <= radial_rtol * scale {
@@ -686,7 +710,7 @@ pub fn integrate_aperture(
             let fine = azimuthal_mode_field_inner(
                 config, theta, phi, k, n_fine, n_phi, m_probe, deadline,
             )?;
-            evaluations += n_fine * n_phi;
+            evaluations += mode_sweep_work(n_fine, n_phi, m_probe as usize + 1);
             radial_error = (fine.total - sweep.total).norm();
             // Return the FINE leg: with Simpson's O(h⁴) the returned estimate's own error is
             // ≈ diff/15, which is the entire reason the symmetric branch is accurate at the
@@ -1205,11 +1229,15 @@ fn mode_count_for(config: &AntennaConfiguration, wavelength: f64, theta: f64) ->
     // `n_phi` must Nyquist-cover the INPUT bandwidth `B`, or high modes of `g(ρ,φ')` fold down
     // into the low `gₘ` — including `g₀`, which at θ=0 IS the answer.
     //
-    // NOT rounded to a power of two: the φ' transform here is a naive O(n_phi·M) DFT, not an
-    // FFT, so nothing requires it — and rounding up doubled the cost of every geometry that
-    // landed just past a boundary (B ≈ 263 asked for 536 and would have been given 1024).
-    // Kept even so the ±m pairs stay symmetric on the grid.
-    let n_phi_needed = ((2.0 * bandwidth).ceil() as usize + 8).next_multiple_of(2);
+    // Rounded up to the next **5-smooth** length (P10-perf, 2026-08-01), because the φ'
+    // transform is now an FFT ([`crate::model::fft`]) rather than a direct DFT. Still NOT
+    // rounded to a power of two, and for the reason that predates the FFT: the padding is
+    // aperture-plane evaluations, which are the integrator's floor cost, and B ≈ 263 asking
+    // for 536 would be given 1024 — 91 % extra — where the nearest fast length is 540, i.e.
+    // 0.7 %. Kept even so the ±m pairs stay symmetric on the grid.
+    let n_phi_needed = crate::model::fft::next_fast_len(
+        ((2.0 * bandwidth).ceil() as usize + 8).next_multiple_of(2),
+    );
 
     // Effort ceiling, keyed to the model's OWN scope boundary. Past
     // `SEVERE_OFFSET_THRESHOLD` (0.5f) the feed is outside physical-optics scope: the caller
@@ -1347,8 +1375,11 @@ struct AperturePlaneConst<'a> {
     f: f64,
     /// Lateral feed offset magnitude `δ` (m); coma driver.
     delta: f64,
-    /// Azimuth of the lateral offset, `atan2(y, x)` (rad).
-    alpha: f64,
+    /// `cos α` / `sin α` for the azimuth of the lateral offset, `α = atan2(y, x)` (rad).
+    /// Stored as the pair rather than the angle: `phase_feed_displacement` only ever wants
+    /// the two, and it runs `n_ρ · n_φ` times per sweep (roadmap P10-perf).
+    cos_alpha: f64,
+    sin_alpha: f64,
     /// Axial phase-center offset from focus (m); defocus driver.
     axial: f64,
     /// Mesh wire spacing (m); `0.0` if no mesh.
@@ -1358,13 +1389,64 @@ struct AperturePlaneConst<'a> {
 impl<'a> AperturePlaneConst<'a> {
     fn new(config: &'a AntennaConfiguration) -> Self {
         let f = config.reflector.focal_length;
+        let alpha = config.feed.position.y.atan2(config.feed.position.x);
         Self {
             feed: &config.feed,
             f,
             delta: config.feed.position.radial_displacement(),
-            alpha: config.feed.position.y.atan2(config.feed.position.x),
+            cos_alpha: alpha.cos(),
+            sin_alpha: alpha.sin(),
             axial: config.feed.position.z - f + config.feed.axial_defocus,
             mesh_spacing: config.mesh.as_ref().map_or(0.0, |m| m.spacing),
+        }
+    }
+
+    /// The ρ-only part of the aperture-plane phase: the mesh term, which depends on ρ through
+    /// the surface incidence angle `θ_inc ≈ ρ/(2f)` and not on φ' at all.
+    ///
+    /// Hoisted out of the φ' loop (roadmap P10-perf): it costs an `atan` and a `sin`, and
+    /// computing it inside the loop repeated that work `n_φ − 1` times per radial sample for
+    /// an identical result. Guarded on `spacing > 0.0` for consistency with `phase_total` and
+    /// `hankel_radial_field` (a zero-spacing mesh would divide by zero in `phase_mesh`).
+    #[inline]
+    fn rho_only_phase(&self, rho: f64, k: f64) -> f64 {
+        if self.mesh_spacing > 0.0 {
+            let theta_inc = rho / (2.0 * self.f);
+            crate::model::phase::phase_mesh(self.mesh_spacing, theta_inc, k)
+        } else {
+            0.0
+        }
+    }
+}
+
+/// Per-φ'-grid-index trigonometric table, built once per sweep and reused at every radial
+/// sample (roadmap P10-perf).
+///
+/// `cos φ'`, `sin φ'` and `cos 2φ'` are needed by [`aperture_plane_g`] at each of the
+/// `n_ρ · n_φ` evaluation points, but depend only on the grid index — the φ' grid is fixed for
+/// the whole sweep. Tabling them turns `3 · n_ρ · n_φ` transcendental calls into `3 · n_φ`.
+struct PhiGrid {
+    cos_phi: Vec<f64>,
+    sin_phi: Vec<f64>,
+    cos_2phi: Vec<f64>,
+}
+
+impl PhiGrid {
+    fn new(n_phi: usize) -> Self {
+        let dphi = 2.0 * PI / n_phi as f64;
+        let mut cos_phi = Vec::with_capacity(n_phi);
+        let mut sin_phi = Vec::with_capacity(n_phi);
+        let mut cos_2phi = Vec::with_capacity(n_phi);
+        for j in 0..n_phi {
+            let phi = j as f64 * dphi;
+            cos_phi.push(phi.cos());
+            sin_phi.push(phi.sin());
+            cos_2phi.push((2.0 * phi).cos());
+        }
+        Self {
+            cos_phi,
+            sin_phi,
+            cos_2phi,
         }
     }
 }
@@ -1382,24 +1464,48 @@ impl<'a> AperturePlaneConst<'a> {
 /// The guards mirror `aperture_integrand`/`phase_total` exactly (lateral coma + axial
 /// defocus via the exact geometric `phase_feed_displacement`; mesh phase when a mesh with
 /// positive spacing is present) so the mode integrator and the 2D reference agree wherever
-/// both are valid. The config-derived constants arrive precomputed in [`AperturePlaneConst`].
+/// both are valid. The config-derived constants arrive precomputed in [`AperturePlaneConst`],
+/// the φ'-only trigonometry in [`PhiGrid`], and the ρ-only mesh phase as `rho_phase` — all
+/// three hoists exist because this function is the integrator's floor cost, evaluated
+/// `n_ρ · n_φ` times per sweep (roadmap P10-perf).
 #[inline]
-fn aperture_plane_g(c: &AperturePlaneConst, rho: f64, phi_prime: f64, k: f64) -> Complex64 {
-    let amp = illumination_amplitude(rho, phi_prime, c.feed, c.f);
+fn aperture_plane_g(
+    c: &AperturePlaneConst,
+    grid: &PhiGrid,
+    j: usize,
+    rho: f64,
+    rho_phase: f64,
+    k: f64,
+) -> Complex64 {
+    let cos_phi = grid.cos_phi[j];
+    let sin_phi = grid.sin_phi[j];
+    let amp = crate::model::illumination::illumination_amplitude_precomputed(
+        rho,
+        cos_phi,
+        sin_phi,
+        grid.cos_2phi[j],
+        c.feed,
+        c.f,
+    );
 
-    let mut phase = 0.0;
+    let mut phase = rho_phase;
     if c.delta > 0.0 || c.axial != 0.0 {
-        phase += crate::model::phase::phase_feed_displacement(
-            rho, phi_prime, c.delta, c.alpha, c.axial, c.f, k,
+        phase += crate::model::phase::phase_feed_displacement_precomputed(
+            rho,
+            cos_phi,
+            sin_phi,
+            c.delta,
+            c.cos_alpha,
+            c.sin_alpha,
+            c.axial,
+            c.f,
+            k,
         );
     }
-    // Mesh phase (ρ-only); guard on spacing > 0.0 for consistency with `phase_total`
-    // and `hankel_radial_field` (a zero-spacing mesh would divide by zero in phase_mesh).
-    if c.mesh_spacing > 0.0 {
-        let theta_inc = rho / (2.0 * c.f);
-        phase += crate::model::phase::phase_mesh(c.mesh_spacing, theta_inc, k);
-    }
-    Complex64::new(0.0, phase).exp() * amp
+    // `exp(j·phase)` for a purely imaginary argument. `Complex64::exp` would compute
+    // `exp(0.0) · (cos, sin)` — the same two transcendentals plus an `exp` whose result is
+    // exactly 1.0, so this is bit-identical and one call cheaper.
+    Complex64::new(phase.cos(), phase.sin()) * amp
 }
 
 /// `(−j)^m` for integer `m` (which may be negative): `(−j)^m = exp(−j·m·π/2)`.
@@ -1482,16 +1588,23 @@ fn azimuthal_mode_field_inner(
     let one_minus_cos = 1.0 - theta.cos();
     let mmax = m_max as usize;
 
-    // Precompute the φ' twiddle factors e^{−jmφ'_j} (θ- and ρ-independent — the φ' grid
-    // is fixed). This lifts n_rho·n_phi·m complex exponentials out of the radial loop into
-    // a one-time n_phi·m table. e^{+jmφ'_j} is just its conjugate.
-    // Flat layout: twiddle[m * n_phi_coeff + j].
-    let mut twiddle = vec![Complex64::new(0.0, 0.0); (mmax + 1) * n_phi_coeff];
-    for (m, chunk) in twiddle.chunks_mut(n_phi_coeff).enumerate() {
-        for (jj, t) in chunk.iter_mut().enumerate() {
-            *t = Complex64::new(0.0, -(m as f64) * jj as f64 * dphi).exp();
-        }
-    }
+    // P10-perf: the φ' coefficients come from an FFT, not a direct DFT. `gₘ(ρ)` for every
+    // wanted `m` is one length-`n_phi_coeff` transform of the `g(ρ,φ'_j)` samples — O(n log n)
+    // instead of the O(n_phi·M) inner loop this replaced, which was the integrator's dominant
+    // term on steered and wide-spectrum geometries (n_phi=536, M=254 ⇒ ~137 000 complex
+    // multiply-accumulates *per radial sample*).
+    //
+    // Index mapping, and it is the one thing here that must not be gotten backwards:
+    //   G[k] = Σ_j g_j e^{−2πi jk/n}        (the forward transform)
+    //   gm_pos[m] = Σ_j g_j e^{−jmφ'_j}/n  = G[m mod n] / n
+    //   gm_neg[m] = Σ_j g_j e^{+jmφ'_j}/n  = G[(n − m mod n) mod n] / n
+    // The `mod n` is not defensive padding: the direct DFT this replaces is exactly periodic
+    // in `m` with period `n`, so an `m ≥ n` (reachable only from tests, which drive `m_max`
+    // directly) aliases identically under both implementations.
+    let plan = crate::model::fft::FftPlan::new(n_phi_coeff);
+    let phi_grid = PhiGrid::new(n_phi_coeff);
+    let mut g_samples = vec![Complex64::new(0.0, 0.0); n_phi_coeff];
+    let mut fft_scratch = vec![Complex64::new(0.0, 0.0); n_phi_coeff];
 
     // Radial accumulators for R_{+m} and R_{-m} (m = 0..=m_max); Simpson scale applied
     // once at the end. r_neg[0] is unused (m=0 has no distinct negative counterpart).
@@ -1501,6 +1614,10 @@ fn azimuthal_mode_field_inner(
     // Per-ρ Fourier-coefficient buffers, reused each radial step to avoid reallocation.
     let mut gm_pos = vec![Complex64::new(0.0, 0.0); mmax + 1];
     let mut gm_neg = vec![Complex64::new(0.0, 0.0); mmax + 1];
+
+    // P10-perf: every order `J_0(a) … J_{m_max}(a)` from ONE recurrence sweep per radial
+    // sample, instead of a fresh recurrence per order (which made the Bessel work O(M²)).
+    let mut jm = vec![0.0_f64; mmax + 1];
 
     for i in 0..n {
         // S3 cooperative budget: poll the wall-clock deadline at chunk boundaries only
@@ -1522,32 +1639,25 @@ fn azimuthal_mode_field_inner(
         let chirp_factor = Complex64::new(0.0, chirp).exp();
         let a = k * rho * sin_theta;
 
-        // g_m(ρ) via a single φ' sweep filling both +m (e^{−jmφ'}) and −m (e^{+jmφ'}).
-        for g in gm_pos.iter_mut() {
-            *g = Complex64::new(0.0, 0.0);
+        // g_m(ρ): one φ' sweep to sample g, one FFT to get every mode at once.
+        let rho_phase = apc.rho_only_phase(rho, k);
+        for (jj, slot) in g_samples.iter_mut().enumerate() {
+            *slot = aperture_plane_g(&apc, &phi_grid, jj, rho, rho_phase, k);
         }
-        for g in gm_neg.iter_mut() {
-            *g = Complex64::new(0.0, 0.0);
-        }
-        for jj in 0..n_phi_coeff {
-            let phip = jj as f64 * dphi;
-            let g = aperture_plane_g(&apc, rho, phip, k);
-            for m in 0..=mmax {
-                let t = twiddle[m * n_phi_coeff + jj]; // e^{−jmφ'_j}
-                gm_pos[m] += g * t;
-                gm_neg[m] += g * t.conj(); // e^{+jmφ'_j}
-            }
-        }
+        plan.forward(&mut g_samples, &mut fft_scratch);
+        // `dphi/(2π) = 1/n_phi_coeff` — the same normalization the direct DFT applied.
         let norm = dphi / (2.0 * PI);
         for m in 0..=mmax {
-            gm_pos[m] *= norm;
-            gm_neg[m] *= norm;
+            let mm = m % n_phi_coeff;
+            gm_pos[m] = g_samples[mm] * norm;
+            gm_neg[m] = g_samples[(n_phi_coeff - mm) % n_phi_coeff] * norm;
         }
 
-        // Radial integrand contribution for each mode.
+        // Radial integrand contribution for each mode. J_m(a) for every m in one sweep;
+        // J_{-m} = (−1)^m J_m.
+        bessel_jn_array(m_max, a, &mut jm);
         for (m, (rp, rn)) in r_pos.iter_mut().zip(r_neg.iter_mut()).enumerate() {
-            let jm = bessel_jn(m as u32, a); // J_m(a); J_{-m} = (−1)^m J_m
-            let base = chirp_factor * jm * rho * w;
+            let base = chirp_factor * jm[m] * rho * w;
             *rp += base * gm_pos[m];
             if m > 0 {
                 let sign = if m % 2 == 0 { 1.0 } else { -1.0 };
@@ -1600,6 +1710,16 @@ fn azimuthal_mode_field_inner(
 /// ~18% of a full sweep at `m_max ≈ 195` (`dsn_34m` Ka) but ~52–62% at `m_max ≈ 12–20`. That
 /// is precisely why [`use_radial_pre_gate`] only reaches for it on geometries where a full
 /// check leg is expensive.
+///
+/// `m_probe` is the full sweep's top mode. It is **not** used to sum more modes — only
+/// [`RADIAL_PROBE_MODES`] are accumulated — but it must be passed so the `Jₘ` ladder is built
+/// with the same branch decision [`azimuthal_mode_field_inner`] makes. [`bessel_jn_array`]
+/// selects upward or downward recurrence from the *highest* wanted order, and those two
+/// directions differ by ~2.8e-9 near the origin (the rational approximations' error at `x=0`
+/// enters the upward seeds). Sizing the ladder differently here would make the pre-gate
+/// difference two subtly different functions, which is exactly what
+/// `radial_probe_field_matches_the_full_sweeps_probe_accumulation` exists to forbid.
+#[allow(clippy::too_many_arguments)]
 fn radial_probe_field(
     config: &AntennaConfiguration,
     theta: f64,
@@ -1607,6 +1727,7 @@ fn radial_probe_field(
     k: f64,
     n_rho: usize,
     n_phi_coeff: usize,
+    m_probe: u32,
     deadline: Option<IntegrationDeadline>,
 ) -> ComputationResult<Complex64> {
     let f = config.reflector.focal_length;
@@ -1626,6 +1747,21 @@ fn radial_probe_field(
     let mut r_pos = [Complex64::new(0.0, 0.0); P];
     let mut r_neg = [Complex64::new(0.0, 0.0); P];
 
+    // φ' twiddles e^{−jmφ'_j} for the handful of probe modes, hoisted out of the radial loop
+    // (P10-perf). Only `P` modes are wanted, so a full FFT would be wasted work here — but
+    // recomputing the exponential per `(ρ, φ', mode)`, which this used to do, was `n_rho·n_phi·P`
+    // transcendental calls on the leg whose entire purpose is to be the cheap one.
+    // Flat layout: twiddle[idx * n_phi_coeff + j].
+    let mut twiddle = vec![Complex64::new(0.0, 0.0); P * n_phi_coeff];
+    for (idx, chunk) in twiddle.chunks_mut(n_phi_coeff).enumerate() {
+        let m = RADIAL_PROBE_MODES[idx] as f64;
+        for (jj, t) in chunk.iter_mut().enumerate() {
+            *t = Complex64::new(0.0, -m * jj as f64 * dphi).exp();
+        }
+    }
+    let mut jm_ladder = vec![0.0_f64; m_probe as usize + 1];
+    let phi_grid = PhiGrid::new(n_phi_coeff);
+
     for i in 0..n {
         if i % BUDGET_CHECK_STRIDE == 0 {
             if let Some(dl) = deadline {
@@ -1640,11 +1776,11 @@ fn radial_probe_field(
 
         let mut gm_pos = [Complex64::new(0.0, 0.0); P];
         let mut gm_neg = [Complex64::new(0.0, 0.0); P];
+        let rho_phase = apc.rho_only_phase(rho, k);
         for jj in 0..n_phi_coeff {
-            let phip = jj as f64 * dphi;
-            let g = aperture_plane_g(&apc, rho, phip, k);
-            for (idx, &m) in RADIAL_PROBE_MODES.iter().enumerate() {
-                let t = Complex64::new(0.0, -(m as f64) * jj as f64 * dphi).exp();
+            let g = aperture_plane_g(&apc, &phi_grid, jj, rho, rho_phase, k);
+            for idx in 0..P {
+                let t = twiddle[idx * n_phi_coeff + jj]; // e^{−jmφ'_j}
                 gm_pos[idx] += g * t;
                 gm_neg[idx] += g * t.conj();
             }
@@ -1655,9 +1791,10 @@ fn radial_probe_field(
             gm_neg[idx] *= norm;
         }
 
+        // Same ladder, same branch decision as the full sweep — see the `m_probe` note above.
+        bessel_jn_array(m_probe, a, &mut jm_ladder);
         for (idx, &m) in RADIAL_PROBE_MODES.iter().enumerate() {
-            let jm = bessel_jn(m, a);
-            let base = chirp_factor * jm * rho * w;
+            let base = chirp_factor * jm_ladder[m as usize] * rho * w;
             r_pos[idx] += base * gm_pos[idx];
             if m > 0 {
                 let sign = if m % 2 == 0 { 1.0 } else { -1.0 };
@@ -2037,9 +2174,24 @@ mod tests {
         );
     }
 
-    /// The azimuthal-mode integrator must reproduce the symmetric Hankel path exactly
-    /// when the aperture is symmetric (m=0-only special case) — a consistency self-check
-    /// that the ±m assembly and normalisation are correct.
+    /// The azimuthal-mode integrator must reproduce the symmetric Hankel path when the
+    /// aperture is symmetric (m=0-only special case) — a consistency self-check that the ±m
+    /// assembly and normalisation are correct.
+    ///
+    /// # Why the tolerance is 1e-8 and not machine precision
+    ///
+    /// The two paths obtain `J₀` from different routines, and have since P10-perf: the Hankel
+    /// path calls [`bessel_j0`] directly (it needs one order), while the mode path takes `J₀`
+    /// from `bessel_jn_array`'s ladder. Those disagree by **2.83e-9** near the origin, because
+    /// `bessel_j0`'s Numerical Recipes rational approximation evaluates to `1 + 2.83e-9` at
+    /// `x = 0` where the ladder's normalized recurrence gives exactly 1.
+    ///
+    /// The disagreement is therefore the *rational approximation's* error, not the mode
+    /// assembly's, and it is bounded by it: 2.83e-9 in field amplitude is 2.5e-8 dB. The
+    /// property this test exists to protect — that the ±m assembly, the `(−j)^m` factors and
+    /// the `2π` normalisation reconstruct the symmetric case — is unaffected by a scale error
+    /// six orders below the tolerance, and would still fail loudly at 1e-8 if any of them were
+    /// wrong (they are wrong by O(1) factors when they are wrong at all).
     #[test]
     fn azimuthal_modes_reduce_to_hankel_when_symmetric() {
         let config = large_test_antenna(); // symmetric: feed at focus, asymmetry_factor=1
@@ -2050,7 +2202,7 @@ mod tests {
             let hankel = hankel_radial_field(&config, th, 0.0, k, 4097, None).unwrap();
             let modes = azimuthal_mode_field(&config, th, 0.0, k, 4097, 64, 4);
             let rel = (hankel - modes).norm() / hankel.norm().max(1e-30);
-            assert!(rel < 1e-9, "θ={deg}°: Hankel vs modes rel diff {rel:.2e}");
+            assert!(rel < 1e-8, "θ={deg}°: Hankel vs modes rel diff {rel:.2e}");
         }
     }
 
@@ -2723,6 +2875,10 @@ mod tests {
 #[cfg(test)]
 mod p12_radial_diagnostic {
     use super::*;
+    // The per-order call, which the production path no longer uses. Kept for the diagnostics
+    // below that evaluate a single named mode: there the ladder form buys nothing, and an
+    // independently-computed `Jₘ` is the more useful reference.
+    use crate::model::bessel::bessel_jn;
     use crate::model::geometry::{
         FeedParameters, FeedPosition, MeshParameters, MeshPattern, ReflectorGeometry,
     };
@@ -2735,7 +2891,7 @@ mod p12_radial_diagnostic {
     /// Deliberately NOT `tests::offset_feed_test_antenna`, which is close but not the served
     /// configuration (q = 2.0, no mesh, ideal surface). P12's measured rows are against the
     /// real entry, so the diagnostic must be too.
-    fn gs_3_7m_x_band() -> AntennaConfiguration {
+    pub(super) fn gs_3_7m_x_band() -> AntennaConfiguration {
         let reflector = ReflectorGeometry::new(3.7, 1.85, 0.0015).unwrap();
         let mut pos = FeedPosition::at_focus(1.85);
         pos.x = 0.05;
@@ -2753,7 +2909,7 @@ mod p12_radial_diagnostic {
 
     /// The **exact** served `dsn_34m_uncalibrated` / `x_band` geometry, for the second of
     /// P12's three measured rows (θ = 0.10°, where the `min_rho_points` floor DOES bind).
-    fn dsn_34m_x_band() -> AntennaConfiguration {
+    pub(super) fn dsn_34m_x_band() -> AntennaConfiguration {
         let reflector = ReflectorGeometry::new(34.0, 13.6, 0.00025).unwrap();
         let mut pos = FeedPosition::at_focus(13.6);
         pos.x = 0.15;
@@ -2778,7 +2934,7 @@ mod p12_radial_diagnostic {
     /// lateral offset at all**. It reaches the mode path purely through
     /// `asymmetry_factor = 1.1`, so its coma cycle budget is exactly zero — which makes it a
     /// clean check that the defect is not about coma.
-    fn d12_uhf_fixture() -> AntennaConfiguration {
+    pub(super) fn d12_uhf_fixture() -> AntennaConfiguration {
         let reflector = ReflectorGeometry::new(8.0, 8.0 * 0.45, 0.002).unwrap();
         let feed = FeedParameters::new(FeedPosition::at_focus(8.0 * 0.45), 5.0, 0.0, 1.1).unwrap();
         let mesh = MeshParameters::new(0.010, 0.001, MeshPattern::Square).unwrap();
@@ -2796,7 +2952,7 @@ mod p12_radial_diagnostic {
     /// Ka feed offset 0.15 m along **+y**. This is P10-perf's pathological latency case — the
     /// widest azimuthal spectrum on any served antenna (~195 modes at 32 GHz) — and therefore
     /// the geometry that decides what a per-call radial check can afford.
-    fn dsn_34m_ka_band() -> AntennaConfiguration {
+    pub(super) fn dsn_34m_ka_band() -> AntennaConfiguration {
         let reflector = ReflectorGeometry::new(34.0, 13.6, 0.00025).unwrap();
         let mut pos = FeedPosition::at_focus(13.6);
         pos.y = 0.15;
@@ -2813,7 +2969,7 @@ mod p12_radial_diagnostic {
 
     /// Wall-clock of `f`, in milliseconds, as the **minimum** over `reps` runs (min rather than
     /// mean: we want the cost of the work, not of whatever else the machine was doing).
-    fn time_ms<F: FnMut() -> Complex64>(reps: usize, mut f: F) -> f64 {
+    pub(super) fn time_ms<F: FnMut() -> Complex64>(reps: usize, mut f: F) -> f64 {
         let mut best = f64::INFINITY;
         for _ in 0..reps {
             let t = Instant::now();
@@ -2900,6 +3056,11 @@ mod p12_radial_diagnostic {
 
         let mut r_pos = vec![Complex64::new(0.0, 0.0); mmax + 1];
         let mut r_neg = vec![Complex64::new(0.0, 0.0); mmax + 1];
+        let plan = crate::model::fft::FftPlan::new(n_phi_coeff);
+        let phi_grid = PhiGrid::new(n_phi_coeff);
+        let mut g_samples = vec![Complex64::new(0.0, 0.0); n_phi_coeff];
+        let mut fft_scratch = vec![Complex64::new(0.0, 0.0); n_phi_coeff];
+        let mut jm = vec![0.0_f64; mmax + 1];
 
         for i in 0..n {
             let rho = i as f64 * h;
@@ -2908,26 +3069,29 @@ mod p12_radial_diagnostic {
             let chirp_factor = Complex64::new(0.0, chirp).exp();
             let a = k * rho * sin_theta;
 
+            // Mirrors `azimuthal_mode_field_inner` line for line, INCLUDING its P10-perf
+            // kernels: the FFT for `gₘ` and the single-sweep `Jₘ` ladder. Reverting either to
+            // its pre-P10-perf form here would not make this a stricter check — it would make
+            // it a check of something else, and
+            // `per_mode_decomposition_reproduces_the_integrator` would fail at ~1e-6 for a
+            // reason having nothing to do with the decomposition.
+            let rho_phase = apc.rho_only_phase(rho, k);
+            for (jj, s) in g_samples.iter_mut().enumerate() {
+                *s = aperture_plane_g(&apc, &phi_grid, jj, rho, rho_phase, k);
+            }
+            plan.forward(&mut g_samples, &mut fft_scratch);
+            let norm = dphi / (2.0 * PI);
             let mut gm_pos = vec![Complex64::new(0.0, 0.0); mmax + 1];
             let mut gm_neg = vec![Complex64::new(0.0, 0.0); mmax + 1];
-            for jj in 0..n_phi_coeff {
-                let phip = jj as f64 * dphi;
-                let g = aperture_plane_g(&apc, rho, phip, k);
-                for m in 0..=mmax {
-                    let t = Complex64::new(0.0, -(m as f64) * jj as f64 * dphi).exp();
-                    gm_pos[m] += g * t;
-                    gm_neg[m] += g * t.conj();
-                }
-            }
-            let norm = dphi / (2.0 * PI);
             for m in 0..=mmax {
-                gm_pos[m] *= norm;
-                gm_neg[m] *= norm;
+                let mm = m % n_phi_coeff;
+                gm_pos[m] = g_samples[mm] * norm;
+                gm_neg[m] = g_samples[(n_phi_coeff - mm) % n_phi_coeff] * norm;
             }
 
+            bessel_jn_array(m_max, a, &mut jm);
             for (m, (rp, rn)) in r_pos.iter_mut().zip(r_neg.iter_mut()).enumerate() {
-                let jm = bessel_jn(m as u32, a);
-                let base = chirp_factor * jm * rho * w;
+                let base = chirp_factor * jm[m] * rho * w;
                 *rp += base * gm_pos[m];
                 if m > 0 {
                     let sign = if m % 2 == 0 { 1.0 } else { -1.0 };
@@ -2966,6 +3130,7 @@ mod p12_radial_diagnostic {
         let f = config.reflector.focal_length;
         let r_max = config.reflector.diameter / 2.0;
         let apc = AperturePlaneConst::new(config);
+        let phi_grid = PhiGrid::new(n_phi_coeff);
         let dphi = 2.0 * PI / n_phi_coeff as f64;
         let sin_theta = theta.sin();
         let one_minus_cos = 1.0 - theta.cos();
@@ -2974,11 +3139,11 @@ mod p12_radial_diagnostic {
         (0..n)
             .map(|i| {
                 let rho = i as f64 * h;
+                let rho_phase = apc.rho_only_phase(rho, k);
                 let mut gm = Complex64::new(0.0, 0.0);
                 for jj in 0..n_phi_coeff {
-                    let phip = jj as f64 * dphi;
                     let t = Complex64::new(0.0, -(m as f64) * jj as f64 * dphi).exp();
-                    gm += aperture_plane_g(&apc, rho, phip, k) * t;
+                    gm += aperture_plane_g(&apc, &phi_grid, jj, rho, rho_phase, k) * t;
                 }
                 gm *= dphi / (2.0 * PI);
                 let chirp = k * rho * rho / (4.0 * f) * one_minus_cos;
@@ -3068,6 +3233,7 @@ mod p12_radial_diagnostic {
         let mut r_neg = vec![Complex64::new(0.0, 0.0); modes.len()];
         let mut gm_pos = vec![Complex64::new(0.0, 0.0); modes.len()];
         let mut gm_neg = vec![Complex64::new(0.0, 0.0); modes.len()];
+        let phi_grid = PhiGrid::new(n_phi_coeff);
 
         for i in 0..n {
             let rho = i as f64 * h;
@@ -3082,9 +3248,9 @@ mod p12_radial_diagnostic {
             for g in gm_neg.iter_mut() {
                 *g = Complex64::new(0.0, 0.0);
             }
+            let rho_phase = apc.rho_only_phase(rho, k);
             for jj in 0..n_phi_coeff {
-                let phip = jj as f64 * dphi;
-                let g = aperture_plane_g(&apc, rho, phip, k);
+                let g = aperture_plane_g(&apc, &phi_grid, jj, rho, rho_phase, k);
                 for (idx, &m) in modes.iter().enumerate() {
                     let t = Complex64::new(0.0, -(m as f64) * jj as f64 * dphi).exp();
                     gm_pos[idx] += g * t;
@@ -3172,7 +3338,8 @@ mod p12_radial_diagnostic {
                 azimuthal_mode_field_inner(&config, theta, phi, k, n_rho, n_phi, m_max + 1, None)
                     .expect("sweep");
             let standalone =
-                radial_probe_field(&config, theta, phi, k, n_rho, n_phi, None).expect("probe");
+                radial_probe_field(&config, theta, phi, k, n_rho, n_phi, m_max + 1, None)
+                    .expect("probe");
 
             let rel = (sweep.radial_probe - standalone).norm()
                 / sweep.radial_probe.norm().max(f64::MIN_POSITIVE);
@@ -4078,8 +4245,17 @@ mod p12_radial_diagnostic {
     /// `RADIAL_PRE_GATE_SAFETY`? A pre-gate that always declines costs an extra leg and buys
     /// nothing, so this is the measurement that decides whether it earns its complexity.
     ///
-    /// `legs` is inferred from `num_evaluations / n_phi`: `N + (2N−1) = 3N−1` is two legs (the
-    /// pre-gate certified, or one refinement converged); `5N−2` is three, and so on.
+    /// `legs` is inferred from `num_evaluations` against the per-leg work model
+    /// [`mode_sweep_work`]: a full sweep costs `n_rho · (n_phi + m_probe + 1)` and a probe leg
+    /// `n_rho · (n_phi + RADIAL_PROBE_MODES.len())`.
+    ///
+    /// **Post-P10-perf note for unit P13.** The pre-gate's whole justification is that a full
+    /// check leg is much dearer than a probe leg. The FFT narrowed that gap sharply: the mode
+    /// work the probe skips used to be an `O(n_phi · M)` DFT and is now `O(M)`, so a probe leg
+    /// costs `n_phi + 2` against a full leg's `n_phi + M + 1` — at `dsn_34m` Ka that is 272 vs
+    /// 405, i.e. the probe now saves only ~33 % of a leg where it once saved ~80 %. P13 should
+    /// re-ask whether `RADIAL_PRE_GATE_SAFETY` is worth validating or the pre-gate is worth
+    /// deleting outright, with these numbers rather than the pre-FFT ones.
     #[test]
     #[ignore = "diagnostic: prints measurements, asserts nothing"]
     fn p12_pre_gate_yield_across_geometries() {
@@ -4106,11 +4282,17 @@ mod p12_radial_diagnostic {
             let work = (n0 as u64) * (n_phi as u64) * (m_max as u64 + 2);
 
             let r = integrate_aperture(theta, 0.0, &config, freq, &params).unwrap();
-            let radial_units = r.num_evaluations / n_phi;
-            // 3N−1 → 2 legs, 5N−2 → 3, 9N−4 → 4 …
-            let legs = if radial_units <= 3 * n0 {
+            // Per-leg work under `mode_sweep_work`: the opening full sweep, then either a
+            // probe leg (pre-gate) or successive full sweeps at 2N−1, 4N−3, …
+            let full = |n: usize| mode_sweep_work(n, n_phi, m_max as usize + 2);
+            let probe = |n: usize| mode_sweep_work(n, n_phi, RADIAL_PROBE_MODES.len());
+            let n1 = radial_check_points(n0);
+            let n2 = radial_check_points(n1);
+            let two = full(n0) + if gated { probe(n1) } else { full(n1) };
+            let three = two + full(if gated { n1 } else { n2 });
+            let legs = if r.num_evaluations <= two {
                 2
-            } else if radial_units <= 5 * n0 {
+            } else if r.num_evaluations <= three {
                 3
             } else {
                 4
@@ -4252,6 +4434,113 @@ mod p12_radial_diagnostic {
                 coarse = fine;
             }
             println!();
+        }
+    }
+}
+
+/// **P10-perf cost measurements.** Diagnostics only — nothing here asserts, because wall
+/// clock is not a property a CI machine can be held to. The numbers they print are what the
+/// roadmap unit is scored on; the *structural* cost guards that DO assert live in
+/// `reference_validation.rs` (leg counts) and in [`tests`] (work-per-leg).
+#[cfg(test)]
+mod p10_perf_diagnostic {
+    use super::p12_radial_diagnostic::{
+        d12_uhf_fixture, dsn_34m_ka_band, dsn_34m_x_band, gs_3_7m_x_band, time_ms,
+    };
+    use super::*;
+    use crate::model::geometry::{FeedParameters, FeedPosition, ReflectorGeometry};
+
+    /// The `coma_aberration_test` / `test_feed_steering_large_offset` geometry: the 34 m dish
+    /// with the feed steered ~5° off boresight (δ = 1.19 m, δ/f = 0.0875). Well inside the 0.5f
+    /// PO scope boundary, so the model is expected to get it RIGHT — and since P12 removed the
+    /// φ' cap that was hiding its cost inside a wrong answer, it is this unit's headline case:
+    /// ~22 s of CPU, enough to exhaust S3's 30 s wall-clock budget and serve a 504.
+    pub(super) fn steered_34m() -> AntennaConfiguration {
+        let reflector = ReflectorGeometry::new(34.0, 13.6, 0.00025).unwrap();
+        let mut pos = FeedPosition::at_focus(13.6);
+        pos.x = 1.19;
+        let feed = FeedParameters::new(pos, 1.14, 0.0, 1.0).unwrap();
+        AntennaConfiguration::new(
+            "steered".into(),
+            "Steered 34m".into(),
+            reflector,
+            feed,
+            None,
+        )
+        .unwrap()
+    }
+
+    /// End-to-end served cost of one `integrate_aperture` call across the geometries this unit
+    /// exists to speed up, with the sizing that drives each one.
+    ///
+    /// Run with:
+    /// `cargo test --release -p antenna-model --lib p10_perf_served_integration_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore = "diagnostic: prints wall-clock measurements, asserts nothing"]
+    fn p10_perf_served_integration_cost() {
+        let params = IntegrationParams::adaptive();
+        println!("\n#### P10-perf: served `integrate_aperture` cost (release build)\n");
+        println!("  geometry                    n_phi  m_max   n_rho0    evals      ms  conv");
+        for (name, config, freq, theta_deg) in [
+            ("gs_3.7m X    θ=5°  ", gs_3_7m_x_band(), 8.4e9, 5.0_f64),
+            ("dsn_34m X    θ=0.1°", dsn_34m_x_band(), 8.45e9, 0.10),
+            ("dsn_34m X    θ=5°  ", dsn_34m_x_band(), 8.45e9, 5.0),
+            ("D12 UHF      θ=16° ", d12_uhf_fixture(), 600.0e6, 16.0),
+            ("steered 34m  θ=0°  ", steered_34m(), 8.45e9, 0.0),
+            ("steered 34m  θ=2°  ", steered_34m(), 8.45e9, 2.0),
+            ("steered 34m  θ=5°  ", steered_34m(), 8.45e9, 5.0),
+            ("dsn_34m Ka   θ=1°  ", dsn_34m_ka_band(), 32.0e9, 1.0),
+            ("dsn_34m Ka   θ=5°  ", dsn_34m_ka_band(), 32.0e9, 5.0),
+            ("dsn_34m Ka   θ=45° ", dsn_34m_ka_band(), 32.0e9, 45.0),
+            ("dsn_34m Ka   θ=90° ", dsn_34m_ka_band(), 32.0e9, 90.0),
+        ] {
+            let lambda = wavelength_from_frequency(freq);
+            let theta = theta_deg.to_radians();
+            let ModeSizing { m_max, n_phi, .. } = mode_count_for(&config, lambda, theta);
+            let n0 = radial_points_for(&config, theta, lambda, &params);
+            let mut result = None;
+            let ms = time_ms(2, || {
+                let r = integrate_aperture(theta, 0.0, &config, freq, &params).unwrap();
+                result = Some(r);
+                r.field
+            });
+            let r = result.unwrap();
+            println!(
+                "  {name}  {n_phi:5}  {m_max:5}  {n0:7}  {:8}  {ms:7.1}  {}",
+                r.num_evaluations, r.converged
+            );
+        }
+    }
+
+    /// Cost of the two hot kernels in isolation, at a fixed radial density, so the FFT (φ')
+    /// and Bessel-recurrence (mode) speedups can be attributed separately from the refinement
+    /// loop's leg count.
+    #[test]
+    #[ignore = "diagnostic: prints wall-clock measurements, asserts nothing"]
+    fn p10_perf_single_sweep_cost() {
+        const N_RHO: usize = 1025;
+        println!("\n#### P10-perf: one `azimuthal_mode_field_inner` sweep at n_rho={N_RHO}\n");
+        println!("  geometry                    n_phi  m_max       ms   µs/ρ-sample");
+        for (name, config, freq, theta_deg) in [
+            ("gs_3.7m X    θ=5°  ", gs_3_7m_x_band(), 8.4e9, 5.0_f64),
+            ("D12 UHF      θ=16° ", d12_uhf_fixture(), 600.0e6, 16.0),
+            ("steered 34m  θ=2°  ", steered_34m(), 8.45e9, 2.0),
+            ("dsn_34m Ka   θ=5°  ", dsn_34m_ka_band(), 32.0e9, 5.0),
+            ("dsn_34m Ka   θ=90° ", dsn_34m_ka_band(), 32.0e9, 90.0),
+        ] {
+            let lambda = wavelength_from_frequency(freq);
+            let k = wavenumber(lambda);
+            let theta = theta_deg.to_radians();
+            let ModeSizing { m_max, n_phi, .. } = mode_count_for(&config, lambda, theta);
+            let ms = time_ms(3, || {
+                azimuthal_mode_field_inner(&config, theta, 0.0, k, N_RHO, n_phi, m_max + 1, None)
+                    .unwrap()
+                    .total
+            });
+            println!(
+                "  {name}  {n_phi:5}  {m_max:5}  {ms:8.2}  {:9.3}",
+                ms * 1e3 / N_RHO as f64
+            );
         }
     }
 }

@@ -113,9 +113,41 @@ pub fn cos_q_pattern(psi: f64, q: f64) -> f64 {
 /// assert!(psi.abs() < 1e-10 || (psi - PI).abs() < 1e-10);
 /// ```
 pub fn feed_angle(rho: f64, phi_prime: f64, feed_pos: &FeedPosition, focal_length: f64) -> f64 {
+    feed_angle_cosine(
+        rho,
+        phi_prime.cos(),
+        phi_prime.sin(),
+        feed_pos,
+        focal_length,
+    )
+    .acos()
+}
+
+/// `cos ψ` for the same geometry as [`feed_angle`], taking `cos φ'` and `sin φ'` directly.
+///
+/// Two reasons this is the primitive and [`feed_angle`] the wrapper, both from the aperture
+/// integrator's hot loop (roadmap P10-perf), which evaluates this `n_ρ · n_φ` times per sweep:
+///
+/// 1. **Every caller that wants the angle immediately takes its cosine again.**
+///    [`illumination_amplitude`] uses `ψ` only as `cos^q ψ` and `(1 + cos ψ)/2`, so the
+///    `acos` here and the `cos` there cancel exactly — `cos(acos(x)) = x` for the clamped
+///    `x ∈ [−1, 1]` this returns.
+/// 2. **`cos φ'` and `sin φ'` do not depend on ρ.** The integrator's φ' grid is fixed for the
+///    whole sweep, so the caller can table them once instead of recomputing per radial sample.
+///
+/// The returned value is already clamped to `[−1, 1]`, so `acos` on it cannot produce NaN.
+/// The degenerate cases match [`feed_angle`]'s exactly: a feed sitting on the aperture point
+/// gives `ψ = 0` (cosine 1), and a feed at the origin falls back to the `−z` boresight.
+pub fn feed_angle_cosine(
+    rho: f64,
+    cos_phi_prime: f64,
+    sin_phi_prime: f64,
+    feed_pos: &FeedPosition,
+    focal_length: f64,
+) -> f64 {
     // Convert aperture point from cylindrical to Cartesian
-    let x_aperture = rho * phi_prime.cos();
-    let y_aperture = rho * phi_prime.sin();
+    let x_aperture = rho * cos_phi_prime;
+    let y_aperture = rho * sin_phi_prime;
     let z_aperture = rho * rho / (4.0 * focal_length);
 
     // Vector from feed to aperture point
@@ -124,9 +156,9 @@ pub fn feed_angle(rho: f64, phi_prime: f64, feed_pos: &FeedPosition, focal_lengt
     let dz = z_aperture - feed_pos.z;
     let distance = (dx * dx + dy * dy + dz * dz).sqrt();
 
-    // Handle degenerate case (feed at aperture point)
+    // Handle degenerate case (feed at aperture point): ψ = 0, i.e. cos ψ = 1.
     if distance < 1e-10 {
-        return 0.0;
+        return 1.0;
     }
 
     // Feed boresight direction: from feed toward vertex (origin)
@@ -141,7 +173,7 @@ pub fn feed_angle(rho: f64, phi_prime: f64, feed_pos: &FeedPosition, focal_lengt
     if boresight_mag < 1e-10 {
         // If feed is at origin, use -z as default boresight
         let cos_angle = -dz / distance;
-        return cos_angle.clamp(-1.0, 1.0).acos();
+        return cos_angle.clamp(-1.0, 1.0);
     }
 
     // Normalized boresight direction
@@ -158,7 +190,7 @@ pub fn feed_angle(rho: f64, phi_prime: f64, feed_pos: &FeedPosition, focal_lengt
     let cos_angle = bx * vx + by * vy + bz * vz;
 
     // Clamp to valid range to handle numerical errors
-    cos_angle.clamp(-1.0, 1.0).acos()
+    cos_angle.clamp(-1.0, 1.0)
 }
 
 /// Calculate illumination amplitude at aperture point
@@ -202,8 +234,43 @@ pub fn illumination_amplitude(
     feed_params: &FeedParameters,
     focal_length: f64,
 ) -> f64 {
-    // Calculate angle from feed to aperture point
-    let psi = feed_angle(rho, phi_prime, &feed_params.position, focal_length);
+    illumination_amplitude_precomputed(
+        rho,
+        phi_prime.cos(),
+        phi_prime.sin(),
+        (2.0 * phi_prime).cos(),
+        feed_params,
+        focal_length,
+    )
+}
+
+/// [`illumination_amplitude`] with the three φ'-only trigonometric values supplied.
+///
+/// The aperture integrator sweeps a **fixed** φ' grid at every radial sample, so these three
+/// depend on the grid index alone and are tabled once per sweep rather than recomputed
+/// `n_ρ · n_φ` times (roadmap P10-perf). `cos_2phi_prime` is `cos(2φ')` — needed only when
+/// `asymmetry_factor != 1.0`, but cheap to table unconditionally.
+///
+/// Formula-identical to [`illumination_amplitude`], with one strength reduction: the feed
+/// angle is obtained as `cos ψ` from [`feed_angle_cosine`] instead of as `ψ` from
+/// [`feed_angle`], because both places `ψ` is used here immediately take its cosine again.
+#[inline]
+pub fn illumination_amplitude_precomputed(
+    rho: f64,
+    cos_phi_prime: f64,
+    sin_phi_prime: f64,
+    cos_2phi_prime: f64,
+    feed_params: &FeedParameters,
+    focal_length: f64,
+) -> f64 {
+    // Cosine of the angle from feed to aperture point.
+    let cos_psi = feed_angle_cosine(
+        rho,
+        cos_phi_prime,
+        sin_phi_prime,
+        &feed_params.position,
+        focal_length,
+    );
 
     // Apply asymmetry if present
     // For asymmetric patterns, we modify the effective q-factor based on azimuthal angle
@@ -211,8 +278,7 @@ pub fn illumination_amplitude(
     let q_effective = if feed_params.asymmetry_factor != 1.0 {
         // Modulate q-factor with azimuthal angle to approximate E/H plane differences
         // E-plane typically at φ' = 0, π; H-plane at φ' = π/2, 3π/2
-        let azimuth_factor = (2.0 * phi_prime).cos();
-        let q_modulation = (feed_params.asymmetry_factor - 1.0) * azimuth_factor;
+        let q_modulation = (feed_params.asymmetry_factor - 1.0) * cos_2phi_prime;
         feed_params.q_factor * (1.0 + 0.2 * q_modulation) // 20% maximum variation
     } else {
         feed_params.q_factor
@@ -220,8 +286,16 @@ pub fn illumination_amplitude(
 
     // Space attenuation: feed→reflector distance r = 2f/(1+cosψ) for a parabola,
     // so the aperture amplitude carries an extra (1+cosψ)/2 factor (normalized to 1 at ψ=0).
-    let space_loss = (1.0 + psi.cos()) / 2.0;
-    cos_q_pattern(psi, q_effective) * space_loss
+    let space_loss = (1.0 + cos_psi) / 2.0;
+    // `cos_q_pattern`'s `|ψ| >= π/2 ⇒ 0` guard, expressed in the cosine domain: `cos_psi`
+    // comes from a clamped dot product, so `ψ = acos(cos_psi) ∈ [0, π]` and `ψ >= π/2` is
+    // exactly `cos_psi <= 0`.
+    let pattern = if cos_psi <= 0.0 {
+        0.0
+    } else {
+        cos_psi.powf(q_effective)
+    };
+    pattern * space_loss
 }
 
 /// Calculate edge taper in dB for given q-factor and f/D ratio

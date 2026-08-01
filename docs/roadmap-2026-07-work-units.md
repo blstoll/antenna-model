@@ -147,6 +147,12 @@ D-B adaptive() floor] — served-path correctness, blocks P10-perf; P12 DONE 202
 (validate/retire the pre-gate constants) and PROMOTING P10-perf to a served-coverage item
 2026-08-01 (steered in-scope geometries can now 504 against S3's budget);
 order: P10-perf → P13 (a cheap full check leg may delete what P13 would validate);
+P10-perf DONE 2026-08-01 (new model/fft.rs + bessel_jn_array + aperture-plane hoists;
+2.4-7.4x cheaper, no physics change, PHYSICS_MODEL_VERSION still 7). It closed the 504
+coverage hole (the ~5deg steer: 22.3s -> 4.0s), shrank D18's slow tier 9 -> 3, filed P14
+(bessel_jn turning-point accuracy, latent behind MODE_M_MAX=254), and INVERTED P13's premise:
+a probe leg now saves ~33% of a full check leg where it once saved ~80%, so P13 should
+expect to DELETE the pre-gate rather than validate its constant;
 D18 filed 2026-08-01 (test-suite latency budget + tiers); P2 DECIDED 2026-07-16 (REMOVE the Seidel mode; Stage-1
 gate tripped and removal re-affirmed same day — the terms are wrong-sign/wrong-scale additions
 on top of complete exact physics, not duplicates); P3 DECIDED + EXECUTED 2026-07-16 (document +
@@ -492,6 +498,10 @@ gap that let this ship.
 
 ### P10-perf — Azimuthal-mode integrator wide-angle cost: served coverage + latency — Effort: M
 
+> **STATUS — ✅ DONE 2026-08-01.** Both named fixes landed (FFT φ' transform, single-sweep `Jₘ`
+> ladder) plus a third that measurement showed had become the dominant term, and the served mode
+> path is **2.4–7.4× cheaper** with every physics anchor unmoved. Closeout at the end of this unit.
+
 **RE-PRIORITIZED 2026-08-01 (triage): promoted from latency fast-follow to a served-coverage
 item — schedule immediately after P12 commits, ahead of everything else in the P series.**
 P12's φ' fix (`PHYSICS_MODEL_VERSION` 7) removed the caps that were hiding this unit's cost
@@ -563,6 +573,111 @@ the mode path (up to 3× its cost); this unit exists to *reduce* that cost. Deci
 speedups on the table — they change what a per-call check can afford. **Land P12 first
 anyway** (correctness ordering): optimizing sample counts against an unverified radial budget
 risks tuning the integrator to preserve a number that is off by a dB.
+
+---
+
+#### ✅ CLOSEOUT — landed 2026-08-01
+
+**No physics changed. `PHYSICS_MODEL_VERSION` is unchanged (7).** Every anchor in the P10/P12
+validation protocol passes untouched, including the two that arbitrate this exact code
+(`p12_mode_path_radial_convergence_anchors`, `p12_phi_cap_removed_steered_feed_matches_converged_reference`),
+plus the independent 2D Simpson oracle cross-checks. Workspace: 996/996 green under
+`scripts/check.sh`.
+
+**What landed — three optimizations, only two of which were the filed ones.**
+
+1. **FFT the `gₘ` φ'-transform** (new `model/fft.rs`). The direct DFT was `O(n_φ · M)` per
+   radial sample; it is now one mixed-radix FFT, `O(n_φ log n_φ)`. `mode_count_for` rounds
+   `n_phi` up to the next **even 5-smooth** length (`next_fast_len`) — deliberately *not* a
+   power of two, for the reason the pre-existing comment already gave: the padding is paid in
+   aperture-plane evaluations, and `B ≈ 263` asking for 536 would be given 1024 (+91 %) where
+   the nearest fast length is 540 (+0.7 %). Padding is ≤ 12.5 % across the whole range.
+2. **Single-sweep `Jₘ` ladder** (`bessel::bessel_jn_array`). Every order `J_0 … J_{m_max}` at
+   one argument now comes from one recurrence instead of one recurrence per order — `O(M)`
+   rather than `O(M²)`, ~32 000 recurrence steps per radial sample saved at the served
+   `m_max = 254`. Branch selection mirrors `bessel_jn` exactly, applied to the highest wanted
+   order.
+3. **The aperture-plane function `g(ρ,φ')`, which measurement showed had become the floor.**
+   Once (1) and (2) removed the `×M` terms, `aperture_plane_g` was ~79 % of a sweep. Three
+   hoists, no formula touched: `feed_angle` computed `acos` and both its callers immediately
+   took `cos` of the result (now `feed_angle_cosine` returns `cos ψ` directly and `feed_angle`
+   is the wrapper); `cos φ'`/`sin φ'`/`cos 2φ'` and `cos α`/`sin α` are tabled per sweep instead
+   of recomputed `n_ρ · n_φ` times (`PhiGrid`, `*_precomputed` variants that the originals
+   delegate to, so there is still one copy of each formula); and the ρ-only mesh phase moved out
+   of the φ' loop. This was **not** in the filed scope and is where roughly half the total win
+   came from.
+
+**Measured (release, one `integrate_aperture` call, same machine and conditions before/after):**
+
+| geometry | before | after | speedup |
+|---|---|---|---|
+| `steered 34m` θ=5° (the coverage case) | 499.8 ms | **67.4 ms** | **7.4×** |
+| `steered 34m` θ=2° | 176.3 ms | 39.7 ms | 4.4× |
+| `dsn_34m` Ka θ=90° | 2135 ms | 559 ms | 3.8× |
+| `dsn_34m` Ka θ=45° | 1395 ms | 365 ms | 3.8× |
+| `dsn_34m` Ka θ=5° | 172.7 ms | 45.1 ms | 3.8× |
+| `dsn_34m` X θ=5° | 15.0 ms | 4.8 ms | 3.1× |
+| `gs_3.7m` X θ=5° | 3.2 ms | 1.2 ms | 2.7× |
+| D12 UHF θ=16° | 2.2 ms | 0.9 ms | 2.4× |
+
+Kept as `#[ignore]`d diagnostics in `p10_perf_diagnostic` so the numbers can be re-measured
+rather than trusted: `p10_perf_served_integration_cost`, `p10_perf_single_sweep_cost`.
+
+**Coverage hole: closed.** The 504 case this unit was promoted for —
+`feed_steering_test::test_feed_steering_large_offset`, a ~5° steer well inside PO scope — went
+from **22.3 s isolated / 31.6 s contended** (breaching S3's 30 s budget *inside the repo*) to
+**4.0 s**. That is 7.5× of headroom against the served default budget rather than none.
+
+**Honest correction to this unit's own estimate.** It predicted "~1-2 orders of magnitude on the
+Ka wide-angle case" from the FFT and Bessel work alone. The real figure for those two changes
+was **1.9×** on Ka; the estimate assumed the DFT was essentially all of the cost, and it was
+~58 %. Reaching 3.8× there needed optimization (3), which nobody had scoped because nobody had
+measured the split. The lesson is the one this repo keeps relearning: measure the profile before
+sizing the fix.
+
+**Test-suite effect (feeds D18).** Six of the nine physics tests in D18's slow tier dropped back
+under the 10 s line and were returned to the dev inner loop; the `threads-required = 4`
+reservation on `test_feed_steering_large_offset` was deleted, exactly as its own comment
+anticipated. `p12_phi_cap_removed_steered_feed_matches_converged_reference` went 125 s → 15.7 s
+(D18 task 3 asked for precisely this) but stays excluded, as does
+`p12_mode_path_radial_convergence_anchors` — the latter on tail-latency grounds, not absolute
+cost. Dev loop: **980 tests / 85.9 s**, against 963 / 72.8 s before, i.e. 17 more tests inside
+D18's 90 s budget.
+
+**Filed, not fixed — two findings, both recorded rather than chased:**
+
+- **P14 (new unit): `bessel_jn` loses accuracy exactly at its turning point `m ≈ x`.** Found by
+  this unit's new high-order coverage (P10 review minor (b)). Latent — bounded harmless by
+  `MODE_M_MAX = 254`. Full detail in the P14 unit.
+- **The radial pre-gate's economics have inverted, which is P13's decision.** The pre-gate exists
+  because a full check leg was much dearer than a probe leg. The mode work a probe skips used to
+  be an `O(n_φ · M)` DFT and is now `O(M)`: at `dsn_34m` Ka a probe leg costs `n_φ + 2 = 272`
+  work units against a full leg's `n_φ + M + 1 = 405`, so the probe now saves ~33 % where it
+  once saved ~80 %. P13's own text says that if this unit made the full leg affordable, the right
+  move is to **delete the pre-gate** rather than validate `RADIAL_PRE_GATE_SAFETY`. These are the
+  numbers it should decide on. Recorded at `p12_pre_gate_yield_across_geometries`.
+
+**Deliberately NOT done — P10 review minor (a), "relax the near-null spurious non-convergence
+warning (absolute-floor on the N-vs-2N check)".** Filed 2026-07-15; **P12 (2026-07-31) falsified
+its premise.** The proposed fix is an absolute floor on the convergence check, keyed to some
+pre-cancellation scale. P12 measured that the mode sum's answer is a residue of mode integrals
+that **cancel 59–111×**, so per-mode errors of ~1 % become ~10 % of the result — which is exactly
+why the radial check had to be added. An absolute floor set from a pre-cancellation scale would
+re-admit that class of silent error, undoing P12 inside the unit that was supposed to make the
+same path cheaper. No spurious near-null non-convergence was observed in any test or diagnostic
+during this work. If it is ever observed, the fix needs a scale derived *after* cancellation, and
+that is a correctness decision, not a performance one. Minors (b) and (c) were done: (b) is the
+turning-point coverage that found P14; (c) is `mode_sweep_work`, which makes `num_evaluations`
+count `n_rho · (n_phi + modes)` instead of understating the mode dimension entirely.
+
+**Still open after this unit:** `dsn_34m` Ka at θ=90° is 559 ms — correct, converged, and well
+inside S3's budget, but still far above the <100 ms p95 target for a single evaluation, and a
+wide-angle Ka `/heatmap` fanning out to ~10⁵ points remains impractical. The remaining cost is
+now ~85 % aperture-plane evaluations (one `powf`, three `sqrt`, one `sin`/`cos` pair each), which
+is a different optimization problem from the one this unit solved — it needs either a cheaper
+illumination/phase evaluation or reuse of `g` across radial legs (measured as memory-prohibitive:
+caching `gₘ` for Ka θ=90° would need ~72 MB against a 512 MB total footprint target). Not filed
+as a unit; raise one if a consumer needs wide-angle Ka heatmaps.
 
 ### P10-tail — Rear-hemisphere radial budget + physicality coverage beyond 90° — Effort: S
 
@@ -960,6 +1075,65 @@ two constants that were fitted to the failures that motivated them, not derived 
   If P10-perf's FFT + O(M) recurrence make the full N-vs-2N leg affordable everywhere, the
   right move is to **delete the pre-gate**, and this unit collapses to tasks 2–3. Do not spend
   the sweep before knowing whether the constant it validates survives.
+
+**✅ P10-perf LANDED 2026-08-01 — start here, and the answer is probably "delete".** The
+conditional above has resolved in the direction that collapses this unit. The pre-gate's entire
+economic case was that a probe leg is much cheaper than a full check leg, because the probe
+skipped an `O(n_φ · M)` DFT. That DFT is now an `O(n_φ log n_φ)` FFT and the mode work is `O(M)`,
+so per radial sample a **probe leg costs `n_φ + 2` against a full leg's `n_φ + M + 1`** — at
+`dsn_34m` Ka (`n_φ = 270`, `M = 134`) that is 272 vs 405. **The probe now saves ~33 % of a leg
+where it once saved ~80 %,** and it buys that 33 % at the price of an unvalidated constant
+(`RADIAL_PRE_GATE_SAFETY = 32`) that certifies `converged = true` on precisely the geometries
+where a miss would be invisible. Deleting the pre-gate costs ~33 % on the expensive regime — a
+regime that is itself 3.8× cheaper than when the trade was priced — and removes the highest-risk
+residue of P12 outright. Re-measure with `p12_pre_gate_yield_across_geometries` (updated to the
+post-FFT work model) before deciding, but expect tasks 2–3 to be what is left.
+
+### P14 — `bessel_jn` loses accuracy exactly at its turning point `m ≈ x` — Effort: S
+
+**Filed 2026-08-01 by P10-perf**, whose review minor (b) added the first high-order Bessel
+coverage this module has ever had (the pinned orders previously stopped at `m = 5`). **Latent
+today — bounded harmless by `MODE_M_MAX = 254` — and filed so it cannot stop being latent
+silently.**
+
+- **Finding.** `bessel_jn`'s downward (Miller) branch starts a fixed `acc = 40` orders above the
+  wanted one. That constant offset is the exact scheme `bessel.rs`'s own module header warns
+  about — "the turning-point transition width grows like `x^(1/3)`, so a constant seed offset
+  fails to reach the decaying tail". The 2026-07 two-branch rework removed the problem for
+  `m ≪ x` (which now takes the upward recurrence) but left it **at** `m ≈ x`, where downward is
+  still the only stable direction. Measured closure of the identity
+  `(2m/x)·Jₘ = J_{m−1} + J_{m+1}` at `m = x`:
+
+  | x | 50 | 200 | 255 | 400 | 700 | 1000 | 3000 | 10000 |
+  |---|----|-----|-----|-----|-----|------|------|-------|
+  | rel. err | 3e-10 | 1e-9 | 2e-8 | 2e-7 | 4e-6 | 2e-5 | 9e-4 | **9e-3** |
+
+  At `m = 0.9x` and `m = 1.1x` the same identity closes to ~1e-15 at every one of those
+  arguments, so the defect is sharply localized to the turning point and is not a general
+  accuracy problem.
+- **Why it is latent.** The only caller reaching the downward branch is the azimuthal-mode
+  integrator, whose order is capped by `MODE_M_MAX = 254`. The turning point is therefore never
+  crossed above `x ≈ 254`, where the error is 2e-8 — seven orders inside the mode-truncation
+  budget and ~1.7e-7 dB in gain terms. **It stops being latent the moment `MODE_M_MAX` is
+  raised**, which is a plausible future change (a wider azimuthal spectrum, or a larger dish at
+  a higher band).
+- **Work:** make the Miller start offset scale with the transition width (`acc ≈ c·x^(1/3)`
+  rather than a flat 40) and *derive* `c` from the required decay rather than fitting it to the
+  measured table; or establish a bound on the current form and assert `MODE_M_MAX` stays inside
+  it. Either way the existing 2e-8-at-254 behavior is a served-value change, so it needs the
+  P10 validation protocol, not just the module tests.
+- **Do NOT simply loosen the pin.** `jn_turning_point_accuracy_degrades_far_above_the_served_order_ceiling`
+  encodes the measured table with ~3× headroom precisely so that this unit's fix shows up as the
+  test getting *tighter*.
+- **Also noted, same module, same class:** `bessel_j0`'s rational approximation evaluates to
+  `1 + 2.83e-9` at `x = 0` instead of exactly 1, and that bias propagates into every order of
+  the upward recurrence it seeds. P10-perf's `bessel_jn_array` does not inherit it on the Miller
+  branch, which is why the mode path and the symmetric Hankel path now agree to 2.8e-9 rather
+  than exactly (see `azimuthal_modes_reduce_to_hankel_when_symmetric`). Cross-checked against the
+  independent 2D Simpson oracle: the array path is **closer to truth at every angle** (up to 22×
+  at θ=2°), so this is a pre-existing bias being partly removed, not introduced. Worth folding
+  into the same unit.
+- **Depends on:** nothing. **Blocks:** nothing. Do it before anything that raises `MODE_M_MAX`.
 
 ### P2 `[DECISION]` — Seidel higher-order aberration terms: REMOVE (double-counted) — Effort: S/M
 
@@ -3961,12 +4135,27 @@ changes *how often tests get run*, which is a correctness input, not a comfort.
   3. **Right-size the two 2-minute tests.** `cli_tuned_run_completes_for_every_tuning_mode`
      runs a full Nelder-Mead per tuning mode — check whether reduced iteration caps or a
      smaller fixture grid preserve the assertion (mode completes + recovers truth) at a
-     fraction of the cost. `p12_phi_cap_removed...` sweeps four steered angles against a
+     fraction of the cost. ~~`p12_phi_cap_removed...` sweeps four steered angles against a
      converged reference — ask P10-perf to revisit after the FFT lands (it directly shrinks
-     this test).
+     this test).~~ **✅ Half done 2026-08-01 by P10-perf: `p12_phi_cap_removed...` went
+     125 s → 15.7 s** (2.9× even under a contended full run) with no assertion weakened — the
+     test still sweeps all four angles against the same converged reference, the geometry just
+     costs 7.4× less. It remains in the slow tier. The calibrate-side test is untouched and is
+     what is left of this task.
 - **Exit criteria:** tiering config committed (✅); check.sh + CI on the `full` profile (✅);
   CLAUDE.md documents both tiers (✅); dev loop measured < 90 s and re-measured after tasks
   2–3; the slow-tier list justified test-by-test or shrunk by the audits.
+- **Slow-tier list shrunk 2026-08-01 (P10-perf).** Nine physics tests → three. Six were returned
+  to the dev inner loop because the mode-path speedup put them back under the 10 s line
+  (`test_feed_steering_large_offset` 22.3 → 4.0 s; `azimuthal_modes_match_2d_small_dish_with_offset`
+  4.5 s; `served_n_phi_sizing_is_sufficient_on_every_asymmetric_geometry` 3.1 s;
+  `dsn34m_offset_feed_mode_count_converges`, `p2_moderate_offset_...` and
+  `test_beam_steering_from_feed_displacement` all ~1.8 s), and the `threads-required = 4`
+  reservation was deleted as its own comment invited. Dev loop re-measured: **980 tests / 85.9 s**
+  (was 963 / 72.8 s) — 17 more tests, still inside the 90 s budget.
+  `p12_mode_path_radial_convergence_anchors` (7.3 s sequential) was held back *not* for absolute
+  cost but because returning it made it the loop's critical path, taking the loop to 92.8 s; it
+  is the first candidate to return once task 2 shrinks the integration-test class around it.
 - **Depends on:** nothing. **Coupled to:** P10-perf (owns the flake fix and the two heaviest
   physics tests' future cost).
 

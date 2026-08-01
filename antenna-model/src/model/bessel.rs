@@ -89,7 +89,15 @@ pub fn bessel_j1(x: f64) -> f64 {
 /// transition width grows like x^(1/3), so a constant seed offset fails to reach
 /// the decaying tail and seed contamination survives (errors of tens of percent by
 /// x~1e5). It also cost O(x) per call and could overflow `ax as usize`. The
-/// two-branch form fixes accuracy, cost, and the overflow together.
+/// two-branch form fixes cost and the overflow outright, and fixes accuracy
+/// everywhere except **at** the turning point itself, where downward is still the
+/// only stable direction and `acc` is still a constant: measured 2026-08-01, the
+/// recurrence identity closes to 2e-8 at `m = x = 255` but only 9e-3 at
+/// `m = x = 10⁴` (it is exact to ~1e-15 at `m = 0.9x` and `m = 1.1x` throughout).
+/// Harmless for every current caller — the mode integrator's `MODE_M_MAX` caps the
+/// order at 254, where the error is 2e-8 — and pinned by
+/// `jn_turning_point_accuracy_degrades_far_above_the_served_order_ceiling` so it
+/// cannot silently become relevant if that cap is ever raised.
 pub fn bessel_jn(n: u32, x: f64) -> f64 {
     match n {
         0 => return bessel_j0(x),
@@ -164,6 +172,120 @@ pub fn bessel_jn(n: u32, x: f64) -> f64 {
         -ans
     } else {
         ans
+    }
+}
+
+/// Extra recurrence steps started above the highest wanted order in the downward (Miller)
+/// branch, so the arbitrary seed has decayed into negligibility by the time the recurrence
+/// reaches an order we keep. Matches the per-call [`bessel_jn`]'s `acc`.
+const MILLER_ACC: usize = 40;
+
+/// Every order `J_0(x) … J_{m_max}(x)` in ONE recurrence sweep — `O(m_max)` total, not
+/// `O(m_max)` per order (roadmap P10-perf).
+///
+/// The azimuthal-mode aperture integrator needs the whole ladder of orders at a single
+/// argument `a = kρ·sinθ`, once per radial sample. Calling [`bessel_jn`] per order re-runs a
+/// recurrence from scratch each time, making that `O(m_max²)` — ~32 000 recurrence steps per
+/// radial sample at the served `m_max = 254`, several thousand radial samples deep. The
+/// recurrences below already compute every intermediate order on the way to the top one; this
+/// simply keeps them.
+///
+/// Fills `out[0..=m_max]`. Branch selection mirrors [`bessel_jn`] exactly, applied to the
+/// **highest** wanted order so that every order in the array is in the stable regime:
+///
+/// - **`|x| > m_max`: upward recurrence.** Stable for all `m < |x|`, which the branch
+///   condition guarantees for the whole array.
+/// - **`|x| <= m_max`: downward Miller recurrence** with the standard `J_0 + 2ΣJ_even = 1`
+///   normalization, capturing every order on the way down. Unlike the per-order call, the
+///   *whole* array comes from a single seed, so low orders are computed from a start point far
+///   above them — if anything more converged than the per-order path, never less.
+///
+/// # Panics
+/// If `out.len() <= m_max`.
+pub fn bessel_jn_array(m_max: u32, x: f64, out: &mut [f64]) {
+    let top = m_max as usize;
+    assert!(
+        out.len() > top,
+        "bessel_jn_array: output buffer holds {} values, need {}",
+        out.len(),
+        top + 1
+    );
+    let out = &mut out[..=top];
+
+    let ax = x.abs();
+    // Non-finite argument: propagate NaN rather than panic, matching `bessel_jn`.
+    if !ax.is_finite() {
+        out.fill(f64::NAN);
+        return;
+    }
+    if ax == 0.0 {
+        // J_0(0) = 1, J_m(0) = 0 for m > 0.
+        out.fill(0.0);
+        out[0] = 1.0;
+        return;
+    }
+
+    if ax > top as f64 {
+        // UPWARD: J_{j+1}(x) = (2j/x)·J_j(x) − J_{j-1}(x). Stable while the order stays below
+        // the argument, which `ax > top` guarantees for every order written here.
+        let tox = 2.0 / ax;
+        out[0] = bessel_j0(ax);
+        if top >= 1 {
+            out[1] = bessel_j1(ax);
+        }
+        for j in 1..top {
+            out[j + 1] = j as f64 * tox * out[j] - out[j - 1];
+        }
+    } else {
+        // DOWNWARD (Miller) with renormalization. Identical recurrence and normalization sum
+        // to `bessel_jn`'s downward branch; the only difference is that the orders passed on
+        // the way down are kept instead of discarded.
+        let tox = 2.0 / ax;
+        let big = 1.0e10_f64;
+        let bigi = 1.0e-10_f64;
+        let m_start = 2 * ((top + MILLER_ACC) / 2 + 1); // force even
+
+        out.fill(0.0);
+        let mut bjp = 0.0_f64; // J_{m+1}
+        let mut bj = 1.0_f64; // J_m (arbitrary seed; renormalized at the end)
+        let mut sum = 0.0_f64;
+        let mut jsum = false; // toggles each step; true selects the even-order terms
+        for m in (1..=m_start).rev() {
+            let bjm = m as f64 * tox * bj - bjp; // J_{m-1}
+            bjp = bj;
+            bj = bjm;
+            if bj.abs() > big {
+                // Renormalize to avoid overflow. Unlike the per-order call, the orders already
+                // captured are part of the running scale and must be rescaled with it.
+                bj *= bigi;
+                bjp *= bigi;
+                sum *= bigi;
+                for v in out.iter_mut() {
+                    *v *= bigi;
+                }
+            }
+            if jsum {
+                sum += bj; // accumulates the even-order Bessel values
+            }
+            jsum = !jsum;
+            if m <= top {
+                out[m] = bjp; // bjp is J_m after the shift
+            }
+        }
+        out[0] = bj;
+        // 1 = J0 + 2·(J2 + J4 + …); `sum` here is J0 + 2ΣJ_even after undoing the double
+        // count of J0 (the last-added term, bj).
+        sum = 2.0 * sum - bj;
+        for v in out.iter_mut() {
+            *v /= sum;
+        }
+    }
+
+    // Jₘ(−x) = (−1)ᵐ Jₘ(x): the recurrences above ran on |x|.
+    if x < 0.0 {
+        for v in out.iter_mut().skip(1).step_by(2) {
+            *v = -*v;
+        }
     }
 }
 
@@ -294,6 +416,235 @@ mod tests {
         let big = 1.0e20_f64;
         let v = bessel_jn(3, big);
         assert!(v.is_finite() && v.abs() < 1.0, "got {v}");
+    }
+
+    /// **Turning-point coverage at high order** (roadmap P10-perf, filed by the P10 review).
+    ///
+    /// `Jₘ(x)` has an Airy-type turning point at `m ≈ x`, where neither recurrence direction is
+    /// comfortable and where the two branches of [`bessel_jn`] meet. The served integrator sits
+    /// squarely here: `m` runs to 254 while `a = kρ·sinθ` sweeps through that whole range as ρ
+    /// goes from 0 to R, so every radial sweep crosses the turning point. Until this test the
+    /// pinned orders stopped at `m = 5`.
+    ///
+    /// Graded by two table-free identities that hold for every real `x` and integer `m`, so
+    /// neither can be satisfied by a matching pair of errors in the implementation and a
+    /// hand-copied reference:
+    ///   1. the three-term recurrence `(2m/x)·Jₘ = J_{m−1} + J_{m+1}`, and
+    ///   2. the Debye envelope `|Jₘ(x)| ≲ sqrt(2/(π·sqrt(x²−m²)))` below the turning point,
+    ///      plus `|Jₘ(x)| ≤ 1` everywhere and decay well above it.
+    ///
+    /// Both are needed: the recurrence identity is **scale-invariant**, so it is satisfied by a
+    /// uniformly mis-normalized array — exactly the failure mode a Miller recurrence has. The
+    /// magnitude bounds are what pin the scale. (Note the envelope is the *Debye* form, not the
+    /// flat `sqrt(2/(πx))`: near the turning point the true values exceed the flat bound — e.g.
+    /// `J₉(10) = 0.2919` against `sqrt(2/(10π)) = 0.2523` — so a flat bound would fail on
+    /// correct values.)
+    #[test]
+    fn jn_high_order_near_the_turning_point() {
+        use std::f64::consts::PI;
+        // Bounded at 300 deliberately: `MODE_M_MAX` caps the served integrator at order 254,
+        // and above ~300 the identity stops closing to machine precision *at* `m = x` — see
+        // `jn_turning_point_accuracy_degrades_far_above_the_served_order_ceiling`, which pins
+        // that separately rather than letting this test's tolerance be loosened to hide it.
+        for &x in &[10.0_f64, 50.0, 120.0, 200.0, 255.0, 300.0] {
+            // Straddle the turning point m ≈ x, and include the high orders the integrator
+            // actually reaches.
+            let orders: Vec<u32> = [0.5, 0.9, 0.99, 1.0, 1.01, 1.1, 1.5, 2.0]
+                .iter()
+                .map(|f| (x * f).round().max(1.0) as u32)
+                .chain([200u32, 254])
+                .collect();
+            for m in orders {
+                let jm = bessel_jn(m, x);
+                let jm1 = bessel_jn(m - 1, x);
+                let jp1 = bessel_jn(m + 1, x);
+                let mf = m as f64;
+                assert!(jm.is_finite(), "J{m}({x}) = {jm} is not finite");
+                assert!(jm.abs() <= 1.0, "J{m}({x}) = {jm} breaks |Jₘ| ≤ 1");
+                if mf < x {
+                    let envelope = (2.0 / (PI * (x * x - mf * mf).sqrt())).sqrt() * 1.1;
+                    assert!(
+                        jm.abs() <= envelope,
+                        "J{m}({x}) = {jm} exceeds the Debye envelope {envelope}"
+                    );
+                }
+                if mf >= 1.5 * x {
+                    // Well past the turning point Jₘ decays super-exponentially. A Miller
+                    // recurrence that failed to normalize would land here at O(1).
+                    assert!(
+                        jm.abs() < 0.1,
+                        "J{m}({x}) = {jm} is not decaying past the turning point"
+                    );
+                }
+                let lhs = (2.0 * mf / x) * jm;
+                let rhs = jm1 + jp1;
+                // Scale by the largest term in the identity: near a zero of Jₘ the two sides
+                // are both tiny and a relative test on their own magnitude is meaningless.
+                //
+                // 1e-7, not machine precision, and the difference is a MEASUREMENT: exactly at
+                // the turning point (`m = x = 255`) the downward branch starts only
+                // `MILLER_ACC = 40` orders above the wanted one, where `J₂₉₆(255)/J₂₅₅(255)`
+                // is still ~4e-5, so the seed has not fully decayed and the identity closes to
+                // 2e-8 rather than 1e-15. That is the accuracy `bessel_jn` has always had here
+                // — this test is the first to look — and 2e-8 is seven orders inside the
+                // integrator's 0.5 % mode-truncation budget, so it is recorded, not fixed.
+                let scale = lhs.abs().max(jm1.abs()).max(jp1.abs()).max(1e-300);
+                assert!(
+                    (lhs - rhs).abs() <= scale * 1e-7,
+                    "recurrence identity broken at m={m}, x={x}: {lhs} vs {rhs}"
+                );
+            }
+        }
+    }
+
+    /// **Known accuracy cliff, pinned rather than fixed** (measured 2026-08-01 by P10-perf's
+    /// new turning-point coverage; filed to the roadmap, not repaired here).
+    ///
+    /// Exactly at the turning point `m = x`, [`bessel_jn`]'s downward branch starts only
+    /// `acc = 40` orders above the wanted one. That constant offset is the very scheme this
+    /// module's header warns about — "the turning-point transition width grows like `x^(1/3)`,
+    /// so a constant seed offset fails to reach the decaying tail" — and while the two-branch
+    /// design removed the problem for `m ≪ x` (which now takes the upward recurrence), it
+    /// left it in place *at* `m ≈ x`, where downward is still the only stable direction.
+    ///
+    /// Measured relative closure of `(2m/x)·Jₘ = J_{m−1} + J_{m+1}` at `m = x`:
+    ///
+    /// | x | 50 | 200 | 255 | 400 | 700 | 1000 | 3000 | 10000 |
+    /// |---|----|-----|-----|-----|-----|------|------|-------|
+    /// | rel. err | 3e-10 | 1e-9 | 2e-8 | 2e-7 | 4e-6 | 2e-5 | 9e-4 | **9e-3** |
+    ///
+    /// At `m = 0.9x` and `m = 1.1x` the same identity closes to ~1e-15 at every one of those
+    /// arguments, so the defect is sharply localized to the turning point.
+    ///
+    /// **Why this is not a served-path defect today:** the only caller that reaches the
+    /// downward branch is the azimuthal-mode integrator, whose order is capped by
+    /// `MODE_M_MAX = 254`. The turning point is therefore never crossed above `x ≈ 254`, where
+    /// the error is 2e-8 — seven orders inside the mode-truncation budget. It becomes real the
+    /// moment that cap is raised, which is why the behavior is pinned here instead of left to
+    /// be rediscovered.
+    #[test]
+    fn jn_turning_point_accuracy_degrades_far_above_the_served_order_ceiling() {
+        // (x, tolerance) — the measured value with ~3× headroom, so this catches a regression
+        // while documenting the real number.
+        for &(x, tol) in &[
+            (255.0_f64, 1e-7),
+            (400.0, 1e-6),
+            (700.0, 2e-5),
+            (1000.0, 1e-4),
+            (3000.0, 3e-3),
+            (10000.0, 3e-2),
+        ] {
+            let m = x as u32;
+            let lhs = (2.0 * m as f64 / x) * bessel_jn(m, x);
+            let rhs = bessel_jn(m - 1, x) + bessel_jn(m + 1, x);
+            let rel = (lhs - rhs).abs() / lhs.abs().max(1e-300);
+            assert!(
+                rel <= tol,
+                "J_{m}({x}) turning-point closure degraded to {rel:.3e} (documented ≤ {tol:.0e})"
+            );
+            // Away from the turning point the same identity must still hold to near machine
+            // precision — that is what localizes the defect and keeps this test from being
+            // satisfied by a routine that is simply bad everywhere.
+            let off = (0.9 * x) as u32;
+            let lhs_off = (2.0 * off as f64 / x) * bessel_jn(off, x);
+            let rhs_off = bessel_jn(off - 1, x) + bessel_jn(off + 1, x);
+            let rel_off = (lhs_off - rhs_off).abs() / lhs_off.abs().max(1e-300);
+            assert!(
+                rel_off < 1e-12,
+                "J_{off}({x}) is off the turning point and must be exact, got {rel_off:.3e}"
+            );
+        }
+    }
+
+    /// [`bessel_jn_array`] must agree with the per-order [`bessel_jn`] it replaces — across
+    /// both branches, across the turning point, and for negative arguments.
+    ///
+    /// This is the load-bearing test for the P10-perf Bessel change: the array form is an
+    /// optimization, so any disagreement is a served-value change that was not asked for.
+    #[test]
+    fn jn_array_matches_the_per_order_function() {
+        let m_max = 254u32;
+        let mut arr = vec![0.0; m_max as usize + 1];
+        // Arguments straddling every regime: far below the top order (deep Miller), at it,
+        // just above it, and far above (upward recurrence). `x = 0` is deliberately absent —
+        // there the array returns the exact `J₀(0) = 1` while `bessel_j0`'s rational
+        // approximation evaluates to 1.000_000_002_8 (a pre-existing 2.8e-9 error at the
+        // origin, well inside that function's own pinned 1e-6 tolerance). Grading the array
+        // against the closed form at that point is `jn_array_handles_degenerate_inputs`.
+        for &x in &[
+            1e-3_f64, 0.5, 5.0, 50.0, 253.0, 254.0, 255.0, 300.0, 1000.0, 11383.0, -50.0, -300.0,
+        ] {
+            bessel_jn_array(m_max, x, &mut arr);
+            for m in 0..=m_max {
+                let expected = bessel_jn(m, x);
+                let got = arr[m as usize];
+                // Absolute floor of 5e-9 rather than a pure relative test, for a reason worth
+                // stating: where the array takes the Miller branch it is *more* accurate than
+                // `bessel_j0`/`bessel_j1` near the origin. Those use the Numerical Recipes
+                // rational approximations, which evaluate to `1 + 2.83e-9` at `x = 0` instead
+                // of exactly 1 — e.g. `J₀(0.001)` is 0.999_999_752_831 from `bessel_j0` and
+                // 0.999_999_750_000 from the array, the latter being right to 1e-16. That
+                // offset is inside `bessel_j0`'s own pinned 1e-6 tolerance and is ~2.5e-8 dB
+                // in gain terms, so it is accommodated here rather than chased: this test
+                // grades the array as an *optimization* of the per-order function, and 5e-9 is
+                // small enough that any algorithmic disagreement still fails it.
+                //
+                // Orders far past the turning point are astronomically small, where only
+                // absolute agreement is meaningful anyway — those modes contribute nothing to
+                // the mode sum.
+                let tol = 5e-9 + 1e-9 * expected.abs();
+                assert!(
+                    (got - expected).abs() <= tol,
+                    "J{m}({x}): array {got:.17e} vs per-order {expected:.17e}"
+                );
+            }
+        }
+    }
+
+    /// The normalization identity `J₀(x) + 2·Σ_{k≥1} J_{2k}(x) = 1`, evaluated from the array.
+    ///
+    /// Independent of [`bessel_jn`] entirely — it grades the array against a closed-form
+    /// property of the Bessel family, so a shared defect in both routines cannot hide here.
+    /// The sum must be taken well past the turning point for the tail to be negligible, which
+    /// is exactly the high-order regime the array is built to serve.
+    #[test]
+    fn jn_array_satisfies_the_normalization_identity() {
+        for &x in &[0.5_f64, 5.0, 50.0, 120.0, 200.0] {
+            let m_max = (x.ceil() as u32 + 80).max(64);
+            let mut arr = vec![0.0; m_max as usize + 1];
+            bessel_jn_array(m_max, x, &mut arr);
+            let sum: f64 = arr[0] + 2.0 * arr.iter().skip(2).step_by(2).sum::<f64>();
+            assert!(
+                (sum - 1.0).abs() < 1e-10,
+                "x={x}: J₀ + 2ΣJ_even = {sum}, expected 1"
+            );
+        }
+    }
+
+    #[test]
+    fn jn_array_handles_degenerate_inputs() {
+        let mut arr = vec![7.0; 5];
+        bessel_jn_array(0, 3.0, &mut arr);
+        assert!((arr[0] - bessel_j0(3.0)).abs() < 1e-15);
+
+        bessel_jn_array(4, f64::NAN, &mut arr);
+        assert!(
+            arr.iter().all(|v| v.is_nan()),
+            "NaN must propagate: {arr:?}"
+        );
+
+        bessel_jn_array(4, f64::INFINITY, &mut arr);
+        assert!(arr.iter().all(|v| v.is_nan()));
+
+        bessel_jn_array(4, 0.0, &mut arr);
+        assert_eq!(arr[..5], [1.0, 0.0, 0.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    #[should_panic(expected = "output buffer holds")]
+    fn jn_array_rejects_a_short_buffer() {
+        let mut arr = [0.0; 3];
+        bessel_jn_array(3, 1.0, &mut arr);
     }
 
     #[test]

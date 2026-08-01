@@ -1,14 +1,12 @@
 # Test tiers — roadmap unit D18 (filed 2026-08-01).
 #
-#   default = the dev inner loop. Excludes the slow tail: the heavy physics
-#             pins and the whole calibrate full-mode e2e binary — 22 tests
-#             holding 653 s of the suite's 1193 s total CPU (measured
-#             2026-08-01 on an idle machine; a contended run inflates both).
-#             Note the cut is not purely "> 10 s": 15 tests exceed 10 s, and
-#             the other 7 ride along because cli_full_mode_e2e is excluded
-#             whole-binary (three of those cost ~0.02 s). Excluding the binary
-#             rather than naming its slow members keeps new e2e cases out of
-#             the inner loop by default.
+#   default = the dev inner loop. Excludes the slow tail: three heavy physics
+#             pins and the whole calibrate full-mode e2e binary. Measured
+#             2026-08-01 after P10-perf: 980 tests, 85.9 s wall (was 963 tests
+#             / 72.8 s when the exclusion list held nine physics pins — P10-perf
+#             returned six of them, so the loop covers 17 more tests for 13 s).
+#             Excluding cli_full_mode_e2e whole-binary rather than naming its
+#             slow members keeps new e2e cases out of the inner loop by default.
 #   full    = everything. scripts/check.sh and CI run this profile, so the
 #             slow tier stays CI-blocking: coverage moves out of the inner
 #             loop, it is never lost.
@@ -27,18 +25,33 @@
 [profile.default]
 # Surface new slow tests early; does not terminate anything.
 slow-timeout = { period = "10s" }
+# Shrunk 2026-08-01 by roadmap unit P10-perf, which is the direction this list is meant to
+# move: the FFT φ' transform and the single-sweep Jₘ ladder made the mode path 2.4–7.4× cheaper,
+# so seven of the nine physics tests here dropped back under the 10 s line and REJOIN the dev
+# loop. Measured after P10-perf (debug, sequential):
+#   test_feed_steering_large_offset                          22.3 s -> 4.0 s
+#   azimuthal_modes_match_2d_small_dish_with_offset                 -> 4.5 s
+#   served_n_phi_sizing_is_sufficient_on_every_asymmetric_geometry  -> 3.1 s
+#   dsn34m_offset_feed_mode_count_converges                         -> 1.8 s
+#   p2_moderate_offset_exact_only_gain_pinned_and_routes_standard_po-> 1.8 s
+#   test_beam_steering_from_feed_displacement                       -> 1.8 s
+# The three that stay:
+#   p12_mode_path_radial_convergence_anchors  7.3 s sequential, 9.1 s in a full run — under
+#     the 10 s marker, but it became the dev loop's single longest test and therefore its
+#     critical path: returning it took the loop from 72.8 s to 92.8 s, over D18's 90 s budget,
+#     for one test. Held back on tail-latency grounds rather than absolute cost; it is a
+#     candidate to return once D18 task 2 shrinks the integration-test class around it.
+#   p12_phi_cap_removed_steered_feed_matches_converged_reference  125 s -> 15.7 s
+#     (43 s under a contended full run) — it sweeps four steered angles against a converged
+#     reference, so it pays the steered cost four times over.
+#   test_heavy_heatmap_times_out_with_504  16.3 s — it exists to exhaust S3's wall-clock
+#     budget, so it is slow by construction and no speedup will change that.
 default-filter = """
 not (
     binary_id(calibrate::cli_full_mode_e2e)
   + test(p12_phi_cap_removed_steered_feed_matches_converged_reference)
   + test(p12_mode_path_radial_convergence_anchors)
-  + test(served_n_phi_sizing_is_sufficient_on_every_asymmetric_geometry)
-  + test(azimuthal_modes_match_2d_small_dish_with_offset)
-  + test(p2_moderate_offset_exact_only_gain_pinned_and_routes_standard_po)
-  + test(dsn34m_offset_feed_mode_count_converges)
-  + test(test_feed_steering_large_offset)
   + test(test_heavy_heatmap_times_out_with_504)
-  + test(test_beam_steering_from_feed_displacement)
 )
 """
 
@@ -46,18 +59,9 @@ not (
 default-filter = "all()"
 slow-timeout = { period = "60s" }
 
-[[profile.full.overrides]]
-# Belt-and-braces, NOT load-bearing: the test now passes its own 300 s budget to
-# compute_gain_from_request_with_budget, so it can no longer fail with
-# TimeBudgetExceeded no matter how contended the run. That test-side fix is the
-# correct one and it is what keeps CI green.
-#
-# This override only bounds wall-clock. Post-P12 the ~5°-steer geometry is the
-# suite's most oversubscription-sensitive test; measured 2026-08-01 under the
-# old 30 s default budget, which is what the reserved slots were worth:
-#   no override, idle machine  -> 27.59 s
-#   no override, contended     -> 34.98 s  (would have blown a 30 s budget)
-#   threads-required = 4       -> 17.14 s
-# Safe to delete along with the override when P10-perf brings the cost down.
-filter = "test(test_feed_steering_large_offset)"
-threads-required = 4
+# The `threads-required = 4` reservation for test(test_feed_steering_large_offset) was deleted
+# 2026-08-01 by P10-perf, exactly as its own comment anticipated ("safe to delete along with
+# the override when P10-perf brings the cost down"). It existed because that ~5°-steer geometry
+# was the suite's most oversubscription-sensitive test — 27.6 s idle, 35.0 s contended. It now
+# runs in 4.0 s against a 300 s budget, so reserving slots for it costs parallelism and buys
+# nothing.

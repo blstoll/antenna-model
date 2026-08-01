@@ -1958,20 +1958,30 @@ fn p12_pre_gate_certifies_an_already_converged_geometry_in_two_legs() {
     );
 
     assert!(r.converged, "Ka θ=1° must report converged");
-    // Two legs — the N sweep plus the cheap probe at 2N — is `N + (2N−1) = 3N−1` radial units.
-    // A third leg (`5N−2`) means the pre-gate declined and refinement ran, i.e. the expensive
-    // regime just got ~1.7× more work for an answer it already had.
-    // n_phi = 2·B + 8 (even) with B = k·δ·(R/f) ≈ 126 for this feed. Was 512 until 2026-07-31,
-    // when `n_phi` stopped being rounded up to a power of two — that rounding was costing this
-    // geometry a factor of ~2 for nothing.
-    let n_phi = 260;
-    let n0 = 335; // radial_points_for at this geometry
-    let radial_units = r.num_evaluations / n_phi;
+
+    // Two legs = the full sweep at N, plus the cheap [0,1]-mode probe at 2N−1. A third leg
+    // (another FULL sweep at 2N−1) means the pre-gate declined and refinement ran, i.e. the
+    // expensive regime just got ~1.9× more work for an answer it already had.
+    //
+    // Sizing at this geometry, all derived rather than observed:
+    //   n_phi = next_fast_len(2·B + 8) with B = k·δ·(R/f) ≈ 126  ⇒ 260 → 270
+    //           (`next_fast_len` since P10-perf made the φ' transform an FFT; before that the
+    //            value was 260, and before 2026-07-31 it was rounded to a power of two at 512)
+    //   m_max = 133, so the sweep runs modes 0..=m_probe = 134  ⇒ 135 mode slots
+    //   N     = radial_points_for = 335
+    //
+    // `num_evaluations` counts `n_rho · (n_phi + modes)` per leg (see `mode_sweep_work`), so:
+    let n_phi = 270;
+    let n0 = 335;
+    let two_legs = n0 * (n_phi + 135) + (2 * n0 - 1) * (n_phi + 2);
+    let three_legs = two_legs + (2 * n0 - 1) * (n_phi + 135);
+    // Threshold midway between the two, so this cannot be satisfied by a near-miss in either
+    // direction and does not have to be re-derived for small sizing changes.
     assert!(
-        radial_units <= 3 * n0,
-        "spent {radial_units} radial units (two legs = {}) — the pre-gate should have \
-         certified this without refining",
-        3 * n0 - 1
+        r.num_evaluations < (two_legs + three_legs) / 2,
+        "spent {} work units (two legs = {two_legs}, three = {three_legs}) — the pre-gate \
+         should have certified this without refining",
+        r.num_evaluations
     );
 }
 

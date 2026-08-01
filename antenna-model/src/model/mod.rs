@@ -18,6 +18,10 @@ pub mod coordinates;
 pub mod coordinates_3d;
 pub mod correction_interpolator;
 pub mod edge_cases;
+/// Mixed-radix FFT backing the aperture integrator's φ' transform (roadmap P10-perf).
+///
+/// Crate-internal: it exists for `integration.rs` and is not part of the public model API.
+pub(crate) mod fft;
 pub mod geometry;
 pub mod illumination;
 pub mod integration;
