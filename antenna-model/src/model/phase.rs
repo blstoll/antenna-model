@@ -162,16 +162,48 @@ pub fn phase_feed_displacement(
     focal_length: f64,
     k: f64,
 ) -> f64 {
+    phase_feed_displacement_precomputed(
+        rho,
+        phi_prime.cos(),
+        phi_prime.sin(),
+        delta_feed,
+        alpha.cos(),
+        alpha.sin(),
+        delta_z,
+        focal_length,
+        k,
+    )
+}
+
+/// [`phase_feed_displacement`] with the four φ'- and α-only trigonometric values supplied.
+///
+/// Identical arithmetic; the sines and cosines are simply hoisted. The aperture integrator
+/// evaluates this `n_ρ · n_φ` times per sweep, where `cos φ'`/`sin φ'` depend only on the
+/// fixed φ' grid index and `cos α`/`sin α` are constant for the whole antenna, so all four
+/// are tabled once (roadmap P10-perf).
+#[inline]
+#[allow(clippy::too_many_arguments)]
+pub fn phase_feed_displacement_precomputed(
+    rho: f64,
+    cos_phi_prime: f64,
+    sin_phi_prime: f64,
+    delta_feed: f64,
+    cos_alpha: f64,
+    sin_alpha: f64,
+    delta_z: f64,
+    focal_length: f64,
+    k: f64,
+) -> f64 {
     // Convert aperture point from polar to Cartesian coordinates
-    let x = rho * phi_prime.cos();
-    let y = rho * phi_prime.sin();
+    let x = rho * cos_phi_prime;
+    let y = rho * sin_phi_prime;
 
     // Surface height on parabola: z = ρ²/(4f)
     let z = rho * rho / (4.0 * focal_length);
 
     // Lateral feed displacement in Cartesian (in focal plane)
-    let dx = delta_feed * alpha.cos();
-    let dy = delta_feed * alpha.sin();
+    let dx = delta_feed * cos_alpha;
+    let dy = delta_feed * sin_alpha;
 
     // Distance from ideal focal point (0, 0, f) to surface point
     // For parabola, all paths from focus to surface to aperture plane are equal,
