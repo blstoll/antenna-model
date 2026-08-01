@@ -55,9 +55,31 @@ not (
 )
 """
 
+# `test_sustained_load` is the one test in the suite that asserts **wall-clock progress of a
+# live server** — three workers issuing gain requests across a 2 s window. That makes it the
+# one test whose result depends on how much of the machine it gets, so it is given the machine.
+#
+# This is not the reservation P10-perf deleted below, restored under a new name. That one sat on
+# a CPU-bound *physics* test that had simply become slow, and it went away when the test got
+# fast. This one is on a test whose assertion is a rate, which no amount of speedup makes
+# schedule-independent: on a 2-core runner it was landing next to `test_concurrent_batch_requests`
+# and `test_mixed_concurrent_requests`, two other server-load tests, and three concurrent load
+# generators on two cores starve each other by construction. Measured consequence: 9 attempts
+# against a floor of 15, every request a 2xx (CI run 30715580598).
+#
+# Belt-and-braces with the test-side fix: the floor is now a liveness check (2 per worker), so
+# this override buys margin rather than being load-bearing.
+[[profile.default.overrides]]
+filter = "test(test_sustained_load)"
+threads-required = "num-test-threads"
+
 [profile.full]
 default-filter = "all()"
 slow-timeout = { period = "60s" }
+
+[[profile.full.overrides]]
+filter = "test(test_sustained_load)"
+threads-required = "num-test-threads"
 
 # The `threads-required = 4` reservation for test(test_feed_steering_large_offset) was deleted
 # 2026-08-01 by P10-perf, exactly as its own comment anticipated ("safe to delete along with

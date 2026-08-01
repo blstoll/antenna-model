@@ -444,13 +444,31 @@ async fn test_sustained_load() {
         total_successes, total_attempts,
         "all sustained-load requests must return 2xx: {total_successes}/{total_attempts} succeeded",
     );
-    // Loose, runner-independent floor: prove the workers actually sustained requests across
-    // the whole window (each does ~one per 50 ms sleep + request). Even a very slow runner
-    // clears several per worker; a value this low only trips on a catastrophic hang/deadlock,
-    // never on ordinary runner-speed variance.
+    // LIVENESS floor — deliberately not a throughput floor. Each worker must get round at
+    // least twice, which proves it looped rather than blocking forever inside the first
+    // `send().await` (a hang there still exits the 2 s `while` and reports exactly 1 attempt).
+    //
+    // The bound was `num_workers * 5` until 2026-08-01, carrying a comment claiming it "only
+    // trips on a catastrophic hang/deadlock, never on ordinary runner-speed variance". **That
+    // claim was false and CI falsified it**: the run came back with 9 attempts, no hang, and
+    // every one of them a 2xx. The arithmetic says why. A single gain request costs ~0.17 s in
+    // a debug build on a 2-core CI runner (measured from the same run:
+    // `test_single_gain_computation_ecef` 0.406 s against `test_health_endpoint` 0.240 s, the
+    // difference being the computation). Add the 50 ms sleep and 3 workers sharing 2 cores and
+    // a worker gets ~3-7 iterations in the 2000 ms window — so `>= 5` each was always inside
+    // the noise, not above it. This is the *second* time this floor has flaked for this reason;
+    // the comment records that the first fix (`> 50` → `>= 15`, after a 47) lowered the number
+    // without diagnosing why, so it flaked again the moment scheduling shifted.
+    //
+    // Nothing real is lost by dropping it to a liveness check: the only defect class `>= 15`
+    // caught that `>= 6` does not is "the server got ~2.5× slower than a slow-runner guess",
+    // which is exactly the throughput assertion the paragraph above disclaims and which a
+    // debug build on a shared runner cannot make. Per-request latency belongs in `cargo bench`
+    // (release), and the aperture-integration hot path now also has standing cost diagnostics
+    // in `model::integration::p10_perf_diagnostic`.
     assert!(
-        total_attempts >= num_workers as u32 * 5,
-        "workers did not sustain requests across the load window: {total_attempts} attempts",
+        total_attempts >= num_workers as u32 * 2,
+        "workers did not loop across the load window: {total_attempts} attempts",
     );
 
     server.shutdown().await;
