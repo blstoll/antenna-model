@@ -153,6 +153,16 @@ coverage hole (the ~5deg steer: 22.3s -> 4.0s), shrank D18's slow tier 9 -> 3, f
 (bessel_jn turning-point accuracy, latent behind MODE_M_MAX=254), and INVERTED P13's premise:
 a probe leg now saves ~33% of a full check leg where it once saved ~80%, so P13 should
 expect to DELETE the pre-gate rather than validate its constant;
+P13 DONE 2026-08-01 (PHYSICS_MODEL_VERSION 8): pre-gate DELETED. It did expect to delete on
+cost, and then found a second, stronger reason -- a theta x D/lambda sweep measured the worst
+PASSING probe-to-total ratio at 43.5x against RADIAL_PRE_GATE_SAFETY = 32, on dsn_34m Ka
+th=90deg, the same served geometry the constant was fitted on. P10-perf's next_fast_len phi'
+resizing (512 -> 270), a change with NO physics content, moved the ratio past the constant
+with nothing able to notice. Ka th=5deg 16x more accurate (+0.0126 -> +0.0008 dB) for +28%
+work; dsn_34m X th=45deg 31% CHEAPER (the pre-gate declined there, so its probe leg was
+waste). Also EXPLAINED the {0,1} probe set by mechanism (intra-mode cancellation C_m, not
+|R_m|) and corrected D17's record -- where BOTH of P12's own corrections to D17 turned out
+to be wrong;
 D18 filed 2026-08-01 (test-suite latency budget + tiers); P2 DECIDED 2026-07-16 (REMOVE the Seidel mode; Stage-1
 gate tripped and removal re-affirmed same day — the terms are wrong-sign/wrong-scale additions
 on top of complete exact physics, not duplicates); P3 DECIDED + EXECUTED 2026-07-16 (document +
@@ -513,6 +523,7 @@ Bessel-recurrence work below is what buys those geometries back. Two further inp
 original filing: P12's refinement loop multiplies radial work exactly where this unit makes a
 leg cheaper, and unit **P13**'s pre-gate question should be re-asked once this lands — a cheap
 full check leg may let `RADIAL_PRE_GATE_SAFETY` be deleted rather than validated (see P13).
+**✅ It did: P13 deleted the pre-gate outright on 2026-08-01.**
 The test suite already demonstrates the hole (2026-08-01):
 `feed_steering_test::test_feed_steering_large_offset` — a ~5° steer, `include_reference: true`
 — costs ~22 s of CPU post-P12 and measured **31.6 s under a 10-wide parallel run, breaching
@@ -656,6 +667,11 @@ D18's 90 s budget.
   once saved ~80 %. P13's own text says that if this unit made the full leg affordable, the right
   move is to **delete the pre-gate** rather than validate `RADIAL_PRE_GATE_SAFETY`. These are the
   numbers it should decide on. Recorded at `p12_pre_gate_yield_across_geometries`.
+  **✅ P13 did exactly that on 2026-08-01** — and found the cost argument was the weaker of two:
+  a θ × D/λ sweep measured the worst *passing* probe-to-total ratio at **43.5×** against the
+  constant's 32, on `dsn_34m` Ka θ=90°. The trigger was this unit's own `next_fast_len` φ'
+  resizing (512 → 270) — a change with no physics content, which nonetheless invalidated a fitted
+  correctness constant. The diagnostic is now `p13_radial_leg_count_across_geometries`.
 
 **Deliberately NOT done — P10 review minor (a), "relax the near-null spurious non-convergence
 warning (absolute-floor on the N-vs-2N check)".** Filed 2026-07-15; **P12 (2026-07-31) falsified
@@ -868,7 +884,17 @@ cone (which ends at 2.21° for that geometry), returning a 0.82 dB error.
   branch — and did not survive contact with this one); and **why** m=0 and m=1 carry the error is
   not understood, while they are demonstrably *not* the largest modes by `|gₘ|`. Picking the
   subset by fitting to three failures is the same kind of mistake the budget formula made.
-  **Both caveats are now unit P13's charter (filed 2026-08-01), sequenced after P10-perf.**
+  **Both caveats became unit P13's charter (filed 2026-08-01), and ✅ P13 closed both on
+  2026-08-01 — by RETIRING the pre-gate, not by validating it.** Caveat 1 resolved against the
+  pre-gate: a θ × D/λ sweep measured the worst *passing* probe-to-total ratio at **43.5×**
+  against `RADIAL_PRE_GATE_SAFETY = 32`, on `dsn_34m` Ka θ=90° — so five points was indeed a
+  signal rather than a validation, exactly as feared, and the constant did not survive the
+  sweep. Caveat 2 resolved on its merits: m=0 and m=1 carry the error because per-mode relative
+  quadrature error tracks **intra-mode cancellation** `Cₘ = ∫|Fₘ|dρ / |∫Fₘdρ|` rather than
+  `|Rₘ|`, and `Cₘ` is systematically largest at low `m` (`Jₘ ~ ρᵐ` confines high modes to a
+  narrow rim annulus across which the phase sweeps little, so they cancel less). The subset was
+  selecting the most self-cancelling modes without knowing it. Both the (ii-a) gate and its
+  constants are gone; the shape shipped is (R) alone, unconditionally.
 - **D-B — Is `adaptive()`'s floor of 16 simply wrong?** Raising it to 32 (matching `default()`)
   fixes sub-defect (a) at rows 2 and 3 and closes D17's remaining calibrate-vs-service preset
   divergence as a side effect. It does nothing for (b). **Recommended: raise to 32** as a cheap
@@ -938,7 +964,10 @@ to preserve a number that is off by a dB.
      is **not a bound** (underestimates by up to 26× where it passes), hence
      `RADIAL_PRE_GATE_SAFETY = 32`. Error estimates are **summed** across the two axes and
      `converged = mode_converged && radially_converged` (the explicit combination decision this
-     unit demanded).
+     unit demanded). **⚠️ The pre-gate half of this was RETIRED 2026-08-01 by P13** — the
+     `{0,1}` probe, its safety factor and its work threshold are all deleted; what remains is
+     the N-vs-2N comparison, the fine-leg return and the refinement loop, applied
+     unconditionally. The summed-estimate and `converged` combination decisions are unchanged.
   3. ✅ **DONE 2026-07-31.** `adaptive()` `min_rho_points` 16 → 32, documented as closing D17's
      preset divergence, explicitly not as the fix for sub-defect (a). Not 64 (would reopen the
      divergence inverted).
@@ -946,7 +975,10 @@ to preserve a number that is off by a dB.
      `p12_mode_path_radial_convergence_anchors` (all four measured rows incl. UHF **φ=0**),
      `p12_symmetric_branch_control_still_accurate_and_cheap` (asserts accuracy **and** that the
      work did not grow — so a future "fix" cannot pass by globally raising density), and
-     `p12_pre_gate_keeps_expensive_ka_at_two_legs` (cost guard on the P10-perf case).
+     `p12_pre_gate_keeps_expensive_ka_at_two_legs` (cost guard on the P10-perf case; renamed
+     `mode_path_settles_an_already_converged_geometry_in_two_legs` by P13, same geometry and
+     same two-leg assertion, now pinning that the honest check agrees on its first comparison
+     rather than that a pre-gate certified).
   5. ✅ **DONE 2026-07-31.** CLAUDE.md's integrator paragraph and pitfall 2, and the
      `adaptive()` docstring, all re-trued.
 - **Exit criteria — ✅ all met (2026-07-31).** Radial convergence on the mode path is now
@@ -1028,66 +1060,63 @@ to preserve a number that is off by a dB.
   — the `calibrate` (`default()`, floor 32) vs service (`adaptive()`, floor 16) preset
   divergence is a *symptom* of this defect and closes with D-B.
 
-### P13 — Validate or retire P12's empirical guards (`RADIAL_PRE_GATE_SAFETY`, probe-mode set) — Effort: S/M
+### P13 — Validate or retire P12's empirical guards (`RADIAL_PRE_GATE_SAFETY`, probe-mode set) — Effort: S/M — ✅ **DONE 2026-08-01**
 
 **Filed 2026-08-01 (triage), collecting P12's "filed, not fixed" close-out items
 (findings doc §4a caveats + §5 discrepancies) into one unit so they stop living in prose.**
 This is served-correctness guard validation — the same defect class P12 fixed (an unvalidated
-constant deciding whether a served number gets checked), one layer up: P12's *fix* now rests on
+constant deciding whether a served number gets checked), one layer up: P12's *fix* rested on
 two constants that were fitted to the failures that motivated them, not derived or bounded.
 
-- **What P12 shipped without validation:**
-  - **`RADIAL_PRE_GATE_SAFETY = 32`.** The `{0,1}` probe's error estimate is **not a bound** —
-    it underestimates the full-sweep delta by up to **26×** where it passes (measured over five
-    geometries). 32 was picked empirically to cover that sample; nothing bounds the
-    probe-to-total ratio in general, and the pre-gate *certifies* `converged = true` on the
-    geometries where the full check leg is too expensive to run — i.e. exactly where a miss
-    would be invisible. This is the highest-risk residue of P12.
-  - **`RADIAL_PROBE_MODES = {0,1}`.** 5/5 on the measured geometries, but chosen by fitting to
-    three failures. *Why* m=0 and m=1 carry the radial error is not understood, and they are
-    demonstrably **not** the largest modes by `|gₘ|` (`gs_3.7m`: magnitude ranking 5,7,2,3,4 vs
-    error ranking 0,1,5,7,3). P12's own caveat: picking the subset by fit "is the same kind of
-    mistake the budget formula made."
-- **Work:**
-  1. **θ × D/λ sweep** over both branches of the pre-gate's applicability, measuring the
-     probe-estimate-to-true-error ratio across the plane (not at the five points we have).
-     Outcome is binary: a **derived bound** (replace the magic 32 with it, or retire the margin
-     entirely), or a **counterexample** (the pre-gate cannot certify; it may only *decline* to
-     certify, and the honest loop runs wherever it would have certified).
-  2. **Explain the m={0,1} concentration** — mechanism, not fit. Either derive why the
-     low-order modes carry the radial error (plausibly: they integrate the slowly-oscillating
-     part of the integrand where cancellation, not resolution, sets the error — connect to the
-     findings doc's cancellation analysis) or replace the subset selection with a criterion
-     computed from the geometry.
-  3. **Correct D17's record** (findings doc §5, "recorded not resolved"): re-measure D17's
-     `default()` vs `adaptive()` table post-P12 and fix the roadmap/findings text — the filed
-     UHF row reads 1.23 dB where the φ=0 measurement is **−7.08 dB**, and D17's
-     `default()`/`adaptive()` accuracy labels appear transposed (on the mode path
-     `min_rho_points` is the only preset field `radial_points_for` reads, so pre-P12 `default()`
-     (32) was strictly *more* accurate than `adaptive()` (16), the opposite of what D17's
-     numbers say). The record is load-bearing: D17's table is what justified P12's D-B call.
-- **Exit criteria:** `RADIAL_PRE_GATE_SAFETY` is derived-with-a-bound or deleted; the probe set
-  is justified by mechanism or replaced by a computed criterion; the cost guard
-  `p12_pre_gate_keeps_expensive_ka_at_two_legs` and all P12 anchors stay green; D17's table and
-  the §5 discrepancies are corrected in place with post-P12 numbers.
-- **Depends on:** P12 (landed 2026-07-31, pending commit). **Sequence AFTER P10-perf:** the
-  pre-gate exists *only because* a full check leg is expensive (`FULL_RADIAL_CHECK_WORK_LIMIT`).
-  If P10-perf's FFT + O(M) recurrence make the full N-vs-2N leg affordable everywhere, the
-  right move is to **delete the pre-gate**, and this unit collapses to tasks 2–3. Do not spend
-  the sweep before knowing whether the constant it validates survives.
+**✅ OUTCOME: the pre-gate is RETIRED, not validated** — the answer P13's own post-P10-perf note
+predicted, reached for a stronger reason than the one predicted. `PHYSICS_MODEL_VERSION` **7 → 8**.
+Full record: [`docs/findings-2026-08-01-p13-pre-gate-retirement.md`](findings-2026-08-01-p13-pre-gate-retirement.md).
 
-**✅ P10-perf LANDED 2026-08-01 — start here, and the answer is probably "delete".** The
-conditional above has resolved in the direction that collapses this unit. The pre-gate's entire
-economic case was that a probe leg is much cheaper than a full check leg, because the probe
-skipped an `O(n_φ · M)` DFT. That DFT is now an `O(n_φ log n_φ)` FFT and the mode work is `O(M)`,
-so per radial sample a **probe leg costs `n_φ + 2` against a full leg's `n_φ + M + 1`** — at
-`dsn_34m` Ka (`n_φ = 270`, `M = 134`) that is 272 vs 405. **The probe now saves ~33 % of a leg
-where it once saved ~80 %,** and it buys that 33 % at the price of an unvalidated constant
-(`RADIAL_PRE_GATE_SAFETY = 32`) that certifies `converged = true` on precisely the geometries
-where a miss would be invisible. Deleting the pre-gate costs ~33 % on the expensive regime — a
-regime that is itself 3.8× cheaper than when the trade was priced — and removes the highest-risk
-residue of P12 outright. Re-measure with `p12_pre_gate_yield_across_geometries` (updated to the
-post-FFT work model) before deciding, but expect tasks 2–3 to be what is left.
+- **What P12 shipped without validation, and what the measurement said:**
+  - **`RADIAL_PRE_GATE_SAFETY = 32`** — filed as "not a bound; underestimates by up to 26× where
+    it passes". **The θ × D/λ sweep found 43.5×**, i.e. the constant does not bound the quantity
+    it exists to bound — and it fails on `dsn_34m` **Ka θ=90°**, an enabled antenna at a served
+    angle, and *the same geometry P12 fitted it on*. The cause is instructive and generalizes:
+    P10-perf's `next_fast_len` φ' resizing (512 → 270), **a change with no physics content
+    whatsoever**, moved the ratio past the constant, and nothing in the build could notice. A
+    constant fitted to measurements is coupled to every input of those measurements, including
+    ones nobody thinks of as inputs.
+  - **`RADIAL_PROBE_MODES = {0,1}`** — filed as "5/5 but chosen by fit; *why* m=0,1 carry the
+    error is not understood". **Now understood** (task 2, below): per-mode relative quadrature
+    error is set by **intra-mode cancellation** `Cₘ = ∫|Fₘ|dρ / |∫Fₘdρ|`, not by `|Rₘ|`, and
+    `Cₘ` is systematically largest at low `m`. The subset was implicitly selecting the most
+    self-cancelling modes. Deleted anyway, with the mechanism recorded for anyone who
+    reintroduces a subset check (rank by `Cₘ`, and treat it as a screen, not a bound).
+- **The economics had also inverted**, which is what made deletion cheap rather than merely
+  correct. The pre-gate's premise was that a 2-mode leg is far cheaper than a full one — ~18 % of
+  one when the φ' transform was an `O(n_phi·M)` DFT, but **66 %** after P10-perf's FFT. Post-FFT
+  it is **strictly dominated**: 2.33× baseline returning the *coarse* leg, where simply computing
+  at 2N and returning the *fine* leg costs 2.00×. Its only remaining claim over the honest check
+  was a 0.67× saving, bought by returning the worse of two legs it had already paid for.
+- **Measured effect of the deletion:**
+  | | before | after |
+  |---|---|---|
+  | `dsn_34m` Ka θ=5° accuracy | +0.0126 dB | **+0.0008 dB** (16×) |
+  | `dsn_34m` Ka θ=90° work | 16 006 511 | 20 493 000 (+28 %, ~583 → ~748 ms) |
+  | `dsn_34m` X θ=45° work | 1 524 114 | **1 047 120 (−31 %)** — the pre-gate declined there, so its probe leg was pure waste |
+  | below the old work threshold | — | bit-identical (never reached the pre-gate) |
+- **Task 3 — D17's record, corrected in place.** Its `default()` row reproduces exactly
+  (−50.7711 vs −50.7668 filed) and its `high_accuracy()` row identifies the φ it never recorded
+  (**90°**), but its `adaptive()` row is **unreproducible** from what it records. Notably **both
+  of P12's §5 corrections to D17 are themselves wrong**: the "labels are transposed" reading is
+  falsified (the `default()` label is right), and the "F7 floor masked it" explanation is
+  falsified (the floor is −25.98 dBi, ~24 dB *above* every number in the table). Corrected in
+  `docs/findings-2026-07-31-p12-mode-path-radial-budget.md` §5 and in the P12 register row.
+- **Exit criteria — all met:** `RADIAL_PRE_GATE_SAFETY` **deleted** (with the sweep that killed
+  it kept runnable as `p13_probe_to_total_ratio_sweep`, its retired constants restated locally);
+  the probe set **justified by mechanism** and then deleted with the code that used it; the cost
+  guard renamed and still green (`mode_path_settles_an_already_converged_geometry_in_two_legs`,
+  406 620 work units against a derived two-leg figure of 406 620); all P12 anchors green; D17's
+  table and the §5 discrepancies corrected in place.
+- **Filed, not fixed:** the sweep found no *counterexample* (probe passing where the honest check
+  fires), only an exceeded margin — and it structurally could not look at low `D/λ`, since that
+  regime never crossed the old work threshold and so has no pre-gated points. If a subset check is
+  ever reintroduced, that is the gap to close first.
 
 ### P14 — `bessel_jn` loses accuracy exactly at its turning point `m ≈ x` — Effort: S
 

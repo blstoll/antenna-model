@@ -33,8 +33,11 @@ use std::time::{Duration, Instant};
 use crate::error::{ComputationError, ComputationResult};
 use crate::model::{
     // `bessel_jn` (the per-order call) is deliberately absent: since P10-perf every Jₘ on this
-    // path comes from `bessel_jn_array`'s single sweep, and mixing the two would reintroduce
-    // the branch mismatch documented on `radial_probe_field`.
+    // path comes from `bessel_jn_array`'s single sweep. Mixing the two would reintroduce a
+    // branch mismatch — `bessel_jn_array` picks upward or downward recurrence from the HIGHEST
+    // wanted order, so a ladder sized differently computes a subtly different function (the two
+    // directions differ by ~2.8e-9 near the origin, where the rational approximations' error at
+    // x=0 enters the upward seeds).
     bessel::{bessel_j0, bessel_jn_array},
     geometry::AntennaConfiguration,
     illumination::illumination_amplitude,
@@ -151,46 +154,6 @@ impl IntegrationDeadline {
 /// reports `converged = false` whenever the clamp costs accuracy.
 const BEYOND_SCOPE_COMA_CYCLE_CAP: f64 = 8.0;
 
-/// Azimuthal modes used by the cheap radial-convergence **pre-gate** (P12, D-A).
-///
-/// Chosen by measurement, not by magnitude: at both failing coma geometries the two largest
-/// contributors to the *radial quadrature error* are `m = 0` and `m = 1`, and they are **not**
-/// the largest modes by `|gₘ|` (`gs_3.7m` ranks 5,7,2,3,4 by magnitude but 0,1,5,7,3 by error;
-/// `dsn_34m` ranks 4,3,6,1,5 by magnitude but 0,1,3,4,5 by error). A pre-gate that picked its
-/// probes by mode magnitude — the form originally proposed for D-A option (ii) — would watch
-/// the wrong modes. See `docs/findings-2026-07-31-p12-mode-path-radial-budget.md` §4a.
-const RADIAL_PROBE_MODES: [u32; 2] = [0, 1];
-
-/// Safety factor applied to the radial pre-gate's error estimate before comparing it against
-/// the tolerance (P12, D-A).
-///
-/// **The pre-gate's estimate is not a bound.** Measured against the honest full N-vs-2N
-/// estimate on five geometries, the `{0,1}` probe is *conservative* where it fires (1.17×,
-/// 1.43×, 2.18× the full estimate) but *anti-conservative* where it passes — it underestimates
-/// by **3.5×** at `dsn_34m` Ka θ=5° and **26×** at θ=90°, because when the total is nearly
-/// converged the probe's own movement is a poor proxy for the residual of the ~195 modes it
-/// does not watch. Multiplying by 32 covers the measured worst case with margin, and errs
-/// toward escalating to the honest check — the fail-safe direction.
-///
-/// This constant is the price of shipping the pre-gate on five data points. Retire it (or
-/// re-derive it) once P12 task 4's θ × D/λ sweep bounds the probe-to-total ratio properly.
-const RADIAL_PRE_GATE_SAFETY: f64 = 32.0;
-
-/// Work estimate (`n_rho × n_phi × modes`) above which a full radial check leg is judged too
-/// expensive to spend unconditionally, so the cheap [`RADIAL_PROBE_MODES`] pre-gate runs first.
-///
-/// Below it, the honest full N-vs-2N check runs directly — which is deliberate rather than
-/// merely thrifty: **every measured radial failure is in the cheap regime** (`gs_3.7m` 0.42 ms,
-/// `dsn_34m` X 0.45 ms, D12 UHF 0.17 ms), while the expensive geometries (`dsn_34m` Ka, 299 ms
-/// and 3.7 s) are already converged to ±0.02 dB. Placing the under-validated pre-gate only
-/// where nothing has been observed to fail keeps the heuristic out of the regime that matters.
-///
-/// Calibrated from the same measurements: `dsn_34m` Ka θ=5° is ~1.4·10⁸ work units at 299 ms,
-/// i.e. ~2.2 ms per 10⁶, so 4·10⁶ is a full check leg of roughly 10 ms. The five measured
-/// geometries straddle it by five orders of magnitude (2·10⁴…1.7·10⁹), so the exact value is
-/// not delicate.
-const FULL_RADIAL_CHECK_WORK_LIMIT: u64 = 4_000_000;
-
 /// Maximum radial doublings in the mode path's refinement loop (P12, D-A).
 ///
 /// Cost is linear in `n_rho` and the legs sum geometrically, so `d` doublings cost
@@ -217,17 +180,18 @@ struct ModeSizing {
 
 /// One azimuthal-mode sweep at a fixed radial density.
 ///
-/// Carries the three quantities the two independent self-checks need, all from a single φ'
-/// sweep: the full mode sum, the top mode's contribution (azimuthal **truncation** check) and
-/// the [`RADIAL_PROBE_MODES`] partial sum (**radial** pre-gate).
+/// Carries both quantities the runtime self-checks need from a single φ' sweep: the full mode
+/// sum, and the top mode's contribution (the azimuthal **truncation** check). The radial check
+/// compares two of these sweeps against each other, so it needs no third observable.
+///
+/// P13 (2026-08-01) removed a third field, `radial_probe` — the `{0,1}`-mode partial sum that
+/// fed P12's cheap radial pre-gate. See the radial block in [`integrate_aperture`].
 #[derive(Debug, Clone, Copy)]
 struct ModeSweep {
     /// `I(θ,φ)` summed over all modes `0..=m_probe` (both `±m`).
     total: Complex64,
     /// The part of `total` contributed by the top mode `±m_probe`.
     top_mode: Complex64,
-    /// The part of `total` contributed by [`RADIAL_PROBE_MODES`].
-    radial_probe: Complex64,
 }
 
 /// Work units in one azimuthal-mode radial sweep, reported through
@@ -247,16 +211,6 @@ struct ModeSweep {
 #[inline]
 fn mode_sweep_work(n_rho: usize, n_phi: usize, modes: usize) -> usize {
     n_rho.saturating_mul(n_phi.saturating_add(modes))
-}
-
-/// Whether this geometry gets the cheap radial pre-gate instead of paying for a full check
-/// leg outright. See [`FULL_RADIAL_CHECK_WORK_LIMIT`].
-#[inline]
-fn use_radial_pre_gate(n_rho: usize, n_phi: usize, m_probe: u32) -> bool {
-    let work = (n_rho as u64)
-        .saturating_mul(n_phi as u64)
-        .saturating_mul(m_probe as u64 + 1);
-    work > FULL_RADIAL_CHECK_WORK_LIMIT
 }
 
 /// Complex integration result
@@ -667,62 +621,47 @@ pub fn integrate_aperture(
         azimuthal_mode_field_inner(config, theta, phi, k, n_rho, n_phi, m_probe, deadline)?;
     let mut evaluations = mode_sweep_work(n_rho, n_phi, m_probe as usize + 1);
 
-    // ---- P12: the RADIAL axis, which before this unit was never verified at all ----
+    // ---- P12: the RADIAL axis, which before that unit was never verified at all ----
     //
     // The mode-truncation check below and this one answer different questions, and the
     // integrator is only honest when BOTH are answered. Radial convergence is established
     // exactly as the symmetric branch establishes it — compare N against 2N and return the
-    // FINE leg — with two additions the symmetric branch does not need:
+    // FINE leg — plus refinement, because no single density is right everywhere: at the same
+    // budget the 2N leg lands at −0.045 dB on `gs_3.7m` but −0.349 dB on D12's UHF fixture.
     //
-    //   * a cheap pre-gate on geometries where a full 2N leg is expensive (`dsn_34m` Ka is
-    //     ~3.7 s, so an unconditional check would make it ~11 s), and
-    //   * refinement, because no single density is right everywhere: at the same budget the
-    //     2N leg lands at −0.045 dB on `gs_3.7m` but −0.349 dB on D12's UHF fixture.
+    // P13 (2026-08-01) deleted the cheap `{0,1}`-mode pre-gate that used to sit in front of
+    // this loop on expensive geometries. It was priced when the φ' transform was an
+    // `O(n_phi·M)` DFT, which made a 2-mode leg ~18 % of a full one; P10-perf's FFT made the
+    // mode work `O(M)`, so a probe leg is now **66 %** of a full leg (measured, `dsn_34m` Ka)
+    // and the pre-gate saved ~28 % rather than ~3×. It bought that 28 % by certifying the
+    // COARSE leg — 16× less accurate at `dsn_34m` Ka θ=5° than the fine leg this loop returns
+    // for the same two sweeps — on the strength of a fitted safety factor that a θ × D/λ sweep
+    // then showed does not bound what it was supposed to bound (worst passing probe-to-total
+    // ratio 43.5× against a constant of 32, on a served geometry). See
+    // `docs/findings-2026-08-01-p13-pre-gate-retirement.md`.
     let radial_rtol = params.relative_tolerance.max(HANKEL_SELF_CHECK_RTOL);
     let mut radial_error = 0.0_f64;
     let mut radially_converged = false;
 
-    if use_radial_pre_gate(n_rho, n_phi, m_probe) {
-        // Cheap leg: repeat ONLY the low modes at 2N and watch how far they move. Compared
-        // against `|total|` — the scale the answer's accuracy is measured on — not against
-        // the probe's own magnitude, which is not the quantity at risk.
-        let n_fine = radial_check_points(n_rho);
-        let probe_fine =
-            radial_probe_field(config, theta, phi, k, n_fine, n_phi, m_probe, deadline)?;
-        evaluations += mode_sweep_work(n_fine, n_phi, RADIAL_PROBE_MODES.len());
-        let probe_diff = (probe_fine - sweep.radial_probe).norm();
-        let scale = sweep.total.norm().max(params.absolute_tolerance);
-        if probe_diff * RADIAL_PRE_GATE_SAFETY <= radial_rtol * scale {
-            radial_error = probe_diff * RADIAL_PRE_GATE_SAFETY;
-            radially_converged = true;
+    for _ in 0..MAX_RADIAL_REFINEMENTS {
+        if n_rho >= RADIAL_POINTS_SAFETY_MAX {
+            break;
         }
-        // Otherwise fall through to the honest loop. The pre-gate is allowed to be wrong in
-        // the direction of "spend more"; it is never allowed to certify on its own once it
-        // has said the answer is moving.
-    }
-
-    if !radially_converged {
-        for _ in 0..MAX_RADIAL_REFINEMENTS {
-            if n_rho >= RADIAL_POINTS_SAFETY_MAX {
-                break;
-            }
-            let n_fine = radial_check_points(n_rho);
-            let fine = azimuthal_mode_field_inner(
-                config, theta, phi, k, n_fine, n_phi, m_probe, deadline,
-            )?;
-            evaluations += mode_sweep_work(n_fine, n_phi, m_probe as usize + 1);
-            radial_error = (fine.total - sweep.total).norm();
-            // Return the FINE leg: with Simpson's O(h⁴) the returned estimate's own error is
-            // ≈ diff/15, which is the entire reason the symmetric branch is accurate at the
-            // same budget the mode path was under-delivering on.
-            n_rho = n_fine;
-            sweep = fine;
-            radially_converged = radial_error
-                <= radial_rtol * sweep.total.norm().max(params.absolute_tolerance)
-                || radial_error < params.absolute_tolerance;
-            if radially_converged {
-                break;
-            }
+        let n_fine = radial_check_points(n_rho);
+        let fine =
+            azimuthal_mode_field_inner(config, theta, phi, k, n_fine, n_phi, m_probe, deadline)?;
+        evaluations += mode_sweep_work(n_fine, n_phi, m_probe as usize + 1);
+        radial_error = (fine.total - sweep.total).norm();
+        // Return the FINE leg: with Simpson's O(h⁴) the returned estimate's own error is
+        // ≈ diff/15, which is the entire reason the symmetric branch is accurate at the
+        // same budget the mode path was under-delivering on.
+        n_rho = n_fine;
+        sweep = fine;
+        radially_converged = radial_error
+            <= radial_rtol * sweep.total.norm().max(params.absolute_tolerance)
+            || radial_error < params.absolute_tolerance;
+        if radially_converged {
+            break;
         }
     }
 
@@ -1558,8 +1497,6 @@ fn azimuthal_mode_field(
 /// - `top_mode` = the part of `total` contributed by the top mode `±m_max`, so the caller has
 ///   both `I(M+1)` (`total`, calling with `m_max = M+1`) and `I(M) = total − top_mode` without
 ///   a second integration — the M-vs-(M+1) azimuthal truncation check (D-6).
-/// - `radial_probe` = the part of `total` contributed by [`RADIAL_PROBE_MODES`], the `N`-density
-///   half of P12's cheap radial pre-gate, likewise free here.
 ///
 /// See [`azimuthal_mode_field`].
 #[allow(clippy::too_many_arguments)]
@@ -1669,15 +1606,9 @@ fn azimuthal_mode_field_inner(
     let scale = h / 3.0;
     // I(θ,φ) = 2π Σ_{m=−M}^{M} (−j)^m e^{jmφ} R_m(θ). Track the top mode's (±m_max)
     // contribution separately so the caller can form I(M) = total − top for the D-6
-    // self-check without a second sweep, and the low-mode partial sum separately so the
-    // P12 radial pre-gate has its N-density observable without a second sweep either.
+    // self-check without a second sweep.
     let mut acc = r_pos[0] * scale; // m = 0: (−j)^0 = 1, e^0 = 1
     let mut top = Complex64::new(0.0, 0.0);
-    let mut probe = if RADIAL_PROBE_MODES.contains(&0) {
-        acc
-    } else {
-        Complex64::new(0.0, 0.0)
-    };
     for m in 1..=mmax {
         let mf = m as f64;
         let epos = Complex64::new(0.0, mf * phi).exp();
@@ -1685,9 +1616,6 @@ fn azimuthal_mode_field_inner(
         let contrib = pow_neg_j(m as i32) * epos * r_pos[m] * scale
             + pow_neg_j(-(m as i32)) * eneg * r_neg[m] * scale;
         acc += contrib;
-        if RADIAL_PROBE_MODES.contains(&(m as u32)) {
-            probe += contrib;
-        }
         if m == mmax {
             top = contrib;
         }
@@ -1695,128 +1623,7 @@ fn azimuthal_mode_field_inner(
     Ok(ModeSweep {
         total: acc * 2.0 * PI,
         top_mode: top * 2.0 * PI,
-        radial_probe: probe * 2.0 * PI,
     })
-}
-
-/// The `Σ_{m ∈ RADIAL_PROBE_MODES}` partial sum on its own, at an arbitrary radial density.
-///
-/// This is the **cheap leg** of P12's radial pre-gate: it repeats only the low modes at `2N`
-/// so their movement can be compared against the same modes' movement inside the `N` sweep
-/// ([`ModeSweep::radial_probe`]).
-///
-/// It is NOT proportionally cheap. The φ' sweep must still evaluate [`aperture_plane_g`] at
-/// every `(ρ, φ')` point regardless of how few modes are wanted, so this costs a floor of
-/// ~18% of a full sweep at `m_max ≈ 195` (`dsn_34m` Ka) but ~52–62% at `m_max ≈ 12–20`. That
-/// is precisely why [`use_radial_pre_gate`] only reaches for it on geometries where a full
-/// check leg is expensive.
-///
-/// `m_probe` is the full sweep's top mode. It is **not** used to sum more modes — only
-/// [`RADIAL_PROBE_MODES`] are accumulated — but it must be passed so the `Jₘ` ladder is built
-/// with the same branch decision [`azimuthal_mode_field_inner`] makes. [`bessel_jn_array`]
-/// selects upward or downward recurrence from the *highest* wanted order, and those two
-/// directions differ by ~2.8e-9 near the origin (the rational approximations' error at `x=0`
-/// enters the upward seeds). Sizing the ladder differently here would make the pre-gate
-/// difference two subtly different functions, which is exactly what
-/// `radial_probe_field_matches_the_full_sweeps_probe_accumulation` exists to forbid.
-#[allow(clippy::too_many_arguments)]
-fn radial_probe_field(
-    config: &AntennaConfiguration,
-    theta: f64,
-    phi: f64,
-    k: f64,
-    n_rho: usize,
-    n_phi_coeff: usize,
-    m_probe: u32,
-    deadline: Option<IntegrationDeadline>,
-) -> ComputationResult<Complex64> {
-    let f = config.reflector.focal_length;
-    let r_max = config.reflector.diameter / 2.0;
-    let apc = AperturePlaneConst::new(config);
-    let n = if n_rho.is_multiple_of(2) {
-        n_rho + 1
-    } else {
-        n_rho
-    };
-    let h = r_max / (n - 1) as f64;
-    let dphi = 2.0 * PI / n_phi_coeff as f64;
-    let sin_theta = theta.sin();
-    let one_minus_cos = 1.0 - theta.cos();
-
-    const P: usize = RADIAL_PROBE_MODES.len();
-    let mut r_pos = [Complex64::new(0.0, 0.0); P];
-    let mut r_neg = [Complex64::new(0.0, 0.0); P];
-
-    // φ' twiddles e^{−jmφ'_j} for the handful of probe modes, hoisted out of the radial loop
-    // (P10-perf). Only `P` modes are wanted, so a full FFT would be wasted work here — but
-    // recomputing the exponential per `(ρ, φ', mode)`, which this used to do, was `n_rho·n_phi·P`
-    // transcendental calls on the leg whose entire purpose is to be the cheap one.
-    // Flat layout: twiddle[idx * n_phi_coeff + j].
-    let mut twiddle = vec![Complex64::new(0.0, 0.0); P * n_phi_coeff];
-    for (idx, chunk) in twiddle.chunks_mut(n_phi_coeff).enumerate() {
-        let m = RADIAL_PROBE_MODES[idx] as f64;
-        for (jj, t) in chunk.iter_mut().enumerate() {
-            *t = Complex64::new(0.0, -m * jj as f64 * dphi).exp();
-        }
-    }
-    let mut jm_ladder = vec![0.0_f64; m_probe as usize + 1];
-    let phi_grid = PhiGrid::new(n_phi_coeff);
-
-    for i in 0..n {
-        if i % BUDGET_CHECK_STRIDE == 0 {
-            if let Some(dl) = deadline {
-                dl.check("radial_probe_field")?;
-            }
-        }
-        let rho = i as f64 * h;
-        let w = simpson_weight(i, n);
-        let chirp = k * rho * rho / (4.0 * f) * one_minus_cos;
-        let chirp_factor = Complex64::new(0.0, chirp).exp();
-        let a = k * rho * sin_theta;
-
-        let mut gm_pos = [Complex64::new(0.0, 0.0); P];
-        let mut gm_neg = [Complex64::new(0.0, 0.0); P];
-        let rho_phase = apc.rho_only_phase(rho, k);
-        for jj in 0..n_phi_coeff {
-            let g = aperture_plane_g(&apc, &phi_grid, jj, rho, rho_phase, k);
-            for idx in 0..P {
-                let t = twiddle[idx * n_phi_coeff + jj]; // e^{−jmφ'_j}
-                gm_pos[idx] += g * t;
-                gm_neg[idx] += g * t.conj();
-            }
-        }
-        let norm = dphi / (2.0 * PI);
-        for idx in 0..P {
-            gm_pos[idx] *= norm;
-            gm_neg[idx] *= norm;
-        }
-
-        // Same ladder, same branch decision as the full sweep — see the `m_probe` note above.
-        bessel_jn_array(m_probe, a, &mut jm_ladder);
-        for (idx, &m) in RADIAL_PROBE_MODES.iter().enumerate() {
-            let base = chirp_factor * jm_ladder[m as usize] * rho * w;
-            r_pos[idx] += base * gm_pos[idx];
-            if m > 0 {
-                let sign = if m % 2 == 0 { 1.0 } else { -1.0 };
-                r_neg[idx] += base * gm_neg[idx] * sign;
-            }
-        }
-    }
-
-    let scale = h / 3.0;
-    let mut acc = Complex64::new(0.0, 0.0);
-    for (idx, &m) in RADIAL_PROBE_MODES.iter().enumerate() {
-        if m == 0 {
-            acc += r_pos[idx] * scale;
-        } else {
-            let mf = m as f64;
-            let epos = Complex64::new(0.0, mf * phi).exp();
-            let eneg = Complex64::new(0.0, -mf * phi).exp();
-            acc += pow_neg_j(m as i32) * epos * r_pos[idx] * scale
-                + pow_neg_j(-(m as i32)) * eneg * r_neg[idx] * scale;
-        }
-    }
-    Ok(acc * 2.0 * PI)
 }
 
 /// Simpson's rule weight for index i in array of n points
@@ -3153,6 +2960,246 @@ mod p12_radial_diagnostic {
             .collect()
     }
 
+    /// Composite-Simpson integral of an odd-length sample vector spanning `[0, R]`, and the
+    /// `L¹` norm `∫|F|dρ` over the same span. Returned together because P13's cancellation
+    /// ratio is exactly the second divided by the magnitude of the first.
+    fn simpson_and_l1(samples: &[Complex64], r_max: f64) -> (Complex64, f64) {
+        let n = samples.len();
+        assert!(n >= 3 && !n.is_multiple_of(2), "Simpson needs odd n ≥ 3");
+        let h = r_max / (n - 1) as f64;
+        let mut acc = Complex64::new(0.0, 0.0);
+        let mut l1 = 0.0;
+        for (i, s) in samples.iter().enumerate() {
+            let w = simpson_weight(i, n);
+            acc += s * w;
+            l1 += s.norm() * w;
+        }
+        (acc * (h / 3.0), l1 * (h / 3.0))
+    }
+
+    /// **P13 task 3 — re-measure D17's `default()`-vs-`adaptive()` table.**
+    ///
+    /// D17 (2026-07-31) filed a preset divergence on D12's UHF fixture geometry: `calibrate`
+    /// builds from `IntegrationParams::default()` and the service from `adaptive()`, and the two
+    /// returned **−50.7668 vs −49.6090 dBi** at θ=16°/600 MHz — 1.16 dB apart, `converged = true`,
+    /// no warning. That table is load-bearing: it is what justified P12's decision D-B.
+    ///
+    /// Two things about it needed correcting, both recorded but unresolved in P12's findings §5:
+    ///
+    /// 1. **The magnitude was understated.** D17 measured through `compute_gain_db`, where the F7
+    ///    sidelobe floor and the spillover gate can compress a low PO value. At the field level
+    ///    the same geometry was **−7.08 dB** off at φ=0, not 1.23 dB — and D17's row records no φ.
+    /// 2. **The preset labels looked transposed.** On the mode path `min_rho_points` is the
+    ///    *only* field of either preset that `radial_points_for` reads, so pre-P12 `default()`
+    ///    (floor 32) was strictly **more** accurate than `adaptive()` (floor 16) — the opposite
+    ///    of what D17's numbers imply, since `high_accuracy()`'s −49.5426 agrees with the
+    ///    −49.6090 D17 labelled `adaptive()`, not with the −50.7668 it labelled `default()`.
+    ///
+    /// **Measured outcome (2026-08-01), which corrects the correction:** the transposition
+    /// reading is wrong too. `default()`'s −50.7668 reconstructs exactly as the pre-P12 floor-32
+    /// value (−50.7711 here, 0.004 dB), so that label is right; and `high_accuracy()`'s −49.5426
+    /// is exactly what all three presets return today at **φ=90°**, which identifies the φ D17
+    /// never recorded. What does *not* reproduce is D17's `adaptive()` row: floor 16 at φ=90°
+    /// gives raw PO −53.3972 dBi, nowhere near −49.6090, and no (floor, φ) combination in either
+    /// principal plane produces it. The honest conclusion is that **D17's `adaptive()` figure is
+    /// unreproducible from what the row records**, not that the labels were swapped — and the
+    /// underlying reason is that the row records neither φ nor the gate configuration.
+    ///
+    /// P12's D-B raised `adaptive()`'s floor to 32, so the divergence is now *zero* by
+    /// construction rather than merely small. This prints both the gain-path numbers D17 quoted
+    /// and the field-level numbers that isolate the integrator, so the corrected record rests on
+    /// a measurement anyone can re-run.
+    #[test]
+    #[ignore = "diagnostic: prints measurements, asserts nothing"]
+    fn p13_recheck_d17_preset_divergence_table() {
+        let config = d12_uhf_fixture();
+        let freq = 600.0e6;
+        let lambda = wavelength_from_frequency(freq);
+        let k = wavenumber(lambda);
+        let theta = 16.0_f64.to_radians();
+
+        println!(
+            "\n#### P13 task 3: D17's preset table, re-measured post-P12/P13\n\
+             #### D12 UHF fixture, 600 MHz, θ=16°.  D17 filed: default −50.7668, \
+             adaptive −49.6090, high_accuracy −49.5426\n"
+        );
+        for phi_deg in [0.0_f64, 90.0] {
+            let phi = phi_deg.to_radians();
+            println!("  φ={phi_deg}°");
+            println!(
+                "    preset          min_rho_points   n_rho   gain_db (served path)   \
+                 field vs converged"
+            );
+            // Same n_phi / m_max on every row, so the only axis that moves is radial density.
+            let ModeSizing { m_max, n_phi, .. } = mode_count_for(&config, lambda, theta);
+            let reference = mode_field_at(&config, theta, phi, k, 32769, n_phi, m_max + 1);
+            for (label, params) in [
+                ("default()      ", IntegrationParams::default()),
+                ("adaptive()     ", IntegrationParams::adaptive()),
+                ("high_accuracy()", IntegrationParams::high_accuracy()),
+            ] {
+                let n_rho = radial_points_for(&config, theta, lambda, &params);
+                let gain =
+                    crate::model::pattern::compute_gain_db(theta, phi, &config, freq, &params)
+                        .map(|g| g.gain);
+                let field = integrate_aperture(theta, phi, &config, freq, &params).unwrap();
+                println!(
+                    "    {label}       {:5}        {n_rho:5}        {:+11.4}          {:+8.4} dB",
+                    params.min_rho_points,
+                    gain.unwrap_or(f64::NAN),
+                    20.0 * (field.field.norm() / reference.norm()).log10(),
+                );
+            }
+        }
+
+        // P12's findings §5 item 3 offered one explanation for D17's numbers: that D17 measured
+        // through `compute_gain_db`, where the F7 statistical sidelobe floor could "compress or
+        // lift a low PO value". **That explanation is falsified here.** The floor for this
+        // fixture sits at −25.98 dBi — roughly 24 dB ABOVE every value in D17's table — so had
+        // it been active, all three of D17's rows would read ≈ −25.98 and none of them do. Every
+        // number in that table is therefore raw, floor-off PO, which is what makes the
+        // reconstruction below a fair comparison.
+        let floor = crate::model::pattern::sidelobe_floor_gain(&config, lambda);
+        println!(
+            "\n  F7 statistical sidelobe floor for this fixture: {:+.4} dBi",
+            10.0 * floor.log10()
+        );
+        println!(
+            "  Pre-P12 raw-PO values reconstructed at the two floors (single leg at N, the\n  \
+             behaviour before P12 added the check), against today's converged answer:"
+        );
+        let phi = 90.0_f64.to_radians();
+        let ModeSizing { m_max, n_phi, .. } = mode_count_for(&config, lambda, theta);
+        let converged_db = -49.5426_f64; // the served value all three presets now agree on
+        for (floor_pts, n) in [(16_usize, 19_usize), (32, 33)] {
+            let coarse = mode_field_at(&config, theta, phi, k, n, n_phi, m_max + 1);
+            let reference = mode_field_at(&config, theta, phi, k, 32769, n_phi, m_max + 1);
+            let delta_db = 20.0 * (coarse.norm() / reference.norm()).log10();
+            let raw_po = converged_db + delta_db;
+            let floored = 10.0 * (10.0_f64.powf(raw_po / 10.0) + floor).log10();
+            println!(
+                "    min_rho_points={floor_pts:3} ⇒ n_rho={n:3}: raw PO {raw_po:+9.4} dBi \
+                 (Δ {delta_db:+7.4} dB) ⇒ after the F7 power sum {floored:+9.4} dBi"
+            );
+        }
+    }
+
+    /// **P13 task 2 — why do modes 0 and 1 carry the radial error?**
+    ///
+    /// P12 chose its `RADIAL_PROBE_MODES = {0, 1}` (retired by P13, §1 of the findings doc) by
+    /// fitting to three failures: `m = 0` and `m = 1` were
+    /// the top two error contributors everywhere measured, and they are conspicuously **not** the
+    /// largest modes by `|Rₘ|`. P12 filed that as its own caveat — "picking the subset by fit is
+    /// the same kind of mistake the budget formula made" — because a rule you cannot explain is a
+    /// rule you cannot extrapolate.
+    ///
+    /// The hypothesis this tests is the findings doc's own §3b mechanism applied one level down.
+    /// §3a explains the *total* error by **inter**-mode cancellation: the modes sum to a residue
+    /// far smaller than `Σ|Rₘ|`, so small per-mode errors become large total ones. If the same
+    /// thing happens *within* a mode — `Rₘ = ∫Fₘ(ρ)dρ` being a small residue of a much larger
+    /// `∫|Fₘ|dρ` — then that mode's own **relative** accuracy is degraded by the same
+    /// amplification, and the probe set is not arbitrary after all: it is selecting the most
+    /// heavily self-cancelling modes.
+    ///
+    /// So this reports, per mode, the intra-mode cancellation ratio `Cₘ = ∫|Fₘ|dρ / |∫Fₘdρ|`
+    /// beside the mode's measured relative quadrature error at the served density. The
+    /// prediction is that they rank together — and specifically that `Cₘ` is largest at `m = 0,1`
+    /// — independently of `|Rₘ|`, which is what makes the claim falsifiable rather than a
+    /// restatement.
+    #[test]
+    #[ignore = "diagnostic: prints measurements, asserts nothing"]
+    fn p13_intra_mode_cancellation_explains_the_probe_set() {
+        println!(
+            "\n#### P13: is the {{0,1}} probe set explained by intra-mode cancellation?\n\
+             #### Cₘ = ∫|Fₘ|dρ / |∫Fₘdρ| (how much mode m's OWN radial integral cancels).\n\
+             #### Prediction: rel-error ranking tracks Cₘ ranking, NOT |Rₘ| ranking.\n"
+        );
+        for (name, config, freq, theta_deg) in [
+            ("gs_3.7m/x_band_feed", gs_3_7m_x_band(), 8.4e9, 5.0_f64),
+            ("dsn_34m/x_band", dsn_34m_x_band(), 8.45e9, 0.10),
+            ("D12 UHF fixture", d12_uhf_fixture(), 600.0e6, 16.0),
+        ] {
+            let lambda = wavelength_from_frequency(freq);
+            let k = wavenumber(lambda);
+            let theta = theta_deg.to_radians();
+            let params = IntegrationParams::adaptive();
+            let r_max = config.reflector.diameter / 2.0;
+            let ModeSizing { m_max, n_phi, .. } = mode_count_for(&config, lambda, theta);
+            let n_served = radial_points_for(&config, theta, lambda, &params);
+            let n_served = if n_served.is_multiple_of(2) {
+                n_served + 1
+            } else {
+                n_served
+            };
+            const N_DENSE: usize = 8193;
+
+            println!(
+                "\n================ {name}  θ={theta_deg}°  (served n_rho={n_served}) ================"
+            );
+            println!("    m |    |Rₘ|   |    Cₘ    | rel err at served n | rank by Cₘ / by err");
+
+            let mut raw: Vec<(u32, f64, f64, f64)> = Vec::new();
+            for m in 0..=m_max.min(9) {
+                let dense = radial_integrand_samples(&config, theta, k, m, n_phi, N_DENSE);
+                let served = radial_integrand_samples(&config, theta, k, m, n_phi, n_served);
+                let (r_dense, l1) = simpson_and_l1(&dense, r_max);
+                let (r_served, _) = simpson_and_l1(&served, r_max);
+                if r_dense.norm() == 0.0 {
+                    continue;
+                }
+                let c_m = l1 / r_dense.norm();
+                let rel = (r_served - r_dense).norm() / r_dense.norm();
+                raw.push((m, r_dense.norm(), c_m, rel));
+            }
+
+            // Modes that vanish IDENTICALLY by symmetry — the UHF fixture's cos2φ′
+            // illumination kills every odd mode — survive only as round-off, so their
+            // "relative error" is noise divided by noise (151 %, 26 %, 22 % …). Including
+            // them would make the ranking comparison meaningless in exactly the geometry
+            // where the mechanism is clearest, so they are excluded and named.
+            let peak = raw.iter().map(|r| r.1).fold(0.0_f64, f64::max);
+            let (rows, vanishing): (Vec<_>, Vec<_>) = raw.iter().partition(|r| r.1 > 1e-9 * peak);
+            let rows: Vec<(u32, f64, f64, f64)> = rows.into_iter().copied().collect();
+
+            let rank_of = |rows: &Vec<(u32, f64, f64, f64)>,
+                           key: fn(&(u32, f64, f64, f64)) -> f64| {
+                let mut v: Vec<u32> = rows.iter().map(|r| r.0).collect();
+                v.sort_by(|a, b| {
+                    let ra = rows.iter().find(|r| r.0 == *a).unwrap();
+                    let rb = rows.iter().find(|r| r.0 == *b).unwrap();
+                    key(rb).total_cmp(&key(ra))
+                });
+                v
+            };
+            let by_c = rank_of(&rows, |r| r.2);
+            let by_err = rank_of(&rows, |r| r.3);
+            let by_mag = rank_of(&rows, |r| r.1);
+
+            for (m, mag, c_m, rel) in &rows {
+                println!(
+                    "   {m:2} | {mag:9.3e} | {c_m:8.2} |      {:9.4} %      |",
+                    100.0 * rel
+                );
+            }
+            println!("  ---");
+            if !vanishing.is_empty() {
+                println!(
+                    "  excluded (|Rₘ| ≈ 0 by symmetry, rel-err is noise/noise): {:?}",
+                    vanishing.iter().map(|r| r.0).collect::<Vec<_>>()
+                );
+            }
+            println!("  ranking by Cₘ      : {:?}", &by_c[..by_c.len().min(6)]);
+            println!(
+                "  ranking by REL ERR : {:?}",
+                &by_err[..by_err.len().min(6)]
+            );
+            println!(
+                "  ranking by |Rₘ|    : {:?}",
+                &by_mag[..by_mag.len().min(6)]
+            );
+        }
+    }
+
     /// Hann-windowed magnitude spectrum of a complex sequence, evaluated at integer
     /// frequencies `0..=f_max` **cycles across the whole `[0, R]` span** (both signs of
     /// frequency folded together, since a complex signal's ± content is independent).
@@ -3303,52 +3350,6 @@ mod p12_radial_diagnostic {
         azimuthal_mode_field_inner(config, theta, phi, k, n_rho, n_phi, m_max, None)
             .expect("no deadline")
             .total
-    }
-
-    /// **Load-bearing consistency gate for P12's radial pre-gate.**
-    ///
-    /// The pre-gate compares `ModeSweep::radial_probe` (accumulated inside the full sweep) at
-    /// `N` against [`radial_probe_field`] (a separate, standalone implementation) at `2N`. Those
-    /// are two independently written code paths, and the comparison is only meaningful if they
-    /// compute the *same* quantity. If they ever drift, the pre-gate would be differencing two
-    /// different functions and could certify an arbitrarily wrong answer as converged — a
-    /// silent-wrong-number failure of exactly the kind P12 exists to remove.
-    ///
-    /// Not `#[ignore]`d: this must fail loudly in CI.
-    #[test]
-    fn radial_probe_field_matches_the_full_sweeps_probe_accumulation() {
-        let k_of = |f: f64| wavenumber(wavelength_from_frequency(f));
-        let cases: Vec<(&str, AntennaConfiguration, f64, f64, f64)> = vec![
-            ("gs_3.7m", gs_3_7m_x_band(), 8.4e9, 5.0_f64, 0.0_f64),
-            ("dsn_34m X", dsn_34m_x_band(), 8.45e9, 0.10, 0.0),
-            // Asymmetric-illumination door into the mode path (feed at focus, δ = 0).
-            ("D12 UHF", d12_uhf_fixture(), 600.0e6, 16.0, 90.0),
-            // φ ≠ 0 matters: the probe carries the m=1 term's e^{±jφ} factors.
-            ("gs_3.7m φ=37°", gs_3_7m_x_band(), 8.4e9, 3.0, 37.0),
-        ];
-        for (name, config, freq, theta_deg, phi_deg) in cases {
-            let lambda = wavelength_from_frequency(freq);
-            let k = k_of(freq);
-            let theta = theta_deg.to_radians();
-            let phi = phi_deg.to_radians();
-            let ModeSizing { m_max, n_phi, .. } = mode_count_for(&config, lambda, theta);
-            let n_rho = 129;
-
-            let sweep =
-                azimuthal_mode_field_inner(&config, theta, phi, k, n_rho, n_phi, m_max + 1, None)
-                    .expect("sweep");
-            let standalone =
-                radial_probe_field(&config, theta, phi, k, n_rho, n_phi, m_max + 1, None)
-                    .expect("probe");
-
-            let rel = (sweep.radial_probe - standalone).norm()
-                / sweep.radial_probe.norm().max(f64::MIN_POSITIVE);
-            assert!(
-                rel < 1e-12,
-                "{name}: radial_probe_field disagrees with the full sweep's probe accumulation \
-                 (rel={rel:.3e}); the P12 pre-gate would be differencing two different functions"
-            );
-        }
     }
 
     /// **φ'-axis sufficiency gate.** `mode_count_for` now sizes `n_phi` from the aperture
@@ -4241,26 +4242,22 @@ mod p12_radial_diagnostic {
         }
     }
 
-    /// **P12 pre-gate yield** — how often does the `{0,1}` pre-gate actually *certify*, given
-    /// `RADIAL_PRE_GATE_SAFETY`? A pre-gate that always declines costs an extra leg and buys
-    /// nothing, so this is the measurement that decides whether it earns its complexity.
+    /// **P13 — radial leg count across the served geometries**, the successor to P12's
+    /// `p12_pre_gate_yield_across_geometries`.
+    ///
+    /// With the pre-gate gone there is one radial shape for every geometry: a full sweep at `N`,
+    /// then full sweeps at `2N−1`, `4N−3`, … until the N-vs-2N difference clears the tolerance
+    /// (or [`MAX_RADIAL_REFINEMENTS`] runs out). `legs = 2` is the common case — the check ran
+    /// once and agreed. This is the measurement to re-run before anyone reintroduces a
+    /// cost-saving shortcut on this path: it shows where the legs are actually being spent.
     ///
     /// `legs` is inferred from `num_evaluations` against the per-leg work model
-    /// [`mode_sweep_work`]: a full sweep costs `n_rho · (n_phi + m_probe + 1)` and a probe leg
-    /// `n_rho · (n_phi + RADIAL_PROBE_MODES.len())`.
-    ///
-    /// **Post-P10-perf note for unit P13.** The pre-gate's whole justification is that a full
-    /// check leg is much dearer than a probe leg. The FFT narrowed that gap sharply: the mode
-    /// work the probe skips used to be an `O(n_phi · M)` DFT and is now `O(M)`, so a probe leg
-    /// costs `n_phi + 2` against a full leg's `n_phi + M + 1` — at `dsn_34m` Ka that is 272 vs
-    /// 405, i.e. the probe now saves only ~33 % of a leg where it once saved ~80 %. P13 should
-    /// re-ask whether `RADIAL_PRE_GATE_SAFETY` is worth validating or the pre-gate is worth
-    /// deleting outright, with these numbers rather than the pre-FFT ones.
+    /// [`mode_sweep_work`], where a full sweep costs `n_rho · (n_phi + m_probe + 1)`.
     #[test]
     #[ignore = "diagnostic: prints measurements, asserts nothing"]
-    fn p12_pre_gate_yield_across_geometries() {
-        println!("\n#### Pre-gate yield (safety factor = {RADIAL_PRE_GATE_SAFETY})\n");
-        println!("  geometry                       work      pre-gate?   N     legs   evals");
+    fn p13_radial_leg_count_across_geometries() {
+        println!("\n#### Radial leg count (pre-gate retired, P13)\n");
+        println!("  geometry                  N     n_phi  m_max   legs   evals");
         for (name, config, freq, theta_deg) in [
             ("gs_3.7m X    θ=5°  ", gs_3_7m_x_band(), 8.4e9, 5.0_f64),
             ("dsn_34m X    θ=0.1°", dsn_34m_x_band(), 8.45e9, 0.10),
@@ -4278,31 +4275,214 @@ mod p12_radial_diagnostic {
             let params = IntegrationParams::adaptive();
             let ModeSizing { m_max, n_phi, .. } = mode_count_for(&config, lambda, theta);
             let n0 = radial_points_for(&config, theta, lambda, &params);
-            let gated = use_radial_pre_gate(n0, n_phi, m_max + 1);
-            let work = (n0 as u64) * (n_phi as u64) * (m_max as u64 + 2);
 
             let r = integrate_aperture(theta, 0.0, &config, freq, &params).unwrap();
-            // Per-leg work under `mode_sweep_work`: the opening full sweep, then either a
-            // probe leg (pre-gate) or successive full sweeps at 2N−1, 4N−3, …
             let full = |n: usize| mode_sweep_work(n, n_phi, m_max as usize + 2);
-            let probe = |n: usize| mode_sweep_work(n, n_phi, RADIAL_PROBE_MODES.len());
-            let n1 = radial_check_points(n0);
-            let n2 = radial_check_points(n1);
-            let two = full(n0) + if gated { probe(n1) } else { full(n1) };
-            let three = two + full(if gated { n1 } else { n2 });
-            let legs = if r.num_evaluations <= two {
-                2
-            } else if r.num_evaluations <= three {
-                3
-            } else {
-                4
-            };
+            let mut spent = full(n0);
+            let mut n = n0;
+            let mut legs = 1;
+            while spent < r.num_evaluations && legs < 1 + MAX_RADIAL_REFINEMENTS {
+                n = radial_check_points(n);
+                spent += full(n);
+                legs += 1;
+            }
             println!(
-                "  {name}  {work:>10}   {:>7}   {n0:>5}   {legs:>4}   {}",
-                if gated { "yes" } else { "no" },
+                "  {name}  {n0:>6}  {n_phi:>5}  {m_max:>5}   {legs:>4}   {}",
                 r.num_evaluations
             );
         }
+    }
+
+    /// An offset-feed dish parameterized by `(diameter, f/D, lateral offset as a fraction of f)`,
+    /// so the P13 sweep can move `D/λ` and the coma strength independently of any real antenna.
+    /// Surface and mesh are left ideal: this sweep is about the radial quadrature, and a surface
+    /// term would only add a ρ-independent efficiency both legs share.
+    fn swept_offset_dish(diameter: f64, f_over_d: f64, delta_over_f: f64) -> AntennaConfiguration {
+        let f = diameter * f_over_d;
+        let reflector = ReflectorGeometry::new(diameter, f, 0.0).unwrap();
+        let mut pos = FeedPosition::at_focus(f);
+        pos.x = delta_over_f * f;
+        let feed = FeedParameters::new(pos, 1.5, 0.0, 1.0).unwrap();
+        AntennaConfiguration::new("swept".into(), "swept".into(), reflector, feed, None).unwrap()
+    }
+
+    /// **P13 task 1 — does `RADIAL_PRE_GATE_SAFETY = 32` bound anything?**
+    ///
+    /// **This is the measurement that retired the pre-gate**, kept runnable so the decision can
+    /// be re-checked rather than taken on trust. Every constant it needs is declared locally,
+    /// because the production ones no longer exist.
+    ///
+    /// The pre-gate certified `converged = true` from the movement of two modes out of `m_max`,
+    /// scaled by a constant that was fitted to five geometries. The quantity that constant had to
+    /// bound is the **probe-to-total ratio** — how much larger the honest N-vs-2N estimate is
+    /// than the `{0,1}` probe's estimate of it. P12 measured that ratio at 3.5× and 26× where the
+    /// probe *passes*, and picked 32 to cover the worst of five points.
+    ///
+    /// This sweeps the plane instead: `D/λ` from ~400 to ~3600 and θ from 0.1° to 90°, restricted
+    /// to the regime where the pre-gate used to run. Three outcomes were possible:
+    ///
+    /// - a **bound** — the ratio stays comfortably under 32 across the plane, so the constant
+    ///   could be replaced by a derived one (or the margin retired);
+    /// - an **unbounded ratio** — some geometry exceeds 32 while the probe passes, so the
+    ///   constant does not bound what it exists to bound;
+    /// - a **counterexample** — the probe passes where the honest check fires, i.e. the pre-gate
+    ///   certifies a number the honest check would have rejected.
+    ///
+    /// Measured 2026-08-01: the **second**. Worst passing ratio **43.5×** at `dsn_34m` Ka θ=90° —
+    /// a served antenna at a served angle, and the very geometry the constant was fitted on
+    /// (P12 measured 26× there; P10-perf's `next_fast_len` φ' sizing moved `n_phi` 512 → 270 and
+    /// with it the ratio, with nothing to notice). No counterexample yet, but only because the
+    /// honest estimate at that point sits ~8× below the tolerance floor for unrelated reasons —
+    /// the margin that was supposed to protect it was gone.
+    ///
+    /// `ratio` matters only where the probe passes: where it fires, control already fell through
+    /// to the honest loop and the estimate's accuracy was irrelevant.
+    #[test]
+    #[ignore = "diagnostic: prints measurements, asserts nothing"]
+    fn p13_probe_to_total_ratio_sweep() {
+        // The two retired production constants, restated locally so this stays runnable.
+        const RADIAL_PRE_GATE_SAFETY: f64 = 32.0;
+        const RADIAL_PROBE_MODES: [u32; 2] = [0, 1];
+        // The retired `use_radial_pre_gate` predicate, in its own (pre-FFT, multiplicative)
+        // work units — which is part of the finding: the threshold was calibrated in units
+        // that stopped describing the cost when the φ' transform became an FFT.
+        const FULL_RADIAL_CHECK_WORK_LIMIT: u64 = 4_000_000;
+        let was_pre_gated = |n_rho: usize, n_phi: usize, m_probe: u32| {
+            (n_rho as u64) * (n_phi as u64) * (m_probe as u64 + 1) > FULL_RADIAL_CHECK_WORK_LIMIT
+        };
+        // Bound on a single leg's work, so the sweep stays a few minutes in release. Points
+        // above it are reported as skipped rather than silently dropped — a sweep that hides
+        // its own coverage gaps is the failure mode this unit exists to correct.
+        const WORK_CEILING: u64 = 250_000_000;
+
+        println!(
+            "\n#### P13: probe-to-total ratio across (D/λ, θ), pre-gated regime only.\n\
+             #### ratio = (honest N-vs-2N estimate) / ({{0,1}} probe estimate). \
+             RADIAL_PRE_GATE_SAFETY = {RADIAL_PRE_GATE_SAFETY} had to bound it where the probe PASSES.\n"
+        );
+        println!(
+            "  geometry                       D/λ     θ°      N   n_phi  m_max   \
+             probe_est   full_est    ratio  probe   verdict"
+        );
+
+        let mut worst_passing = 0.0_f64;
+        let mut worst_label = String::new();
+        let mut counterexamples = 0_usize;
+        let mut skipped = 0_usize;
+
+        let cases: Vec<(&str, AntennaConfiguration, f64)> = vec![
+            ("gs_3.7m X   ", gs_3_7m_x_band(), 8.4e9),
+            ("dsn_34m X   ", dsn_34m_x_band(), 8.45e9),
+            ("dsn_34m Ka  ", dsn_34m_ka_band(), 32.0e9),
+            ("D12 UHF     ", d12_uhf_fixture(), 600.0e6),
+            // Synthetic sweep of the two axes the real antennas do not separate: dish size at
+            // fixed coma strength, and coma strength at fixed dish size.
+            (
+                "swept 10m δ/f=.02",
+                swept_offset_dish(10.0, 0.4, 0.02),
+                12.0e9,
+            ),
+            (
+                "swept 10m δ/f=.10",
+                swept_offset_dish(10.0, 0.4, 0.10),
+                12.0e9,
+            ),
+            (
+                "swept 10m δ/f=.30",
+                swept_offset_dish(10.0, 0.4, 0.30),
+                12.0e9,
+            ),
+            (
+                "swept 30m δ/f=.02",
+                swept_offset_dish(30.0, 0.4, 0.02),
+                12.0e9,
+            ),
+            (
+                "swept 30m δ/f=.10",
+                swept_offset_dish(30.0, 0.4, 0.10),
+                12.0e9,
+            ),
+            (
+                "swept 70m δ/f=.02",
+                swept_offset_dish(70.0, 0.4, 0.02),
+                8.4e9,
+            ),
+        ];
+
+        for (name, config, freq) in cases {
+            let lambda = wavelength_from_frequency(freq);
+            let k = wavenumber(lambda);
+            let d_lambda = config.reflector.diameter / lambda;
+            let params = IntegrationParams::adaptive();
+
+            for theta_deg in [0.1_f64, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 45.0, 90.0] {
+                let theta = theta_deg.to_radians();
+                let ModeSizing { m_max, n_phi, .. } = mode_count_for(&config, lambda, theta);
+                let m_probe = m_max + 1;
+                let n1 = radial_points_for(&config, theta, lambda, &params);
+                if !was_pre_gated(n1, n_phi, m_probe) {
+                    continue; // not the pre-gate's regime; the honest check ran directly
+                }
+                let n2 = radial_check_points(n1);
+                let work = (n2 as u64) * (n_phi as u64 + m_probe as u64 + 1);
+                if work > WORK_CEILING {
+                    skipped += 1;
+                    println!(
+                        "  {name}  {d_lambda:8.0}  {theta_deg:5}  {n1:7}  {n_phi:5}  {m_max:5}   \
+                         [skipped: one leg is {work} work units > ceiling {WORK_CEILING}]"
+                    );
+                    continue;
+                }
+
+                // Both estimates exactly as the retired code formed them: the probe difference
+                // is normalized by |total at N| (the scale the answer's accuracy is measured
+                // on), the honest one by |total at 2N| (what `self_check` divides by). The probe
+                // legs come from `mode_subset_field`, the test module's own subset integrator,
+                // rather than the deleted production `radial_probe_field`.
+                let sweep_n =
+                    azimuthal_mode_field_inner(&config, theta, 0.0, k, n1, n_phi, m_probe, None)
+                        .unwrap();
+                let sweep_2n =
+                    azimuthal_mode_field_inner(&config, theta, 0.0, k, n2, n_phi, m_probe, None)
+                        .unwrap();
+                let probe_n =
+                    mode_subset_field(&config, theta, 0.0, k, n1, n_phi, &RADIAL_PROBE_MODES);
+                let probe_2n =
+                    mode_subset_field(&config, theta, 0.0, k, n2, n_phi, &RADIAL_PROBE_MODES);
+
+                let probe_est = (probe_2n - probe_n).norm() / sweep_n.total.norm();
+                let full_est = (sweep_2n.total - sweep_n.total).norm() / sweep_2n.total.norm();
+                let ratio = full_est / probe_est.max(f64::MIN_POSITIVE);
+                let probe_passes = probe_est * RADIAL_PRE_GATE_SAFETY <= HANKEL_SELF_CHECK_RTOL;
+                let honest_fires = full_est > HANKEL_SELF_CHECK_RTOL;
+
+                let verdict = if probe_passes && honest_fires {
+                    counterexamples += 1;
+                    "*** CERTIFIES A NUMBER THE HONEST CHECK REJECTS ***"
+                } else if probe_passes {
+                    "certifies (honest check agrees)"
+                } else {
+                    "declines → honest loop"
+                };
+                if probe_passes && ratio > worst_passing {
+                    worst_passing = ratio;
+                    worst_label = format!("{name} θ={theta_deg}°");
+                }
+
+                println!(
+                    "  {name}  {d_lambda:8.0}  {theta_deg:5}  {n1:7}  {n_phi:5}  {m_max:5}   \
+                     {probe_est:9.2e}  {full_est:9.2e}  {ratio:7.1}  {:6}  {verdict}",
+                    if probe_passes { "pass" } else { "fire" },
+                );
+            }
+        }
+
+        println!(
+            "\n  Worst probe-to-total ratio WHERE THE PROBE PASSES: {worst_passing:.1}× \
+             ({worst_label})\n  RADIAL_PRE_GATE_SAFETY = {RADIAL_PRE_GATE_SAFETY} ⇒ margin \
+             {:.2}×.  Counterexamples: {counterexamples}.  Skipped (too expensive): {skipped}.",
+            RADIAL_PRE_GATE_SAFETY / worst_passing.max(f64::MIN_POSITIVE),
+        );
     }
 
     /// **P12 implementation check** — the `p2_moderate_offset` pin moved 16.05 → 13.72 dBi at

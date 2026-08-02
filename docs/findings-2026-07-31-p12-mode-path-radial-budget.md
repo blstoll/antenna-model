@@ -348,21 +348,42 @@ fallback available: bound the refinement by S3's existing wall-clock budget and 
 
 Recorded rather than resolved; both want a second pair of eyes before P12's tests are written.
 
+> **✅ RESOLVED 2026-08-01 by unit P13** — see
+> [`findings-2026-08-01-p13-pre-gate-retirement.md`](findings-2026-08-01-p13-pre-gate-retirement.md) §3.
+> Item 1 is **confirmed** (and the missing φ identified as 90°). Items 2 and 3 are **both
+> wrong**, in different ways; the corrected readings are inlined below.
+
 1. **The UHF row is much worse than filed.** P12 records D12's `UHF_Array_Element` fixture at
    600 MHz, θ=16° as **1.23 dB** (−50.7668 vs −49.5383 dBi). Measured here at the field level:
    **−7.0761 dB** at φ=0 and **−3.8546 dB** at φ=90 — and **−1.2285 dB** at floor 32, which is
    `default()`'s floor, not `adaptive()`'s. P12's row does not record φ.
-2. **D17's preset labels look transposed.** D17 reports `default()` = −50.7668 and `adaptive()`
-   = −49.6090 with `high_accuracy()` = −49.5426 "agreeing with `default()` to 0.066 dB" — but
-   −49.5426 agrees with −49.6090, not with −50.7668. On the mode path `default()` (floor 32) is
-   strictly more accurate than `adaptive()` (floor 16), since `min_rho_points` is the only field
-   of either preset that `radial_points_for` reads. The measurement here has floor 32 → −1.2285
-   dB and floor 64 → −0.0707 dB (φ=90), matching D17's *numbers* with the labels swapped.
-   The direction of the divergence D17 filed is unaffected; which preset is the worse one is not.
-3. Both may be explained by D17 having measured through `compute_gain_db` (where the F7
+   **✅ P13: confirmed, and φ identified.** D17's unrecorded φ was **90°** — its
+   `high_accuracy()` figure of −49.5426 is *exactly* what all three presets return there today
+   (the φ=0 value is −43.58, nowhere near it). So the honest restatement is 1.23 dB at floor 32 /
+   3.85 dB at floor 16 in the plane D17 measured, and **7.08 dB** at φ=0.
+2. ~~**D17's preset labels look transposed.**~~ **✗ P13: this inference is wrong.** D17 reports
+   `default()` = −50.7668 and `adaptive()` = −49.6090 with `high_accuracy()` = −49.5426
+   "agreeing with `default()` to 0.066 dB" — and it is true that −49.5426 agrees with −49.6090,
+   not with −50.7668, and true that on the mode path `default()` (floor 32) is strictly more
+   accurate than `adaptive()` (floor 16), since `min_rho_points` is the only field of either
+   preset that `radial_points_for` reads. But the conclusion drawn from that — that the labels
+   were swapped — does not survive measurement. Reconstructing the pre-P12 single-leg values at
+   φ=90 gives floor 32 → **−50.7711 dBi**, matching D17's `default()` to **0.004 dB**: that
+   label is **right**. Floor 16 gives **−53.3972**, nowhere near D17's `adaptive()` = −49.6090,
+   and no (floor, φ) combination in either principal plane reproduces it. The correct finding is
+   that **D17's `adaptive()` figure is unreproducible from what its row records** — the row
+   captures neither φ nor the gate configuration. What *is* defective in D17's prose is only its
+   attribution: it credits the agreement to `default()` when the number that agrees is
+   `adaptive()`'s.
+3. ~~Both may be explained by D17 having measured through `compute_gain_db` (where the F7
    sidelobe floor and the spillover gate can compress or lift a low PO value) rather than at
-   the field level. The field-level measurement isolates the integrator, which is what P12 is
-   about.
+   the field level.~~ **✗ P13: falsified.** The F7 floor for this fixture is **−25.9834 dBi** —
+   about **24 dB above** every value in D17's table — so had it been active, all three rows
+   would read ≈ −25.98 and none do. Every number in that table is raw, floor-off PO. (Worth
+   noting what this implies in the other direction: on the *served* path, where this fixture's
+   uncorrected physics turns the floor ON, θ=16° returns ≈ −25.98 dBi at **any** preset, so the
+   whole divergence is masked there. It was visible to D17 only because `calibrate` evaluates
+   with the floor off.)
 
 ---
 
@@ -392,14 +413,33 @@ symmetric branch does not need:
   geometries where a full check leg is expensive (`use_radial_pre_gate`, threshold
   `FULL_RADIAL_CHECK_WORK_LIMIT = 4·10⁶` work units ≈ 10 ms). The pre-gate may only *certify*;
   the moment it says the answer is moving, control falls through to the honest loop.
+  **⚠️ RETIRED 2026-08-01 by unit P13 — this paragraph describes code that no longer exists.**
 - **refinement** (`MAX_RADIAL_REFINEMENTS = 4`), because no fixed multiplier is right
   everywhere — the 2N leg lands at −0.045 dB on `gs_3.7m` but −0.349 dB on the UHF fixture.
+  *(Still current; it is now the only shape the radial block has.)*
 
 The safety factor is the price of shipping the pre-gate on five points: the `{0,1}` probe is
 conservative where it fires (1.17–2.18× the honest estimate) but **anti-conservative where it
 passes**, underestimating by 3.5× at Ka θ=5° and **26×** at θ=90°. 32 covers the measured worst
 case with margin and errs toward escalating. Retire or re-derive it once a θ × D/λ sweep bounds
 the probe-to-total ratio properly.
+
+> **✅ RETIRED 2026-08-01 (P13) — the sweep was run and the constant did not survive it.** See
+> [`findings-2026-08-01-p13-pre-gate-retirement.md`](findings-2026-08-01-p13-pre-gate-retirement.md).
+> Two independent reasons, either sufficient:
+> 1. **The margin was already gone.** The θ × D/λ sweep measures the worst *passing*
+>    probe-to-total ratio at **43.5×** against the constant's 32 — on `dsn_34m` Ka θ=90°, the same
+>    geometry P12 measured 26× on. P10-perf's `next_fast_len` φ' resizing (512 → 270), a change
+>    with no physics content, moved the ratio past the constant with nothing in the build to
+>    notice. A constant fitted to measurements is coupled to every input of those measurements.
+> 2. **The economics inverted.** The pre-gate's premise was that a 2-mode leg is far cheaper than
+>    a full one — true at ~18% when the φ' transform was an `O(n_phi·M)` DFT, but **66%** after
+>    P10-perf's FFT. Post-FFT it is strictly dominated: it cost 2.33× baseline and returned the
+>    *coarse* leg, where simply computing at 2N and returning the fine leg costs 2.00×.
+>
+> Deleting it made the formerly pre-gated geometries **16× more accurate** (Ka θ=5°:
+> +0.0126 → +0.0008 dB) for +28% work, and made `dsn_34m` X θ=45° — where the pre-gate declined,
+> so its probe leg was pure waste — **31% cheaper**. `PHYSICS_MODEL_VERSION` 7 → 8.
 
 The two error estimates are **summed**, not merged — P12 required this be decided explicitly.
 They bound errors on different axes of the same returned field, both are absolute field-magnitude
@@ -423,7 +463,19 @@ point. Not 64, which would reopen the divergence inverted.
 Symmetric-branch control unmoved and still cheap (50–434 evaluations; Δ ≤ 0.0025 dB), and the
 `reference_validation` boresight anchors did not move — the change did not leak onto the J₀ path.
 
+**Updated 2026-08-01 (P13).** The Ka row was the one geometry above where the pre-gate certified
+rather than the honest loop running, so it is the one row P13 moved: **+0.0126 → +0.0008 dB**, at
++28 % work. The other four are unchanged in kind (they never reached the pre-gate); their
+small drifts since — `dsn_34m` X −0.0033 → −0.0019, UHF φ=0 −0.0013 → −0.0021, UHF φ=90
+−0.0027 → −0.0044 — are P10-perf's `n_phi` resizing, all inside 0.005 dB.
+
 ### Pre-gate yield: does it earn its complexity?
+
+> **✅ ANSWERED 2026-08-01 (P13): no, not any more.** The table below is the pre-FFT picture and
+> is retained as the historical record. Post-P10-perf a probe leg costs 66 % of a full leg rather
+> than ~18 %, which removes the "✅" from every Ka row's economics, and the two X-band "declined"
+> rows became a pure 31 % saving once the pre-gate was deleted. The retirement measurement is in
+> [`findings-2026-08-01-p13-pre-gate-retirement.md`](findings-2026-08-01-p13-pre-gate-retirement.md) §1.
 
 A pre-gate that always declines costs an extra leg and buys nothing, so this was measured after
 the fact (`p12_pre_gate_yield_across_geometries`). `legs` counts full sweeps: 2 = the pre-gate
@@ -454,7 +506,9 @@ the measured X-band points are 5–100 ms, not seconds.
 Pinned by three tests in `antenna-model/tests/reference_validation.rs`:
 `p12_mode_path_radial_convergence_anchors`, `p12_symmetric_branch_control_still_accurate_and_cheap`
 (asserts accuracy **and** that the work did not grow, so a future "fix" cannot pass by raising
-density globally), and `p12_pre_gate_keeps_expensive_ka_at_two_legs` (cost guard).
+density globally), and — since P13 renamed it with the pre-gate's removal —
+`mode_path_settles_an_already_converged_geometry_in_two_legs` (cost guard; same geometry and same
+two-leg assertion, now pinning that the honest check agrees on its first comparison).
 
 ### Two existing tests moved
 

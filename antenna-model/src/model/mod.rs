@@ -99,7 +99,26 @@ pub mod ray_trace;
 ///   which no enabled antenna's *design* feed reaches (max 0.027), but request-driven
 ///   steering does. Costs ~69× more per evaluation in that regime; P10-perf's FFT for the
 ///   `gₘ` φ'-DFT is what recovers it. See the findings doc §7.
-pub const PHYSICS_MODEL_VERSION: u32 = 7;
+/// - 8: P13 retired the mode path's radial **pre-gate** (2026-08-01). On expensive geometries
+///   P12 had let a cheap `{0,1}`-mode partial leg *certify* radial convergence, in which case
+///   the integrator returned the COARSE `N` leg; everywhere else the honest N-vs-2N check ran
+///   and the FINE `2N` leg was returned. Those geometries now take the honest path too, so
+///   served gain moves there — by the difference between the two legs, measured **+0.0126 →
+///   +0.0008 dB** at `dsn_34m`/`ka_band` θ=5° (16× more accurate) — for ~28% more work. The
+///   affected regime is the wide-angle / high-frequency asymmetric one: the four `dsn_34m` Ka
+///   points and `dsn_34m` X-band beyond ~20°. Everything below the old work threshold is
+///   bit-identical, since it never reached the pre-gate.
+///
+///   The pre-gate was retired rather than re-tuned because both of its premises had expired.
+///   Its economic premise — that a 2-mode leg is far cheaper than a full one — held when the
+///   φ' transform was an `O(n_phi·M)` DFT (~18% of a full leg); after P10-perf made it an FFT
+///   a probe leg is **66%** of a full one, so it saved ~28% rather than ~3×, and it bought that
+///   by returning the less accurate leg. Its safety premise — `RADIAL_PRE_GATE_SAFETY = 32`
+///   bounding the probe-to-total error ratio — was measured across a θ × D/λ sweep at **43.5×**
+///   on `dsn_34m` Ka θ=90°, i.e. the constant did not bound the quantity it existed to bound,
+///   on a served antenna at a served angle. See
+///   `docs/findings-2026-08-01-p13-pre-gate-retirement.md`.
+pub const PHYSICS_MODEL_VERSION: u32 = 8;
 
 // Re-export commonly used types
 pub use bessel::{bessel_j0, bessel_j1, bessel_jn};
