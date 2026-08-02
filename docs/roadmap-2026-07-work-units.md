@@ -163,6 +163,18 @@ work; dsn_34m X th=45deg 31% CHEAPER (the pre-gate declined there, so its probe 
 waste). Also EXPLAINED the {0,1} probe set by mechanism (intra-mode cancellation C_m, not
 |R_m|) and corrected D17's record -- where BOTH of P12's own corrections to D17 turned out
 to be wrong;
+P14 DONE 2026-08-01 (PHYSICS_MODEL_VERSION 9): Miller start offset now scales as 12*x^(1/3)
+(DERIVED from an Airy decay requirement, not fitted) instead of a flat 40, and J0/J1 below
+|x|=8 use the convergent series instead of a rational fit. Turning-point closure went from
+growing without bound in x (2e-8 at x=255, 9e-3 at x=1e4) to ~3e-16 FLAT; J0(0) is now
+exactly 1. Served gain moves ~1e-7 dB; no anchor or convergence pin moved. Built the
+INDEPENDENT quadrature oracle the module never had -- the recurrence identity is
+scale-invariant and so cannot grade a Miller fix at all. Found that the filed error table
+was measuring TWO ceilings at once (the m=x configuration puts J_{m-1} on the upward branch,
+which is seed-limited at ~3e-9 by the |x|>=8 rational fit, deliberately not replaced -- the
+Hankel asymptotic's own smallest term at x=8 is ~2e-8, so only a Chebyshev minimax could
+beat it). Carries P13's margin test: 3x-the-offset invariance plus a negative control
+proving the check can still fail;
 D18 filed 2026-08-01 (test-suite latency budget + tiers); P2 DECIDED 2026-07-16 (REMOVE the Seidel mode; Stage-1
 gate tripped and removal re-affirmed same day — the terms are wrong-sign/wrong-scale additions
 on top of complete exact physics, not duplicates); P3 DECIDED + EXECUTED 2026-07-16 (document +
@@ -1118,7 +1130,64 @@ Full record: [`docs/findings-2026-08-01-p13-pre-gate-retirement.md`](findings-20
   regime never crossed the old work threshold and so has no pre-gated points. If a subset check is
   ever reintroduced, that is the gap to close first.
 
-### P14 — `bessel_jn` loses accuracy exactly at its turning point `m ≈ x` — Effort: S
+### P14 — `bessel_jn` loses accuracy exactly at its turning point `m ≈ x` — Effort: S — ✅ **DONE 2026-08-01**
+
+> **STATUS — ✅ COMPLETE, `PHYSICS_MODEL_VERSION` 9.** Both halves fixed: the Miller start
+> offset now scales with the turning-point width (a **derived** `12·x^(1/3)`, floored at the
+> old flat 40), and `J₀`/`J₁` below |x| = 8 use the convergent ascending series instead of the
+> rational fit. Turning-point closure went from **growing without bound in x** (2e-8 at x=255,
+> 9e-3 at x=10⁴) to **~3e-16 flat**; `J₀(0)` is now exactly 1. Served gain moves by ~1e-7 dB —
+> no anchor, oracle cross-check or convergence pin moved. Details below.
+>
+> **Cost, since this repo tracks mode-path wall clock against S3's budget:** the longer sweep
+> costs **+13.5–19.4%** on the Miller recurrence itself (~+15% at the served `MODE_M_MAX = 254`),
+> A/B'd on the production routine at both offsets in release. End-to-end it is bounded at ≲2% by
+> P10-perf's profile (~85% of a sweep is aperture-plane evaluation, not the `Jₘ` ladder) — a
+> bound from that profile, not an end-to-end A/B. Measured after the change, `dsn_34m` X-band on
+> the mode path: **4.7 / 37.7 / 57.6 ms** at θ = 5° / 45° / 90°; full suite 227 s, unmoved.
+> **This is a real speed-for-accuracy trade**, taken because the accuracy it buys is what makes
+> raising `MODE_M_MAX` safe, and recorded here so it is not rediscovered as a regression.
+>
+> **What the unit did not anticipate, and what future Bessel work should take from it:**
+>
+> 1. **The recurrence identity could not have graded this fix.** It is scale-invariant, so a
+>    uniformly mis-normalized Miller result satisfies it exactly — and mis-scaling is Miller's
+>    characteristic failure. An **independent oracle** was built for the verification: a
+>    compensated trapezoidal quadrature of `Jₘ(x) = (1/2π)∫₀^{2π} cos(mτ − x sinτ)dτ`, which
+>    shares no machinery with either recurrence. It immediately paid for itself twice — see (2)
+>    and (3). It is committed (`jm_by_quadrature`) and should grade any future change here.
+> 2. **The old table was measuring two defects at once.** The filed numbers were closures at
+>    `m = x` exactly, where `J_{m−1}` sits on the *upward* branch. After the Miller fix that
+>    configuration still only closes to ~6e-10 — because the upward branch inherits the
+>    `J₀`/`J₁` **asymptotic** fit's ~3e-9 absolute error, an entirely separate ceiling that the
+>    identity cannot see (an upward recurrence satisfies it by construction however wrong its
+>    seeds are). Graded all-downward at `m = x + 1`, the fix shows its true ~3e-16. Both
+>    ceilings are now pinned separately.
+> 3. **The `|x| >= 8` branch was left alone deliberately, and that is not laziness.** Adding
+>    terms cannot help: the Hankel asymptotic expansion's *smallest* term at `x = 8` is itself
+>    ~2e-8, so it cannot beat the ~3e-9 fit already there. Beating it needs a genuine Chebyshev
+>    minimax fit — a different unit, buying ~2.6e-8 dB. The split accuracy (series ~1e-14 below
+>    8, fit ~3e-9 above) is pinned by
+>    `j01_asymptotic_branch_absolute_accuracy_is_the_module_ceiling`, which asserts the branch
+>    is *both* no worse and no better than documented, so the docs cannot silently go stale.
+> 4. **A normalized downward sweep is accurate to ~ε·(peak Jₘ) in absolute terms**, so orders
+>    well below the turning-point peak are relatively less accurate by exactly that ratio
+>    (measured: `J₂₂₀(200)` is 5.6e-16 absolute, 5.1e-12 relative, against a peak of 0.0765).
+>    That is a property of the algorithm, not a defect, and the oracle test grades it
+>    accordingly — with an absolute floor, and a comment saying why the floor is not slack.
+> 5. **The constant carries the margin test P13 asked for**, and it is measured rather than
+>    argued: `miller_start_offset_has_real_margin` re-runs the *shipped* recurrence
+>    (`miller_downward` takes the offset as a parameter precisely so a copy is not what gets
+>    tested) at 3× the offset and requires the answer not to move, plus a **negative control**
+>    asserting the pre-P14 flat 40 *fails* that same check at x = 10⁴. Without the control the
+>    test would keep passing if the offset ever regressed to a constant.
+> 6. **The oracle has a floor of its own and it was load-bearing.** Forming `x·sinτ` commits
+>    ~x·ε of phase error that no sample count removes, so the oracle cannot resolve decay below
+>    ~1e-15 absolute. Three tolerance "failures" during development were this, not the code.
+>    It is why the decay-law test stops at c = 8 and the margin test uses a different method
+>    entirely. Plain summation was also costing ~3e-15 (partial sums reach ~n/2 while the
+>    answer is O(1)); Neumaier compensation and exact integer mod-2π reduction of `m·τ` fixed
+>    both. **Anything graded against this oracle below ~1e-15 absolute is grading noise.**
 
 **Filed 2026-08-01 by P10-perf**, whose review minor (b) added the first high-order Bessel
 coverage this module has ever had (the pinned orders previously stopped at `m = 5`). **Latent
