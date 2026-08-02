@@ -128,9 +128,19 @@ G1 ─┬─ G2 ── G3
     │      th=5deg is 0.82 dB off with the    │
     │      floor NOT binding) and NOT only a  │
     │      floor problem. P12 blocks P10-perf.│
+    │  D19, D20 filed 2026-08-02 as D14's     │
+    │      blockers, from D15's "Still open": │
+    │      adaptive knots land ON the axis    │
+    │      bounds (end multiplicity order+1,  │
+    │      37.5% of coefficients attached to  │
+    │      identically-zero basis functions), │
+    │      and the sufficiency check tests    │
+    │      125 where the real quantity is the │
+    │      coefficient count (960). D19 -     │
+    │      D20 - D14, in that order.          │
     │  D14 open (filed 2026-07-29: NASA-      │
     │      anchored full-mode artifact;       │
-    │      also needs D2; feeds D9)           │
+    │      also needs D2, D19, D20; feeds D9) │
     └─ (Phases 1–3 done) ─ D4 ─ D7
 Superseded by C8 (do not implement): S7, C5, C6
 Phase 5: F1..F9 (F8 done) gated on register rows (P3, P5/F4, F5, D9, F9); P1 + C8 DECIDED 2026-07-08;
@@ -4190,7 +4200,14 @@ are meaningful rather than dominated by a topology gap.
   reproduce the anchors within budget, that is a *finding about the pipeline or the fill*,
   to be reported — not a reason to widen the budget.
 - **Depends on:** D10, D11, D12 (infrastructure and prerequisite fixes), D2 (✅ done
-  2026-07-30 — artifact format settled). Feeds D9.
+  2026-07-30 — artifact format settled), and — filed 2026-08-02 — **D19 + D20**, which make
+  the fit well-specified and well-determined. Those two are prerequisites rather than
+  nice-to-haves: this unit's headline assertion is that the served calibrated pattern
+  reproduces the digitized peaks within a stated uncertainty budget, and an underdetermined
+  surface oscillating between its fitted points is exactly what would miss it. Its own gotcha
+  ("if the fitted surface cannot reproduce the anchors within budget, that is a *finding about
+  the pipeline or the fill*, not a reason to widen the budget") is unanswerable while a known
+  pipeline defect is outstanding. Feeds D9.
 
 ### D18 — Test-suite latency budget + tiering — Effort: S/M (tiering ✅ landed 2026-08-01; tasks 2–3 open)
 
@@ -4256,6 +4273,134 @@ changes *how often tests get run*, which is a correctness input, not a comfort.
   is the first candidate to return once task 2 shrinks the integration-test class around it.
 - **Depends on:** nothing. **Coupled to:** P10-perf (owns the flake fix and the two heaviest
   physics tests' future cost).
+
+### D19 — Adaptive knot placement lands internal knots on the axis bounds — Effort: S/M
+
+**Filed 2026-08-02**, out of the "Still open" item 1 of
+`docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md` (D15 excluded it because
+adding the multiplicity check alone would fail the *shipped* adaptive knots — which is the
+finding, not a reason to leave it). Re-measured before filing; it is larger than it was filed as.
+
+**Measured 2026-08-02** on D12's full-mode fixture (4 frequencies × 9 cone × 8 clock = 288 rows),
+in exactly the configuration `main.rs::surface_fitting_params` ships — 4/6/8 internal knots at
+spline order 4:
+
+| axis | internal knots asked for | knot vector as generated | end multiplicity | identically-zero basis functions |
+|---|---|---|---|---|
+| frequency | 4 | `[400×5, 500, 600, 700×5]` | **5 / 5** | B₀, B₇ (2 of 8) |
+| cone | 6 | `[0×4, 2, 4, 6, 12, 16, 20, 24×4]` | 4 / 4 (correct) | none |
+| clock | 8 | `[0×5, 45, 90, 135, 180, 225, 270, 315×5]` | **5 / 5** | B₀, B₁₁ (2 of 12) |
+
+**Mechanism.** `generate_adaptive_knots` (`correction_surface.rs:594`) places internal knots at
+data quantiles — `sorted_data[(i·n)/(num_knots+1)]` — with no constraint that the result be
+strictly *interior*. The fixture's frequency axis has four distinct values with 72 rows each, so
+the first quantile index (57) lands on the minimum and the last (228) on the maximum.
+`generate_knot_vector` then clamps by prepending/appending `order` copies (`:574-576`), so a knot
+that already equals a bound becomes multiplicity `order + 1`. `validate_knot_vector` (`:637`)
+checks length and non-decreasing order only, so nothing objects.
+
+**Consequences, in increasing order of importance:**
+1. **The requested resolution is silently reduced.** The frequency axis asked for 4 internal knots
+   and delivers 2 usable ones (500, 600); the clock axis asked for 8 and delivers 6.
+2. **`shape` overstates the model.** `B_{i,order}` has support `[t_i, t_{i+order}]`; at
+   multiplicity `order + 1` that span is zero-width, so B₀ ≡ 0 and B_{n−1} ≡ 0 on the affected
+   axes. **360 of the artifact's 960 coefficients (37.5 %) are attached to basis functions that
+   are identically zero everywhere.** They carry no information, are serialized into every
+   artifact, and are read back by the service's 4D interpolator.
+3. **The normal matrix is structurally rank-deficient.** Those 360 rows/columns of `BᵀB` are
+   exactly zero, and the system is solvable *only* because the ridge term puts λ on the diagonal.
+   The module already pins that Cholesky refuses a positive-*semi*-definite system
+   (`unregularized_rank_deficient_fit_reports_singular_matrix`) — the shipped configuration is
+   one, and λ = 1e-6 is all that hides it.
+
+**This is not the D15 defect.** Partition of unity still holds at the boundary (at t = 400 the
+k = 1 base case selects the span `[knots[4], knots[5])` and B₁…B₄ sum to 1), so the served value
+at an axis bound is correct. The harm is a mis-specified model: fewer degrees of freedom than
+requested, reported, and stored.
+
+**Options:**
+1. **Constrain adaptive placement to the strict interior, *and* add the multiplicity check.**
+2. Add the multiplicity check only — correctly fails the shipped configuration, fixes nothing.
+3. Abandon adaptive placement; always use uniform knots.
+
+- **Recommended default: option 1.** `generate_adaptive_knots` clamps its candidates into
+  `(min, max)` with at least `min_spacing` of margin at each end and dedupes; `validate_knot_vector`
+  gains **both** an end-multiplicity `== order` assertion and an interior-multiplicity
+  `<= order - 1` assertion, so no future producer can reintroduce this quietly. Option 3 was
+  rejected because adaptive placement is the right behavior on a genuinely non-uniform grid (the
+  cone axis above shows it working); the bug is the missing interior constraint, not the idea.
+- **Per P13, the check must be shown to have power:** a negative control asserting that the
+  *pre-fix* adaptive knot vectors above still fail `validate_knot_vector`. A guard nobody has seen
+  fail is the thing P13 was about.
+- **Exit criteria:** adaptive knots are strictly interior on all three axes for the shipped
+  configuration; no identically-zero basis function survives in any fitted surface;
+  `validate_knot_vector` enforces end and interior multiplicity, with the negative control; the
+  new knot vectors and the resulting coefficient count are recorded in the unit's closeout.
+- **Gotchas:** the fitted knot vectors are quoted **verbatim** in `cli_full_mode_e2e.rs`'s
+  probe-placement comment — they will move, and that comment is load-bearing documentation, not
+  decoration. Changing knot placement changes every fitted coefficient, so D12's `corrected_rmse`
+  ceiling (0.0058 + 0.002 dB) and the four probe errors are *expected* to move: **re-measure and
+  re-record them, do not widen a tolerance to accommodate a shift you have not explained.** The
+  resulting coefficient count is D20's input, so land D19 first.
+- **Depends on:** nothing. **Blocks:** D20, and through it D14.
+
+### D20 — The data-sufficiency check tests the wrong quantity — Effort: S/M
+
+**Filed 2026-08-02**, out of the "Still open" item 2 of
+`docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md`. D15 excluded it because
+fixing it makes D12's 288-point fixture fail its own minimum — a fixture-sizing decision, which
+is this unit's job to make rather than a reason to keep accepting underdetermined fits.
+
+**The defect.** `validate_fitting_inputs` (`correction_surface.rs:1057-1069`) requires
+`(spline_order + 1)³` points — 125 at order 4 — a number that depends on neither the knot counts
+nor anything else about the model actually being fitted. The quantity that decides whether the
+least-squares system is determined is the **coefficient count**,
+`∏(len(knots_axis) − order)`: **960** for the shipped 4/6/8 configuration. Any run with 126–959
+points is accepted silently and fits an underdetermined system, held together only by the ridge
+term.
+
+**Measured.** D12's fixture supplies **288 points against 960 coefficients** (600 once D19 removes
+the identically-zero ones — still underdetermined). The symptom is already in the record:
+`corrected_rmse` at the fitted grid points is **0.0058 dB** while the four off-grid probes sit at
+**0.5928 / 0.0934 / 0.0365 / 0.0934 dB**. Near-exact interpolation of the data with oscillation
+between it is what an underdetermined spline does, and it is the reason
+`BIAS_RECOVERY_TOLERANCE_DB` is still 0.65 dB.
+
+**Structural note.** The check runs *before* knot generation, so it cannot see the real
+coefficient count — the knot counts are a *request*, and dedup/min-spacing can only reduce them.
+The real check has to run after `generate_knot_vector`, where the count is known.
+
+**Options for the policy when `n_points < n_coeff`:**
+1. **Hard error**, naming both numbers.
+2. Warn and continue.
+3. Auto-reduce the knot counts until the system is determined.
+
+- **Recommended default: option 1**, with the count computed after knot generation and both
+  numbers in the message. This roadmap's own rule — size from the physics, never be silent — and
+  option 2 reproduces the exact class of defect D11 was: a real problem reported through a channel
+  nobody reads. Option 3 silently fits a different model than the caller asked for. The escape
+  hatch belongs to the caller and is explicit either way: supply more data, or ask for fewer knots.
+- **Keep the existing `(spline_order + 1)³` pre-check** as a cheap early guard on obvious garbage;
+  it is not wrong, it is just not sufficient. The new check is additional, not a replacement.
+- **The fixture decision (this unit's, and the reason it blocks D14).** D12's 288-point fixture
+  will fail the new check. **Prefer reducing the knot counts over growing the grid**: the fixture
+  has four distinct frequencies, and asking a spline for four internal knots on a four-value axis
+  is the request that produced D19. Growing the grid past ~960 points is also available and costs
+  test latency (D18 owns that budget — `cli_full_mode_e2e` is already in the slow tier at 122 s).
+  Whichever is chosen, state the reasoning in the fixture's provenance comment.
+- **Exit criteria:** the coefficient-count check exists, runs after knot generation, and is pinned
+  by a test that fails without it; every shipping configuration (full mode, boresight mode, the
+  D12 and D13 fixtures) passes it; `BIAS_RECOVERY_TOLERANCE_DB` **re-measured and tightened** to
+  the new worst-case probe error with stated headroom — this unit exists to move that number, so a
+  closeout that leaves it at 0.65 has not finished; the D12 provenance comment records why the
+  fixture is sized as it is.
+- **Gotchas:** the CV fold refits fit on `(1 − 1/folds)` of the data, so a fixture that only just
+  clears the coefficient count will fail inside cross-validation rather than at the top level —
+  size for the *training split*, not the full set (`generator_grid_satisfies_the_fitter_constraints`
+  already reasons this way about the 125-point minimum and must be updated to the real quantity).
+  If tightening the tolerance exposes a *different* limiting factor, that is a finding to file,
+  not a number to widen.
+- **Depends on:** D19 (which changes the coefficient count this checks). **Blocks:** D14.
 
 ---
 

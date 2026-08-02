@@ -238,6 +238,14 @@ Two problems adjacent to the edge collapse were surfaced during triage and remai
 excluded from this fix's scope for stated reasons — plus the pre-existing degenerate-axis gap
 noted above:
 
+> **Filed as units 2026-08-02: item 1 → D19, item 2 → D20**, both blocking D14. Re-measurement
+> before filing found item 1 to be materially larger than described below: the boundary
+> multiplicity does not merely go unchecked, it makes `B₀` and `B_{n−1}` **identically zero** on
+> the frequency and clock axes, so 360 of the shipped configuration's 960 coefficients (37.5 %)
+> are attached to basis functions that are zero everywhere, and `BᵀB` is structurally
+> rank-deficient with only the ridge term keeping Cholesky from rejecting it. See the D19 unit for
+> the measured knot vectors.
+
 1. **`validate_knot_vector` does not check multiplicity.** `generate_adaptive_knots`
    (`correction_surface.rs:567`) can place knots at an axis's min or max, and
    `generate_knot_vector` clamps by prepending/appending `order` copies, yielding multiplicity
