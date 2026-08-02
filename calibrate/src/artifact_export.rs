@@ -500,10 +500,13 @@ mod tests {
 
     /// Build a fitted 3D correction surface from synthetic residual data.
     fn make_test_surface() -> (CorrectionSurface, f64) {
+        // 8 x 6 x 6 = 288 points against the 5x6x6 = 180 coefficients that 1/2/2 knots at
+        // order 4 declare. Sized to the coefficient count, per roadmap D20 — the previous
+        // 6 x 5 x 5 = 150 grid was underdetermined and the fitter now says so.
         let freq0 = 8000.0;
-        let clocks = [0.0, 70.0, 140.0, 210.0, 280.0, 350.0];
-        let cones = [0.0, 2.5, 5.0, 7.5, 10.0];
-        let freqs = [8000.0, 8100.0, 8200.0, 8300.0, 8400.0];
+        let clocks = [0.0, 50.0, 100.0, 150.0, 200.0, 250.0, 300.0, 350.0];
+        let cones = [0.0, 2.0, 4.0, 6.0, 8.0, 10.0];
+        let freqs = [8000.0, 8080.0, 8160.0, 8240.0, 8320.0, 8400.0];
 
         let mut measurements = Vec::new();
         for &k in &clocks {

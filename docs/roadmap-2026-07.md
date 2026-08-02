@@ -430,7 +430,21 @@ Unless a decision-register row flips them:
   everywhere** — written into every artifact, and leaving `BᵀB` structurally rank-deficient with
   only λ = 1e-6 keeping Cholesky from refusing it. Both units block D14, whose anchor-recovery
   assertion cannot be read as evidence about the fill while a known pipeline defect is
-  outstanding.**
+  outstanding.** **✅ Both closed 2026-08-02** on branch
+  `fix/d19-d20-correction-surface-determinacy`. D19 made adaptive knots strictly interior and
+  gave `validate_knot_vector` end- and interior-multiplicity rules (with a negative control on
+  the exact pre-fix vectors, per P13); the served surface did not move by a single bit, which is
+  the confirmation — a basis function that is zero everywhere contributes zero to every
+  evaluation — while declared coefficients fell 960 → 600. D20 then made an underdetermined fit
+  a hard error, computed after knot generation where the count is knowable, and **24 tests
+  failed the moment it was switched on** — every full-mode test in the suite had been fitting an
+  underdetermined surface. Maintainer decision the same day: **grow the data, do not cut the
+  model**, since the knot counts are production values and the fixture is a known-unrealistic
+  placeholder standing in for a real dataset. D12's grid went 288 → 1728 rows and the worst
+  off-grid known-answer probe fell **0.5928 → 0.1226 dB (4.8×)**, with
+  `BIAS_RECOVERY_TOLERANCE_DB` tightened 0.65 → 0.20. The residue is no longer
+  underdetermination: fitting the injected bias alone recovers it to 0.004 dB, so what is left
+  is the surface-RMS perturbation's own contribution near the main lobe.
 - **The azimuthal-mode integrator returns unverified radial quadrature as `converged = true`**
   (filed by D17 2026-07-31, promoted to unit **P12** the same day). `integrate_aperture`'s
   **symmetric** branch verifies its radial density with an N-vs-2N recomputation

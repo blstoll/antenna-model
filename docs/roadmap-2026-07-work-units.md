@@ -128,16 +128,29 @@ G1 ─┬─ G2 ── G3
     │      th=5deg is 0.82 dB off with the    │
     │      floor NOT binding) and NOT only a  │
     │      floor problem. P12 blocks P10-perf.│
-    │  D19, D20 filed 2026-08-02 as D14's     │
-    │      blockers, from D15's "Still open": │
-    │      adaptive knots land ON the axis    │
-    │      bounds (end multiplicity order+1,  │
-    │      37.5% of coefficients attached to  │
-    │      identically-zero basis functions), │
-    │      and the sufficiency check tests    │
-    │      125 where the real quantity is the │
-    │      coefficient count (960). D19 -     │
-    │      D20 - D14, in that order.          │
+    │  D19, D20 DONE 2026-08-02 (branch fix/  │
+    │      d19-d20-correction-surface-        │
+    │      determinacy), filed the same day   │
+    │      as D14's blockers from D15's       │
+    │      "Still open". D19: adaptive knots  │
+    │      landed ON the axis bounds, so 360  │
+    │      of 960 coefficients (37.5%) sat on │
+    │      identically-zero basis functions;  │
+    │      removing them moved NO served      │
+    │      value (they were zero everywhere). │
+    │      D20: sufficiency check tested 125  │
+    │      where the real quantity is the     │
+    │      coefficient count -- 24 tests      │
+    │      failed when switched on, i.e. the  │
+    │      whole full-mode suite had been     │
+    │      fitting underdetermined surfaces.  │
+    │      Maintainer call: GROW THE DATA,    │
+    │      don't cut the model (fixture is a  │
+    │      placeholder for a real dataset).   │
+    │      288 -> 1728 rows; worst known-     │
+    │      answer probe 0.5928 -> 0.1226 dB.  │
+    │      Cost: calibrate full profile       │
+    │      87 s -> 505 s (dev loop untouched).│
     │  D14 open (filed 2026-07-29: NASA-      │
     │      anchored full-mode artifact;       │
     │      also needs D2, D19, D20; feeds D9) │
@@ -4200,8 +4213,8 @@ are meaningful rather than dominated by a topology gap.
   reproduce the anchors within budget, that is a *finding about the pipeline or the fill*,
   to be reported — not a reason to widen the budget.
 - **Depends on:** D10, D11, D12 (infrastructure and prerequisite fixes), D2 (✅ done
-  2026-07-30 — artifact format settled), and — filed 2026-08-02 — **D19 + D20**, which make
-  the fit well-specified and well-determined. Those two are prerequisites rather than
+  2026-07-30 — artifact format settled), and **D19 + D20** (filed and ✅ closed 2026-08-02),
+  which make the fit well-specified and well-determined. Those two are prerequisites rather than
   nice-to-haves: this unit's headline assertion is that the served calibrated pattern
   reproduces the digitized peaks within a stated uncertainty budget, and an underdetermined
   surface oscillating between its fitted points is exactly what would miss it. Its own gotcha
@@ -4273,8 +4286,47 @@ changes *how often tests get run*, which is a correctness input, not a comfort.
   is the first candidate to return once task 2 shrinks the integration-test class around it.
 - **Depends on:** nothing. **Coupled to:** P10-perf (owns the flake fix and the two heaviest
   physics tests' future cost).
+- **Slow tier grew 2026-08-02 (D20), by decision.** `calibrate`'s `full`-profile suite went
+  **87 s → ~505 s**: D20 made the fitter reject underdetermined systems, and the maintainer's
+  call was to grow the synthetic fixture to the production knot configuration (288 → 1728
+  rows) rather than reduce the model's resolution to fit an admittedly unrealistic fixture.
+  The dev inner loop is untouched — `cli_full_mode_e2e` is excluded whole-binary — so this
+  unit's 90 s budget is unaffected, but it is a 5.8× addition to the slow tier against this
+  unit's one-in-one-out policy, recorded as a deliberate exception. It also makes **task 3's
+  remaining half larger, not smaller**: `cli_tuned_run_completes_for_every_tuning_mode` runs
+  a full Nelder-Mead per tuning mode over 6× the points. If that task proceeds, the cheapest
+  lever is a *separate, smaller* grid for the tuner tests — they exercise the tuner, not the
+  correction surface's resolution — which the `generate_rows_without_bias()` split already
+  anticipates.
 
-### D19 — Adaptive knot placement lands internal knots on the axis bounds — Effort: S/M
+### D19 — Adaptive knot placement lands internal knots on the axis bounds — Effort: S/M — ✅ **DONE 2026-08-02**
+
+**✅ DONE 2026-08-02**, branch `fix/d19-d20-correction-surface-determinacy`. Fixed as
+recommended (option 1): `generate_adaptive_knots` drops candidates that equal a bound rather
+than nudging them inward — an axis with four distinct values has no fourth interior position,
+and inventing a knot where the data has no support is what adaptive placement exists to avoid
+— and a short delivery is now reported through `warn!` instead of absorbed silently.
+`validate_knot_vector` enforces both rules: each end repeats exactly `order` times, interior
+knots at most `order - 1`. That also closed item 3 of D15's "Still open" (the fully degenerate
+axis), which had been guarded upstream only.
+
+**The served surface did not move, and that is the confirmation rather than a weak result.**
+A basis function with zero-width support is identically zero, so it contributes zero to every
+evaluation and removing it cannot change a value anywhere: D12's four known-answer probes
+reproduced bit-for-bit (0.5928 / 0.0934 / 0.0365 / 0.0934 dB) and corrected RMSE stayed
+0.0058 dB across the change. What changed is the representation — declared coefficients
+**960 → 600**, an honest `shape`, and a `BᵀB` that is no longer structurally rank-deficient.
+
+Per P13 the guard carries a **negative control**: the exact pre-fix knot vectors, asserted
+both to have had a dead basis function at each end and to be rejected now, alongside a
+positive control on the cone axis, which was never defective and is bit-identical after.
+
+**Filed, not fixed:** an adaptive knot may still land arbitrarily *close* to a bound (a
+near-zero-width span is ill-conditioned rather than degenerate). `enforce_min_spacing`
+governs knot-to-knot distance only, not distance to the bounds, and extending it would have
+changed the cone axis — an axis with no defect. Recorded here rather than fixed silently.
+
+---
 
 **Filed 2026-08-02**, out of the "Still open" item 1 of
 `docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md` (D15 excluded it because
@@ -4344,7 +4396,58 @@ requested, reported, and stored.
   resulting coefficient count is D20's input, so land D19 first.
 - **Depends on:** nothing. **Blocks:** D20, and through it D14.
 
-### D20 — The data-sufficiency check tests the wrong quantity — Effort: S/M
+### D20 — The data-sufficiency check tests the wrong quantity — Effort: S/M — ✅ **DONE 2026-08-02**
+
+**✅ DONE 2026-08-02**, same branch. The check landed as recommended (option 1, hard error),
+computed after knot generation where the real count is knowable, reporting both numbers and
+the per-axis basis counts. The cheap `(spline_order + 1)³` pre-check was kept, not replaced.
+
+**24 tests failed the moment it was switched on** — every full-mode test in the suite, plus
+the validator's fold-refit pins and both artifact-export round trips. Each was a genuinely
+underdetermined fit that had been passing. That is the measure of how invisible this was.
+
+**Maintainer decision, 2026-08-02: grow the data, do not cut the model.** The knot counts are
+production values (`main.rs::surface_fitting_params`), not fixture ones, so the alternative
+was to reduce the resolution of every future artifact. The call was to keep the production
+configuration and size the synthetic fixture to it, because the fixture is a known-unrealistic
+placeholder — no public antenna calibration dataset of this shape exists — and the target is a
+real high-quality dataset in production. Sizing the model to the placeholder would have built
+toward the placeholder.
+
+**Consequence worth stating: growing a tensor grid raises the coefficient count too**, because
+more distinct values per axis means more of the requested knots actually get placed (a knot
+must be strictly interior — D19). The count caps at 8 × 10 × 12 = **960**, and the binding
+constraint is the *tightest CV training split*, `--cv-folds 3` at 2/3 of the grid — so the
+floor was 1440 rows, not 600. D12's grid went **288 → 1728** rows (6 × 12 × 24), leaving 1152
+in that split against 960 coefficients.
+
+**Measured outcome — this is what the unit existed to move:**
+
+| | before | after |
+|---|---|---|
+| worst off-grid probe | 0.5928 dB | **0.1226 dB** (4.8×) |
+| `BIAS_RECOVERY_TOLERANCE_DB` | 0.65 | **0.20** |
+| corrected RMSE (on-grid) | 0.0058 dB | 0.0014 dB |
+| points : coefficients | 288 : 600 | 1728 : 960 |
+
+On-grid RMSE improving *alongside* off-grid recovery — rather than alone — is what
+distinguishes a better-determined fit from a better-interpolating one. The on-grid figure fell
+despite the fit being less free, because the old grid could place only 2 of the 4 requested
+frequency knots and 6 of the 8 clock knots; the larger grid places all of them.
+
+**The remaining 0.1226 dB is no longer underdetermination**, and the closeout says so rather
+than banking it: it sits almost entirely at one probe (450 MHz, 3° cone; the others are
+0.0373 / 0.0232 / 0.0433 dB), and fitting the injected bias *alone* recovers it to 0.004 dB.
+The gap is the part of the residual that is not the bias — the 2.0 → 2.6 mm surface-RMS
+perturbation, which varies fastest near the main lobe. A fixture property, and the first thing
+to look at if that number moves.
+
+**Cost, owed to D18:** the `calibrate` suite went **87 s → ~505 s** under the `full` profile.
+The dev inner loop is unaffected — `cli_full_mode_e2e` is excluded whole-binary — but this is
+a 5.8× increase in the slow tier, against a unit whose stated policy is one-in-one-out. It is
+recorded on D18 as a deliberate, decision-backed exception, not an oversight.
+
+---
 
 **Filed 2026-08-02**, out of the "Still open" item 2 of
 `docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md`. D15 excluded it because

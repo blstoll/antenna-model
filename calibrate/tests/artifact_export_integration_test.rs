@@ -17,10 +17,14 @@ fn residual(clock_deg: f64, cone_deg: f64, freq_mhz: f64) -> f64 {
         + 0.005 * (freq_mhz - 8000.0)
 }
 
+/// 8 x 6 x 6 = 288 points against the 5x6x6 = 180 coefficients that 1/2/2 knots at order 4
+/// declare. Sized to the coefficient count, per roadmap D20 — the previous 6 x 5 x 5 = 150
+/// grid was underdetermined and the fitter now rejects it rather than fitting it quietly.
+/// The axis *ranges* are unchanged, so the domain every probe below samples is the same.
 fn build_measurements() -> Vec<MeasurementPoint> {
-    let clocks = [0.0, 70.0, 140.0, 210.0, 280.0, 350.0];
-    let cones = [0.0, 2.5, 5.0, 7.5, 10.0];
-    let freqs = [8000.0, 8100.0, 8200.0, 8300.0, 8400.0];
+    let clocks = [0.0, 50.0, 100.0, 150.0, 200.0, 250.0, 300.0, 350.0];
+    let cones = [0.0, 2.0, 4.0, 6.0, 8.0, 10.0];
+    let freqs = [8000.0, 8080.0, 8160.0, 8240.0, 8320.0, 8400.0];
     let mut v = Vec::new();
     for &k in &clocks {
         for &c in &cones {

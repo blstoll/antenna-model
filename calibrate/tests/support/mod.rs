@@ -62,19 +62,52 @@ pub const BIAS_CONE_DB: f64 = 0.40;
 // Grid definition
 // ============================================================================
 
-/// Frequencies in MHz. Span 300 MHz across 4 values — comfortably over the 50 MHz
-/// minimum knot spacing with the artifact's 4 frequency knots.
-pub const FIXTURE_FREQUENCIES_MHZ: [f64; 4] = [400.0, 500.0, 600.0, 700.0];
+// The grid is sized by roadmap D20, which made the fitter reject an underdetermined
+// system instead of silently fitting one. Three constraints set it, in order:
+//
+// 1. **The coefficient count is what must be covered**, not the old `(order+1)³ = 125`.
+//    Full mode requests 4/6/8 internal knots at order 4 (`main.rs::surface_fitting_params`),
+//    so each axis contributes `placed_internal_knots + order` basis functions, capping at
+//    8 × 10 × 12 = **960** coefficients once every axis carries enough distinct values to
+//    place every requested knot.
+// 2. **An axis only reaches its requested knot count if it has the distinct values to
+//    support them.** Knots are placed at data quantiles and must be strictly interior
+//    (roadmap D19), so `n` internal knots need at least `n + 2` distinct values on that
+//    axis. Hence >= 6 frequencies, >= 8 cone angles, >= 10 clock angles.
+// 3. **Cross-validation folds must clear the count too.** `cli_cv_folds_controls_the_
+//    reported_fold_count` exercises `--cv-folds 3`, whose training split is 2/3 of the
+//    grid, so the grid needs >= 960 / (2/3) = 1440 rows before that test can pass.
+//
+// 1728 rows gives the 3-fold training split 1152 points against 960 coefficients. That is
+// the thinnest margin any test here runs at; the full-grid fit sees 1.8x its coefficients.
+//
+// This fixture is synthetic and known to be unrealistic — no public antenna calibration
+// dataset of this shape exists (see the D14 assessment in docs/roadmap-2026-07.md §1). It
+// is sized to the production configuration deliberately, rather than the production
+// configuration being cut down to fit it, because the target is a real high-quality
+// dataset in a production environment.
+
+/// Frequencies in MHz. Span 300 MHz across 6 values at 60 MHz steps — over the 50 MHz
+/// minimum knot spacing, with 4 interior values for the artifact's 4 frequency knots.
+pub const FIXTURE_FREQUENCIES_MHZ: [f64; 6] = [400.0, 460.0, 520.0, 580.0, 640.0, 700.0];
 
 /// E-cone (polar) angles in degrees. Spans 0–24°: main lobe (0–5°), the shoulder, and
-/// deep sidelobes past 10° where G/T falls below −20 dB/K.
-pub const FIXTURE_CONE_DEG: [f64; 9] = [0.0, 2.0, 4.0, 6.0, 9.0, 12.0, 16.0, 20.0, 24.0];
+/// deep sidelobes past 10° where G/T falls below −20 dB/K. Deliberately non-uniform —
+/// denser near boresight, where the pattern actually varies — with every adjacent pair at
+/// least the 2° minimum knot spacing apart, so quantile-placed knots are not thinned by
+/// `enforce_min_spacing`. 12 values leaves 10 interior for the artifact's 6 cone knots.
+pub const FIXTURE_CONE_DEG: [f64; 12] = [
+    0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 19.0, 21.5, 24.0,
+];
 
-/// E-clock (azimuthal) angles in degrees. Spans 0–315° in 45° steps — over the 5°
-/// minimum knot spacing with the artifact's 8 clock knots.
-pub const FIXTURE_CLOCK_DEG: [f64; 8] = [0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0];
+/// E-clock (azimuthal) angles in degrees. Spans 0–345° in 15° steps — over the 5°
+/// minimum knot spacing, with 22 interior values for the artifact's 8 clock knots.
+pub const FIXTURE_CLOCK_DEG: [f64; 24] = [
+    0.0, 15.0, 30.0, 45.0, 60.0, 75.0, 90.0, 105.0, 120.0, 135.0, 150.0, 165.0, 180.0, 195.0,
+    210.0, 225.0, 240.0, 255.0, 270.0, 285.0, 300.0, 315.0, 330.0, 345.0,
+];
 
-/// Total rows the generator emits: 4 × 9 × 8 = 288.
+/// Total rows the generator emits: 6 × 12 × 24 = 1728.
 pub const FIXTURE_ROW_COUNT: usize =
     FIXTURE_FREQUENCIES_MHZ.len() * FIXTURE_CONE_DEG.len() * FIXTURE_CLOCK_DEG.len();
 

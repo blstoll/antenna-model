@@ -19,10 +19,24 @@ fn generator_grid_satisfies_the_fitter_constraints() {
     let rows = generate_rows();
 
     assert_eq!(rows.len(), FIXTURE_ROW_COUNT);
+
+    // The binding quantity is the fitted COEFFICIENT count, not the fitter's cheap
+    // `(spline_order + 1)^3 = 125` pre-check — roadmap D20. Full mode requests 4/6/8
+    // internal knots at order 4, and each axis contributes `placed_knots + order` basis
+    // functions, so the surface declares at most 8 * 10 * 12 = 960 coefficients.
+    //
+    // The tightest split any test here runs at is `--cv-folds 3` (see
+    // `cli_cv_folds_controls_the_reported_fold_count`), whose training fold is 2/3 of the
+    // grid. That fold, not the whole grid, is what has to cover the coefficients.
+    const MAX_COEFFICIENTS: usize = 8 * 10 * 12;
+    const TIGHTEST_TRAINING_FRACTION: f64 = 2.0 / 3.0;
+
+    let tightest_fold = (rows.len() as f64 * TIGHTEST_TRAINING_FRACTION) as usize;
     assert!(
-        rows.len() >= 200,
-        "a 5-fold CV training split must still clear the fitter's 125-point minimum, \
-         got {} rows",
+        tightest_fold >= MAX_COEFFICIENTS,
+        "a 3-fold CV training split ({tightest_fold} of {} rows) must cover the \
+         {MAX_COEFFICIENTS} coefficients the shipped knot counts declare, or the fitter \
+         rejects it as underdetermined",
         rows.len()
     );
 
@@ -413,17 +427,24 @@ fn cli_full_mode_correction_beats_the_uncorrected_model() {
          corrected {corrected:.4} dB vs model-only {model_only:.4} dB"
     );
 
-    // The correction now removes essentially all of the injected bias AT THE MEASUREMENT
-    // POINTS: model-only 1.3071 dB -> corrected 0.0058 dB. Before the endpoint fix
-    // (`bspline_basis` evaluating to zero at the exact maximum of an axis, starving the
-    // last coefficient on every axis to ~0 by the ridge term), this was 0.9756 dB — a 168x
-    // improvement.
+    // The correction removes essentially all of the injected bias AT THE MEASUREMENT
+    // POINTS: model-only 1.3206 dB -> corrected 0.0014 dB. History: before the D15
+    // endpoint fix (`bspline_basis` evaluating to zero at the exact maximum of an axis,
+    // starving the last coefficient on every axis to ~0 by the ridge term) this was
+    // 0.9756 dB; the fix took it to 0.0058 dB on the old 288-row grid.
     //
-    // This is RMSE at the fitted data points, and near-exact interpolation there is
-    // EXPECTED of an underdetermined fit (960 coefficients, 288 points) — it is not
-    // evidence the surface is accurate between grid points. `BIAS_RECOVERY_TOLERANCE_DB`
-    // below is the assertion that measures off-grid accuracy; it did not move when this
-    // one did, because it probes points the endpoint defect never touched.
+    // D20 (2026-08-02) grew the grid to 1728 rows and it fell further, to 0.0014 dB. That
+    // is not the fit getting freer — it got *less* free, from 288 points against 600
+    // coefficients to 1728 against 960. It is the fit getting more expressive where it
+    // matters: on the old grid the frequency axis could place only 2 of its 4 requested
+    // internal knots and the clock axis 6 of 8, because a knot must be strictly interior
+    // (D19) and those axes had too few distinct values. The larger grid places all of them.
+    //
+    // This is RMSE at the fitted data points, so it is not by itself evidence the surface
+    // is accurate between them — that is `BIAS_RECOVERY_TOLERANCE_DB` below, which D20
+    // tightened 0.65 -> 0.20 dB. Both numbers moving together, rather than on-grid RMSE
+    // improving alone, is what distinguishes a better-determined fit from a better-
+    // interpolating one.
     //
     // The bound is an ABSOLUTE epsilon, not a proportional one: this pipeline is
     // deterministic (no `--tune-parameters`, nothing in the fit path is thread-parallel),
@@ -434,14 +455,14 @@ fn cli_full_mode_correction_beats_the_uncorrected_model() {
     // local noise — deliberately tight because, this close to zero, a loose absolute bound
     // would hide a large proportional regression (the old +0.02 dB was 3.4x the value it
     // bounded).
-    let today_corrected_rmse = 0.0058;
+    let today_corrected_rmse = 0.0014;
     let ceiling = today_corrected_rmse + 0.002;
     assert!(
         corrected < ceiling,
         "corrected RMSE regressed past the measured ceiling: \
          corrected {corrected:.4} dB vs ceiling {ceiling:.4} dB ({today_corrected_rmse:.4} dB \
-         measured on 2026-07-30 (debug and release agree to 4 decimals) + 0.002 dB for \
-         cross-platform libm ULP noise)"
+         measured on 2026-08-02 (D20's 1728-row grid) + 0.002 dB for cross-platform libm \
+         ULP noise)"
     );
 }
 
@@ -480,12 +501,26 @@ fn cli_full_mode_correction_beats_the_uncorrected_model() {
 /// This tolerance can only tighten once that is addressed; it is deliberately left
 /// unchanged by D15 and D19 alike.
 ///
+/// **Tightened 0.65 → 0.20 dB by roadmap D20 (2026-08-02)**, which is what this unit
+/// existed to do. Growing the fixture from 288 to 1728 rows made the fit determined (1728
+/// points against 960 coefficients; the tightest CV fold sees 1152), and the worst probe
+/// error fell **0.5928 → 0.1226 dB, a 4.8× improvement**, confirming the diagnosis: the
+/// residual was interpolation error from an underdetermined system, not a limit of the
+/// physics or of the correction surface's expressiveness.
+///
 /// All four probe values reproduce bit-for-bit across debug and release builds and across
-/// repeat runs. 0.65 dB is set with headroom above the measured 0.5928 dB worst case —
+/// repeat runs. 0.20 dB is set with headroom above the measured 0.1226 dB worst case —
 /// enough to absorb run-to-run libm noise without flaking — while staying far below the
 /// injected bias's own 0.7529–1.4529 dB range at these probes, so a surface that fitted
 /// nothing would still fail this test.
-const BIAS_RECOVERY_TOLERANCE_DB: f64 = 0.65;
+///
+/// The remaining 0.1226 dB is concentrated at one probe (450 MHz, 3° cone — the others sit
+/// at 0.0373 / 0.0232 / 0.0433 dB) and is *not* explained by underdetermination any more.
+/// Fitting the injected bias alone, with no physics residual, recovers it to 0.004 dB, so
+/// the gap is the part of the residual that is not the bias: the 2.0 → 2.6 mm surface-RMS
+/// perturbation, whose contribution varies fastest near the main lobe. That is a fixture
+/// property, not a defect — but it is the thing to look at first if this number moves.
+const BIAS_RECOVERY_TOLERANCE_DB: f64 = 0.20;
 
 #[test]
 fn cli_full_mode_recovers_the_injected_bias() {

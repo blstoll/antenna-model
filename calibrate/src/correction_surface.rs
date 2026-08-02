@@ -47,6 +47,19 @@ pub enum CorrectionSurfaceError {
     #[error("Insufficient data for fitting: need at least {min_required}, got {actual}")]
     InsufficientData { min_required: usize, actual: usize },
 
+    #[error(
+        "Underdetermined fit: {n_coefficients} B-spline coefficients \
+         ({n_freq}x{n_cone}x{n_clock}) against {n_points} data points. Reduce the knot \
+         counts (num_knots_frequency/econe/eclock) or supply more measurements."
+    )]
+    UnderdeterminedFit {
+        n_coefficients: usize,
+        n_points: usize,
+        n_freq: usize,
+        n_cone: usize,
+        n_clock: usize,
+    },
+
     #[error("Dimension mismatch: measurements ({measurements}) != predictions ({predictions})")]
     DimensionMismatch {
         measurements: usize,
@@ -323,6 +336,32 @@ pub fn fit_correction_surface(
         n_clock,
         n_freq * n_cone * n_clock
     );
+
+    // The real data-sufficiency requirement (roadmap D20).
+    //
+    // `validate_fitting_inputs` ran a cheap `(spline_order + 1)^3` pre-check above, which
+    // is a fixed 125 at order 4 and depends on nothing about the model actually being
+    // fitted. The quantity that decides whether the least-squares system is determined is
+    // the coefficient count, and it is only knowable *here*: the knot counts in
+    // `params` are a request, and dedup / minimum-spacing / interior-only placement can
+    // all reduce them.
+    //
+    // Below this line the system is underdetermined and the ridge term is the only thing
+    // making it solvable — the surface then interpolates its data points almost exactly
+    // while oscillating between them, which reads as an excellent RMSE and an inaccurate
+    // surface. That is a hard error rather than a warning by decision: a warning here
+    // repeats the class of defect D11 was, a real problem reported through a channel
+    // nobody reads.
+    let n_coefficients = n_freq * n_cone * n_clock;
+    if residuals.len() < n_coefficients {
+        return Err(CorrectionSurfaceError::UnderdeterminedFit {
+            n_coefficients,
+            n_points: residuals.len(),
+            n_freq,
+            n_cone,
+            n_clock,
+        });
+    }
 
     // Build design matrix and solve least squares
     let coefficients = fit_bspline_coefficients(
@@ -1503,6 +1542,120 @@ mod tests {
     }
 
     // ========================================================================
+    // D20 — the data-sufficiency check must test the coefficient count
+    // ========================================================================
+
+    /// Build `n` residual points on a regular grid spanning the given axes.
+    fn grid_measurements(
+        n_freq: usize,
+        n_cone: usize,
+        n_clock: usize,
+    ) -> (Vec<MeasurementPoint>, Vec<f64>) {
+        let mut measurements = Vec::new();
+        let mut predictions = Vec::new();
+
+        for i in 0..n_freq {
+            for j in 0..n_cone {
+                for k in 0..n_clock {
+                    let frequency_mhz = 400.0 + 300.0 * i as f64 / (n_freq - 1).max(1) as f64;
+                    let e_cone_deg = 24.0 * j as f64 / (n_cone - 1).max(1) as f64;
+                    let e_clock_deg = 315.0 * k as f64 / (n_clock - 1).max(1) as f64;
+
+                    measurements.push(MeasurementPoint::new(
+                        e_clock_deg,
+                        e_cone_deg,
+                        frequency_mhz,
+                        10.0,
+                        290.0,
+                    ));
+                    predictions.push(9.0);
+                }
+            }
+        }
+
+        (measurements, predictions)
+    }
+
+    /// The check must fire on a system the old `(spline_order + 1)^3 = 125` minimum waved
+    /// through. 216 points comfortably clears 125 and is nowhere near the 600 coefficients
+    /// the shipped full-mode configuration declares.
+    #[test]
+    fn a_fit_with_fewer_points_than_coefficients_is_rejected() {
+        let (measurements, predictions) = grid_measurements(6, 6, 6);
+        assert!(
+            measurements.len() > (4 + 1usize).pow(3),
+            "the fixture must clear the old 125-point minimum, or this test proves nothing"
+        );
+
+        let params = CorrectionSurfaceParams {
+            spline_order: 4,
+            num_knots_frequency: 4,
+            num_knots_econe: 6,
+            num_knots_eclock: 8,
+            regularization: 1e-3,
+            adaptive_knots: true,
+            cross_validation_folds: 0,
+            ..CorrectionSurfaceParams::default()
+        };
+
+        let err = fit_correction_surface(&measurements, &predictions, &params)
+            .expect_err("an underdetermined fit must be rejected");
+
+        match err {
+            CorrectionSurfaceError::UnderdeterminedFit {
+                n_coefficients,
+                n_points,
+                ..
+            } => {
+                assert!(
+                    n_points < n_coefficients,
+                    "the error must report the two numbers that made it fire, got \
+                     {n_points} points / {n_coefficients} coefficients"
+                );
+            }
+            other => panic!("expected UnderdeterminedFit, got {other:?}"),
+        }
+    }
+
+    /// ...and must not fire once the data covers the coefficients.
+    #[test]
+    fn a_fit_with_more_points_than_coefficients_is_accepted() {
+        let (measurements, predictions) = grid_measurements(6, 6, 6);
+        let params = CorrectionSurfaceParams {
+            spline_order: 4,
+            num_knots_frequency: 0,
+            num_knots_econe: 0,
+            num_knots_eclock: 0,
+            regularization: 1e-3,
+            adaptive_knots: true,
+            cross_validation_folds: 0,
+            ..CorrectionSurfaceParams::default()
+        };
+
+        // 4x4x4 = 64 coefficients against 216 points.
+        fit_correction_surface(&measurements, &predictions, &params)
+            .expect("a determined system must fit");
+    }
+
+    /// The old pre-check is kept as a cheap early guard, not replaced — it catches obvious
+    /// garbage before any knot generation happens.
+    #[test]
+    fn the_cheap_pre_check_still_rejects_obviously_too_little_data() {
+        let (measurements, predictions) = grid_measurements(2, 2, 2);
+        let params = CorrectionSurfaceParams {
+            cross_validation_folds: 0,
+            ..CorrectionSurfaceParams::default()
+        };
+
+        let err = fit_correction_surface(&measurements, &predictions, &params)
+            .expect_err("8 points must be rejected");
+        assert!(
+            matches!(err, CorrectionSurfaceError::InsufficientData { .. }),
+            "expected the cheap InsufficientData pre-check, got {err:?}"
+        );
+    }
+
+    // ========================================================================
     // D10 — cross-validation must not re-enter itself
     // ========================================================================
 
@@ -1542,15 +1695,22 @@ mod tests {
     }
 
     /// A fold fit inside `cross_validate` must not cross-validate in turn. The fixture is
-    /// sized so the recursion is what fails: 176 points → 141 in a fold (clears the
-    /// `(4+1)³ = 125` minimum), but a *second* level would train on 113 and trip it.
+    /// sized so the recursion is exactly what fails, restated against the quantity roadmap
+    /// D20 made binding — the coefficient count, not the old `(4+1)³ = 125` minimum.
+    ///
+    /// These knots declare 4 × 10 × 10 = **400** coefficients (two distinct frequencies
+    /// place no interior knot, so that axis contributes `order` basis functions). 512
+    /// points leaves **410** in one 5-fold training split, which clears 400; a *second*
+    /// level would train on **328** and trip the check. The window is deliberately narrow —
+    /// a fixture much larger than this would let two levels of recursion succeed and the
+    /// test would stop testing anything.
     #[test]
     fn cross_validation_does_not_recurse_into_itself() {
         let mut measurements = Vec::new();
         let mut predictions = Vec::new();
         for fi in 0..2 {
             let frequency_mhz = 8400.0 + 100.0 * fi as f64;
-            for ci in 0..11 {
+            for ci in 0..32 {
                 let e_cone_deg = ci as f64;
                 for ki in 0..8 {
                     let e_clock_deg = 45.0 * ki as f64;
@@ -1566,7 +1726,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(measurements.len(), 176);
+        assert_eq!(measurements.len(), 512);
 
         let params = CorrectionSurfaceParams {
             spline_order: 4,

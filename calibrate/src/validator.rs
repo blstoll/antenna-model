@@ -967,14 +967,23 @@ mod tests {
     // D10 — the cross-validation fold refit must score the surface that ships
     // ========================================================================
 
-    /// A grid large enough that a 5-fold split still clears the fitter's
-    /// `(spline_order + 1)³ = 125` minimum for cubic splines (256 points → 205 per fold).
+    /// A grid large enough that a 5-fold split still covers the fitted **coefficient
+    /// count**, which is what roadmap D20 made the binding quantity — not the old
+    /// `(spline_order + 1)³ = 125` minimum, which depended on nothing about the model
+    /// being fitted.
+    ///
+    /// `artifact_params` below declares 4 × 10 × 10 = 400 coefficients (the frequency axis
+    /// has only two distinct values, so it places no interior knot and contributes `order`
+    /// basis functions). 640 points leaves 512 in a 5-fold training split, 1.28× the
+    /// coefficients. Growing the cone axis is what buys the margin: its knot count is
+    /// already capped by the 6 requested, so more distinct cone values add data without
+    /// adding coefficients.
     fn cv_fixture() -> (Vec<MeasurementPoint>, Vec<f64>) {
         let mut points = Vec::new();
         let mut predictions = Vec::new();
         for fi in 0..2 {
             let frequency_mhz = 8400.0 + 100.0 * fi as f64;
-            for ci in 0..16 {
+            for ci in 0..40 {
                 let e_cone_deg = ci as f64;
                 for ki in 0..8 {
                     let e_clock_deg = 45.0 * ki as f64;
@@ -1073,12 +1082,17 @@ mod tests {
             spline_order: 6,
             ..artifact_params()
         }))
-        .expect_err("order 6 cannot be fitted from a 205-point training fold");
+        .expect_err("order 6 cannot be fitted from a 512-point training fold");
 
+        // Each axis contributes `placed_knots + order` basis functions, so the caller's
+        // spline order is visible in the coefficient count: order 4 gives 4x10x10 = 400
+        // (which this fixture covers), order 6 gives 6x12x12 = 864 (which it does not).
+        // Before roadmap D20 this keyed on `(order + 1)^3 = 343`, a data minimum that
+        // depended on the order but on nothing else about the model being fitted.
         let message = err.to_string();
         assert!(
-            message.contains("343"),
-            "expected the caller's spline order to set the data minimum, got: {message}"
+            message.contains("864"),
+            "expected the caller's spline order to set the coefficient count, got: {message}"
         );
     }
 
