@@ -644,10 +644,22 @@ pub fn integrate_aperture(
     let mut radially_converged = false;
 
     for _ in 0..MAX_RADIAL_REFINEMENTS {
-        if n_rho >= RADIAL_POINTS_SAFETY_MAX {
+        let n_fine = radial_check_points(n_rho);
+        // Refine while a genuinely finer leg EXISTS — not while `n_rho` is under the density
+        // cap. The distinction matters at the cap itself: `radial_check_points` has its own,
+        // higher ceiling (`2·MAX + 1`), so at `n_rho == RADIAL_POINTS_SAFETY_MAX` a strictly
+        // finer leg is still available, and comparing against it is the ONLY way to report how
+        // wrong the capped density is. Guarding on `n_rho >= RADIAL_POINTS_SAFETY_MAX` instead
+        // (as this loop did until 2026-08-01) broke out before the first comparison, leaving
+        // `radial_error` at 0.0 — so `converged` was correctly false but `error_estimate`
+        // reported the azimuthal axis alone, understating by ~7 orders of magnitude on the
+        // fixture in `mode_path_reports_a_radial_error_even_when_the_density_cap_binds`. That
+        // contradicted P12's combination decision, whose whole justification is that summing
+        // the two axes never understates. The symmetric branch never had the bug: it computes
+        // its capped `2N` leg unconditionally.
+        if n_fine <= n_rho {
             break;
         }
-        let n_fine = radial_check_points(n_rho);
         let fine =
             azimuthal_mode_field_inner(config, theta, phi, k, n_fine, n_phi, m_probe, deadline)?;
         evaluations += mode_sweep_work(n_fine, n_phi, m_probe as usize + 1);
@@ -2174,6 +2186,92 @@ mod tests {
         assert!(r.error_estimate.is_finite() && r.error_estimate >= 0.0);
     }
 
+    /// The **mode path's** counterpart to `unconverged_is_flagged_not_silently_returned`,
+    /// which only covers the symmetric branch (its fixture's feed is at the focus).
+    ///
+    /// When `radial_points_for` clamps to [`RADIAL_POINTS_SAFETY_MAX`] the refinement loop used
+    /// to `break` **before** running any comparison, leaving `radial_error` at its 0.0 initial
+    /// value. `converged` was still correctly `false`, so nothing was served silently — but
+    /// `error_estimate` reported the azimuthal axis alone, understating the total on precisely
+    /// the geometries whose density was known to be insufficient. That contradicted P12's
+    /// explicit combination decision, which is that the two axes are **summed** because summing
+    /// never understates.
+    ///
+    /// The geometry deliberately mirrors the symmetric test's — a 750 m dish at 40 GHz,
+    /// `D/λ = 100 000` — so the two branches are compared on the same physics. At θ=90° Nyquist
+    /// wants ~2·10⁵ radial points; the budget is clamped to the 65 537 cap and even the check
+    /// leg (131 073) stays under Nyquist, so the two legs genuinely disagree and the honest
+    /// verdict is non-convergence. The 1 mm feed offset is what routes it to the mode path
+    /// while keeping the azimuthal spectrum negligible, so the sweep stays cheap (~5·10⁶ work
+    /// units per leg) despite the enormous dish.
+    #[test]
+    fn mode_path_reports_a_radial_error_even_when_the_density_cap_binds() {
+        let reflector = ReflectorGeometry::new(750.0, 375.0, 0.0).unwrap(); // f/D = 0.5
+        let mut pos = FeedPosition::at_focus(375.0);
+        pos.x = 0.001; // 1 mm ⇒ mode path, but a negligible azimuthal spectrum
+        let feed = FeedParameters::new(pos, 2.0, 0.0, 1.0).unwrap();
+        let config =
+            AntennaConfiguration::new("capped".into(), "Capped".into(), reflector, feed, None)
+                .unwrap();
+        let f_hz = 40.0e9; // λ = 0.0075 m ⇒ D/λ = 100 000
+
+        // Opt out of S3's production wall-clock budget, as three existing tests already do:
+        // a test that deliberately exercises an expensive geometry should not be gated by the
+        // budget meant to bound a production request. Hitting the density cap costs ~3 × 65 537
+        // radial samples BY CONSTRUCTION — that is what the cap binding means — so this cannot
+        // be made cheap, only honest. It runs in ~1.9 s release / ~35 s debug, which is why it
+        // joins D18's slow tier in the same change, per that unit's stated policy.
+        let params = IntegrationParams {
+            time_budget: None,
+            ..IntegrationParams::adaptive()
+        };
+        let n_rho = radial_points_for(&config, PI / 2.0, wavelength_from_frequency(f_hz), &params);
+        assert_eq!(
+            n_rho, RADIAL_POINTS_SAFETY_MAX,
+            "fixture must actually hit the density cap for this test to mean anything"
+        );
+
+        let r = integrate_aperture(PI / 2.0, 0.0, &config, f_hz, &params).unwrap();
+        println!(
+            "capped mode path θ=90°: converged={} err={:.6e} evals={}",
+            r.converged, r.error_estimate, r.num_evaluations
+        );
+
+        assert!(
+            !r.converged,
+            "density capped below Nyquist must flag non-convergence"
+        );
+
+        // The discriminating assertion. `error_estimate` is the SUM of the two axes, and the
+        // azimuthal term alone is ~1e-13 here, so asserting `> 0` would pass on the mode error
+        // and prove nothing. Measure the radial disagreement independently — the same N-vs-2N
+        // difference the loop is supposed to compute — and require the reported estimate to
+        // account for it.
+        let lambda = wavelength_from_frequency(f_hz);
+        let k = wavenumber(lambda);
+        let ModeSizing { m_max, n_phi, .. } = mode_count_for(&config, lambda, PI / 2.0);
+        let coarse = azimuthal_mode_field(&config, PI / 2.0, 0.0, k, n_rho, n_phi, m_max + 1);
+        let fine = azimuthal_mode_field(
+            &config,
+            PI / 2.0,
+            0.0,
+            k,
+            radial_check_points(n_rho),
+            n_phi,
+            m_max + 1,
+        );
+        let true_radial_diff = (fine - coarse).norm();
+        println!("  independent radial N-vs-2N difference: {true_radial_diff:.6e}");
+
+        assert!(
+            r.error_estimate >= 0.5 * true_radial_diff,
+            "error_estimate {:.6e} omits the radial axis: an independent N-vs-2N comparison \
+             at the same sizing disagrees by {true_radial_diff:.6e}. The refinement loop \
+             skipped its comparison at the density cap and reported the azimuthal axis alone",
+            r.error_estimate
+        );
+    }
+
     #[test]
     fn asymmetric_amplitude_feed_bypasses_symmetric_hankel_path() {
         // A centered feed (no lateral offset) with a non-unity asymmetry_factor has an
@@ -3254,6 +3352,7 @@ mod p12_radial_diagnostic {
     /// requested**, while only the inner accumulation scales with the subset size. A subset
     /// check is therefore NOT proportional to `|subset| / m_max` — it is floored by the
     /// g-evaluation, and how binding that floor is depends entirely on the geometry.
+    #[allow(clippy::too_many_arguments)]
     fn mode_subset_field(
         config: &AntennaConfiguration,
         theta: f64,
@@ -3262,6 +3361,7 @@ mod p12_radial_diagnostic {
         n_rho: usize,
         n_phi_coeff: usize,
         modes: &[u32],
+        m_ladder: u32,
     ) -> Complex64 {
         let f = config.reflector.focal_length;
         let r_max = config.reflector.diameter / 2.0;
@@ -3281,6 +3381,7 @@ mod p12_radial_diagnostic {
         let mut gm_pos = vec![Complex64::new(0.0, 0.0); modes.len()];
         let mut gm_neg = vec![Complex64::new(0.0, 0.0); modes.len()];
         let phi_grid = PhiGrid::new(n_phi_coeff);
+        let mut jm_ladder = vec![0.0_f64; m_ladder as usize + 1];
 
         for i in 0..n {
             let rho = i as f64 * h;
@@ -3310,8 +3411,20 @@ mod p12_radial_diagnostic {
                 gm_neg[idx] *= norm;
             }
 
+            // Build the WHOLE `Jₘ` ladder up to `m_ladder` and index into it, rather than
+            // calling per-order `bessel_jn` for the two wanted modes. `bessel_jn_array` picks
+            // upward or downward recurrence from the HIGHEST requested order, so a subset built
+            // from per-order calls is a subtly different function from the same modes inside a
+            // full sweep (the two directions differ by ~2.8e-9 near the origin, where the
+            // rational approximations' error at x=0 enters the upward seeds). The retired
+            // production `radial_probe_field` took `m_probe` for exactly this reason, and the
+            // test that enforced the agreement went with it — so the discipline has to live
+            // here now, in the diagnostic that replaced them. It matters most in
+            // `p13_probe_to_total_ratio_sweep`, whose probe estimates go down to ~6e-5 relative
+            // and whose denominator comes from the array-form full sweep.
+            bessel_jn_array(m_ladder, a, &mut jm_ladder);
             for (idx, &m) in modes.iter().enumerate() {
-                let jm = bessel_jn(m, a);
+                let jm = jm_ladder[m as usize];
                 let base = chirp_factor * jm * rho * w;
                 r_pos[idx] += base * gm_pos[idx];
                 if m > 0 {
@@ -3927,10 +4040,10 @@ mod p12_radial_diagnostic {
                 mode_field_at(&config, theta, phi, k, n2, n_phi, m_max)
             });
             let t_sub_n = time_ms(reps, || {
-                mode_subset_field(&config, theta, phi, k, n1, n_phi, &subset)
+                mode_subset_field(&config, theta, phi, k, n1, n_phi, &subset, m_max + 1)
             });
             let t_sub_2n = time_ms(reps, || {
-                mode_subset_field(&config, theta, phi, k, n2, n_phi, &subset)
+                mode_subset_field(&config, theta, phi, k, n2, n_phi, &subset, m_max + 1)
             });
             let t_full_3n = time_ms(reps, || {
                 mode_field_at(&config, theta, phi, k, 3 * n1 / 2 * 2 + 1, n_phi, m_max)
@@ -3990,8 +4103,8 @@ mod p12_radial_diagnostic {
             let reference = mode_field_at(&config, theta, phi, k, n_ref, n_phi, m_max);
             let f_n = mode_field_at(&config, theta, phi, k, n1, n_phi, m_max);
             let f_2n = mode_field_at(&config, theta, phi, k, n2, n_phi, m_max);
-            let s_n = mode_subset_field(&config, theta, phi, k, n1, n_phi, &subset);
-            let s_2n = mode_subset_field(&config, theta, phi, k, n2, n_phi, &subset);
+            let s_n = mode_subset_field(&config, theta, phi, k, n1, n_phi, &subset, m_max + 1);
+            let s_2n = mode_subset_field(&config, theta, phi, k, n2, n_phi, &subset, m_max + 1);
 
             let db = |f: Complex64| 20.0 * (f.norm() / reference.norm()).log10();
             // (i) compares full legs; (ii) compares only the subset's movement, but must
@@ -4369,6 +4482,7 @@ mod p12_radial_diagnostic {
         let mut worst_label = String::new();
         let mut counterexamples = 0_usize;
         let mut skipped = 0_usize;
+        let mut not_pre_gated = 0_usize;
 
         let cases: Vec<(&str, AntennaConfiguration, f64)> = vec![
             ("gs_3.7m X   ", gs_3_7m_x_band(), 8.4e9),
@@ -4421,7 +4535,21 @@ mod p12_radial_diagnostic {
                 let m_probe = m_max + 1;
                 let n1 = radial_points_for(&config, theta, lambda, &params);
                 if !was_pre_gated(n1, n_phi, m_probe) {
-                    continue; // not the pre-gate's regime; the honest check ran directly
+                    // Print it rather than skipping silently. Three of the ten named
+                    // geometries (`gs_3.7m`, `D12 UHF`, `swept 10m δ/f=.02`) are below the old
+                    // work threshold at EVERY angle, so a silent `continue` would drop them
+                    // from the table entirely and a reader could not tell "measured and fine"
+                    // from "never ran" — which is the coverage-gap failure this unit exists to
+                    // correct. It is also the sweep's one real limitation: it cannot say
+                    // anything about low `D/λ`, because that regime has no pre-gated points.
+                    not_pre_gated += 1;
+                    println!(
+                        "  {name}  {d_lambda:8.0}  {theta_deg:5}  {n1:7}  {n_phi:5}  {m_max:5}   \
+                         {:>9}  {:>9}  {:>7}  {:6}  below the old work threshold — honest check \
+                         ran directly, pre-gate never applied",
+                        "—", "—", "—", "n/a",
+                    );
+                    continue;
                 }
                 let n2 = radial_check_points(n1);
                 let work = (n2 as u64) * (n_phi as u64 + m_probe as u64 + 1);
@@ -4445,10 +4573,26 @@ mod p12_radial_diagnostic {
                 let sweep_2n =
                     azimuthal_mode_field_inner(&config, theta, 0.0, k, n2, n_phi, m_probe, None)
                         .unwrap();
-                let probe_n =
-                    mode_subset_field(&config, theta, 0.0, k, n1, n_phi, &RADIAL_PROBE_MODES);
-                let probe_2n =
-                    mode_subset_field(&config, theta, 0.0, k, n2, n_phi, &RADIAL_PROBE_MODES);
+                let probe_n = mode_subset_field(
+                    &config,
+                    theta,
+                    0.0,
+                    k,
+                    n1,
+                    n_phi,
+                    &RADIAL_PROBE_MODES,
+                    m_probe,
+                );
+                let probe_2n = mode_subset_field(
+                    &config,
+                    theta,
+                    0.0,
+                    k,
+                    n2,
+                    n_phi,
+                    &RADIAL_PROBE_MODES,
+                    m_probe,
+                );
 
                 let probe_est = (probe_2n - probe_n).norm() / sweep_n.total.norm();
                 let full_est = (sweep_2n.total - sweep_n.total).norm() / sweep_2n.total.norm();
@@ -4480,7 +4624,10 @@ mod p12_radial_diagnostic {
         println!(
             "\n  Worst probe-to-total ratio WHERE THE PROBE PASSES: {worst_passing:.1}× \
              ({worst_label})\n  RADIAL_PRE_GATE_SAFETY = {RADIAL_PRE_GATE_SAFETY} ⇒ margin \
-             {:.2}×.  Counterexamples: {counterexamples}.  Skipped (too expensive): {skipped}.",
+             {:.2}×.  Counterexamples: {counterexamples}.  Skipped (too expensive): {skipped}.\n  \
+             Points below the old work threshold (pre-gate never applied): {not_pre_gated}. \
+             **This sweep says nothing about that regime** — it has no pre-gated points by \
+             construction, which is the coverage gap recorded in the findings doc §5.",
             RADIAL_PRE_GATE_SAFETY / worst_passing.max(f64::MIN_POSITIVE),
         );
     }

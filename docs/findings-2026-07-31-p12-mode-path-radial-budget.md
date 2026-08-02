@@ -478,8 +478,15 @@ small drifts since — `dsn_34m` X −0.0033 → −0.0019, UHF φ=0 −0.0013 �
 > [`findings-2026-08-01-p13-pre-gate-retirement.md`](findings-2026-08-01-p13-pre-gate-retirement.md) §1.
 
 A pre-gate that always declines costs an extra leg and buys nothing, so this was measured after
-the fact (`p12_pre_gate_yield_across_geometries`). `legs` counts full sweeps: 2 = the pre-gate
-certified (or one refinement sufficed), 3+ = refinement ran.
+the fact. `legs` counts full sweeps: 2 = the pre-gate certified (or one refinement sufficed),
+3+ = refinement ran.
+
+> **Note (P13, 2026-08-01):** the test that produced this table,
+> `p12_pre_gate_yield_across_geometries`, **no longer exists** — it measured the pre-gate, which
+> is gone. Its successor `p13_radial_leg_count_across_geometries` reports leg counts for the
+> single post-P13 radial shape, so it does not reproduce the "pre-gated?" column below. To
+> re-derive the pre-gate's behaviour, use `p13_probe_to_total_ratio_sweep`, which restates the
+> retired constants locally.
 
 | geometry | work | pre-gated? | N | legs |
 |---|---|---|---|---|

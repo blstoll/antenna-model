@@ -303,11 +303,59 @@ Tests:
   locally and the probe legs taken from the test module's own `mode_subset_field`, so the
   decision can be re-checked rather than taken on trust),
   `p13_intra_mode_cancellation_explains_the_probe_set` (§2),
-  `p13_recheck_d17_preset_divergence_table` (§3).
+  `p13_recheck_d17_preset_divergence_table` (§3),
+  `mode_path_reports_a_radial_error_even_when_the_density_cap_binds` (§4a).
+- `mode_subset_field` now builds the whole `Jₘ` ladder with `bessel_jn_array` and indexes into
+  it, instead of calling per-order `bessel_jn` for the wanted modes. Raised in review: the
+  retired `radial_probe_field` took `m_probe` precisely to avoid that mixing (the two recurrence
+  directions differ by ~2.8e-9 near the origin), and the test that enforced the agreement was
+  deleted along with it — so the discipline had to move into the diagnostic that replaced them.
+  It matters most in `p13_probe_to_total_ratio_sweep`, whose probe estimates reach ~6e-5 relative
+  against an array-form denominator. **Re-measured after the change: the sweep's conclusion is
+  unchanged** — worst passing ratio still 43.5×, margin 0.74×, 0 counterexamples — so the mixing
+  had not contaminated the result, but the measurement is now correct by construction rather
+  than by argument.
 
 All 995 tests pass across both nextest tiers, including every P12 anchor
 (`p12_mode_path_radial_convergence_anchors`, `p12_symmetric_branch_control_still_accurate_and_cheap`,
 `p12_phi_cap_removed_steered_feed_matches_converged_reference`).
+
+## 4a. Found in review: the refinement loop skipped its comparison at the density cap
+
+Raised against this unit's PR, confirmed, fixed here. Pre-existing from P12, but P13 makes the
+refinement loop the mode path's *only* radial shape, so it became the whole story on that path.
+
+The loop opened with `if n_rho >= RADIAL_POINTS_SAFETY_MAX { break }`. When
+`radial_points_for` clamps to that cap — i.e. exactly when the density is known to be
+insufficient — the loop broke **before running any comparison**, leaving `radial_error` at its
+`0.0` initial value. `converged` was still correctly `false`, so no wrong number was served
+silently; but `error_estimate` reported the azimuthal axis alone. That contradicts P12's explicit
+combination decision, whose entire justification is that summing the two axes *never
+understates*.
+
+Measured on a 750 m dish at 40 GHz with a 1 mm feed offset (`D/λ = 100 000`, θ=90°, so the
+budget clamps to 65 537 against a Nyquist demand of ~2·10⁵):
+
+| | before | after |
+|---|---|---|
+| `error_estimate` | **2.41e-13** (azimuthal only) | **1.204** |
+| independent radial N-vs-2N difference | 1.99 | 1.99 |
+| `converged` | false | false |
+
+Understated by **seven orders of magnitude**. The symmetric branch never had this: it computes
+its capped `2N` leg unconditionally.
+
+**Fix:** guard on whether a genuinely finer leg *exists*, not on `n_rho` versus the cap —
+`radial_check_points` has its own higher ceiling (`2·MAX + 1`), so at `n_rho == MAX` a strictly
+finer leg is still available, and comparing against it is the only way to report how wrong the
+capped density is. Cost at the cap goes from one leg to three (bounded by the check ceiling and
+by `MAX_RADIAL_REFINEMENTS`), which is the price the symmetric branch already pays.
+
+Pinned by `mode_path_reports_a_radial_error_even_when_the_density_cap_binds`, deliberately built
+on the same geometry as the symmetric branch's `unconverged_is_flagged_not_silently_returned` so
+the two branches are compared on the same physics. Its assertion is against an **independently
+computed** N-vs-2N difference, not against `> 0` — the first draft of the test asserted the
+latter and passed on the mode error alone, proving nothing.
 
 ## 5. Filed, not fixed
 
