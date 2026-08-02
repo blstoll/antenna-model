@@ -1919,29 +1919,36 @@ fn p12_symmetric_branch_control_still_accurate_and_cheap() {
     }
 }
 
-/// Cost guard for P12's radial pre-gate.
+/// Cost guard for the mode path's radial check.
 ///
-/// The pre-gate exists so that geometries where a full check leg is expensive — and which
-/// measurement shows are ALREADY radially converged — get certified in **two legs** rather than
-/// paying 3× for refinement they do not need. If that regresses, the expensive mode path
-/// silently gets ~3× slower, which is exactly the trade D-A was decided to avoid on a path
-/// P10-perf exists to make faster.
+/// The expensive mode geometries are — measurement, not assumption — **already radially
+/// converged at the budget density**, so the N-vs-2N check should agree on its first comparison
+/// and refinement should never run. That is the property this pins: two full legs, no more. If
+/// it regresses to three, the expensive mode path just got ~2.3× slower, and the cause is either
+/// a radial budget that stopped being sufficient or a tolerance that stopped being met — both
+/// worth failing a build over.
 ///
-/// Uses `dsn_34m` **Ka** at θ=1°: the cheapest geometry that both crosses
-/// `FULL_RADIAL_CHECK_WORK_LIMIT` and is certified by the pre-gate, at ~2% of the cost of the
-/// θ=90° case the decision was priced on. That matters because `scripts/check.sh` runs this
-/// suite in DEBUG. Measured yield across the Ka sweep (θ = 1°, 5°, 45°, 90°): the pre-gate
-/// certifies **all four** in two legs, so this point is representative of the whole expensive
-/// regime rather than a lucky pick.
+/// Uses `dsn_34m` **Ka** at θ=1°: the cheapest geometry in the expensive regime, at ~2% of the
+/// cost of the θ=90° case, which matters because `scripts/check.sh` runs this suite in DEBUG.
+/// Measured across the Ka sweep (θ = 1°, 5°, 45°, 90°): **all four** settle in two legs, so this
+/// point represents the whole regime rather than being a lucky pick.
+///
+/// **History (P13, 2026-08-01).** Until P13 this same geometry reached two legs a different way:
+/// a `{0,1}`-mode pre-gate certified it from a cheap partial leg and the integrator returned the
+/// COARSE `N` leg. That pre-gate was retired — its cheap leg had become 66% of a full one after
+/// P10-perf's FFT, and its `RADIAL_PRE_GATE_SAFETY = 32` was measured at 43.5× on this very
+/// antenna — so the second leg is now a full sweep and the returned answer is the fine `2N` leg
+/// (Ka θ=5° went +0.0126 → +0.0008 dB for +28% work). The leg *count* is unchanged, which is why
+/// this test survived the change with only its arithmetic and its reasoning updated.
 ///
 /// Deliberately asserts **structure only** — no dense reference. A radially converged reference
 /// at this geometry is ~1.7·10⁹ work units, which in debug would take minutes and, before
 /// `radially_converged_reference` was given `time_budget = None`, tripped S3's 30 s budget and
 /// failed this test as a timeout. Radial *accuracy* is anchored by
 /// `p12_mode_path_radial_convergence_anchors` on four geometries; Ka accuracy specifically is
-/// measured by `p12_post_fix_served_behaviour` in `model/integration.rs` (+0.0126 dB).
+/// measured by `p12_post_fix_served_behaviour` in `model/integration.rs` (+0.0008 dB).
 #[test]
-fn p12_pre_gate_certifies_an_already_converged_geometry_in_two_legs() {
+fn mode_path_settles_an_already_converged_geometry_in_two_legs() {
     let repo = load_real_repository();
     let cal = repo
         .get_calibration("dsn_34m_uncalibrated", "ka_band")
@@ -1953,34 +1960,33 @@ fn p12_pre_gate_certifies_an_already_converged_geometry_in_two_legs() {
 
     let r = antenna_model::model::integrate_aperture(th, 0.0, &cfg, freq, &p).unwrap();
     println!(
-        "\n[P12] pre-gate: converged={} evals={}",
+        "\n[P13] radial legs: converged={} evals={}",
         r.converged, r.num_evaluations
     );
 
     assert!(r.converged, "Ka θ=1° must report converged");
 
-    // Two legs = the full sweep at N, plus the cheap [0,1]-mode probe at 2N−1. A third leg
-    // (another FULL sweep at 2N−1) means the pre-gate declined and refinement ran, i.e. the
-    // expensive regime just got ~1.9× more work for an answer it already had.
+    // Two legs = the full sweep at N, plus the full check sweep at 2N−1. A third leg means the
+    // first comparison did NOT agree and refinement ran.
     //
     // Sizing at this geometry, all derived rather than observed:
     //   n_phi = next_fast_len(2·B + 8) with B = k·δ·(R/f) ≈ 126  ⇒ 260 → 270
     //           (`next_fast_len` since P10-perf made the φ' transform an FFT; before that the
     //            value was 260, and before 2026-07-31 it was rounded to a power of two at 512)
-    //   m_max = 133, so the sweep runs modes 0..=m_probe = 134  ⇒ 135 mode slots
+    //   m_max = 133, so each sweep runs modes 0..=m_probe = 134  ⇒ 135 mode slots
     //   N     = radial_points_for = 335
     //
     // `num_evaluations` counts `n_rho · (n_phi + modes)` per leg (see `mode_sweep_work`), so:
-    let n_phi = 270;
+    let per_radial_sample = 270 + 135;
     let n0 = 335;
-    let two_legs = n0 * (n_phi + 135) + (2 * n0 - 1) * (n_phi + 2);
-    let three_legs = two_legs + (2 * n0 - 1) * (n_phi + 135);
+    let two_legs = (n0 + (2 * n0 - 1)) * per_radial_sample;
+    let three_legs = two_legs + (4 * n0 - 3) * per_radial_sample;
     // Threshold midway between the two, so this cannot be satisfied by a near-miss in either
     // direction and does not have to be re-derived for small sizing changes.
     assert!(
         r.num_evaluations < (two_legs + three_legs) / 2,
-        "spent {} work units (two legs = {two_legs}, three = {three_legs}) — the pre-gate \
-         should have certified this without refining",
+        "spent {} work units (two legs = {two_legs}, three = {three_legs}) — the radial check \
+         should have agreed on its first comparison at this geometry",
         r.num_evaluations
     );
 }

@@ -46,12 +46,20 @@ slow-timeout = { period = "10s" }
 #     reference, so it pays the steered cost four times over.
 #   test_heavy_heatmap_times_out_with_504  16.3 s — it exists to exhaust S3's wall-clock
 #     budget, so it is slow by construction and no speedup will change that.
+# Added 2026-08-01 by roadmap unit P13:
+#   mode_path_reports_a_radial_error_even_when_the_density_cap_binds  ~1.9 s release, ~35 s
+#     debug — it pins that the mode path still reports a radial error estimate when
+#     radial_points_for clamps to RADIAL_POINTS_SAFETY_MAX, so it must actually reach that cap:
+#     ~3 × 65 537 radial samples, which is what "the cap binds" MEANS. Slow by construction, in
+#     the same class as test_heavy_heatmap_times_out_with_504; no speedup will change it, and
+#     shrinking the dish does not help because the cost is set by the cap, not by D/λ.
 default-filter = """
 not (
     binary_id(calibrate::cli_full_mode_e2e)
   + test(p12_phi_cap_removed_steered_feed_matches_converged_reference)
   + test(p12_mode_path_radial_convergence_anchors)
   + test(test_heavy_heatmap_times_out_with_504)
+  + test(mode_path_reports_a_radial_error_even_when_the_density_cap_binds)
 )
 """
 
