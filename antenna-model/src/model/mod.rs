@@ -118,7 +118,33 @@ pub mod ray_trace;
 ///   on `dsn_34m` Ka θ=90°, i.e. the constant did not bound the quantity it existed to bound,
 ///   on a served antenna at a served angle. See
 ///   `docs/findings-2026-08-01-p13-pre-gate-retirement.md`.
-pub const PHYSICS_MODEL_VERSION: u32 = 8;
+/// - 9: P14 Bessel accuracy (2026-08-01). Two changes in `model::bessel`, neither a change of
+///   *model*: the Miller downward recurrence now starts an offset that scales with the
+///   turning-point width (`12·x^(1/3)`, derived) instead of a flat 40 orders, and `J₀`/`J₁`
+///   use the convergent ascending series below |x| = 8 instead of a rational fit that was
+///   ~3e-9 absolute and evaluated `J₀(0)` as `1 + 2.83e-9`.
+///
+///   **This bump is bookkeeping, not a warning.** It follows P1b's literal policy — stamp
+///   whenever `gain_physics` changes for identical inputs — and it does change, at the
+///   **~1e-7 dB** level: 2.8e-9 relative in field amplitude at boresight from the `J₀` seed,
+///   and up to 2e-8 relative from the recurrence at the served `MODE_M_MAX = 254`. That is
+///   seven orders inside the mode-truncation budget and further still inside any measurement,
+///   so no reference anchor, oracle cross-check or convergence pin moved. Unlike versions 6–8
+///   there is no served value a reader should go re-examine; what changed is that the
+///   routine's error stopped *growing with argument*, which is what makes raising
+///   `MODE_M_MAX` safe.
+///
+///   **Cost — this one is not free.** The Miller start offset grows 40 → 45/56/71/76 at
+///   `|x|` = 50/100/200/254, and an A/B of the production recurrence at both offsets (release,
+///   200k reps) measures the *sweep itself* **+13.5% to +19.4%**, ~+15% at the served
+///   `MODE_M_MAX = 254`. The served mode path absorbs a fraction of that: P10-perf left ~85% of
+///   a sweep in aperture-plane evaluation rather than the `Jₘ` ladder, bounding the end-to-end
+///   effect at ≲2% — a bound from that published profile, not an end-to-end A/B. Reference
+///   points measured after this change, `dsn_34m` X-band on the mode path: **4.7 / 37.7 /
+///   57.6 ms** at θ = 5° / 45° / 90°. Well inside S3's wall-clock budget, and the full test
+///   suite is unmoved at 227 s. Flagged because this repo tracks mode-path wall clock against
+///   that budget, and a speed-for-accuracy trade should be visible where the accuracy claim is.
+pub const PHYSICS_MODEL_VERSION: u32 = 9;
 
 // Re-export commonly used types
 pub use bessel::{bessel_j0, bessel_j1, bessel_jn};

@@ -2001,16 +2001,22 @@ mod tests {
     ///
     /// The two paths obtain `J₀` from different routines, and have since P10-perf: the Hankel
     /// path calls [`bessel_j0`] directly (it needs one order), while the mode path takes `J₀`
-    /// from `bessel_jn_array`'s ladder. Those disagree by **2.83e-9** near the origin, because
-    /// `bessel_j0`'s Numerical Recipes rational approximation evaluates to `1 + 2.83e-9` at
-    /// `x = 0` where the ladder's normalized recurrence gives exactly 1.
+    /// from `bessel_jn_array`'s ladder. They therefore differ by whatever `bessel_j0`'s own
+    /// error is at the arguments swept here.
     ///
-    /// The disagreement is therefore the *rational approximation's* error, not the mode
-    /// assembly's, and it is bounded by it: 2.83e-9 in field amplitude is 2.5e-8 dB. The
-    /// property this test exists to protect — that the ±m assembly, the `(−j)^m` factors and
-    /// the `2π` normalisation reconstruct the symmetric case — is unaffected by a scale error
-    /// six orders below the tolerance, and would still fail loudly at 1e-8 if any of them were
-    /// wrong (they are wrong by O(1) factors when they are wrong at all).
+    /// Until P14 that was **2.83e-9** even at the origin, where `bessel_j0`'s Numerical
+    /// Recipes rational approximation evaluated to `1 + 2.83e-9` against the ladder's exact 1.
+    /// P14 replaced the |x| < 8 branch with the convergent ascending series, so the two paths
+    /// now agree to ~1e-15 near boresight. The tolerance stays at 1e-8 because the **|x| >= 8**
+    /// branch is untouched and still a ~3e-9-absolute fit, which the wide-angle cases here
+    /// reach — see `bessel::j01_asymptotic_branch_absolute_accuracy_is_the_module_ceiling`.
+    ///
+    /// The disagreement is therefore the *seed routine's* error, not the mode assembly's, and
+    /// is bounded by it: 3e-9 in field amplitude is 2.6e-8 dB. The property this test exists to
+    /// protect — that the ±m assembly, the `(−j)^m` factors and the `2π` normalisation
+    /// reconstruct the symmetric case — is unaffected by a scale error six orders below the
+    /// tolerance, and would still fail loudly at 1e-8 if any of them were wrong (they are wrong
+    /// by O(1) factors when they are wrong at all).
     #[test]
     fn azimuthal_modes_reduce_to_hankel_when_symmetric() {
         let config = large_test_antenna(); // symmetric: feed at focus, asymmetry_factor=1
