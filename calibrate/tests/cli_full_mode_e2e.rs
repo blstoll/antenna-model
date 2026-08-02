@@ -461,17 +461,24 @@ fn cli_full_mode_correction_beats_the_uncorrected_model() {
 /// (see the probe-placement comment in the test below), so their coefficients were never
 /// starved.
 ///
+/// UNCHANGED again at 0.65 dB by roadmap D19 (2026-08-02), which stopped adaptive knot
+/// placement from landing internal knots on the axis bounds. All four probe errors below
+/// reproduced bit-for-bit across that change too, for a reason worth stating: the knots D19
+/// removed were duplicates of a bound, and the basis functions they created had zero-width
+/// support — identically zero everywhere, so they contributed nothing to any evaluation.
+/// D19 shrank the declared coefficient count from 960 to 600 without moving the surface.
+///
 /// What actually limits recovery here is overfitting from an underdetermined fit: the
-/// shipped configuration has 960 coefficients ((4+4)(6+4)(8+4) for 4/6/8 knots at
-/// spline order 4) fitting only 288 measurement points, so the surface can interpolate
-/// every data point almost exactly (`corrected_rmse` 0.0058 dB, see the ceiling assertion
-/// above) while oscillating between them — which is exactly what these off-grid probes
-/// are catching. That is tracked separately from the endpoint defect: the fitter's
+/// shipped configuration has 600 coefficients (6·10·10 after D19) fitting only 288
+/// measurement points, so the surface can interpolate every data point almost exactly
+/// (`corrected_rmse` 0.0058 dB, see the ceiling assertion above) while oscillating between
+/// them — which is exactly what these off-grid probes are catching. That is tracked
+/// separately from the endpoint defect, as roadmap unit **D20**: the fitter's
 /// data-sufficiency check tests `(spline_order+1)^3 = 125` points as the minimum, when the
-/// real requirement is the coefficient count (960 here). See
+/// real requirement is the coefficient count. See
 /// docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md, which records this.
 /// This tolerance can only tighten once that is addressed; it is deliberately left
-/// unchanged by this change.
+/// unchanged by D15 and D19 alike.
 ///
 /// All four probe values reproduce bit-for-bit across debug and release builds and across
 /// repeat runs. 0.65 dB is set with headroom above the measured 0.5928 dB worst case —
@@ -497,14 +504,22 @@ fn cli_full_mode_recovers_the_injected_bias() {
     // unity at every boundary, so it's history, not a live hazard here.
     //
     // Staying interior is still worthwhile post-fix, for a different reason: off-grid
-    // accuracy is limited by the underdetermined fit (960 coefficients, 288 points — see
+    // accuracy is limited by the underdetermined fit (600 coefficients, 288 points — see
     // `BIAS_RECOVERY_TOLERANCE_DB` above), and a probe placed exactly at a boundary would
     // conflate boundary behavior with that interpolation error. Keeping the probes
     // interior keeps this test measuring one thing. Concretely, the fitted frequency knot
-    // vector is [400, 400, 400, 400, 400, 500, 600, 700, 700, 700, 700, 700], so its
-    // topmost span is [600, 700] MHz — every probe's frequency here is <= 570 MHz, clear
-    // of it. The cone axis's topmost span is [20, 24] deg (probes <= 14 deg) and the
-    // clock axis's is [270, 315] deg (probes <= 260 deg).
+    // vector is [400, 400, 400, 400, 500, 600, 700, 700, 700, 700], so its topmost span
+    // is [600, 700] MHz — every probe's frequency here is <= 570 MHz, clear of it. The
+    // cone axis's topmost span is [20, 24] deg (probes <= 14 deg) and the clock axis's is
+    // [270, 315] deg (probes <= 260 deg).
+    //
+    // Those bounds now repeat exactly `order` = 4 times. Until roadmap D19 (2026-08-02)
+    // they repeated 5 times on the frequency and clock axes, because adaptive quantile
+    // placement put an internal knot ON each bound; the extra copy gave the first and last
+    // basis function of those axes a zero-width support, so they were identically zero.
+    // Removing them left every value below unmoved, bit-for-bit — a basis function that is
+    // zero everywhere contributes zero to every evaluation — while dropping the declared
+    // coefficient count from 960 to 600.
     let probes = [
         (450.0_f64, 3.0_f64, 30.0_f64),
         (550.0, 7.0, 120.0),
