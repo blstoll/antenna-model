@@ -1746,8 +1746,35 @@ the other, because they are readable at different moments:
 |---|---|---|
 | Framing or codec only (e.g. bincode → postcard) | **bump** | — |
 | Add / remove / reorder / retype any field reachable from `AntennaCalibration` | **bump** | **bump MAJOR** |
+| A producer starts writing an existing field with a *different meaning* — same bytes, different quantity — layout untouched | — | **bump MAJOR** |
 | Meaning of an existing field documented or clarified, byte layout untouched | — | bump MINOR |
 | Correction-surface fitting improvements, API-layer changes, new sidecar fields | — | — |
+
+The second row was added 2026-08-02 by roadmap **C13**, which is the case the table was
+missing and the case this axis exists for. `feed.position` was written vertex-relative by
+full-mode `calibrate` and focus-relative by everyone else; fixing the producer left the byte
+layout untouched but made the same three `f64`s mean something different from what every
+already-written full-mode artifact means, with no way for a consumer to tell — and serving the
+old meaning costs 27.3 dB. "Documented or clarified" (MINOR, warn-and-load) does not cover it:
+a warning is not enough when the numbers are wrong. Schema went to **3.0**, container stayed
+at 2 — the axes moving independently is the scheme working, not a mistake.
+
+**Stamp the constant, never a literal — and derive test stamps from it too.** The 3.0 bump
+found seven hardcoded copies of the version: three producers writing `"2.0"` by hand
+(`artifact_export`, `boresight_calibration`, `data::repository`), which would have kept
+stamping 2.0 into 3.0 artifacts; three loader tests built on literal `"1.0"`/`"3.0"`/`"2.7"`
+stamps, one of which quietly stopped testing "foreign major" when 3.0 became this build's own
+version; and an endpoint test asserting `"2.0"` against a fixture that takes the builder
+default. All of them now derive from `CALIBRATION_SCHEMA_VERSION`.
+
+**Committed `.bin` fixtures must be carried across a bump.** Two exist —
+`antenna-model/tests/fixtures/calibration_data/test_uncalibrated_{x,s}band_boresight.bin`,
+legacy headerless files the postcard migration already regenerated once. For 3.0 they were
+**restamped, not rewritten**: decoded, `format_version` set, re-encoded, so every other value
+is bit-identical. Check first that the artifact does not carry the defect the bump exists to
+reject — restamping a wrong artifact launders it past the new gate. (For C13 that check is
+"the feed's axial offset is not the focal length"; a lateral offset is legitimate, and one of
+these two fixtures has one.)
 
 A layout change bumps **both**: the schema MAJOR because the meaning changed, and
 the container version because existing files can no longer be decoded. Do not bump

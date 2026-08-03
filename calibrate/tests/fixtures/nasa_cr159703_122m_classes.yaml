@@ -1,0 +1,93 @@
+# Antenna class for the NASA CR-159703 1.22 m prime-focus paraboloid (roadmap unit D14).
+#
+# Schema: AntennaClassRegistry (calibrate/src/antenna_config.rs) — the `--classes-file`
+# INPUT to `calibrate --calibration-mode full`. Same shape as calibrate/antenna_classes.yaml,
+# kept separate because this class exists only to calibrate one report's antenna and has no
+# business appearing in the tool's shipped class list.
+#
+# ============================================================================
+# PROVENANCE — what is published, what is assumed
+# ============================================================================
+#
+# Source: NASA CR-159703, R.E. Collin & L.R. Gabel, "Low sidelobe level low-cost earth
+#         station antennas for the 12 GHz broadcasting satellite service", Sept 1979
+#         (Case Western Reserve University).
+#         https://ntrs.nasa.gov/api/citations/19800004009/downloads/19800004009.pdf
+# Configuration modelled: the 1.22 m dish with the Kumar coaxial-ring hybrid feed, Series C
+#         reshaped surface (report figures 4.22 / 4.37, pages 74 / 86 of the PDF). That is
+#         the best-performing 1.22 m configuration in the report and the one whose H- and
+#         E-plane cuts are both digitized in
+#         antenna-model/tests/fixtures/reference_datasets/sidelobe_data/
+#         nasa_cr159703_pattern_peaks.psv.
+#
+# PUBLISHED (from the report; do not change without changing the citation):
+#   diameter_m  1.22   — spun-aluminium prime-focus paraboloid.
+#   f_over_d    0.3746 — the report gives f = 0.457 m for the 1.22 m dish, so f/D =
+#                        0.457 / 1.22 = 0.374590…, rounded to 4 dp. The PSV header's
+#                        "f/D = 0.38 nominal" is the same number to 2 dp; the focal length
+#                        is the primary figure and is what this is derived from.
+#
+# ASSUMED (chosen here; each one is absorbed by the fitted correction surface, and none is
+# presentable as a measurement):
+#   q_factor    2.4    — cos^q FIELD exponent. The report describes the Kumar feed as
+#                        ~20 dB edge taper. At f/D = 0.3746 the reflector's edge is
+#                        subtended at 2·atan(1/(4·f/D)) = 67.45°, where cos^q costs
+#                        20·q·log10(cos 67.45°) = −8.33·q dB, so a 20 dB illumination taper
+#                        is q = 2.40. If the report's figure instead includes the −3.2 dB
+#                        space attenuation at that edge angle, the equivalent q is 2.02;
+#                        the difference is a ~0.4 dB change in modelled boresight gain and
+#                        lands in the correction surface either way. Full mode does not tune
+#                        q_factor (TunableParameters carries surface RMS and mesh only), so
+#                        this value is used as written.
+#   surface.rms_mm 0.9 — back-derived, not published. The report states 41.4 dBi for this
+#                        configuration against an ideal (πD/λ)² = 43.79 dBi at 12.1 GHz, so
+#                        total efficiency is 0.577; with this file's illumination taper and
+#                        a nominal ~0.9 blockage allowance that leaves Ruze ≈ 0.81, i.e.
+#                        σ ≈ 0.9 mm. Consistent with the report's "residual deviation
+#                        ≤ 1.6 mm" for the Series C reshaped surface (a peak figure, of
+#                        which ~0.9 mm RMS is a plausible fraction). This IS tunable by
+#                        `--tune-parameters`; the D14 pipeline leaves it at nominal so that
+#                        the correction surface carries the whole measured-minus-model
+#                        residual rather than splitting it with the tuner.
+#   mesh               — the CR-159703 dishes are SOLID spun aluminium. The class schema has
+#                        no "solid" option, so a mesh far finer than the wavelength encodes
+#                        it: at 0.2 mm spacing / 0.05 mm wire the inductive-grid reflection
+#                        efficiency is 1 − 1.5e−5 (−0.00007 dB) and the mesh phase term is
+#                        ≤ 0.06° at 12.1 GHz. Both are below every other term in the model by
+#                        orders of magnitude. Do not read these as hardware dimensions.
+#                        (mesh_spacing_mm and wire_diameter_mm are nominally tunable; the
+#                        D14 pipeline does not tune them.)
+#   system_noise_temperature_k 100 — the report publishes GAIN, not G/T; the measurement
+#                        pipeline's unit is G/T. 100 K is a plausible receive-system figure
+#                        for a 12 GHz TVRO terminal and, more importantly, it CANCELS:
+#                        the generator writes g_over_t = gain − 10·log10(T) and the model
+#                        computes G/T = gain − 10·log10(temperature_k) from the same class
+#                        field, so the assumption never reaches a fitted quantity. It must
+#                        stay equal to the `temperature_k` column the generator writes.
+#
+# The class is consumed by `calibrate/src/bin/cr159703_grid.rs` (which builds the physics
+# model from THIS file, so the generator and the calibrator cannot drift) and by
+# `scripts/generate-cr159703-artifact.sh`.
+
+classes:
+  NASA_CR159703_1p22m:
+    class_id: "NASA_CR159703_1p22m"
+    description: "NASA CR-159703 1.22 m prime-focus paraboloid, Kumar hybrid feed (Series C)"
+
+    geometry:
+      diameter_m: 1.22
+      f_over_d: 0.3746 # f = 0.457 m (published)
+
+    feed:
+      q_factor: 2.4 # ~20 dB edge taper at the 67.45 deg edge angle (assumed)
+      phase_center_offset_wavelengths: 0.0
+      asymmetry_factor: 1.0 # symmetric prime-focus feed; E/H asymmetry lives in the correction
+
+    mesh:
+      spacing_mm: 0.2 # solid reflector, encoded as a sub-wavelength mesh (see above)
+      wire_diameter_mm: 0.05
+
+    surface:
+      rms_mm: 0.9 # back-derived from the published 41.4 dBi (assumed)
+
+    system_noise_temperature_k: 100.0 # assumed; cancels in the G/T round trip

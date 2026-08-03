@@ -7,6 +7,7 @@ use crate::data::loader::load_calibration_artifact;
 use crate::data::types::{
     AntennaCalibration, BSplineModel4D, CalibrationMetadata, CalibrationStatus, FeedParameters,
     MeshParameters, PhysicalAntennaConfig, ReflectorGeometry, ValidityRanges,
+    CALIBRATION_SCHEMA_VERSION,
 };
 use crate::error::DataError;
 use parking_lot::RwLock;
@@ -254,7 +255,7 @@ impl CalibrationRepository {
             let metadata = CalibrationMetadata {
                 antenna_name: format!("{} - {}", entry.name, feed_spec.name),
                 calibration_date: "N/A".to_string(),
-                format_version: "2.0".to_string(),
+                format_version: CALIBRATION_SCHEMA_VERSION.to_string(),
                 data_source: "design_specifications".to_string(),
                 // Sentinel: no calibration was fitted, so there is no error metric.
                 // `CalibrationMetadata` is postcard-serialized into the ANTC artifact

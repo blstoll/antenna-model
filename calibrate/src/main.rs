@@ -188,6 +188,76 @@ fn validation_config(
     }
 }
 
+/// The physical parameters stamped into a full-mode artifact.
+///
+/// Tuned values where the tuner produced one, the class nominal otherwise — the same
+/// `unwrap_or` chain [`compute_model_predictions`] uses, so the artifact describes the
+/// configuration the residuals were fitted against.
+///
+/// Split out of `run_calibration` so the one field whose *frame* is not recoverable from
+/// its value — `feed_position_m` — can be pinned by a unit test (roadmap C13).
+///
+/// # What it cannot carry: `asymmetry_factor` (roadmap D23)
+///
+/// [`compute_model_predictions`] fits residuals against a model built with the class's
+/// `feed.asymmetry_factor`, but [`ExportPhysicalParams`] — and the `FeedParameters` it writes
+/// into the artifact — have no such field, so the service rebuilds the feed with the model
+/// default of 1.0. On a class with a non-unity factor the correction surface is therefore
+/// fitted against an **asymmetric** model and applied on top of a **symmetric** one. Two
+/// shipped classes are affected (`GroundStation_13m` at 1.05, `UHF_Array_Element` at 1.1).
+/// It is the same calibrate/service seam as C13 two lines below, and it cannot be closed here:
+/// adding the field changes the postcard layout, so it needs a schema **and** container
+/// version bump of its own. Filed as **D23**; the warning below is the interim honesty.
+fn export_physical_params(
+    class: &calibrate::AntennaClass,
+    tunable_params: &TunableParameters,
+) -> ExportPhysicalParams {
+    if class.feed.asymmetry_factor != 1.0 {
+        warn!(
+            asymmetry_factor = class.feed.asymmetry_factor,
+            class = %class.class_id,
+            "this antenna class has a non-symmetric feed, but the artifact format has no field \
+             for it: the residuals below are fitted against an asymmetric illumination and the \
+             service will serve a symmetric one. See roadmap unit D23 — until it lands, prefer \
+             a class with asymmetry_factor = 1.0 for any artifact that will actually be served."
+        );
+    }
+
+    let focal_length_m = class.geometry.diameter_m * class.geometry.f_over_d;
+    let surface_rms_mm = tunable_params
+        .surface_rms_mm
+        .unwrap_or(class.surface.rms_mm);
+    let mesh_spacing_mm = tunable_params
+        .mesh_spacing_mm
+        .unwrap_or(class.mesh.spacing_mm);
+    let wire_diameter_mm = tunable_params
+        .mesh_wire_diameter_mm
+        .unwrap_or(class.mesh.wire_diameter_mm);
+
+    ExportPhysicalParams {
+        diameter_m: class.geometry.diameter_m,
+        focal_length_m,
+        f_over_d_ratio: class.geometry.f_over_d,
+        surface_rms_mm,
+        // On-axis configuration: feed at the focal point.
+        //
+        // `FeedParameters.position` is the feed's **design offset from the focal point**,
+        // not its vertex-origin position — see the field's doc comment in
+        // `antenna_model::data::types`. "At the focus" is therefore the origin, and this
+        // must NOT be `(0, 0, focal_length_m)`: the service adds this offset to a steering
+        // position that is *already* vertex-origin (`compute_feed_position_from_pointing`
+        // → `to_feed_position_with_bdf` returns `(dx, dy, f + dz)`), so writing the focal
+        // length here placed a full-mode artifact's feed at z ≈ 2f. Measured cost on the
+        // roadmap D14 fixture (1.22 m, f/D 0.375, 12.1 GHz): boresight gain 41.09 → 13.83
+        // dBi, a 27.3 dB phantom axial defocus on every request. Roadmap unit **C13**,
+        // fixed 2026-08-02 under D14 — the unit that first served a full-mode artifact.
+        feed_position_m: (0.0, 0.0, 0.0),
+        q_factor: class.feed.q_factor,
+        phase_center_offset_m: 0.0,
+        mesh: Some((mesh_spacing_mm, wire_diameter_mm)),
+    }
+}
+
 /// Compute physics-model G/T predictions for all measurement points.
 fn compute_model_predictions(
     measurements: &[MeasurementPoint],
@@ -690,28 +760,7 @@ async fn run_calibration(args: Args) -> Result<()> {
     // surface) and write it as the binary artifact. `artifact_metadata` above
     // and `validation_report` only drive the optional `--metadata`/`--report`
     // JSON sidecars below; neither is part of the on-disk binary format.
-    let focal_length_m = class.geometry.diameter_m * class.geometry.f_over_d;
-    let surface_rms_mm = tunable_params
-        .surface_rms_mm
-        .unwrap_or(class.surface.rms_mm);
-    let mesh_spacing_mm = tunable_params
-        .mesh_spacing_mm
-        .unwrap_or(class.mesh.spacing_mm);
-    let wire_diameter_mm = tunable_params
-        .mesh_wire_diameter_mm
-        .unwrap_or(class.mesh.wire_diameter_mm);
-
-    let export_physical = ExportPhysicalParams {
-        diameter_m: class.geometry.diameter_m,
-        focal_length_m,
-        f_over_d_ratio: class.geometry.f_over_d,
-        surface_rms_mm,
-        // On-axis configuration: feed at the focal point.
-        feed_position_m: (0.0, 0.0, focal_length_m),
-        q_factor: class.feed.q_factor,
-        phase_center_offset_m: 0.0,
-        mesh: Some((mesh_spacing_mm, wire_diameter_mm)),
-    };
+    let export_physical = export_physical_params(class, &tunable_params);
 
     let feed_id = args.feed_id.as_deref().unwrap_or("primary");
     let service_calibration = export_full_calibration(
@@ -913,6 +962,46 @@ mod tests {
         assert_eq!(ungated.outlier_threshold_db, gated.outlier_threshold_db);
         assert_eq!(ungated.main_lobe_beamwidths, gated.main_lobe_beamwidths);
         assert_eq!(ungated.first_sidelobe_max_deg, gated.first_sidelobe_max_deg);
+    }
+
+    /// **Roadmap C13.** The artifact's feed position is an offset **from the focal
+    /// point**, so an on-axis feed is the origin — not `(0, 0, f)`.
+    ///
+    /// This is the assertion that had no home: the value lived inline in
+    /// `run_calibration`, and no test served a full-mode artifact, so a frame that
+    /// disagreed with every consumer went unnoticed from the day the exporter was
+    /// written. The service adds this offset to an already-vertex-origin steering
+    /// position, so the old value put the feed a full focal length behind the focus —
+    /// 27.3 dB of boresight gain on the D14 fixture.
+    ///
+    /// The second assertion is the one with teeth: it fails for *exactly* the old value
+    /// on a class whose focal length is non-zero, which a bare `== (0,0,0)` would too,
+    /// but it says why, and it keeps working if the fixture class changes.
+    #[test]
+    fn exported_feed_position_is_focus_relative_not_vertex_relative() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("antenna_classes.yaml");
+        let registry = AntennaClassRegistry::load_from_file(&path).expect("load antenna classes");
+        let class = registry.get_class("DSN_34m").expect("DSN_34m class");
+
+        let physical = export_physical_params(class, &TunableParameters::default_from_class());
+
+        assert_eq!(
+            physical.feed_position_m,
+            (0.0, 0.0, 0.0),
+            "an on-axis feed's design offset from the focal point is the origin"
+        );
+        assert_ne!(
+            physical.feed_position_m.2, physical.focal_length_m,
+            "feed_position_m is being written vertex-relative again (roadmap C13): the \
+             service adds it to a vertex-origin steering position, so this places the feed \
+             at z = 2f"
+        );
+        assert!(
+            physical.focal_length_m > 1.0,
+            "this test only has power on a class with a non-trivial focal length; \
+             DSN_34m's is {} m",
+            physical.focal_length_m
+        );
     }
 
     /// `--cv-folds N` reaches both the surface fit and the validation fold count, and

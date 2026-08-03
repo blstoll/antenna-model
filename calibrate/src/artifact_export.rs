@@ -44,7 +44,7 @@ use antenna_model::data::types::{
     CalibrationMetadataBuilder, CalibrationStatus, FeedParameters as DataFeedParameters,
     MeasurementDensity, MeshParameters as DataMeshParameters, ParameterSource,
     PhysicalAntennaConfigBuilder, ReflectorGeometry as DataReflectorGeometry,
-    ValidityRangesBuilder,
+    ValidityRangesBuilder, CALIBRATION_SCHEMA_VERSION,
 };
 
 use antenna_model::model::PHYSICS_MODEL_VERSION;
@@ -398,7 +398,7 @@ pub fn export_full_calibration(
     let metadata = CalibrationMetadataBuilder::default()
         .antenna_name(antenna_name.to_string())
         .calibration_date(chrono::Utc::now().to_rfc3339())
-        .format_version("2.0".to_string())
+        .format_version(CALIBRATION_SCHEMA_VERSION.to_string())
         .data_source(data_source)
         .rmse_db(rmse_db)
         .r_squared(r_squared)

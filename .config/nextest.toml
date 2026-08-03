@@ -53,9 +53,18 @@ slow-timeout = { period = "10s" }
 #     ~3 × 65 537 radial samples, which is what "the cap binds" MEANS. Slow by construction, in
 #     the same class as test_heavy_heatmap_times_out_with_504; no speedup will change it, and
 #     shrinking the dish does not help because the cost is set by the cap, not by D/λ.
+# Added 2026-08-02 by roadmap unit D14, on review:
+#   binary_id(calibrate::cli_full_mode_real_data_e2e) — the real-anchored full-mode e2e. No
+#     single test crosses the 10 s marker (measured 2.6–5.4 s, 7.6 s for the binary), so the
+#     per-test rule did not catch it, but the binary is process-per-test and every one of its
+#     10 tests re-runs the whole pipeline: generate a 3240-row grid, then a full `calibrate`
+#     run. That is ~48 s of CPU for one binary — the `OnceLock` in `pipeline()` shares the work
+#     under `cargo test` and shares nothing under nextest. Excluded whole-binary for the same
+#     reason `cli_full_mode_e2e` is: it keeps new e2e cases out of the inner loop by default.
 default-filter = """
 not (
     binary_id(calibrate::cli_full_mode_e2e)
+  + binary_id(calibrate::cli_full_mode_real_data_e2e)
   + test(p12_phi_cap_removed_steered_feed_matches_converged_reference)
   + test(p12_mode_path_radial_convergence_anchors)
   + test(test_heavy_heatmap_times_out_with_504)

@@ -2127,6 +2127,16 @@ mod tests {
     /// The OLD (angular) code also returned ~(0, 0, 0) for this case because
     /// `feed_az - refl_az ≈ 0` — so this test alone does not discriminate.
     /// See `test_feed_offset_is_meters_not_degrees` for the discriminating case.
+    ///
+    /// It *does* discriminate on the frame of the artifact's design offset, and that is
+    /// the second thing it now guards (roadmap **C13**, closed 2026-08-02):
+    /// `create_test_calibration` writes `position: (0, 0, 0)` for an on-axis feed —
+    /// focus-relative, the convention `antennas.yaml` and the boresight producer use —
+    /// against a 5 m focal length, so a vertex-relative artifact would land here at
+    /// `z = 5.0` and blow the 0.05 m bound. This is the design-spec producer's half of
+    /// C13's "one test per producer"; the `calibrate` half is
+    /// `exported_feed_position_is_focus_relative_not_vertex_relative` (unit) and the
+    /// served assertion in `calibrate/tests/cli_full_mode_real_data_e2e.rs` (end to end).
     #[test]
     fn test_feed_offset_reported_in_meters_zero_for_boresight() {
         let mut repo = CalibrationRepository::new();

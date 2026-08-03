@@ -151,9 +151,27 @@ G1 ─┬─ G2 ── G3
     │      answer probe 0.5928 -> 0.1226 dB.  │
     │      Cost: calibrate full profile       │
     │      87 s -> 505 s (dev loop untouched).│
-    │  D14 open (filed 2026-07-29: NASA-      │
-    │      anchored full-mode artifact;       │
-    │      also needs D2, D19, D20; feeds D9) │
+    │  D14 DONE 2026-08-02 (branch feat/d14-  │
+    │      cr159703-real-anchored-artifact):  │
+    │      NASA CR-159703 1.22 m hybrid fill  │
+    │      -> full-mode artifact -> SERVED     │
+    │      through compute_gain_from_request. │
+    │      First test in the repo to serve a  │
+    │      full-mode artifact, and it hit C13 │
+    │      immediately: feed written vertex-  │
+    │      relative, served at z=2f, -27.3 dB.│
+    │      C13 FIXED here (it blocked D14     │
+    │      outright). Served boresight is     │
+    │      within 0.09 dB of the report's     │
+    │      published 41.4 dBi; 19 digitized   │
+    │      peaks 11.58 -> 3.19 dB RMS.        │
+    │      D9's exemplar script ships with it.│
+    │      FILED: D21 (the 2deg cone knot     │
+    │      floor cannot resolve lambda/D=1.16 │
+    │      deg -- the residual 3.19 dB) and   │
+    │      D22 (CV folds are contiguous slices│
+    │      of a grid-ordered file: 10.07/0.56/│
+    │      0.12/0.64/10.86 dB).               │
     └─ (Phases 1–3 done) ─ D4 ─ D7
 Superseded by C8 (do not implement): S7, C5, C6
 Phase 5: F1..F9 (F8 done) gated on register rows (P3, P5/F4, F5, D9, F9); P1 + C8 DECIDED 2026-07-08;
@@ -2508,7 +2526,37 @@ closes the missing-coverage gap noted above. `examples/responses/antenna_details
 was **not** modified — its `null`s were already correct, which is exactly what motivated
 option 2 over option 1. See `docs/domain-contract.md`, "Resolved by design 2026-07-28 (C12)".
 
-### C13 — `design_feed_offset_m`'s origin is producer-dependent (vertex vs focus) — Effort: S/M
+### C13 — `design_feed_offset_m`'s origin is producer-dependent (vertex vs focus) — Effort: S/M — ✅ **DONE 2026-08-02**
+
+**✅ DONE 2026-08-02**, under **D14**, which is what forced it: D14 is the first unit to serve a
+full-mode artifact, and "latent" stopped being true the moment it did. Fixed as recommended
+(**option 1**): `calibrate` writes the offset focus-relative, `(0.0, 0.0, 0.0)` for an on-axis
+feed, matching `antennas.yaml`, the boresight producer, the API docstrings and `evaluator.rs`'s
+arithmetic. Nothing in the service moved.
+
+**It was not a reporting defect.** Filed as one — a `design_feed_offset_m` that "means something
+different depending on which tool produced the artifact" — but the field feeds the aperture
+phase, so the served *gain* was wrong too: measured on D14's fixture (1.22 m, f/D 0.375,
+12.1 GHz), a full-mode artifact served **13.83 dBi at boresight against 41.09 dBi focused —
+−27.3 dB**, with the response also reporting `physical_feed_offset_m.z ≈ f` and three
+edge-case warnings nobody was reading.
+
+Three guards, one per place the frame can be got wrong, exactly as this unit asked for:
+
+- `calibrate/src/main.rs::exported_feed_position_is_focus_relative_not_vertex_relative` — unit
+  test on the value itself (the assembly moved into `export_physical_params` so it could have
+  one), asserting both `(0,0,0)` *and* `!= focal_length`, on a class whose focal length is
+  non-trivial.
+- `evaluator::test_feed_offset_reported_in_meters_zero_for_boresight` — the design-spec
+  producer's half; its 0.05 m bound against a 5 m focal length already had the power, and now
+  says so.
+- `calibrate/tests/cli_full_mode_real_data_e2e.rs::served_feed_sits_at_the_focus` — end to end
+  through the real binary and the real service path.
+
+The origin is now documented **on the field** (`antenna_model::data::types::FeedParameters::
+position`), which is where a third producer would look.
+
+---
 
 **The defect.** The API documents this field as the feed's offset **from the focal point** —
 `antenna-model/src/api/schemas.rs:803` (the `FeedInfo` docstring) and
@@ -4170,7 +4218,110 @@ and says otherwise" question.
   gate axis is load-bearing for it (full mode always attaches a correction, so its gates are
   off on both sides).
 
-### D14 — Real-anchored full-mode artifact: NASA CR-159703 hybrid fill — Effort: M/L
+### D14 — Real-anchored full-mode artifact: NASA CR-159703 hybrid fill — Effort: M/L — ✅ **DONE 2026-08-02**
+
+**✅ DONE 2026-08-02**, branch `feat/d14-cr159703-real-anchored-artifact`. Built as approved:
+the 1.22 m dish's digitized H- and E-plane cuts anchor a model-filled 3240-row grid, the real
+`calibrate` binary fits it, and the artifact is served through
+`compute_gain_from_request` — **the first test in the repository to serve a full-mode
+artifact at all**.
+
+**What shipped**
+
+| piece | where |
+|---|---|
+| antenna class + what in it is published vs assumed | `calibrate/tests/fixtures/nasa_cr159703_122m_classes.yaml` |
+| hybrid-fill generator (reads the committed PSV, writes the grid + a summary JSON) | `calibrate/src/bin/cr159703_grid.rs` |
+| CLI + served-path e2e, 10 tests | `calibrate/tests/cli_full_mode_real_data_e2e.rs` |
+| D9's worked generation path | `scripts/generate-cr159703-artifact.sh` |
+
+**Measured, all on 2026-08-02:**
+
+- Served **boresight gain 41.3065 dBi against the report's published 41.4 dBi (−0.0935 dB)** —
+  inside the absolute anchor's own 0.5 dB uncertainty, and the assertion with the most power
+  against C13 below.
+- Over the **19 digitized peaks**: uncorrected model 11.58 dB RMS → served calibrated
+  **3.19 dB RMS (3.6×)**, closer at **17 of 19**. The two exceptions are the two rows the
+  digitization itself annotates as spikes rather than lobes (−3.6° H, −3.2° E), where the
+  uncorrected model already agrees to ~1.5 dB and there is nothing to improve.
+- Fit reproduces the fill at **0.0272 dB RMSE** over 3240 points against 960 coefficients, and
+  the **served correction reproduces the injected residual to 0.24 dB worst case** (0.05 dB
+  away from the fill's hold-last kinks).
+- `calibrate`'s model-only RMSE equals the generator's injected-residual RMS to four decimals
+  (**11.0266 dB** both sides) — the D17 question ("do the two sides evaluate the same model?")
+  asked one seam further out, and now pinned.
+
+**The blocker nobody had filed: C13.** Serving a full-mode artifact for the first time hit
+roadmap unit **C13** immediately — `calibrate` wrote the feed's design offset *vertex*-relative
+(`(0, 0, f)`) while the service adds that field to an already-vertex-origin steering position,
+so the served feed sat at `z ≈ 2f`. Measured cost on this geometry: **boresight gain 41.09 →
+13.83 dBi, −27.3 dB**, on every request. C13 was recorded as "latent behind D9, still open" and
+its own text said "D9 and this unit must land together or D9 ships the bug"; D14 *is* D9's
+exemplar, so it was a hard blocker and is **fixed here** (option 1, focus-relative), with the
+origin now stated on `data::types::FeedParameters::position` and one test per producer.
+
+**Review pass, 2026-08-02.** Eight findings, all verified, all real. Four fixed here — the test
+binary moved to the slow tier (a per-test 10 s marker cannot see a per-binary cost that nextest
+pays 10 times over); the generator now rejects a non-positive `uncertainty_db` at entry instead
+of turning it into `inf` weights and NaN coefficients; the values the test restates from the
+generator are pinned against the summary JSON; and the script's `--validate`/`--metadata`
+argument set, which no test ran despite both files claiming otherwise, is now covered. Three
+more became the fixes and filings below (**C13's version axis**, **D22's fold-abort diagnosis**,
+**D23**). The one that most deserves recording: **the schema version was not bumped for C13**,
+which is precisely the case the two-axis scheme exists for — same bytes, different meaning, no
+way for a consumer to tell — so `CALIBRATION_SCHEMA_VERSION` is now **3.0** and pre-fix
+artifacts are rejected rather than served 27 dB low.
+
+The bump was cheap to make and expensive to *verify*, which is the part worth recording. It
+turned up **seven places that had hardcoded the version instead of deriving it**: three
+producers stamping the literal `"2.0"` into artifacts (`artifact_export`,
+`boresight_calibration`, `data::repository`) that would have kept stamping 2.0 into 3.0
+artifacts; three loader tests written against literal `"1.0"`/`"3.0"`/`"2.7"` stamps, one of
+which silently stopped testing "foreign major" the moment 3.0 became this build's own version;
+and an endpoint test asserting `"2.0"` against a fixture that takes the builder default. All
+now derive from the constant. It also turned up the claim in this closeout's first draft that
+"no artifact ships in-repo" — **two do**: the legacy headerless
+`test_uncalibrated_{x,s}band_boresight.bin` fixtures, which were **restamped rather than
+rewritten** (decode → set `format_version` → re-encode) after checking neither carried the
+vertex-relative feed position, since restamping one that did would have laundered a wrong
+artifact past the gate the bump exists to close. One of them carries a 5 cm *lateral* design
+offset, a useful reminder that C13's invariant is "the axial component is not the focal
+length", not "the offset is zero".
+
+**Filed, not fixed** — three, all measured, none in this unit's charter:
+
+- **D21 — the correction surface's angular knot floors are absolute, the pattern scale is
+  `λ/D`.** This antenna's lobes are 1.16° apart against a 2° minimum cone knot spacing, so the
+  digitized peaks deviate from the smoothest representable curve by up to 8.42 dB and *that* is
+  the 3.19 dB residual above, not fit error. Per this unit's gotcha it is reported rather than
+  budgeted away silently: `docs/findings-2026-08-02-correction-surface-angular-resolution.md`.
+- **D22 — cross-validation assigns folds as contiguous slices of a grid-ordered file**, so the
+  edge folds hold out a whole frequency slab and score a frequency *extrapolation*: fold RMSEs
+  10.07 / 0.56 / 0.12 / 0.64 / **10.86** dB against an in-sample 0.027 dB.
+  `docs/findings-2026-08-02-cross-validation-fold-assignment.md`. A second defect in the same
+  function was filed with it on review — since D20, `--validate` can *abort artifact production*
+  on a dataset that fits fine without it, because a fold trains on `(1 − 1/folds)` of the grid.
+  The semantics are D20's to revisit; the diagnosis was fixed here.
+- **D23 — the artifact has no field for `asymmetry_factor`**, so on a class with a non-unity
+  feed (`GroundStation_13m` 1.05, `UHF_Array_Element` 1.1 — D12's own fixture class) the
+  correction is fitted against an asymmetric illumination and served on a symmetric one. Found
+  by the review as C13's sibling, two lines away in the same function; it needs a postcard
+  layout change, so it could not ride C13's fix. Interim: `export_physical_params` warns.
+
+**Cost.** No test crosses D18's 10 s marker (slowest 5.4 s), which is why the binary was first
+left in the dev inner loop — wrongly: nextest is process-per-test, so all 10 tests re-run the
+grid generation and the `calibrate` run, ~48 s CPU for the binary (+5.6 s wall here, far worse
+on a slower machine). **Moved to the slow tier on review**, whole-binary, alongside
+`cli_full_mode_e2e`; see D18 for the policy gap that let a per-test marker miss a per-binary
+cost.
+
+**What this dataset is not.** The grid is the repository's own physics model plus a
+measured-minus-model residual trend; only the residual is real, and only at 19 angles. Every
+fabrication is listed in `cr159703_grid`'s `FABRICATIONS`, echoed on every run, copied into the
+summary JSON, and repeated in the class fixture and the script header. It must never be quoted
+as measured data.
+
+---
 
 **Filed 2026-07-29; approach approved by the maintainer 2026-07-29** (register row D14).
 The same data assessment concluded **no digitized dataset can drive full-mode fitting** —
@@ -4286,6 +4437,23 @@ changes *how often tests get run*, which is a correctness input, not a comfort.
   is the first candidate to return once task 2 shrinks the integration-test class around it.
 - **Depends on:** nothing. **Coupled to:** P10-perf (owns the flake fix and the two heaviest
   physics tests' future cost).
+- **Slow tier grew 2026-08-02 (D14), on review — and the per-test rule is why it took a
+  reviewer.** `calibrate::cli_full_mode_real_data_e2e` was first placed in the **dev** tier
+  because no single test crosses the 10 s marker (measured 2.6–5.4 s each, 7.6 s for the
+  binary, +5.6 s on the loop: 102.1 → 107.8 s wall, same session). That reasoning applied this
+  unit's policy exactly as written and still got it wrong: **the marker is per test and the
+  cost is per binary.** nextest is process-per-test, so the `OnceLock` that shares the pipeline
+  under `cargo test` shares nothing here — all 10 tests re-run a 3240-row grid generation plus a
+  full `calibrate` run, ~48 s of CPU, and a reviewer on a slower machine saw it dominate the
+  loop by orders more than the +5.6 s measured here. Now excluded whole-binary, like
+  `cli_full_mode_e2e`.
+  **Policy gap this exposes, for whoever picks up this unit:** "a test crossing 10 s" is not the
+  quantity that matters for an e2e binary whose fixture cost is paid per process. The rule wants
+  a second clause — a *binary* CPU budget, or a marker on setup shared through `OnceLock`, which
+  is precisely the pattern that looks free under `cargo test` and is not.
+  **Note the baseline:** this session measured the pre-existing dev loop at 102.1 s, not the
+  85.9 s recorded on 2026-08-01, so the 90 s budget is already breached by something other than
+  this addition — re-measure on the reference machine before acting on it.
 - **Slow tier grew 2026-08-02 (D20), by decision.** `calibrate`'s `full`-profile suite went
   **87 s → ~505 s**: D20 made the fitter reject underdetermined systems, and the maintainer's
   call was to grow the synthetic fixture to the production knot configuration (288 → 1728
@@ -4504,6 +4672,119 @@ The real check has to run after `generate_knot_vector`, where the count is known
   If tightening the tolerance exposes a *different* limiting factor, that is a finding to file,
   not a number to widen.
 - **Depends on:** D19 (which changes the coefficient count this checks). **Blocks:** D14.
+
+### D21 — The correction surface's angular knot floors are absolute; the pattern scale is λ/D — Effort: M
+
+**Filed 2026-08-02 by D14**, the first unit to fit a correction surface to a real antenna's
+measured sidelobe structure. Full analysis and the option trade:
+`docs/findings-2026-08-02-correction-surface-angular-resolution.md`.
+
+`main.rs::surface_fitting_params` ships `min_knot_spacing_econe = 2.0°` and
+`min_knot_spacing_eclock = 5.0°` for every antenna, while the angular scale a pattern varies on
+is `λ/D` — **0.06° (dsn_34m X-band) to 5.4° (UHF_Array_Element at 400 MHz)** across the
+antennas already in the tree. Only the broad-beam UHF class is resolved; `gs_3.7m` X-band is
+under-resolved 7×, `dsn_34m` X-band 67×.
+
+**Measured on D14's fixture** (1.22 m at 12.1 GHz, `λ/D = 1.16°`): the 19 digitized peaks
+deviate from the smoothest curve the shipped knot spacing can carry by up to **8.42 dB**, and
+the served calibrated pattern reproduces them at **3.19 dB RMS** (against 11.58 dB uncorrected)
+with two peaks where the correction makes the answer *worse* than raw physics. The fit itself is
+fine — 0.027 dB in sample — which is the point: **in-sample RMSE cannot see this**, because a
+grid sampled no finer than the knots carries no structure the knots cannot follow. Only a
+comparison against something off-grid exposes it.
+
+- **Options:** (1) derive the floors from `λ/D` (≥2 knots per lobe period), which needs the
+  fitter to know the geometry and forces a much denser dataset via D20's sufficiency check;
+  (2) keep the floors and *report* the mismatch at fit time (warn or refuse); (3) document the
+  claim as envelope-only. **Recommended: 2 now, 1 as the real fix.**
+- **Exit criteria:** an artifact fitted for an antenna whose `λ/D` the knots cannot resolve says
+  so, in the report and in the artifact's own metadata; if option 1 is taken, D14's anchor RMS
+  and `MIN_ANCHORS_IMPROVED` are re-measured and tightened (this unit exists to move them).
+- **Gotcha:** D12's fixture comment already records the symptom from the other side — a
+  narrow-beam class "the fitter's 2° minimum E-cone knot spacing cannot represent" — and the
+  response was to pick a broader-beam antenna for the fixture. Do not let this unit's fix be
+  another fixture choice.
+- **Depends on:** D20 (a finer surface needs the sufficiency check that now exists).
+  **Coupled to:** D9 — this decides what a shipped artifact can promise off the main lobe.
+
+### D22 — Cross-validation folds are contiguous slices of a grid-ordered file — Effort: S
+
+**Filed 2026-08-02 by D14.** Full analysis:
+`docs/findings-2026-08-02-cross-validation-fold-assignment.md`.
+
+`validator.rs::perform_cross_validation` takes fold `k` as rows `[k·n/K, (k+1)·n/K)`.
+Measurement files are grid-ordered (frequency-major for both D12's fixture and D14's
+generator, and for any real swept measurement), so the first and last folds hold out an entire
+frequency slab and the fit must **extrapolate past its own knots** to score them. Measured on
+D14's 3240-row artifact at `--cv-folds 5`: **10.0688 / 0.5600 / 0.1223 / 0.6436 / 10.8570 dB**,
+reported as a mean of 4.4503 ± 4.9187 dB against an in-sample 0.0272 dB.
+
+The reported figure is therefore neither generalization error nor a deliberate extrapolation
+test, but a mixture whose proportions depend on how the input file happened to be sorted —
+re-sorting the same measurements changes it. It is also the pipeline's headline quality claim
+for anyone running `--validate`.
+
+- **Options:** (1) strided assignment `i % K == k` (one line, deterministic, no RNG; leans
+  optimistic on a dense grid because a fold's neighbours are all in training); (2) seeded
+  shuffle; (3) keep blocked folds but *declare* them, with the block axis chosen deliberately
+  rather than inherited from row order; (4) independent of those — surface the per-fold values,
+  since a mean alone hid a 100× spread. **Recommended: 1 + 4.**
+- **Exit criteria:** fold assignment is a stated design choice with the reason in the code; the
+  D14 artifact's fold RMSEs are re-measured; the reported summary carries the spread.
+- **Gotcha:** this is the third defect in this function (D10 fixed the fold refit params and an
+  unbounded nested recursion). Whatever lands, keep D10's `without_nested_cross_validation`
+  contract intact.
+- **Depends on:** nothing. **Coupled to:** D9 (an artifact's reported CV number is part of what
+  ships with it).
+- **Second defect in the same function, filed with this one (2026-08-02, D14 review):**
+  since D20 an underdetermined fit is a hard error, and a fold refits on `(1 − 1/folds)` of the
+  data, so **`--validate` can remove an artifact that the same command without it produces**.
+  A 1100-point dataset against the shipped 960 coefficients fits on the whole set and fails on
+  an 880-point training split; the run aborts before the artifact is written. Whether that is
+  right is D20's call to revisit — a fold that cannot be fitted is real information — but the
+  *diagnosis* was unusable and is fixed: the fold refit now reports which fold, the size of its
+  training split, and the size of the full set (`validator.rs`, pinned by
+  `a_fold_refit_failure_names_the_fold_and_both_point_counts`). The remaining question for this
+  unit or D20: should a fold failure downgrade cross-validation to a warning and still ship the
+  artifact, or stay fatal?
+
+### D23 — The artifact cannot carry `asymmetry_factor`, so calibrate fits one model and the service serves another — Effort: M
+
+**Filed 2026-08-02 by D14's review.** Same seam as **C13**, two lines away in the same function,
+and found the same way: by asking what `calibrate` knows that the artifact does not.
+
+`compute_model_predictions` builds the fitting model with the antenna class's
+`feed.asymmetry_factor` (`FeedParametersBuilder::asymmetry_factor`), which modulates the
+effective q-factor with `cos 2φ'` and routes the integrator down the **azimuthal-mode** path.
+`ExportPhysicalParams` and `data::types::FeedParameters` have no such field, so
+`service::evaluator` rebuilds the feed without it and `FeedParametersBuilder` defaults it to
+**1.0** (`model/geometry.rs`), i.e. a symmetric feed on the **symmetric** integrator branch.
+The residual surface is therefore fitted against one illumination and applied on top of another.
+
+- **Reach:** two of the five shipped classes — `GroundStation_13m` (1.05) and
+  `UHF_Array_Element` (1.1, which is D12's fixture class). D14's own class is 1.0, which is why
+  its served comparisons hold. Latent in the same sense C13 was — no `.bin` ships (D9) — and it
+  stops being latent for exactly the same reason.
+- **Size of the error: not yet measured.** Doing so is task 1: evaluate the same geometry with
+  `asymmetry_factor` 1.1 versus 1.0 across the D12 fixture's (θ, φ) grid. It is a φ-dependent
+  gain difference, so it will not show up in a boresight check.
+- **Why it cannot ride a doc fix:** adding the field changes the postcard byte layout, so it
+  needs a schema MAJOR **and** an `ANTC_ARTIFACT_VERSION` bump — the paired bump
+  `CALIBRATION_SCHEMA_VERSION`'s docs describe. **Sequencing note:** C13 just bumped the schema
+  to 3.0 (meaning-change, layout unchanged) on 2026-08-02. If this unit lands before any
+  artifact ships, it can bump both axes once more at no real cost; the two bumps are only
+  wasteful if someone has artifacts in between.
+- **Open question for the maintainer:** the design-spec producer has no asymmetry field either
+  (`DesignSpecs::FeedSpecs`), so boresight artifacts would write 1.0. Should asymmetry be a
+  *declared* design property, a *tuned* one (it is not in `TunableParameters` today), or both?
+- **Interim mitigation, landed with the filing:** `export_physical_params` now `warn!`s when the
+  class carries a non-unity factor, naming this unit — the "never be silent about what the
+  model is not carrying" rule the integrator units settled on.
+- **Exit criteria:** the field round-trips producer → artifact → served model; a served gain on
+  a non-unity class matches the model calibrate fitted against, pinned per producer the way C13
+  now is; both version axes bumped in one step.
+- **Depends on:** nothing. **Coupled to:** D9 (must land before any artifact for an affected
+  class ships), D2 (owns the version-axis procedure).
 
 ---
 

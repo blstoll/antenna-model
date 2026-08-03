@@ -47,10 +47,23 @@ pub enum CorrectionSurfaceError {
     #[error("Insufficient data for fitting: need at least {min_required}, got {actual}")]
     InsufficientData { min_required: usize, actual: usize },
 
+    /// The fitted system has more coefficients than data points (roadmap D20).
+    ///
+    /// The remediation text says "measurements" first and names the knot counts second, in
+    /// that order deliberately: the knot counts have **no CLI flag**. Full mode's are a
+    /// private local in `calibrate/src/main.rs::surface_fitting_params` and boresight mode's
+    /// are fixed by its axis construction, so "reduce the knots" is a code change, while
+    /// supplying more data is something the caller can actually do. The message therefore
+    /// states the number of points required rather than leaving it to be inferred from the
+    /// coefficient count, and warns about the cross-validation multiplier — a training split
+    /// is what has to clear the count, not the whole set.
     #[error(
         "Underdetermined fit: {n_coefficients} B-spline coefficients \
-         ({n_freq}x{n_cone}x{n_clock}) against {n_points} data points. Reduce the knot \
-         counts (num_knots_frequency/econe/eclock) or supply more measurements."
+         ({n_freq}x{n_cone}x{n_clock}) against {n_points} data points. Supply at least \
+         {n_coefficients} measurements (and at least {n_coefficients} in every \
+         cross-validation *training* split, i.e. ~{n_coefficients} / (1 - 1/folds) overall \
+         when --validate is used), or reduce the knot counts — which are compile-time, in \
+         calibrate/src/main.rs::surface_fitting_params, not a CLI flag."
     )]
     UnderdeterminedFit {
         n_coefficients: usize,

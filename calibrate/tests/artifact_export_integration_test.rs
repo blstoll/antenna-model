@@ -6,6 +6,7 @@
 //! the service loader (`antenna_model::data::loader::load_calibration_artifact`).
 
 use antenna_model::data::loader::load_calibration_artifact;
+use antenna_model::data::types::CALIBRATION_SCHEMA_VERSION;
 use calibrate::artifact_export::{export_full_calibration, ExportPhysicalParams};
 use calibrate::correction_surface::{fit_correction_surface, CorrectionSurfaceParams};
 use calibrate::parser::MeasurementPoint;
@@ -107,7 +108,7 @@ fn test_full_export_loads_via_service() {
 
     assert_eq!(loaded.antenna_id, "integ_antenna");
     assert_eq!(loaded.feed_id, "x_band");
-    assert_eq!(loaded.metadata.format_version, "2.0");
+    assert_eq!(loaded.metadata.format_version, CALIBRATION_SCHEMA_VERSION);
 
     let correction = loaded
         .correction_surface
