@@ -692,10 +692,14 @@ fn full_mode_artifact_loads_and_presents_as_calibrated() {
 /// without**. This grid is sized to clear it either way (3240 points, 2592 per training split,
 /// 960 coefficients) — that is the property being pinned.
 ///
-/// The cross-validation *numbers* are a known defect and are pinned as one: folds are
-/// contiguous slices of a grid-ordered file, so the edge folds hold out a whole frequency slab
-/// and score an extrapolation. Roadmap **D22**; when it lands, the spread assertion below
-/// should fail and be inverted.
+/// The cross-validation numbers used to be a known defect pinned as one — folds were
+/// contiguous slices of a grid-ordered file, so the edge folds held out a whole frequency slab
+/// and scored an extrapolation. **Roadmap D22 landed 2026-08-03 and the pin is inverted**, as
+/// its own comment instructed: strided folds put this artifact's five fold RMSEs at
+/// 0.0286 / 0.0312 / 0.0305 / 0.0602 / 0.0458 dB, where they were
+/// 10.0688 / 0.5600 / 0.1223 / 0.6436 / 10.8570. The worst fold went from **370× the in-sample
+/// RMSE to 2.2×**, which is what a cross-validation figure is supposed to look like on a
+/// surface that interpolates well.
 #[test]
 fn the_scripts_validated_run_produces_an_artifact() {
     let run = pipeline();
@@ -759,23 +763,47 @@ fn the_scripts_validated_run_produces_an_artifact() {
     let best = values.iter().cloned().fold(f64::INFINITY, f64::min);
     println!("fold RMSEs {values:?}, in-sample corrected {corrected:.4} dB");
 
-    // Known-defect pin (D22), stated as one. Measured 2026-08-02: 10.07 / 0.56 / 0.12 / 0.64 /
-    // 10.86 dB against an in-sample 0.027 dB — the two *edge* folds hold out a whole frequency
-    // slab and so score an extrapolation, while the middle fold reports the surface's real
-    // interpolation error. A fix that makes folds representative collapses the worst fold onto
-    // the in-sample figure; that is a *pass* for the pipeline and a failure here, and the right
-    // response is to invert this assertion, not to widen it.
+    // **D22's inverted pin** (2026-08-03). Every fold must now score near the in-sample RMSE,
+    // because a strided fold's training set spans every value of every axis and so scores an
+    // interpolation rather than an extrapolation past the fitted knots.
     //
-    // The bar is on the worst fold against a fixed dB threshold rather than on the
-    // worst/best *ratio*: a ratio couples two independently moving numbers, so an unrelated
-    // change to the middle fold could fail it for no reason. Anything above 1 dB here is two
-    // orders above the in-sample RMSE and can only be the extrapolation.
+    // The bar is on the worst fold against a fixed dB threshold rather than on the worst/best
+    // *ratio*: a ratio couples two independently moving numbers, so an unrelated change to
+    // one fold could fail it for no reason. 0.5 dB is an order below the smallest number the
+    // old blocked assignment produced on its edge folds (0.56 dB — and its worst was 10.86),
+    // so a regression to contiguous slices cannot slip under it, while sitting a comfortable
+    // 8× above the 0.0602 dB measured here.
+    const WORST_FOLD_MAX_DB: f64 = 0.5;
     assert!(
-        worst > 1.0,
-        "no cross-validation fold shows D22's contiguous-slab signature any more (folds \
-         {values:?}, worst {worst:.4} dB, best {best:.4} dB, in-sample {corrected:.4} dB). If \
-         D22 has landed, invert this pin and record the new fold RMSEs; if it has not, \
-         something else changed the fold assignment."
+        worst < WORST_FOLD_MAX_DB,
+        "a cross-validation fold is scoring an extrapolation again (folds {values:?}, worst \
+         {worst:.4} dB, best {best:.4} dB, in-sample {corrected:.4} dB). Strided folds \
+         measured 0.0286 / 0.0312 / 0.0305 / 0.0602 / 0.0458 dB on 2026-08-03; the blocked \
+         assignment D22 replaced gave 10.07 / 0.56 / 0.12 / 0.64 / 10.86. Check \
+         validator::perform_cross_validation's fold assignment first."
+    );
+
+    // The whole point of striding is that no fold is *special*. Under the blocked assignment
+    // the spread was 89× (0.12 to 10.86); requiring the worst to stay within an order of
+    // magnitude of the best is what distinguishes "every fold interpolates" from "they all
+    // happen to be small today".
+    assert!(
+        worst < 10.0 * best,
+        "fold RMSEs still show two populations (worst {worst:.4} dB vs best {best:.4} dB, \
+         folds {values:?}) — strided folds should all be scoring the same kind of question"
+    );
+
+    // Cross-validation must have completed: this grid is sized so every training split clears
+    // the coefficient count (2592 against 960). Since D22 a fold failure is recorded rather
+    // than fatal, so without this the test would pass on a run where no fold was scored at all.
+    let failed = report["cross_validation"]["failed_folds"]
+        .as_array()
+        .map(|f| f.len())
+        .unwrap_or(0);
+    assert_eq!(
+        failed, 0,
+        "every fold must refit: this grid is sized for it (3240 points, 2592 per training \
+         split, 960 coefficients). Report:\n{report:#}"
     );
 }
 

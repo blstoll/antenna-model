@@ -308,7 +308,10 @@ impl BoresightObjectiveFunction {
             .at_focus(self.design_specs.reflector.focal_length_m)
             .q_factor(params.q_factor)
             .phase_center_offset(feed_spec.phase_center_offset_m)
-            .asymmetry_factor(1.0) // Default
+            // The declared design value, not a hardcoded 1.0 — the tuner must minimise
+            // its objective against the same model the artifact will be served with
+            // (roadmap D23; same rule D17 established for the integration gates).
+            .asymmetry_factor(feed_spec.asymmetry_factor)
             .build()
             .context("Failed to build feed parameters")?;
 
@@ -728,6 +731,9 @@ pub fn build_calibration_artifact(
         phase_center_offset_m: feed_spec.phase_center_offset_m,
         // deliberate defocus is service-config only; not exposed by the calibrate CLI
         axial_defocus_m: 0.0,
+        // Roadmap D23: the design spec's declared value, matching what
+        // `compute_predictions` tuned against.
+        asymmetry_factor: feed_spec.asymmetry_factor,
     };
 
     // Build mesh parameters with tuned values (if applicable) (using data types)
@@ -872,6 +878,7 @@ mod tests {
                 position: [0.0, 0.0, 0.0],
                 q_factor: 8.0,
                 phase_center_offset_m: 0.0,
+                asymmetry_factor: 1.0,
                 frequency_range: [7100.0, 8500.0],
             }],
             mesh: Some(MeshSpecs {
@@ -972,6 +979,75 @@ frequency_mhz,g_over_t_db,temperature_k
         let (min, max) = measurements.frequency_range();
         assert_eq!(min, 7100.0);
         assert_eq!(max, 8500.0);
+    }
+
+    /// **Roadmap D23, boresight producer half.** The artifact must carry the design spec's
+    /// declared `asymmetry_factor`, and `compute_predictions` must tune against the same
+    /// value — the two used to disagree by construction, since `compute_predictions`
+    /// hardcoded `1.0` while the artifact had nowhere to record anything.
+    ///
+    /// This is the D17 rule (calibrate tunes under what the service will serve) applied to a
+    /// model parameter rather than an integration gate. Its sibling per-producer guards are
+    /// `main::exported_asymmetry_factor_is_the_class_value_not_a_symmetric_default` (full
+    /// mode), `repository::declared_asymmetry_factor_reaches_the_loaded_calibration`
+    /// (design-spec producer), and the served half,
+    /// `evaluator::served_gain_uses_the_artifacts_asymmetry_factor`.
+    #[test]
+    fn boresight_artifact_carries_the_design_spec_asymmetry_factor() {
+        let mut specs = create_test_design_specs();
+        specs.feeds[0].asymmetry_factor = 1.1;
+
+        let measurements = create_test_measurements();
+        let result = calibrate_boresight(&specs, "x_band", &measurements, Some(20))
+            .expect("boresight calibration");
+        let artifact = build_calibration_artifact(
+            &specs,
+            "x_band",
+            &measurements,
+            &result,
+            "test".to_string(),
+        )
+        .expect("build artifact");
+
+        assert_eq!(
+            artifact.physical_config.feed.asymmetry_factor, 1.1,
+            "the artifact must carry the declared design asymmetry, not a symmetric default"
+        );
+    }
+
+    /// Negative control for the test above: a non-unity asymmetry must actually change the
+    /// number the tuner is fitting. If it did not, that test would be pinning a field that
+    /// travels but does nothing, which is the shape of the defect D23 closed.
+    #[test]
+    fn asymmetry_factor_moves_the_boresight_objective() {
+        let mut symmetric = create_test_design_specs();
+        symmetric.feeds[0].asymmetry_factor = 1.0;
+        let mut asymmetric = create_test_design_specs();
+        asymmetric.feeds[0].asymmetry_factor = 1.1;
+
+        let measurements = create_test_measurements();
+        let params = BoresightTunableParameters::from_design_specs(&symmetric, "x_band").unwrap();
+
+        let predict = |specs: &DesignSpecs| {
+            let bounds = specs.get_tuning_bounds("x_band").expect("tuning bounds");
+            BoresightObjectiveFunction::new(
+                Arc::new(specs.clone()),
+                "x_band".to_string(),
+                Arc::new(measurements.clone()),
+                bounds,
+                true,
+            )
+            .compute_predictions(&params)
+            .expect("predictions")
+        };
+
+        let a = predict(&symmetric);
+        let b = predict(&asymmetric);
+        assert!(
+            a.iter().zip(&b).any(|(x, y)| (x - y).abs() > 1e-9),
+            "asymmetry_factor did not move any boresight prediction, so the round-trip \
+             test above would pass on a field the model ignores"
+        );
     }
 
     #[test]

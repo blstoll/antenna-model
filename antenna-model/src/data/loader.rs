@@ -59,10 +59,19 @@ pub const ANTC_MAGIC: &[u8; 4] = b"ANTC";
 /// encoding changed, so any pre-migration ANTC file is rejected loudly rather than
 /// risking a garbled decode.
 ///
+/// Bumped 2 → 3 by roadmap **D23** (2026-08-03), which added
+/// `PhysicalAntennaConfig.feed.asymmetry_factor`. That is a payload *layout* change, not a
+/// codec change, so strictly the schema axis is what changed meaning — but a version-2
+/// payload is one `f64` short of what this build decodes, and postcard reads positionally,
+/// so the decode itself would consume the following field's bytes and either fail
+/// arbitrarily deep or succeed into garbage. The container axis is the only stamp readable
+/// *before* that happens, which is exactly the "existing files can no longer be decoded"
+/// case the module docs' bump policy assigns to it.
+///
 /// Writers use this constant through
 /// `calibrate::artifact_export::write_calibration_artifact`, so the reader and both
 /// producers cannot disagree about the framing.
-pub const ANTC_ARTIFACT_VERSION: u32 = 2;
+pub const ANTC_ARTIFACT_VERSION: u32 = 3;
 
 /// Byte length of an ANTC header: 4 (magic) + 4 (version) + 4 (crc) + 8 (len) = 20.
 pub const ANTC_HEADER_LEN: usize = 20;
@@ -635,8 +644,14 @@ mod tests {
         let calibration = create_test_calibration();
 
         let payload = postcard::to_allocvec(&calibration).unwrap();
-        // Build a valid ANTC artifact but with version = 3 (unsupported).
-        let bytes = make_antc_bytes(&payload, 3, None);
+        // Derived, never a literal. This test was written against a hardcoded `3` when the
+        // supported version was 2; D23's 2 → 3 bump (2026-08-03) turned it into an
+        // assertion that this build rejects *its own* artifacts, and it failed loudly —
+        // which is the lucky case. A test asserting acceptance of a literal would have gone
+        // green while testing nothing, exactly as the workflow guide records happening to
+        // three loader tests during the C13 bump.
+        let unsupported = ANTC_ARTIFACT_VERSION + 1;
+        let bytes = make_antc_bytes(&payload, unsupported, None);
 
         let mut temp_file = NamedTempFile::new().unwrap();
         temp_file.write_all(&bytes).unwrap();
@@ -645,13 +660,13 @@ mod tests {
         let result = load_calibration_artifact(temp_file.path());
         assert!(
             result.is_err(),
-            "Expected Err for unsupported ANTC version, got Ok"
+            "Expected Err for unsupported ANTC version {unsupported}, got Ok"
         );
         match result {
             Err(DataError::LoadError { reason, .. }) => {
                 assert!(
-                    reason.contains("version 3"),
-                    "Expected message to mention 'version 3', got: {}",
+                    reason.contains(&format!("version {unsupported}")),
+                    "Expected message to mention 'version {unsupported}', got: {}",
                     reason
                 );
             }

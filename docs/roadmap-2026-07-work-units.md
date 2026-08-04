@@ -172,6 +172,39 @@ G1 ─┬─ G2 ── G3
     │      D22 (CV folds are contiguous slices│
     │      of a grid-ordered file: 10.07/0.56/│
     │      0.12/0.64/10.86 dB).               │
+    │  D22, D23 DONE 2026-08-03 — the two of  │
+    │      D14's three filings that are       │
+    │      correctness-class. D23: the        │
+    │      artifact gained feed.asymmetry_    │
+    │      factor, bumping BOTH axes (schema  │
+    │      4.0, container 3) because the      │
+    │      layout moved. The task-1 measure-  │
+    │      ment the filing lacked: worst      │
+    │      1.20 dB (UHF_Array_Element, cone   │
+    │      14deg, 700 MHz), 0.60 dB (Ground-  │
+    │      Station_13m) -- but +0.0003 dB AT  │
+    │      BORESIGHT, which is why C13's pass │
+    │      over the same function missed it.  │
+    │      DECLARED, not tuned (maintainer):  │
+    │      horn geometry, and boresight data  │
+    │      carries no signal about it. Also   │
+    │      closed a hardcoded 1.0 in the      │
+    │      boresight tuner's own objective.   │
+    │      The bump exposed two version-      │
+    │      literal defects, incl. a FOURTH    │
+    │      hand-rolled ANTC writer in a test. │
+    │      D22: strided folds (i % K), per-   │
+    │      fold reporting, and a fold refit   │
+    │      failure now warns instead of       │
+    │      aborting -- it could REMOVE an     │
+    │      artifact the same command without  │
+    │      --validate produces. D14's         │
+    │      artifact re-measured: 10.07/0.56/  │
+    │      0.12/0.64/10.86 -> 0.029/0.031/    │
+    │      0.031/0.060/0.046 dB against an    │
+    │      in-sample 0.027 (worst fold 370x   │
+    │      -> 2.2x). D21 is the only D14      │
+    │      filing still open.                 │
     └─ (Phases 1–3 done) ─ D4 ─ D7
 Superseded by C8 (do not implement): S7, C5, C6
 Phase 5: F1..F9 (F8 done) gated on register rows (P3, P5/F4, F5, D9, F9); P1 + C8 DECIDED 2026-07-08;
@@ -4707,7 +4740,50 @@ comparison against something off-grid exposes it.
 - **Depends on:** D20 (a finer surface needs the sufficiency check that now exists).
   **Coupled to:** D9 — this decides what a shipped artifact can promise off the main lobe.
 
-### D22 — Cross-validation folds are contiguous slices of a grid-ordered file — Effort: S
+### D22 — Cross-validation folds are contiguous slices of a grid-ordered file — Effort: S — ✅ **DONE 2026-08-03**
+
+**✅ DONE 2026-08-03**, maintainer taking the recommended **option 1 + option 4**, plus a
+decision on the second filed defect: **a fold that cannot refit warns and still ships**.
+
+- **Strided folds** (`i % K`), with the reasoning in the code. The missing property was never
+  randomness but *invariance to which axis varies fastest*; striding gives every fold's
+  training set the full span of every axis, deterministically and without a seed. Its bias is
+  now stated rather than discovered — optimistic on a dense grid, i.e. it measures
+  interpolation, which is the question a correction surface exists to answer. Pinned by
+  `folds_are_strided_so_no_fold_holds_out_a_whole_frequency_slab`, which asserts the
+  *assignment* (every fold's training set spans every frequency in the data) rather than a
+  resulting RMSE, and carries a negative control asserting the fixture is grid-ordered — without
+  it the test would pass just as happily on the old blocked assignment.
+- **Per-fold values in `format_summary`**, not just mean ± σ. The mean alone is what hid the
+  100× spread.
+- **A fold refit failure is recorded, not fatal.** `CrossValidationResults` grew
+  `failed_folds`, the summary declares the run INCOMPLETE and names each failure with both
+  point counts, and — the detail that is a defect in its own right — the mean is taken over
+  the folds actually **scored**. Dividing by `num_folds` would have made cross-validation
+  report a *better* number the less of it ran.
+- Two existing tests changed channel rather than subject: `a_fold_refit_failure_...` now
+  asserts the failure is recorded instead of fatal, and `fold_refit_uses_caller_spline_order`
+  reads the caller's coefficient count out of the recorded reason instead of out of an `Err`.
+
+**Review pass, same day — the first cut fixed the wrong copy.** `validator::perform_cross_validation`
+is not the only k-fold implementation: `correction_surface::cross_validate` is a second one,
+run from inside `fit_correction_surface` whenever `cross_validation_folds > 1`, which
+`main::surface_fitting_params` sets straight from `--validate`. So on the CLI path the fit's
+own cross-validation runs **first**, and it kept both defects — contiguous slicing (two
+contradictory CV numbers per run, only one of them ever read) and a `?` on the fold refit,
+which made the non-fatal decision *unreachable from the CLI*: the run still died inside the
+fit, before the validator or the artifact writer. Both now route through one shared
+`correction_surface::is_held_out` carrying the rationale, and `cross_validate` returns
+`Option<f64>`. The generalizable lesson is the one this roadmap keeps relearning in a new
+place each time — **fixing the implementation you found is not the same as fixing the
+behaviour you were asked to change**; ask which copy the user's command reaches. Three
+smaller defects fixed with it: dense `fold_rmse_values` printed positionally silently
+relabelled the surviving folds; the aggregates were `f64::NAN` when nothing scored, which
+`serde_json` writes as `null` and a plain `f64` cannot read back, so the `--report` JSON would
+not round-trip; and the strided-fold test re-implemented the assignment inline, making it a
+test of the fixture that would have passed against a reverted implementation.
+
+*Original filing follows.*
 
 **Filed 2026-08-02 by D14.** Full analysis:
 `docs/findings-2026-08-02-cross-validation-fold-assignment.md`.
@@ -4748,7 +4824,66 @@ for anyone running `--validate`.
   unit or D20: should a fold failure downgrade cross-validation to a warning and still ship the
   artifact, or stay fatal?
 
-### D23 — The artifact cannot carry `asymmetry_factor`, so calibrate fits one model and the service serves another — Effort: M
+### D23 — The artifact cannot carry `asymmetry_factor`, so calibrate fits one model and the service serves another — Effort: M — ✅ **DONE 2026-08-03**
+
+**✅ DONE 2026-08-03.** `PhysicalAntennaConfig.feed.asymmetry_factor` exists, both version axes
+moved (`CALIBRATION_SCHEMA_VERSION` **4.0**, `ANTC_ARTIFACT_VERSION` **3**), and the field
+round-trips producer → artifact → served model on all three producers.
+
+**Task 1, the measurement that was outstanding at filing.** Evaluated over the D12 fixture's
+(cone, clock) grid at 400/550/700 MHz, artifact value versus the 1.0 the service substituted:
+
+| Class | factor | worst | RMS over grid | at boresight |
+|---|---|---|---|---|
+| `UHF_Array_Element` | 1.1 | **1.2039 dB** (cone 14°, 700 MHz) | 0.27–0.38 dB | **+0.0003 dB** |
+| `GroundStation_13m` | 1.05 | 0.5950 dB (cone 14°, 700 MHz) | 0.13–0.19 dB | +0.0001 dB |
+
+The worst case breaches the project's <1 dB accuracy budget on its own. The boresight column
+is the reason this outlived C13's pass over the same function: the error is φ-dependent, and
+every check in that pass was a boresight check.
+
+**Maintainer decision (2026-08-03) on the open question — asymmetry is a *declared* design
+property, not a tuned one.** It is horn geometry rather than a manufacturing tolerance like
+surface RMS, and being φ-dependent it is invisible to the boresight sweeps the tuner runs on
+(0.0003 dB of signal), so tuning it would fit noise. It is therefore declared in all three
+places a feed can be described — `antennas.yaml` design specs (`FeedSpecConfig`), calibrate's
+`DesignSpecs::FeedSpecs`, and `antenna_classes.yaml`, which already had it — each defaulting
+to 1.0 when unstated, so every existing config keeps loading as the symmetric antenna it is.
+`TunableParameters` is untouched.
+
+**Guards, one per producer, each with a negative control** (the C13 pattern):
+`main::exported_asymmetry_factor_is_the_class_value_not_a_symmetric_default` (full mode; the
+control asserts the class it tests is non-unity, or the assertion would pass against the very
+default it excludes), `boresight_calibration::boresight_artifact_carries_the_design_spec_asymmetry_factor`
+plus `asymmetry_factor_moves_the_boresight_objective` (which proves the field is not merely
+travelling), `repository::declared_asymmetry_factor_reaches_the_loaded_calibration` (both the
+declared and the omitted case), and the served half,
+`evaluator::served_gain_uses_the_artifacts_asymmetry_factor` — which rebuilds the model twice
+and requires the served gain to match the artifact's 1.1 and **not** the symmetric 1.0. That
+second assertion is the test; without it the whole thing passes on a build that ignores the
+field.
+
+**A second producer-side seam closed with it:** boresight `compute_predictions` hardcoded
+`.asymmetry_factor(1.0)`, so the tuner minimised against a model the artifact could not
+describe even once the field existed. Same rule D17 established for the integration gates —
+calibrate tunes under what the service will serve.
+
+**Two version-literal defects fell out of the bump**, both recorded in
+`docs/calibration-workflow-guide.md` §10.5.1: `loader::test_load_antc_unsupported_version_rejected`
+built its "unsupported" artifact from a hardcoded `3` and became an assertion that this build
+rejects its own artifacts (it failed loudly — the lucky direction); and
+`artifact_export_integration_test::write_antc` hand-rolled the ANTC header with a literal
+`b"ANTC"` and `2u32`, a **fourth** producer of the container format that D2's single-writer
+rule was supposed to have eliminated. It now calls `write_calibration_artifact`.
+
+**Fixture migration:** the two committed headerless `.bin` fixtures could not be *restamped*
+this time because the layout moved. They were migrated by decoding the prefix through
+`physical_config` with a shim carrying the old field set, re-encoding with the new one, and
+appending the remaining bytes verbatim — +8 bytes each, every other value bit-identical, with
+C13's "the feed's axial offset is not the focal length" check re-run before writing so the
+migration could not launder a defective artifact past the gate.
+
+*Original filing follows.*
 
 **Filed 2026-08-02 by D14's review.** Same seam as **C13**, two lines away in the same function,
 and found the same way: by asking what `calibrate` knows that the artifact does not.

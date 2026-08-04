@@ -166,6 +166,13 @@ mesh:  # Optional - omit this section for solid reflectors
 - `mesh`: Include only for mesh reflectors (omit for solid)
 - `feeds[].position`: Defaults to [0, 0, 0] (focal point)
 - `feeds[].phase_center_offset_m`: Defaults to 0.0
+- `feeds[].asymmetry_factor`: E-plane/H-plane illumination asymmetry, must be > 0. Defaults
+  to 1.0 (symmetric). **Declare it if the feed has one.** It is a *declared* design property,
+  not a tuned one (roadmap D23): it is horn geometry, and being φ-dependent it is invisible to
+  a boresight sweep — 0.0003 dB of signal at boresight against up to 1.20 dB off-axis — so the
+  tuner has nothing to recover it from. The value written here is what `calibrate` fits
+  residuals against **and** what the service evaluates the artifact with; until D23 the
+  artifact had no field for it and the service silently substituted 1.0.
 
 ### 2.3 Design Specs Validation Rules
 
@@ -1709,7 +1716,7 @@ confuse because they all sound like "the version" — they answer different ques
 
 | Axis | Type | Location | Question it answers |
 |------|------|----------|----------------------|
-| ANTC **container** version | `u32` (file header, *outside* the payload) | `ANTC_ARTIFACT_VERSION` in `data/loader.rs` | How do file bytes become a payload byte string — the `[magic][version][crc32][len]` framing and which codec decodes the payload? Bumped 1→2 on the bincode→postcard migration. |
+| ANTC **container** version | `u32` (file header, *outside* the payload) | `ANTC_ARTIFACT_VERSION` in `data/loader.rs` | How do file bytes become a payload byte string — the `[magic][version][crc32][len]` framing and which codec decodes the payload? Bumped 1→2 on the bincode→postcard migration, 2→3 by D23's layout change (a version-2 payload is one `f64` short, and postcard reads positionally, so the decode itself cannot be trusted). |
 | **Schema** version (`format_version`) | `String` `"MAJOR.MINOR"` (*inside* the payload) | `CALIBRATION_SCHEMA_VERSION` in `data/types.rs`, stamped into `CalibrationMetadata::format_version` | What does the decoded `AntennaCalibration` **mean** — which fields exist, in what order, meaning what? |
 | **Physics-model** version | `u32` (inside the payload) | `CalibrationMetadata::physics_model_version` | Which `gain_physics` implementation was this artifact's correction surface fitted against? |
 
@@ -1775,6 +1782,25 @@ is bit-identical. Check first that the artifact does not carry the defect the bu
 reject — restamping a wrong artifact launders it past the new gate. (For C13 that check is
 "the feed's axial offset is not the focal length"; a lateral offset is legitimate, and one of
 these two fixtures has one.)
+
+For **4.0 (D23) restamping was not available**, because the layout moved: the same two
+fixtures were **migrated**. Postcard is positional, so the procedure is to decode the prefix
+through `physical_config` with a shim struct carrying the *old* field set, re-encode it with
+the new one, and append the remaining bytes verbatim — every value outside the edited struct
+stays bit-identical, and the files grew by exactly 8 bytes (one `f64`). The C13 check above
+was re-run against the decoded prefix before writing, for the same reason: a migration is
+just as capable of laundering a defective artifact past a new gate as a restamp is.
+
+**Expect a version bump to break a test that names a version literally.** D23's container
+bump turned `loader::test_load_antc_unsupported_version_rejected` — which built its
+"unsupported" artifact with a hardcoded `3` — into an assertion that this build rejects its
+own artifacts, and it failed. That is the *lucky* direction. The dangerous one is a test that
+asserts *acceptance* of a literal, which goes green while testing nothing; three loader tests
+were in that state during the C13 bump. The same pass found
+`artifact_export_integration_test::write_antc` hand-rolling the ANTC header with a literal
+`b"ANTC"` and `2u32`, making it a fourth producer of the container format that D2's
+single-writer rule was supposed to have eliminated. **Derive every version stamp from its
+constant, and write artifacts only through `artifact_export::write_calibration_artifact`.**
 
 A layout change bumps **both**: the schema MAJOR because the meaning changed, and
 the container version because existing files can no longer be decoded. Do not bump
@@ -1859,6 +1885,7 @@ feeds:
     position: [x, y, z] (optional)     # Position relative to focal point (meters), default: [0, 0, 0]
     q_factor: float (required)         # Feed illumination pattern, >0, typical: 1-30
     phase_center_offset_m: float (optional)  # Phase center offset along feed axis, default: 0.0
+    asymmetry_factor: float (optional)       # E/H illumination asymmetry, >0, default: 1.0 (symmetric)
     frequency_range: [min, max] (required)   # Operating frequency range in MHz
 
 # Mesh properties (optional, omit for solid reflectors)

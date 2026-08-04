@@ -221,15 +221,67 @@ pub struct AngularRegionStats {
     pub mean_error_db: f64,
 }
 
-/// Results from k-fold cross-validation
+/// A fold whose training split could not be fitted.
+///
+/// Roadmap D22: recorded and reported rather than aborting the run. Since D20 an
+/// underdetermined fit is a hard error and a fold trains on `(1 − 1/folds)` of the data, so
+/// a dataset can clear the coefficient count on the full set and miss it on a split.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FoldFailure {
+    /// 1-based fold number.
+    pub fold: usize,
+    /// Size of the training split that could not be fitted.
+    pub training_points: usize,
+    /// The underlying fitting error, with both point counts.
+    pub reason: String,
+}
+
+/// Results from k-fold cross-validation.
+///
+/// **Read `fold_rmse_values`, not just `mean_rmse`** (roadmap D22). The mean alone hid a
+/// 100× spread across folds on D14's artifact, which is what led to the fold-assignment
+/// defect being found at all. `format_summary` prints every fold for the same reason.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrossValidationResults {
+    /// Folds requested.
     pub num_folds: usize,
+    /// Per-fold RMSE for each fold that was successfully scored, in fold order. Shorter than
+    /// `num_folds` when `failed_folds` is non-empty — so **this vector is dense and its index
+    /// is not the fold number**. Pair it with [`Self::scored_fold_numbers`] before labelling.
     pub fold_rmse_values: Vec<f64>,
-    pub mean_rmse: f64,
-    pub std_rmse: f64,
-    pub min_rmse: f64,
-    pub max_rmse: f64,
+    /// Folds whose training split could not be fitted. Empty in the normal case.
+    #[serde(default)]
+    pub failed_folds: Vec<FoldFailure>,
+    /// Mean over the folds that were scored.
+    ///
+    /// `Option` rather than a NaN sentinel: these are serialized into the `--report` JSON,
+    /// `serde_json` writes a non-finite `f64` as `null`, and a plain `f64` field cannot read
+    /// that back — so a NaN here made the report un-round-trippable
+    /// (`sidecar::tests` parses `ValidationReport` back). `None` means no fold scored.
+    pub mean_rmse: Option<f64>,
+    pub std_rmse: Option<f64>,
+    pub min_rmse: Option<f64>,
+    pub max_rmse: Option<f64>,
+}
+
+impl CrossValidationResults {
+    /// True when every requested fold was scored.
+    pub fn is_complete(&self) -> bool {
+        self.failed_folds.is_empty()
+    }
+
+    /// The 1-based fold numbers behind `fold_rmse_values`, in the same order.
+    ///
+    /// `fold_rmse_values` skips folds that could not be refitted, so its *position* is not its
+    /// fold number. Reporting it positionally silently relabels the survivors — with folds 1
+    /// and 2 failing, the value printed as "fold 1" is really fold 3.
+    pub fn scored_fold_numbers(&self) -> Vec<usize> {
+        let failed: std::collections::BTreeSet<usize> =
+            self.failed_folds.iter().map(|f| f.fold).collect();
+        (1..=self.num_folds)
+            .filter(|n| !failed.contains(n))
+            .collect()
+    }
 }
 
 // ============================================================================
@@ -709,25 +761,22 @@ fn perform_cross_validation(
     // already have it: nested cross-validation under a CV fold is never wanted.
     let refit_params = config.correction_params.without_nested_cross_validation();
 
-    let fold_size = n / num_folds;
     let mut fold_rmse_values = Vec::new();
+    let mut failed_folds: Vec<FoldFailure> = Vec::new();
 
     for fold in 0..num_folds {
-        let test_start = fold * fold_size;
-        let test_end = if fold == num_folds - 1 {
-            n
-        } else {
-            (fold + 1) * fold_size
-        };
-
-        // Split into training and test sets
+        // Fold assignment comes from `correction_surface::is_held_out` — the crate's single
+        // definition, shared with the cross-validation inside `fit_correction_surface`.
+        // Restating `i % num_folds == fold` here is what let the two implementations drift
+        // in the first place (roadmap D22); that function's docs carry the rationale and
+        // the measurements.
         let mut train_measurements = Vec::new();
         let mut train_predictions = Vec::new();
         let mut test_measurements = Vec::new();
         let mut test_predictions = Vec::new();
 
         for i in 0..n {
-            if i >= test_start && i < test_end {
+            if crate::correction_surface::is_held_out(i, fold, num_folds) {
                 test_measurements.push(measurements[i].clone());
                 test_predictions.push(model_predictions[i]);
             } else {
@@ -739,30 +788,45 @@ fn perform_cross_validation(
         // Fit correction surface on training set, with the caller's knot counts,
         // regularization and spline order — the fold must score the same model family as
         // the artifact being blessed — but never with nested cross-validation.
-        // A fold refit failure is reported AS a fold refit failure. Without this, the most
-        // likely one — `UnderdeterminedFit` since roadmap D20 — surfaces as a bare complaint
-        // about a point count the caller never supplied (the training split, `n - fold_size`),
-        // on a dataset whose full-set fit had just succeeded. Worse, the whole run then fails
-        // and no artifact is written, so `--validate` can *remove* an artifact that the same
-        // command without it produces: a dataset can clear the coefficient count on the whole
-        // set and miss it on a `(1 − 1/folds)` split. That behaviour is D20's semantics, not
-        // this line's to change; making it legible is.
-        let correction_surface = crate::correction_surface::fit_correction_surface(
+        //
+        // **A fold that cannot be fitted is recorded, not fatal** (roadmap D22, decided
+        // 2026-08-03). It used to abort the whole run, which made `--validate` *destructive*:
+        // since D20 an underdetermined fit is a hard error, and a fold trains on
+        // `(1 − 1/folds)` of the data, so a dataset can clear the coefficient count on the
+        // full set and miss it on a training split. The run then failed before the artifact
+        // was written — `--validate` removed an artifact that the same command without it
+        // produces. A fold failure is real information and is reported as such; it is not a
+        // reason to withhold an artifact whose own fit succeeded.
+        let refit = crate::correction_surface::fit_correction_surface(
             &train_measurements,
             &train_predictions,
             &refit_params,
-        )
-        .map_err(|e| ValidationError::CrossValidationError {
-            reason: format!(
-                "fold {}/{} could not refit on its training split of {} points (the full set \
-                 has {n}, and its own fit succeeded — cross-validation trains on {:.0}% of it): \
-                 {e}",
-                fold + 1,
-                num_folds,
-                train_measurements.len(),
-                100.0 * (1.0 - 1.0 / num_folds as f64),
-            ),
-        })?;
+        );
+        let correction_surface = match refit {
+            Ok(surface) => surface,
+            Err(e) => {
+                // Names the fold and BOTH point counts. Without them the most likely
+                // failure — `UnderdeterminedFit` — surfaces as a bare complaint about a
+                // point count the caller never supplied, on a dataset whose full-set fit
+                // had just succeeded.
+                let reason = format!(
+                    "fold {}/{} could not refit on its training split of {} points (the full \
+                     set has {n}, and its own fit succeeded — cross-validation trains on \
+                     {:.0}% of it): {e}",
+                    fold + 1,
+                    num_folds,
+                    train_measurements.len(),
+                    100.0 * (1.0 - 1.0 / num_folds as f64),
+                );
+                warn!("{reason}");
+                failed_folds.push(FoldFailure {
+                    fold: fold + 1,
+                    training_points: train_measurements.len(),
+                    reason,
+                });
+                continue;
+            }
+        };
 
         // Evaluate on test set
         let mut test_corrected = Vec::new();
@@ -787,30 +851,66 @@ fn perform_cross_validation(
         fold_rmse_values.push(fold_rmse);
     }
 
-    let mean_rmse = fold_rmse_values.iter().sum::<f64>() / num_folds as f64;
-    let variance = fold_rmse_values
-        .iter()
-        .map(|x| (x - mean_rmse).powi(2))
-        .sum::<f64>()
-        / num_folds as f64;
-    let std_rmse = variance.sqrt();
-    let min_rmse = fold_rmse_values
-        .iter()
-        .copied()
-        .fold(f64::INFINITY, f64::min);
-    let max_rmse = fold_rmse_values
-        .iter()
-        .copied()
-        .fold(f64::NEG_INFINITY, f64::max);
+    // Averaged over the folds that were actually SCORED, not over `num_folds`. Dividing by
+    // the requested count would silently pull the mean toward zero for every fold that
+    // failed to fit — reporting a *better* cross-validation the less of it ran.
+    let scored = fold_rmse_values.len();
+    let (mean_rmse, std_rmse, min_rmse, max_rmse) = if scored == 0 {
+        (None, None, None, None)
+    } else {
+        let mean = fold_rmse_values.iter().sum::<f64>() / scored as f64;
+        let variance = fold_rmse_values
+            .iter()
+            .map(|x| (x - mean).powi(2))
+            .sum::<f64>()
+            / scored as f64;
+        (
+            Some(mean),
+            Some(variance.sqrt()),
+            Some(
+                fold_rmse_values
+                    .iter()
+                    .copied()
+                    .fold(f64::INFINITY, f64::min),
+            ),
+            Some(
+                fold_rmse_values
+                    .iter()
+                    .copied()
+                    .fold(f64::NEG_INFINITY, f64::max),
+            ),
+        )
+    };
 
-    info!(
-        "Cross-validation complete: mean RMSE = {:.3} ± {:.3} dB (min: {:.3}, max: {:.3})",
-        mean_rmse, std_rmse, min_rmse, max_rmse
-    );
+    match (
+        failed_folds.is_empty(),
+        mean_rmse,
+        std_rmse,
+        min_rmse,
+        max_rmse,
+    ) {
+        (true, Some(mean), Some(std), Some(min), Some(max)) => info!(
+            "Cross-validation complete: mean RMSE = {mean:.3} ± {std:.3} dB \
+             (min: {min:.3}, max: {max:.3})"
+        ),
+        (false, Some(mean), Some(std), _, _) => warn!(
+            "Cross-validation INCOMPLETE: {scored}/{num_folds} folds scored (mean RMSE = \
+             {mean:.3} ± {std:.3} dB over those); {} fold(s) could not refit on their \
+             training split. The artifact is still written — its own fit succeeded — but \
+             this figure describes only the folds that ran.",
+            failed_folds.len()
+        ),
+        _ => warn!(
+            "Cross-validation produced NO figure: none of the {num_folds} folds could refit \
+             on its training split. The artifact is still written — its own fit on the full \
+             dataset succeeded."
+        ),
+    }
 
     Ok(CrossValidationResults {
         num_folds,
         fold_rmse_values,
+        failed_folds,
         mean_rmse,
         std_rmse,
         min_rmse,
@@ -920,15 +1020,61 @@ impl ValidationReport {
         if let Some(ref cv) = self.cross_validation {
             s.push_str("Cross-Validation:\n");
             s.push_str("------------------\n");
-            s.push_str(&format!("{}-fold cross-validation\n", cv.num_folds));
             s.push_str(&format!(
-                "Mean RMSE:  {:.3} ± {:.3} dB\n",
-                cv.mean_rmse, cv.std_rmse
+                "{}-fold cross-validation (strided folds: point i is held out by fold \
+                 i % {})\n",
+                cv.num_folds, cv.num_folds
             ));
-            s.push_str(&format!(
-                "Range:      {:.3} - {:.3} dB\n\n",
-                cv.min_rmse, cv.max_rmse
-            ));
+            match (cv.mean_rmse, cv.std_rmse) {
+                (Some(mean), Some(std)) => {
+                    s.push_str(&format!("Mean RMSE:  {mean:.3} ± {std:.3} dB\n"))
+                }
+                _ => s.push_str("Mean RMSE:  n/a (no fold could be scored)\n"),
+            }
+            match (cv.min_rmse, cv.max_rmse) {
+                (Some(min), Some(max)) => {
+                    s.push_str(&format!("Range:      {min:.3} - {max:.3} dB\n"))
+                }
+                _ => s.push_str("Range:      n/a\n"),
+            }
+
+            // Per-fold values, not just the summary (roadmap D22). A mean of 4.45 ± 4.92 dB
+            // reads as one noisy number; the folds behind it were 10.07 / 0.56 / 0.12 /
+            // 0.64 / 10.86, which reads as two populations and is what exposed the defect.
+            //
+            // Each value is labelled with its own fold NUMBER, not its position:
+            // `fold_rmse_values` is dense and skips folds that could not refit, so with folds
+            // 1 and 2 failing, printing positionally would report fold 3's RMSE as "fold 1".
+            if !cv.fold_rmse_values.is_empty() {
+                s.push_str("Per fold:   ");
+                for (i, (fold_no, rmse)) in cv
+                    .scored_fold_numbers()
+                    .iter()
+                    .zip(cv.fold_rmse_values.iter())
+                    .enumerate()
+                {
+                    if i > 0 {
+                        s.push_str(", ");
+                    }
+                    s.push_str(&format!("#{fold_no} {rmse:.3}"));
+                }
+                s.push_str(" dB\n");
+            }
+
+            if !cv.is_complete() {
+                s.push_str(&format!(
+                    "\n⚠ INCOMPLETE: {} of {} folds could not refit on their training \
+                     split, so the figures above cover only the {} that ran. The artifact \
+                     is still written — its own fit succeeded on the full dataset.\n",
+                    cv.failed_folds.len(),
+                    cv.num_folds,
+                    cv.fold_rmse_values.len()
+                ));
+                for failure in &cv.failed_folds {
+                    s.push_str(&format!("    {}\n", failure.reason));
+                }
+            }
+            s.push('\n');
         }
 
         s.push_str("=================================================\n");
@@ -1077,20 +1223,23 @@ mod tests {
             .expect("num_folds > 1, so cross-validation must have run"))
     }
 
-    /// **Filed by D14's review.** A dataset can clear the coefficient count on the whole set
-    /// and miss it on a `(1 − 1/folds)` training split, so since roadmap D20 `--validate` can
-    /// turn a run that would have produced a good artifact into one that produces none.
+    /// **Filed by D14's review, resolved by D22 (2026-08-03).** A dataset can clear the
+    /// coefficient count on the whole set and miss it on a `(1 − 1/folds)` training split,
+    /// so since roadmap D20 a fold refit can fail on data whose own fit succeeded.
     ///
-    /// That behaviour is D20's semantics and this test does not challenge it — it pins the
-    /// diagnosis. Before the fold refit wrapped its error, the failure surfaced as a bare
-    /// `UnderdeterminedFit` quoting a point count *the caller never supplied* (the training
-    /// split), immediately after a full-set fit at a larger count had succeeded. The three
-    /// facts a reader needs — which fold, how big its split was, how big the real dataset is —
-    /// are what this asserts.
+    /// This test originally asserted that the whole run **failed** — which made `--validate`
+    /// destructive: it removed an artifact that the same command without it produces. The
+    /// maintainer's D22 call was to warn and still ship, so the assertion is inverted here:
+    /// validation must *complete*, report the failure, and leave the surviving folds
+    /// scored. What it kept is the diagnosis. Before the fold refit wrapped its error the
+    /// failure surfaced as a bare `UnderdeterminedFit` quoting a point count *the caller
+    /// never supplied* (the training split), immediately after a full-set fit at a larger
+    /// count had succeeded; the three facts a reader needs — which fold, how big its split
+    /// was, how big the real dataset is — are still asserted.
     #[test]
-    fn a_fold_refit_failure_names_the_fold_and_both_point_counts() {
+    fn a_fold_refit_failure_is_recorded_and_names_the_fold_and_both_point_counts() {
         // 448 points against the 400 coefficients `artifact_params` declares: the whole set
-        // clears them, a 5-fold training split (359) does not.
+        // clears them, a 5-fold training split (358–359) does not.
         let (points, predictions) = cv_fixture_with_cone_values(28);
         assert_eq!(points.len(), 448);
 
@@ -1101,24 +1250,212 @@ mod tests {
         )
         .expect("the whole set must fit — that is the premise of this test");
 
-        let error = validate_calibration(
+        let report = validate_calibration(
             &points,
             &predictions,
             &surface,
             &config_with(artifact_params()),
         )
-        .expect_err("a 5-fold split of 448 points cannot cover 400 coefficients");
-        let message = error.to_string();
+        .expect(
+            "a fold that cannot refit must not fail the run: validation is not allowed to \
+             withhold an artifact whose own fit succeeded (roadmap D22)",
+        );
 
-        for needle in ["fold 1/5", "training split of 359", "the full set has 448"] {
+        let cv = report
+            .cross_validation
+            .as_ref()
+            .expect("cross-validation ran");
+        assert!(
+            !cv.is_complete(),
+            "premise broken: this fixture is sized so folds cannot refit"
+        );
+        assert_eq!(
+            cv.failed_folds.len() + cv.fold_rmse_values.len(),
+            cv.num_folds,
+            "every requested fold must be accounted for, scored or failed"
+        );
+
+        let reasons = cv
+            .failed_folds
+            .iter()
+            .map(|f| f.reason.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        for needle in ["fold 1/5", "training split of 358", "the full set has 448"] {
             assert!(
-                message.contains(needle),
-                "a fold refit failure must say {needle:?}; got: {message}"
+                reasons.contains(needle),
+                "a fold refit failure must say {needle:?}; got: {reasons}"
             );
         }
+
+        // The report a human reads has to say so too — a mean over the folds that happened
+        // to survive, printed without that caveat, is the shape of claim D22 exists to stop.
+        let summary = report.format_summary();
         assert!(
-            matches!(error, ValidationError::CrossValidationError { .. }),
-            "a fold refit failure is a cross-validation failure, not a bare surface error: {error:?}"
+            summary.contains("INCOMPLETE"),
+            "the summary must declare an incomplete cross-validation; got:\n{summary}"
+        );
+    }
+
+    /// **Roadmap D22.** Folds are strided, not contiguous slices of the input file.
+    ///
+    /// Calls `correction_surface::is_held_out` — the crate's single fold-assignment
+    /// definition, which both cross-validation implementations use. An earlier version of
+    /// this test re-implemented `i % num_folds != fold` inline, which made it a test of the
+    /// *fixture* rather than of the code it guards: reverting the implementation to
+    /// contiguous slices would have left it passing.
+    ///
+    /// The discriminating property: a grid-ordered file's contiguous first fold holds out an
+    /// entire leading frequency slab, so its training set contains **no** point at that
+    /// frequency and scoring it is an extrapolation. Under striding every fold's training
+    /// set spans every frequency present.
+    #[test]
+    fn folds_are_strided_so_no_fold_holds_out_a_whole_frequency_slab() {
+        use crate::correction_surface::is_held_out;
+
+        let (points, _) = cv_fixture();
+        let num_folds = 5;
+        let all_frequencies: std::collections::BTreeSet<_> =
+            points.iter().map(|p| p.frequency_mhz.to_bits()).collect();
+        assert!(
+            all_frequencies.len() > 1,
+            "fixture must span several frequencies or this test is vacuous"
+        );
+
+        // The fixture must actually be grid-ordered, or the old blocked assignment would
+        // have been harmless here and this test would prove nothing about it.
+        let contiguous_first_fold: std::collections::BTreeSet<_> = points
+            [..points.len() / num_folds]
+            .iter()
+            .map(|p| p.frequency_mhz.to_bits())
+            .collect();
+        assert!(
+            contiguous_first_fold.len() < all_frequencies.len(),
+            "negative control: this fixture is not grid-ordered, so it cannot demonstrate \
+             what strided assignment fixes"
+        );
+
+        for fold in 0..num_folds {
+            let train: std::collections::BTreeSet<_> = points
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !is_held_out(*i, fold, num_folds))
+                .map(|(_, p)| p.frequency_mhz.to_bits())
+                .collect();
+            assert_eq!(
+                train, all_frequencies,
+                "fold {fold}'s training set is missing a frequency present in the data, so \
+                 scoring it extrapolates past the fitted knots"
+            );
+        }
+    }
+
+    /// **Roadmap D22.** Per-fold output is labelled by fold *number*, not by position.
+    ///
+    /// `fold_rmse_values` is dense — a fold that could not refit contributes no entry — so
+    /// printing it positionally silently relabels the survivors: with fold 1 failing, the
+    /// value shown as the first fold is really fold 2. A cross-validation report whose fold
+    /// labels are wrong is worse than one that omits them, because the reader cannot tell.
+    #[test]
+    fn scored_fold_numbers_skip_the_folds_that_failed() {
+        let cv = CrossValidationResults {
+            num_folds: 5,
+            fold_rmse_values: vec![0.30, 0.50, 0.40],
+            failed_folds: vec![
+                FoldFailure {
+                    fold: 1,
+                    training_points: 10,
+                    reason: "fold 1/5 could not refit".to_string(),
+                },
+                FoldFailure {
+                    fold: 4,
+                    training_points: 10,
+                    reason: "fold 4/5 could not refit".to_string(),
+                },
+            ],
+            mean_rmse: Some(0.40),
+            std_rmse: Some(0.0816),
+            min_rmse: Some(0.30),
+            max_rmse: Some(0.50),
+        };
+
+        assert_eq!(
+            cv.scored_fold_numbers(),
+            vec![2, 3, 5],
+            "folds 1 and 4 failed, so the three scored values belong to folds 2, 3 and 5"
+        );
+        assert_eq!(cv.scored_fold_numbers().len(), cv.fold_rmse_values.len());
+
+        let report = ValidationReport {
+            cross_validation: Some(cv),
+            ..minimal_report()
+        };
+        let summary = report.format_summary();
+        assert!(
+            summary.contains("#2 0.300") && summary.contains("#5 0.400"),
+            "each fold RMSE must be labelled with its own fold number; got:\n{summary}"
+        );
+        assert!(
+            !summary.contains("#1 0.300"),
+            "fold 1 failed — its number must not be attached to fold 2's value:\n{summary}"
+        );
+    }
+
+    /// A report with everything zeroed, for tests that only care about one section.
+    fn minimal_report() -> ValidationReport {
+        ValidationReport {
+            num_points: 0,
+            model_only_rmse: 0.0,
+            model_only_max_error: 0.0,
+            model_only_r_squared: 0.0,
+            corrected_rmse: 0.0,
+            corrected_max_error: 0.0,
+            corrected_r_squared: 0.0,
+            rmse_improvement_percent: 0.0,
+            max_error_improvement_percent: 0.0,
+            main_lobe_num_points: 0,
+            main_lobe_max_error: 0.0,
+            main_lobe_rmse: 0.0,
+            main_lobe_meets_target: true,
+            first_sidelobe_num_points: 0,
+            first_sidelobe_max_error: 0.0,
+            first_sidelobe_rmse: 0.0,
+            first_sidelobe_meets_target: true,
+            outliers: vec![],
+            num_outliers: 0,
+            frequency_band_analysis: vec![],
+            angular_region_analysis: vec![],
+            cross_validation: None,
+            meets_accuracy_requirements: true,
+        }
+    }
+
+    /// The behavioural counterpart: `perform_cross_validation` itself must produce folds that
+    /// all score the same *kind* of question on a grid-ordered fixture.
+    ///
+    /// The test above proves the assignment function is strided; this proves cross-validation
+    /// actually routes through it. Under the pre-D22 contiguous slicing the edge folds
+    /// extrapolated a whole frequency slab and came out orders of magnitude worse than the
+    /// interior ones — 89× between best and worst on D14's artifact. Requiring the spread to
+    /// stay inside one order of magnitude distinguishes "every fold interpolates" from "these
+    /// numbers all happen to be small".
+    #[test]
+    fn cross_validation_folds_all_score_comparably_on_a_grid_ordered_fixture() {
+        let cv = run_cv(&config_with(artifact_params())).expect("cv on the grid-ordered fixture");
+        assert!(
+            cv.is_complete(),
+            "premise broken: this fixture is sized so every fold refits"
+        );
+
+        let best = cv.min_rmse.expect("a scored fold has a min");
+        let worst = cv.max_rmse.expect("a scored fold has a max");
+        assert!(
+            worst < 10.0 * best,
+            "fold RMSEs show two populations (worst {worst:.4} dB vs best {best:.4} dB, folds \
+             {:?}) — the signature of contiguous folds holding out a whole axis slab. Check \
+             that perform_cross_validation still routes through \
+             correction_surface::is_held_out.",
+            cv.fold_rmse_values
         );
     }
 
@@ -1138,12 +1475,14 @@ mod tests {
         }))
         .expect("dense config");
 
+        let sparse_mean = sparse
+            .mean_rmse
+            .expect("sparse config must score every fold");
+        let dense_mean = dense.mean_rmse.expect("dense config must score every fold");
         assert!(
-            (sparse.mean_rmse - dense.mean_rmse).abs() > 1e-3,
+            (sparse_mean - dense_mean).abs() > 1e-3,
             "knot counts and regularization did not reach the fold refit: \
-             sparse={:.6} dB, dense={:.6} dB",
-            sparse.mean_rmse,
-            dense.mean_rmse
+             sparse={sparse_mean:.6} dB, dense={dense_mean:.6} dB"
         );
     }
 
@@ -1152,21 +1491,34 @@ mod tests {
     /// Under the pre-D10 default (order 4, minimum 125) this would have succeeded.
     #[test]
     fn fold_refit_uses_caller_spline_order() {
-        let err = run_cv(&config_with(CorrectionSurfaceParams {
+        // Since D22 a fold that cannot refit is recorded rather than fatal, so the evidence
+        // that the caller's order reached the refit is in the recorded reason, not in an
+        // `Err` from the run.
+        let cv = run_cv(&config_with(CorrectionSurfaceParams {
             spline_order: 6,
             ..artifact_params()
         }))
-        .expect_err("order 6 cannot be fitted from a 512-point training fold");
+        .expect("a fold that cannot refit no longer fails the run (roadmap D22)");
+
+        assert!(
+            !cv.is_complete(),
+            "premise broken: order 6 must be unfittable from this fixture's training splits"
+        );
 
         // Each axis contributes `placed_knots + order` basis functions, so the caller's
         // spline order is visible in the coefficient count: order 4 gives 4x10x10 = 400
         // (which this fixture covers), order 6 gives 6x12x12 = 864 (which it does not).
         // Before roadmap D20 this keyed on `(order + 1)^3 = 343`, a data minimum that
         // depended on the order but on nothing else about the model being fitted.
-        let message = err.to_string();
+        let reasons = cv
+            .failed_folds
+            .iter()
+            .map(|f| f.reason.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         assert!(
-            message.contains("864"),
-            "expected the caller's spline order to set the coefficient count, got: {message}"
+            reasons.contains("864"),
+            "expected the caller's spline order to set the coefficient count, got: {reasons}"
         );
     }
 

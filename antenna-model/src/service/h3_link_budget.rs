@@ -112,6 +112,8 @@ fn build_antenna_config(
         .q_factor(calibration.physical_config.feed.q_factor)
         .phase_center_offset(calibration.physical_config.feed.phase_center_offset_m)
         .axial_defocus(calibration.physical_config.feed.axial_defocus_m)
+        // Roadmap D23 — see the matching call in `evaluator::compute_gain_from_request`.
+        .asymmetry_factor(calibration.physical_config.feed.asymmetry_factor)
         .build()
         .map_err(|e| AntennaModelError::Generic(format!("Failed to build feed: {}", e)))?;
 
@@ -723,6 +725,7 @@ mod tests {
                     q_factor: 8.0,
                     phase_center_offset_m: 0.0,
                     axial_defocus_m: 0.0,
+                    asymmetry_factor: 1.0,
                 },
                 mesh: Some(MeshParameters {
                     mesh_spacing_mm: 5.0,

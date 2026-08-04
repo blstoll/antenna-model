@@ -293,6 +293,13 @@ pub struct ExportPhysicalParams {
     pub q_factor: f64,
     /// Feed phase-center offset in meters.
     pub phase_center_offset_m: f64,
+    /// E/H illumination asymmetry the residuals were fitted against (1.0 = symmetric).
+    ///
+    /// Roadmap **D23**: this must be the value `compute_model_predictions` built its model
+    /// with. Anything else — including this struct simply not carrying it, which was the
+    /// defect — means the correction surface is applied on top of a different illumination
+    /// than it was fitted against.
+    pub asymmetry_factor: f64,
     /// Optional mesh parameters (spacing_mm, wire_diameter_mm).
     pub mesh: Option<(f64, f64)>,
 }
@@ -345,6 +352,7 @@ pub fn export_full_calibration(
         phase_center_offset_m: physical.phase_center_offset_m,
         // deliberate defocus is service-config only; not exposed by the calibrate CLI
         axial_defocus_m: 0.0,
+        asymmetry_factor: physical.asymmetry_factor,
     };
     let mut config_builder = PhysicalAntennaConfigBuilder::default()
         .reflector(reflector)
@@ -661,6 +669,7 @@ mod tests {
             feed_position_m: (0.0, 0.0, 0.0),
             q_factor: 8.0,
             phase_center_offset_m: 0.0,
+            asymmetry_factor: 1.0,
             mesh: None,
         };
 

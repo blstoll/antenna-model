@@ -194,35 +194,21 @@ fn validation_config(
 /// `unwrap_or` chain [`compute_model_predictions`] uses, so the artifact describes the
 /// configuration the residuals were fitted against.
 ///
-/// Split out of `run_calibration` so the one field whose *frame* is not recoverable from
-/// its value — `feed_position_m` — can be pinned by a unit test (roadmap C13).
+/// Split out of `run_calibration` so the two fields whose value cannot be checked from the
+/// outside — `feed_position_m`, whose *frame* is not recoverable from its numbers (roadmap
+/// C13), and `asymmetry_factor`, which is invisible at boresight (roadmap D23) — can each be
+/// pinned by a unit test.
 ///
-/// # What it cannot carry: `asymmetry_factor` (roadmap D23)
-///
-/// [`compute_model_predictions`] fits residuals against a model built with the class's
-/// `feed.asymmetry_factor`, but [`ExportPhysicalParams`] — and the `FeedParameters` it writes
-/// into the artifact — have no such field, so the service rebuilds the feed with the model
-/// default of 1.0. On a class with a non-unity factor the correction surface is therefore
-/// fitted against an **asymmetric** model and applied on top of a **symmetric** one. Two
-/// shipped classes are affected (`GroundStation_13m` at 1.05, `UHF_Array_Element` at 1.1).
-/// It is the same calibrate/service seam as C13 two lines below, and it cannot be closed here:
-/// adding the field changes the postcard layout, so it needs a schema **and** container
-/// version bump of its own. Filed as **D23**; the warning below is the interim honesty.
+/// **Every field here must be the one [`compute_model_predictions`] built its model from.**
+/// Both C13 and D23 were the same defect: a parameter the fitting model used that the
+/// artifact did not carry, so the service rebuilt the feed without it and served a different
+/// antenna than the residuals describe. C13 cost 27.3 dB, D23 up to 1.20 dB. If a parameter
+/// is added to the fitting model, it belongs here and in `ExportPhysicalParams` in the same
+/// change — the test below is what enforces that for the two known cases.
 fn export_physical_params(
     class: &calibrate::AntennaClass,
     tunable_params: &TunableParameters,
 ) -> ExportPhysicalParams {
-    if class.feed.asymmetry_factor != 1.0 {
-        warn!(
-            asymmetry_factor = class.feed.asymmetry_factor,
-            class = %class.class_id,
-            "this antenna class has a non-symmetric feed, but the artifact format has no field \
-             for it: the residuals below are fitted against an asymmetric illumination and the \
-             service will serve a symmetric one. See roadmap unit D23 — until it lands, prefer \
-             a class with asymmetry_factor = 1.0 for any artifact that will actually be served."
-        );
-    }
-
     let focal_length_m = class.geometry.diameter_m * class.geometry.f_over_d;
     let surface_rms_mm = tunable_params
         .surface_rms_mm
@@ -254,6 +240,12 @@ fn export_physical_params(
         feed_position_m: (0.0, 0.0, 0.0),
         q_factor: class.feed.q_factor,
         phase_center_offset_m: 0.0,
+        // The class value, matching `compute_model_predictions`'s
+        // `.asymmetry_factor(antenna_class.feed.asymmetry_factor)`. Roadmap D23 — before
+        // the artifact had this field the service substituted 1.0, so a `GroundStation_13m`
+        // or `UHF_Array_Element` artifact was served on a symmetric feed the residuals had
+        // never seen.
+        asymmetry_factor: class.feed.asymmetry_factor,
         mesh: Some((mesh_spacing_mm, wire_diameter_mm)),
     }
 }
@@ -729,14 +721,32 @@ async fn run_calibration(args: Args) -> Result<()> {
         info!("  ✓ First sidelobe meets accuracy target");
     }
 
-    // Print cross-validation results if available
+    // Print cross-validation results if available. The aggregates are `Option` because a
+    // fold that cannot refit is recorded rather than fatal (roadmap D22), so a run where no
+    // fold scored has no mean to print — and must say so rather than print a sentinel.
     if let Some(cv) = &validation_report.cross_validation {
         info!("  Cross-validation results:");
-        info!(
-            "    Mean RMSE: {:.4} dB (± {:.4} dB)",
-            cv.mean_rmse, cv.std_rmse
-        );
-        info!("    Range: [{:.4}, {:.4}] dB", cv.min_rmse, cv.max_rmse);
+        match (cv.mean_rmse, cv.std_rmse) {
+            (Some(mean), Some(std)) => {
+                info!("    Mean RMSE: {mean:.4} dB (± {std:.4} dB)")
+            }
+            _ => info!("    Mean RMSE: n/a — no fold could be refitted"),
+        }
+        if let (Some(min), Some(max)) = (cv.min_rmse, cv.max_rmse) {
+            info!("    Range: [{min:.4}, {max:.4}] dB");
+        }
+        if !cv.is_complete() {
+            warn!(
+                "    {} of {} folds could not refit on their training split; the figures \
+                 above cover only the {} that ran. The artifact is still written.",
+                cv.failed_folds.len(),
+                cv.num_folds,
+                cv.fold_rmse_values.len()
+            );
+            for failure in &cv.failed_folds {
+                warn!("      {}", failure.reason);
+            }
+        }
     }
 
     // Generate and save calibration artifact
@@ -1002,6 +1012,44 @@ mod tests {
              DSN_34m's is {} m",
             physical.focal_length_m
         );
+    }
+
+    /// **Roadmap D23, full-mode producer half.** The artifact must carry the class's
+    /// `asymmetry_factor`, because that is what `compute_model_predictions` fitted the
+    /// residuals against.
+    ///
+    /// Deliberately runs on a class with a **non-unity** factor. Before D23 the field did
+    /// not exist and the service rebuilt the feed at the builder default of 1.0, so a
+    /// residual surface fitted against an asymmetric illumination was applied on top of a
+    /// symmetric one — worth up to 1.20 dB on this class, and it also moved the evaluation
+    /// off the azimuthal-mode integrator branch. A symmetric class cannot detect any of
+    /// that, which is why the negative control below asserts this test has power.
+    #[test]
+    fn exported_asymmetry_factor_is_the_class_value_not_a_symmetric_default() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("antenna_classes.yaml");
+        let registry = AntennaClassRegistry::load_from_file(&path).expect("load antenna classes");
+
+        let asymmetric = registry
+            .get_class("UHF_Array_Element")
+            .expect("UHF_Array_Element class");
+        let physical = export_physical_params(asymmetric, &TunableParameters::default_from_class());
+
+        assert_eq!(
+            physical.asymmetry_factor, asymmetric.feed.asymmetry_factor,
+            "the artifact must carry the illumination the residuals were fitted against"
+        );
+        assert_ne!(
+            physical.asymmetry_factor, 1.0,
+            "negative control: this class must have a non-unity factor or the assertion \
+             above passes against the very default it exists to exclude (class value is {})",
+            asymmetric.feed.asymmetry_factor
+        );
+
+        // A symmetric class must still round-trip its own value, so the field cannot be
+        // "whatever makes the asymmetric case pass".
+        let symmetric = registry.get_class("DSN_34m").expect("DSN_34m class");
+        let physical = export_physical_params(symmetric, &TunableParameters::default_from_class());
+        assert_eq!(physical.asymmetry_factor, 1.0);
     }
 
     /// `--cv-folds N` reaches both the surface fit and the validation fold count, and

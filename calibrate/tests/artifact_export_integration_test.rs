@@ -38,19 +38,19 @@ fn build_measurements() -> Vec<MeasurementPoint> {
 }
 
 /// Write an `AntennaCalibration` with the ANTC header (matching full mode).
+/// Write an artifact through the production writer.
+///
+/// This used to hand-roll the ANTC header here with a literal `b"ANTC"` and a literal
+/// `2u32`, making it a fourth producer of the container format — the exact drift roadmap
+/// **D2** collapsed into one writer. It went stale the moment D23 bumped the container
+/// version to 3, failing with "unsupported ANTC artifact version 2" from a test whose
+/// subject is the correction surface. Calling the real writer means the framing and both
+/// version stamps can never be this test's problem again.
 fn write_antc(
     calibration: &antenna_model::data::types::AntennaCalibration,
     path: &std::path::Path,
 ) {
-    let payload = postcard::to_allocvec(calibration).expect("encode");
-    let crc = crc32fast::hash(&payload);
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(b"ANTC");
-    bytes.extend_from_slice(&2u32.to_le_bytes());
-    bytes.extend_from_slice(&crc.to_le_bytes());
-    bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
-    bytes.extend_from_slice(&payload);
-    std::fs::write(path, &bytes).expect("write");
+    calibrate::artifact_export::write_calibration_artifact(calibration, path).expect("write");
 }
 
 #[test]
@@ -82,6 +82,7 @@ fn test_full_export_loads_via_service() {
         feed_position_m: (0.0, 0.0, 1.85),
         q_factor: 8.0,
         phase_center_offset_m: 0.0,
+        asymmetry_factor: 1.0,
         mesh: Some((5.0, 0.5)),
     };
 
@@ -168,6 +169,7 @@ fn test_full_export_correction_evaluates_against_3d() {
         feed_position_m: (0.0, 0.0, 1.85),
         q_factor: 8.0,
         phase_center_offset_m: 0.0,
+        asymmetry_factor: 1.0,
         mesh: Some((5.0, 0.5)),
     };
     let calibration = export_full_calibration(
