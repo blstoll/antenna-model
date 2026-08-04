@@ -35,7 +35,7 @@ use antenna_model::data::types::{
     CalibrationMetadataBuilder, CalibrationStatus, FeedParameters as DataFeedParameters,
     MeasurementDensity, MeshParameters as DataMeshParameters, ParameterSource,
     PhysicalAntennaConfigBuilder, ReflectorGeometry as DataReflectorGeometry,
-    ValidityRangesBuilder, BORESIGHT_COVERAGE_CONE_DEG,
+    ValidityRangesBuilder, BORESIGHT_COVERAGE_CONE_DEG, CALIBRATION_SCHEMA_VERSION,
 };
 use antenna_model::model::{
     compute_g_over_t, AntennaConfigurationBuilder, FeedParametersBuilder, IntegrationParams,
@@ -802,7 +802,7 @@ pub fn build_calibration_artifact(
     let metadata = CalibrationMetadataBuilder::default()
         .antenna_name(design_specs.antenna_name.clone())
         .calibration_date(chrono::Utc::now().to_rfc3339())
-        .format_version("2.0".to_string())
+        .format_version(CALIBRATION_SCHEMA_VERSION.to_string())
         .data_source(data_source)
         .rmse_db(calibration_result.final_rmse_db)
         .r_squared(0.95) // Typical R² for boresight calibration

@@ -64,7 +64,7 @@ fn generate_model_predictions(measurements: &[MeasurementPoint], error_magnitude
 #[test]
 fn test_correction_surface_fitting_basic() {
     // Generate synthetic data
-    let measurements = generate_synthetic_measurements(125); // 5x5x5 grid
+    let measurements = generate_synthetic_measurements(512); // 8x8x8 grid
     let predictions = generate_model_predictions(&measurements, 0.5);
 
     // Fit correction surface
@@ -107,7 +107,7 @@ fn test_correction_surface_fitting_basic() {
 #[test]
 fn test_correction_surface_evaluation() {
     // Generate synthetic data
-    let measurements = generate_synthetic_measurements(125); // 5x5x5 grid
+    let measurements = generate_synthetic_measurements(512); // 8x8x8 grid
     let predictions = generate_model_predictions(&measurements, 1.0);
 
     // Fit correction surface
@@ -149,10 +149,12 @@ fn test_correction_surface_interpolation() {
     let mut measurements = Vec::new();
     let mut predictions = Vec::new();
 
-    // Sample at a 4x4x4 grid (64 points)
-    for freq in [8000.0, 8133.0, 8266.0, 8400.0] {
-        for cone in [0.0, 10.0, 20.0, 30.0] {
-            for clock in [0.0, 90.0, 180.0, 270.0] {
+    // Sample at a 7x7x7 grid (343 points). "Sparser" here means fewer KNOTS than the
+    // basic test (2/2/3, i.e. 6x6x7 = 252 coefficients), not fewer points than the
+    // coefficient count — roadmap D20 rejects the latter rather than silently fitting it.
+    for freq in [8000.0, 8066.0, 8133.0, 8200.0, 8266.0, 8333.0, 8400.0] {
+        for cone in [0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0] {
+            for clock in [0.0, 51.0, 102.0, 154.0, 205.0, 257.0, 308.0] {
                 let g_over_t = 40.0 + 0.001 * (freq - 8200.0) - 0.1 * cone;
                 measurements.push(MeasurementPoint {
                     e_clock_deg: clock,
@@ -206,7 +208,7 @@ fn test_correction_surface_interpolation() {
 
 #[test]
 fn test_correction_surface_batch_evaluation() {
-    let measurements = generate_synthetic_measurements(125);
+    let measurements = generate_synthetic_measurements(512); // 8x8x8 grid
     let predictions = generate_model_predictions(&measurements, 0.5);
 
     let params = CorrectionSurfaceParams {
@@ -248,10 +250,14 @@ fn test_adaptive_knot_placement() {
     let mut measurements = Vec::new();
     let mut predictions = Vec::new();
 
-    for i in 0..50 {
+    // 200 (freq, cone) pairs x 4 clock = 800 points. The uniform variant below places
+    // every requested knot (5/5/4 -> 9x9x8 = 648 coefficients), which is what this grid
+    // has to cover; the adaptive variant places fewer on the 4-value clock axis, since a
+    // knot must be strictly interior (roadmap D19).
+    for i in 0..200 {
         // Dense sampling near center
-        let cone = 15.0 + 5.0 * (i as f64 / 49.0 - 0.5);
-        let freq = 8200.0 + 100.0 * (i as f64 / 49.0 - 0.5);
+        let cone = 15.0 + 5.0 * (i as f64 / 199.0 - 0.5);
+        let freq = 8200.0 + 100.0 * (i as f64 / 199.0 - 0.5);
 
         for clock in [0.0, 90.0, 180.0, 270.0] {
             let g_over_t = 40.0 - 0.1 * cone;
@@ -301,7 +307,7 @@ fn test_adaptive_knot_placement() {
 
 #[test]
 fn test_regularization_effect() {
-    let measurements = generate_synthetic_measurements(125);
+    let measurements = generate_synthetic_measurements(512); // 8x8x8 grid
     let predictions = generate_model_predictions(&measurements, 0.5);
 
     // Test with regularization (more robust)

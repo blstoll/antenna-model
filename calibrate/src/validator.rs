@@ -739,11 +739,30 @@ fn perform_cross_validation(
         // Fit correction surface on training set, with the caller's knot counts,
         // regularization and spline order — the fold must score the same model family as
         // the artifact being blessed — but never with nested cross-validation.
+        // A fold refit failure is reported AS a fold refit failure. Without this, the most
+        // likely one — `UnderdeterminedFit` since roadmap D20 — surfaces as a bare complaint
+        // about a point count the caller never supplied (the training split, `n - fold_size`),
+        // on a dataset whose full-set fit had just succeeded. Worse, the whole run then fails
+        // and no artifact is written, so `--validate` can *remove* an artifact that the same
+        // command without it produces: a dataset can clear the coefficient count on the whole
+        // set and miss it on a `(1 − 1/folds)` split. That behaviour is D20's semantics, not
+        // this line's to change; making it legible is.
         let correction_surface = crate::correction_surface::fit_correction_surface(
             &train_measurements,
             &train_predictions,
             &refit_params,
-        )?;
+        )
+        .map_err(|e| ValidationError::CrossValidationError {
+            reason: format!(
+                "fold {}/{} could not refit on its training split of {} points (the full set \
+                 has {n}, and its own fit succeeded — cross-validation trains on {:.0}% of it): \
+                 {e}",
+                fold + 1,
+                num_folds,
+                train_measurements.len(),
+                100.0 * (1.0 - 1.0 / num_folds as f64),
+            ),
+        })?;
 
         // Evaluate on test set
         let mut test_corrected = Vec::new();
@@ -967,14 +986,33 @@ mod tests {
     // D10 — the cross-validation fold refit must score the surface that ships
     // ========================================================================
 
-    /// A grid large enough that a 5-fold split still clears the fitter's
-    /// `(spline_order + 1)³ = 125` minimum for cubic splines (256 points → 205 per fold).
+    /// A grid large enough that a 5-fold split still covers the fitted **coefficient
+    /// count**, which is what roadmap D20 made the binding quantity — not the old
+    /// `(spline_order + 1)³ = 125` minimum, which depended on nothing about the model
+    /// being fitted.
+    ///
+    /// `artifact_params` below declares 4 × 10 × 10 = 400 coefficients (the frequency axis
+    /// has only two distinct values, so it places no interior knot and contributes `order`
+    /// basis functions). 640 points leaves 512 in a 5-fold training split, 1.28× the
+    /// coefficients. Growing the cone axis is what buys the margin: its knot count is
+    /// already capped by the 6 requested, so more distinct cone values add data without
+    /// adding coefficients.
     fn cv_fixture() -> (Vec<MeasurementPoint>, Vec<f64>) {
+        cv_fixture_with_cone_values(40)
+    }
+
+    /// As [`cv_fixture`], with the cone axis length as a parameter.
+    ///
+    /// The cone axis is the one that adds points without adding coefficients (its knot count
+    /// is capped by the 6 requested), so it is the knob for putting a fixture on either side
+    /// of the coefficient count — which is what
+    /// `a_fold_refit_failure_names_the_fold_and_both_point_counts` needs.
+    fn cv_fixture_with_cone_values(cone_values: usize) -> (Vec<MeasurementPoint>, Vec<f64>) {
         let mut points = Vec::new();
         let mut predictions = Vec::new();
         for fi in 0..2 {
             let frequency_mhz = 8400.0 + 100.0 * fi as f64;
-            for ci in 0..16 {
+            for ci in 0..cone_values {
                 let e_cone_deg = ci as f64;
                 for ki in 0..8 {
                     let e_clock_deg = 45.0 * ki as f64;
@@ -1039,6 +1077,51 @@ mod tests {
             .expect("num_folds > 1, so cross-validation must have run"))
     }
 
+    /// **Filed by D14's review.** A dataset can clear the coefficient count on the whole set
+    /// and miss it on a `(1 − 1/folds)` training split, so since roadmap D20 `--validate` can
+    /// turn a run that would have produced a good artifact into one that produces none.
+    ///
+    /// That behaviour is D20's semantics and this test does not challenge it — it pins the
+    /// diagnosis. Before the fold refit wrapped its error, the failure surfaced as a bare
+    /// `UnderdeterminedFit` quoting a point count *the caller never supplied* (the training
+    /// split), immediately after a full-set fit at a larger count had succeeded. The three
+    /// facts a reader needs — which fold, how big its split was, how big the real dataset is —
+    /// are what this asserts.
+    #[test]
+    fn a_fold_refit_failure_names_the_fold_and_both_point_counts() {
+        // 448 points against the 400 coefficients `artifact_params` declares: the whole set
+        // clears them, a 5-fold training split (359) does not.
+        let (points, predictions) = cv_fixture_with_cone_values(28);
+        assert_eq!(points.len(), 448);
+
+        let surface = crate::correction_surface::fit_correction_surface(
+            &points,
+            &predictions,
+            &artifact_params(),
+        )
+        .expect("the whole set must fit — that is the premise of this test");
+
+        let error = validate_calibration(
+            &points,
+            &predictions,
+            &surface,
+            &config_with(artifact_params()),
+        )
+        .expect_err("a 5-fold split of 448 points cannot cover 400 coefficients");
+        let message = error.to_string();
+
+        for needle in ["fold 1/5", "training split of 359", "the full set has 448"] {
+            assert!(
+                message.contains(needle),
+                "a fold refit failure must say {needle:?}; got: {message}"
+            );
+        }
+        assert!(
+            matches!(error, ValidationError::CrossValidationError { .. }),
+            "a fold refit failure is a cross-validation failure, not a bare surface error: {error:?}"
+        );
+    }
+
     /// The fold refit must fit the *caller's* model family. Two configs that differ only
     /// in knot counts and regularization must therefore produce different CV numbers —
     /// if the refit fell back to `CorrectionSurfaceParams::default()` (the pre-D10 bug)
@@ -1073,12 +1156,17 @@ mod tests {
             spline_order: 6,
             ..artifact_params()
         }))
-        .expect_err("order 6 cannot be fitted from a 205-point training fold");
+        .expect_err("order 6 cannot be fitted from a 512-point training fold");
 
+        // Each axis contributes `placed_knots + order` basis functions, so the caller's
+        // spline order is visible in the coefficient count: order 4 gives 4x10x10 = 400
+        // (which this fixture covers), order 6 gives 6x12x12 = 864 (which it does not).
+        // Before roadmap D20 this keyed on `(order + 1)^3 = 343`, a data minimum that
+        // depended on the order but on nothing else about the model being fitted.
         let message = err.to_string();
         assert!(
-            message.contains("343"),
-            "expected the caller's spline order to set the data minimum, got: {message}"
+            message.contains("864"),
+            "expected the caller's spline order to set the coefficient count, got: {message}"
         );
     }
 

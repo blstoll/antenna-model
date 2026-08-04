@@ -36,7 +36,7 @@ use crate::parser::MeasurementPoint;
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 // ============================================================================
 // Error Types
@@ -46,6 +46,32 @@ use tracing::{debug, info};
 pub enum CorrectionSurfaceError {
     #[error("Insufficient data for fitting: need at least {min_required}, got {actual}")]
     InsufficientData { min_required: usize, actual: usize },
+
+    /// The fitted system has more coefficients than data points (roadmap D20).
+    ///
+    /// The remediation text says "measurements" first and names the knot counts second, in
+    /// that order deliberately: the knot counts have **no CLI flag**. Full mode's are a
+    /// private local in `calibrate/src/main.rs::surface_fitting_params` and boresight mode's
+    /// are fixed by its axis construction, so "reduce the knots" is a code change, while
+    /// supplying more data is something the caller can actually do. The message therefore
+    /// states the number of points required rather than leaving it to be inferred from the
+    /// coefficient count, and warns about the cross-validation multiplier — a training split
+    /// is what has to clear the count, not the whole set.
+    #[error(
+        "Underdetermined fit: {n_coefficients} B-spline coefficients \
+         ({n_freq}x{n_cone}x{n_clock}) against {n_points} data points. Supply at least \
+         {n_coefficients} measurements (and at least {n_coefficients} in every \
+         cross-validation *training* split, i.e. ~{n_coefficients} / (1 - 1/folds) overall \
+         when --validate is used), or reduce the knot counts — which are compile-time, in \
+         calibrate/src/main.rs::surface_fitting_params, not a CLI flag."
+    )]
+    UnderdeterminedFit {
+        n_coefficients: usize,
+        n_points: usize,
+        n_freq: usize,
+        n_cone: usize,
+        n_clock: usize,
+    },
 
     #[error("Dimension mismatch: measurements ({measurements}) != predictions ({predictions})")]
     DimensionMismatch {
@@ -324,6 +350,32 @@ pub fn fit_correction_surface(
         n_freq * n_cone * n_clock
     );
 
+    // The real data-sufficiency requirement (roadmap D20).
+    //
+    // `validate_fitting_inputs` ran a cheap `(spline_order + 1)^3` pre-check above, which
+    // is a fixed 125 at order 4 and depends on nothing about the model actually being
+    // fitted. The quantity that decides whether the least-squares system is determined is
+    // the coefficient count, and it is only knowable *here*: the knot counts in
+    // `params` are a request, and dedup / minimum-spacing / interior-only placement can
+    // all reduce them.
+    //
+    // Below this line the system is underdetermined and the ridge term is the only thing
+    // making it solvable — the surface then interpolates its data points almost exactly
+    // while oscillating between them, which reads as an excellent RMSE and an inaccurate
+    // surface. That is a hard error rather than a warning by decision: a warning here
+    // repeats the class of defect D11 was, a real problem reported through a channel
+    // nobody reads.
+    let n_coefficients = n_freq * n_cone * n_clock;
+    if residuals.len() < n_coefficients {
+        return Err(CorrectionSurfaceError::UnderdeterminedFit {
+            n_coefficients,
+            n_points: residuals.len(),
+            n_freq,
+            n_cone,
+            n_clock,
+        });
+    }
+
     // Build design matrix and solve least squares
     let coefficients = fit_bspline_coefficients(
         &residuals,
@@ -591,6 +643,24 @@ fn generate_uniform_knots(min: f64, max: f64, num_knots: usize) -> Vec<f64> {
 }
 
 /// Generate adaptive knots based on data density
+///
+/// # Interior placement (roadmap D19)
+///
+/// Every knot returned here is *internal*: [`generate_knot_vector`] clamps the vector by
+/// prepending and appending `order` copies of the data bounds, so a knot equal to a bound
+/// would arrive at multiplicity `order + 1`. The basis function `B_{i,order}` has support
+/// `[t_i, t_{i+order}]`, which at that multiplicity is zero-width — the function is
+/// identically zero everywhere, its coefficient carries no information, and its row and
+/// column of `B^T B` are exactly zero (leaving the system solvable only via the ridge term).
+///
+/// Quantile placement hits a bound whenever a bound value is common enough to own the
+/// quantile: measured 2026-08-02 on D12's fixture, whose frequency axis has four distinct
+/// values with 72 rows each, so index `288/5 = 57` selects the minimum and `4·57 = 228` the
+/// maximum. Candidates on a bound are therefore **dropped**, not nudged inward — on an axis
+/// with four distinct values there is no fourth distinct interior position to nudge one to,
+/// and inventing a knot where the data has no support is what the adaptive placement exists
+/// to avoid. The delivered count can consequently fall short of the request, which is
+/// reported rather than absorbed silently.
 fn generate_adaptive_knots(
     sorted_data: &[f64],
     num_knots: usize,
@@ -603,15 +673,33 @@ fn generate_adaptive_knots(
     // Use quantile-based placement for adaptive knots
     let n = sorted_data.len();
     let step = n / (num_knots + 1);
+    let min_val = sorted_data[0];
+    let max_val = sorted_data[n - 1];
 
     let mut knots = Vec::new();
     for i in 1..=num_knots {
         let idx = (i * step).min(n - 1);
-        knots.push(sorted_data[idx]);
+        let candidate = sorted_data[idx];
+
+        // Strictly interior only — see the note above.
+        if candidate > min_val && candidate < max_val {
+            knots.push(candidate);
+        }
     }
 
     // Remove duplicates and enforce minimum spacing
     knots.dedup_by(|a, b| (*b - *a).abs() < min_spacing);
+
+    if knots.len() < num_knots {
+        warn!(
+            requested = num_knots,
+            placed = knots.len(),
+            min = min_val,
+            max = max_val,
+            "adaptive knot placement delivered fewer internal knots than requested: the \
+             data does not support that many distinct interior positions"
+        );
+    }
 
     Ok(knots)
 }
@@ -634,6 +722,25 @@ fn enforce_min_spacing(knots: &[f64], min_spacing: f64) -> Vec<f64> {
 }
 
 /// Validate that a knot vector is valid for B-spline interpolation
+///
+/// # Multiplicity (roadmap D19)
+///
+/// Length and monotonicity were the only checks until 2026-08-02, which let the fitter's own
+/// adaptive placement ship vectors with end multiplicity `order + 1` — see
+/// [`generate_adaptive_knots`] for the mechanism and
+/// `docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md` for the history. The
+/// two rules added here are the ones that make a clamped vector well-formed:
+///
+/// * **Each end must repeat exactly `order` times.** Fewer leaves the spline unclamped (it
+///   would not interpolate its end coefficient at the bound); more creates a zero-width
+///   support and therefore an identically-zero basis function.
+/// * **An interior knot may repeat at most `order - 1` times.** That is a legitimate
+///   continuity reduction, down to C⁰ at `order - 1`. Multiplicity `order` splits the spline
+///   into disconnected pieces, which this fitter never intends.
+///
+/// A fully degenerate vector (every knot equal) fails the first rule, which also closes the
+/// gap documented on [`bspline_basis`] — previously guarded only upstream in
+/// [`generate_knot_vector`].
 fn validate_knot_vector(knots: &[f64], order: usize) -> Result<()> {
     if knots.len() < 2 * order {
         return Err(CorrectionSurfaceError::InvalidKnotVector {
@@ -658,6 +765,42 @@ fn validate_knot_vector(knots: &[f64], order: usize) -> Result<()> {
                 ),
             });
         }
+    }
+
+    // Check multiplicity, run by run over the (now known non-decreasing) vector.
+    let mut start = 0;
+    while start < knots.len() {
+        let mut end = start + 1;
+        while end < knots.len() && knots[end] == knots[start] {
+            end += 1;
+        }
+        let multiplicity = end - start;
+        let is_end_run = start == 0 || end == knots.len();
+
+        if is_end_run {
+            if multiplicity != order {
+                return Err(CorrectionSurfaceError::InvalidKnotVector {
+                    reason: format!(
+                        "Clamped knot vector must repeat each bound exactly {order} times: \
+                         value {} at index {start} repeats {multiplicity} times. A bound \
+                         repeated more than {order} times gives basis function B_{start} a \
+                         zero-width support, making it identically zero (roadmap D19)",
+                        knots[start]
+                    ),
+                });
+            }
+        } else if multiplicity >= order {
+            return Err(CorrectionSurfaceError::InvalidKnotVector {
+                reason: format!(
+                    "Interior knot {} at index {start} repeats {multiplicity} times; the \
+                     maximum for order {order} is {} (multiplicity {order} splits the spline)",
+                    knots[start],
+                    order - 1
+                ),
+            });
+        }
+
+        start = end;
     }
 
     Ok(())
@@ -1200,6 +1343,332 @@ mod tests {
     }
 
     // ========================================================================
+    // D19 — adaptive knots must land in the strict interior
+    //
+    // `generate_adaptive_knots` placed internal knots at data quantiles with no
+    // constraint that the result be interior, and `generate_knot_vector` then clamps
+    // by prepending/appending `order` copies of the bounds. A quantile that landed ON
+    // a bound therefore became multiplicity `order + 1`, whose basis function
+    // `B_{i,order}` has support `[t_i, t_{i+order}]` of ZERO width — identically zero
+    // everywhere, contributing a dead coefficient and an empty row/column in `B^T B`.
+    // ========================================================================
+
+    /// The D12 full-mode fixture's axis data, in the shipped 4/6/8 configuration.
+    ///
+    /// The frequency axis is the sharp case: four distinct values (400/500/600/700 MHz)
+    /// with 72 rows each, so quantile index `(1 * 288/5) = 57` lands on the minimum and
+    /// `(4 * 288/5) = 228` lands on the maximum.
+    fn d12_axis_data() -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        let freqs = [400.0, 500.0, 600.0, 700.0];
+        let cones = [0.0, 2.0, 4.0, 6.0, 9.0, 12.0, 16.0, 20.0, 24.0];
+        let clocks = [0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0];
+
+        let (mut fd, mut cd, mut kd) = (Vec::new(), Vec::new(), Vec::new());
+        for &f in &freqs {
+            for &c in &cones {
+                for &k in &clocks {
+                    fd.push(f);
+                    cd.push(c);
+                    kd.push(k);
+                }
+            }
+        }
+        (fd, cd, kd)
+    }
+
+    /// Indices of basis functions whose support `[t_i, t_{i+order}]` has zero width.
+    fn identically_zero_basis(knots: &[f64], order: usize) -> Vec<usize> {
+        (0..knots.len() - order)
+            .filter(|&i| knots[i + order] - knots[i] <= 0.0)
+            .collect()
+    }
+
+    /// The negative control for the multiplicity guard, per P13: a check nobody has
+    /// seen fail is not evidence of anything. These are the knot vectors the fitter
+    /// ACTUALLY produced on 2026-08-02, before this fix — `validate_knot_vector` passed
+    /// every one of them, and must now reject the two that are defective.
+    #[test]
+    fn multiplicity_guard_rejects_the_knot_vectors_the_fitter_used_to_produce() {
+        let order = 4;
+
+        // Measured pre-fix. End multiplicity 5 = order + 1 on both axes.
+        let pre_fix_frequency = vec![
+            400.0, 400.0, 400.0, 400.0, 400.0, 500.0, 600.0, 700.0, 700.0, 700.0, 700.0, 700.0,
+        ];
+        let pre_fix_clock = vec![
+            0.0, 0.0, 0.0, 0.0, 0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0, 315.0, 315.0,
+            315.0, 315.0,
+        ];
+
+        for (name, knots) in [("frequency", &pre_fix_frequency), ("clock", &pre_fix_clock)] {
+            assert_eq!(
+                identically_zero_basis(knots, order),
+                vec![0, knots.len() - order - 1],
+                "{name}: the pre-fix vector must have a dead basis function at each end, \
+                 or this control is not testing what it claims"
+            );
+            assert!(
+                validate_knot_vector(knots, order).is_err(),
+                "{name}: validate_knot_vector must reject end multiplicity {} for order \
+                 {order}; it accepted this vector before D19",
+                order + 1
+            );
+        }
+
+        // Positive control: the cone axis was already correct pre-fix and must stay ok.
+        let pre_fix_cone = vec![
+            0.0, 0.0, 0.0, 0.0, 2.0, 4.0, 6.0, 12.0, 16.0, 20.0, 24.0, 24.0, 24.0, 24.0,
+        ];
+        assert!(identically_zero_basis(&pre_fix_cone, order).is_empty());
+        assert!(
+            validate_knot_vector(&pre_fix_cone, order).is_ok(),
+            "the cone axis was never defective and must not be rejected"
+        );
+    }
+
+    /// An interior knot may repeat up to `order - 1` times (that is a legitimate
+    /// continuity reduction, down to C⁰); `order` times splits the spline into
+    /// disconnected pieces and is not something this fitter ever intends to produce.
+    #[test]
+    fn multiplicity_guard_admits_legitimate_interior_repeats() {
+        let order = 4;
+
+        let c0_knot = vec![0.0, 0.0, 0.0, 0.0, 5.0, 5.0, 5.0, 10.0, 10.0, 10.0, 10.0];
+        assert!(
+            validate_knot_vector(&c0_knot, order).is_ok(),
+            "interior multiplicity {} (= order - 1) is legitimate",
+            order - 1
+        );
+
+        let split = vec![
+            0.0, 0.0, 0.0, 0.0, 5.0, 5.0, 5.0, 5.0, 10.0, 10.0, 10.0, 10.0,
+        ];
+        assert!(
+            validate_knot_vector(&split, order).is_err(),
+            "interior multiplicity {order} (= order) splits the spline and must be rejected"
+        );
+    }
+
+    /// A fully degenerate vector (every knot equal) makes every basis function return
+    /// 0 rather than summing to a partition of unity — recorded as item 3 of
+    /// `docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md`'s "Still
+    /// open" and guarded only upstream until now. The multiplicity check closes it here
+    /// too, at no extra cost.
+    #[test]
+    fn multiplicity_guard_rejects_a_fully_degenerate_axis() {
+        assert!(validate_knot_vector(&[5.0; 8], 4).is_err());
+    }
+
+    #[test]
+    fn adaptive_knots_are_strictly_interior_on_every_d12_axis() {
+        let order = 4;
+        let (fd, cd, kd) = d12_axis_data();
+
+        for (name, data, num_knots, min_spacing) in [
+            ("frequency", &fd, 4usize, 50.0),
+            ("cone", &cd, 6, 2.0),
+            ("clock", &kd, 8, 5.0),
+        ] {
+            let knots = generate_knot_vector(data, num_knots, order, true, min_spacing)
+                .unwrap_or_else(|e| panic!("{name}: knot generation failed: {e}"));
+
+            let lo = knots[0];
+            let hi = knots[knots.len() - 1];
+
+            assert_eq!(
+                knots.iter().filter(|&&k| k == lo).count(),
+                order,
+                "{name}: end multiplicity must be exactly the order, got {knots:?}"
+            );
+            assert_eq!(
+                knots.iter().filter(|&&k| k == hi).count(),
+                order,
+                "{name}: end multiplicity must be exactly the order, got {knots:?}"
+            );
+            assert!(
+                identically_zero_basis(&knots, order).is_empty(),
+                "{name}: every basis function must have non-zero support, got {knots:?}"
+            );
+            assert!(
+                validate_knot_vector(&knots, order).is_ok(),
+                "{name}: the generator must produce vectors its own validator accepts"
+            );
+        }
+    }
+
+    /// The headline number: what the dead basis functions cost the shipped configuration.
+    ///
+    /// Pre-D19 the D12 configuration declared **960** coefficients, of which **360 (37.5 %)**
+    /// were attached to identically-zero basis functions — serialized into every artifact and
+    /// read back by the service's 4D interpolator, carrying no information.
+    ///
+    /// The served surface is **unchanged** by their removal, and that is not a weaker result
+    /// than it sounds: a basis function that is zero everywhere contributes zero to every
+    /// evaluation, so removing it *cannot* move a value. D12's four known-answer probes
+    /// reproduce bit-for-bit across this change (0.5928 / 0.0934 / 0.0365 / 0.0934 dB), which
+    /// is the end-to-end confirmation. What D19 fixes is the representation: an honest
+    /// `shape`, and a `B^T B` that is no longer structurally rank-deficient. The remaining
+    /// probe error is underdetermination (600 coefficients against 288 points) — roadmap D20.
+    #[test]
+    fn the_shipped_configuration_no_longer_carries_dead_coefficients() {
+        let order = 4;
+        let (fd, cd, kd) = d12_axis_data();
+
+        let axes = [
+            ("frequency", &fd, 4usize, 50.0, 6usize),
+            ("cone", &cd, 6, 2.0, 10),
+            ("clock", &kd, 8, 5.0, 10),
+        ];
+
+        let mut n_coefficients = 1;
+        for (name, data, num_knots, min_spacing, expected_basis) in axes {
+            let knots = generate_knot_vector(data, num_knots, order, true, min_spacing)
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            let n_basis = knots.len() - order;
+
+            assert_eq!(
+                n_basis, expected_basis,
+                "{name}: expected {expected_basis} basis functions, got {n_basis} from {knots:?}"
+            );
+            n_coefficients *= n_basis;
+        }
+
+        assert_eq!(
+            n_coefficients, 600,
+            "the D12 configuration should declare 600 live coefficients (was 960 declared, \
+             360 of them identically zero)"
+        );
+    }
+
+    /// The fix must not disturb an axis that was already placing knots correctly —
+    /// otherwise it is changing more than the defect.
+    #[test]
+    fn adaptive_knots_are_unchanged_on_the_axis_that_was_already_correct() {
+        let (_, cd, _) = d12_axis_data();
+        let knots = generate_knot_vector(&cd, 6, 4, true, 2.0).expect("cone knots");
+
+        assert_eq!(
+            knots,
+            vec![0.0, 0.0, 0.0, 0.0, 2.0, 4.0, 6.0, 12.0, 16.0, 20.0, 24.0, 24.0, 24.0, 24.0],
+            "the cone axis was correct before D19 and must be bit-identical after"
+        );
+    }
+
+    // ========================================================================
+    // D20 — the data-sufficiency check must test the coefficient count
+    // ========================================================================
+
+    /// Build `n` residual points on a regular grid spanning the given axes.
+    fn grid_measurements(
+        n_freq: usize,
+        n_cone: usize,
+        n_clock: usize,
+    ) -> (Vec<MeasurementPoint>, Vec<f64>) {
+        let mut measurements = Vec::new();
+        let mut predictions = Vec::new();
+
+        for i in 0..n_freq {
+            for j in 0..n_cone {
+                for k in 0..n_clock {
+                    let frequency_mhz = 400.0 + 300.0 * i as f64 / (n_freq - 1).max(1) as f64;
+                    let e_cone_deg = 24.0 * j as f64 / (n_cone - 1).max(1) as f64;
+                    let e_clock_deg = 315.0 * k as f64 / (n_clock - 1).max(1) as f64;
+
+                    measurements.push(MeasurementPoint::new(
+                        e_clock_deg,
+                        e_cone_deg,
+                        frequency_mhz,
+                        10.0,
+                        290.0,
+                    ));
+                    predictions.push(9.0);
+                }
+            }
+        }
+
+        (measurements, predictions)
+    }
+
+    /// The check must fire on a system the old `(spline_order + 1)^3 = 125` minimum waved
+    /// through. 216 points comfortably clears 125 and is nowhere near the 600 coefficients
+    /// the shipped full-mode configuration declares.
+    #[test]
+    fn a_fit_with_fewer_points_than_coefficients_is_rejected() {
+        let (measurements, predictions) = grid_measurements(6, 6, 6);
+        assert!(
+            measurements.len() > (4 + 1usize).pow(3),
+            "the fixture must clear the old 125-point minimum, or this test proves nothing"
+        );
+
+        let params = CorrectionSurfaceParams {
+            spline_order: 4,
+            num_knots_frequency: 4,
+            num_knots_econe: 6,
+            num_knots_eclock: 8,
+            regularization: 1e-3,
+            adaptive_knots: true,
+            cross_validation_folds: 0,
+            ..CorrectionSurfaceParams::default()
+        };
+
+        let err = fit_correction_surface(&measurements, &predictions, &params)
+            .expect_err("an underdetermined fit must be rejected");
+
+        match err {
+            CorrectionSurfaceError::UnderdeterminedFit {
+                n_coefficients,
+                n_points,
+                ..
+            } => {
+                assert!(
+                    n_points < n_coefficients,
+                    "the error must report the two numbers that made it fire, got \
+                     {n_points} points / {n_coefficients} coefficients"
+                );
+            }
+            other => panic!("expected UnderdeterminedFit, got {other:?}"),
+        }
+    }
+
+    /// ...and must not fire once the data covers the coefficients.
+    #[test]
+    fn a_fit_with_more_points_than_coefficients_is_accepted() {
+        let (measurements, predictions) = grid_measurements(6, 6, 6);
+        let params = CorrectionSurfaceParams {
+            spline_order: 4,
+            num_knots_frequency: 0,
+            num_knots_econe: 0,
+            num_knots_eclock: 0,
+            regularization: 1e-3,
+            adaptive_knots: true,
+            cross_validation_folds: 0,
+            ..CorrectionSurfaceParams::default()
+        };
+
+        // 4x4x4 = 64 coefficients against 216 points.
+        fit_correction_surface(&measurements, &predictions, &params)
+            .expect("a determined system must fit");
+    }
+
+    /// The old pre-check is kept as a cheap early guard, not replaced — it catches obvious
+    /// garbage before any knot generation happens.
+    #[test]
+    fn the_cheap_pre_check_still_rejects_obviously_too_little_data() {
+        let (measurements, predictions) = grid_measurements(2, 2, 2);
+        let params = CorrectionSurfaceParams {
+            cross_validation_folds: 0,
+            ..CorrectionSurfaceParams::default()
+        };
+
+        let err = fit_correction_surface(&measurements, &predictions, &params)
+            .expect_err("8 points must be rejected");
+        assert!(
+            matches!(err, CorrectionSurfaceError::InsufficientData { .. }),
+            "expected the cheap InsufficientData pre-check, got {err:?}"
+        );
+    }
+
+    // ========================================================================
     // D10 — cross-validation must not re-enter itself
     // ========================================================================
 
@@ -1239,15 +1708,22 @@ mod tests {
     }
 
     /// A fold fit inside `cross_validate` must not cross-validate in turn. The fixture is
-    /// sized so the recursion is what fails: 176 points → 141 in a fold (clears the
-    /// `(4+1)³ = 125` minimum), but a *second* level would train on 113 and trip it.
+    /// sized so the recursion is exactly what fails, restated against the quantity roadmap
+    /// D20 made binding — the coefficient count, not the old `(4+1)³ = 125` minimum.
+    ///
+    /// These knots declare 4 × 10 × 10 = **400** coefficients (two distinct frequencies
+    /// place no interior knot, so that axis contributes `order` basis functions). 512
+    /// points leaves **410** in one 5-fold training split, which clears 400; a *second*
+    /// level would train on **328** and trip the check. The window is deliberately narrow —
+    /// a fixture much larger than this would let two levels of recursion succeed and the
+    /// test would stop testing anything.
     #[test]
     fn cross_validation_does_not_recurse_into_itself() {
         let mut measurements = Vec::new();
         let mut predictions = Vec::new();
         for fi in 0..2 {
             let frequency_mhz = 8400.0 + 100.0 * fi as f64;
-            for ci in 0..11 {
+            for ci in 0..32 {
                 let e_cone_deg = ci as f64;
                 for ki in 0..8 {
                     let e_clock_deg = 45.0 * ki as f64;
@@ -1263,7 +1739,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(measurements.len(), 176);
+        assert_eq!(measurements.len(), 512);
 
         let params = CorrectionSurfaceParams {
             spline_order: 4,

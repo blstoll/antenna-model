@@ -687,9 +687,17 @@ mod tests {
 
     #[test]
     fn schema_major_mismatch_is_an_error() {
-        // Older major (the pre-2.0 schema) and newer major alike: neither can be
-        // interpreted by this build's field layout.
-        for foreign in ["1.0", "3.0"] {
+        // One major below and one above: neither can be interpreted by this build's field
+        // layout. **Derived from the constant, not written out.** These were the literals
+        // "1.0" and "3.0", which stopped testing what they claim the moment roadmap C13 moved
+        // the schema to 3.0 — "3.0" became this build's own version and the test failed. A
+        // version test that has to be edited whenever the version moves is a version test that
+        // will eventually be edited wrongly.
+        let (major, _) = parse_schema_version(CALIBRATION_SCHEMA_VERSION)
+            .expect("this build's schema version parses");
+        let below = format!("{}.0", major - 1);
+        let above = format!("{}.0", major + 1);
+        for foreign in [below.as_str(), above.as_str()] {
             let err = check_schema_version(foreign)
                 .expect_err("a foreign schema major must be rejected, not warned about");
             assert!(
@@ -703,7 +711,10 @@ mod tests {
     fn schema_minor_mismatch_loads() {
         // A minor bump leaves the byte layout and every field's meaning intact, so it
         // warns rather than failing (see CALIBRATION_SCHEMA_VERSION's bump policy).
-        assert!(check_schema_version("2.7").is_ok());
+        // Derived from the constant for the reason given in the test above.
+        let (major, minor) = parse_schema_version(CALIBRATION_SCHEMA_VERSION)
+            .expect("this build's schema version parses");
+        assert!(check_schema_version(&format!("{major}.{}", minor + 7)).is_ok());
         assert!(check_schema_version(CALIBRATION_SCHEMA_VERSION).is_ok());
     }
 
@@ -767,7 +778,12 @@ mod tests {
     #[test]
     fn test_load_accepts_differing_schema_minor() {
         let mut calibration = create_test_calibration();
-        calibration.metadata.format_version = "2.9".to_string();
+        // Same major, a minor this build does not carry — derived, not a literal, so it stays
+        // a MINOR test when the schema version moves (see `schema_major_mismatch_is_an_error`).
+        let (major, minor) = parse_schema_version(CALIBRATION_SCHEMA_VERSION)
+            .expect("this build's schema version parses");
+        let differing_minor = format!("{major}.{}", minor + 9);
+        calibration.metadata.format_version = differing_minor.clone();
 
         let payload = postcard::to_allocvec(&calibration).unwrap();
         let bytes = make_antc_bytes(&payload, ANTC_ARTIFACT_VERSION, None);
@@ -778,7 +794,7 @@ mod tests {
 
         let loaded = load_calibration_artifact(temp_file.path())
             .expect("a differing schema MINOR must warn and load, not fail");
-        assert_eq!(loaded.metadata.format_version, "2.9");
+        assert_eq!(loaded.metadata.format_version, differing_minor);
     }
 
     #[test]

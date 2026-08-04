@@ -41,7 +41,33 @@ use std::fmt;
 ///
 /// Anything that changes the postcard byte layout must bump MAJOR here **and**
 /// [`crate::data::loader::ANTC_ARTIFACT_VERSION`] — see that constant's docs for why both.
-pub const CALIBRATION_SCHEMA_VERSION: &str = "2.0";
+///
+/// # History
+///
+/// - **3.0 (2026-08-02, roadmap C13 under D14)** — `PhysicalAntennaConfig.feed.position`.
+///   The byte layout did not move and the container axis did not move: a 2.0 artifact still
+///   decodes perfectly. That is exactly why this is a MAJOR. Full-mode `calibrate` wrote that
+///   field **vertex**-relative while every consumer reads it as an offset **from the focal
+///   point**, so the same three `f64`s mean different things either side of the fix, and no
+///   consumer can tell which it is holding — a payload that decodes cleanly and means
+///   something else, which is the case this axis exists to reject. Serving a pre-3.0
+///   full-mode artifact costs **27.3 dB** of boresight gain (measured on a 1.22 m dish at
+///   12.1 GHz), so a `warn!`-and-load MINOR would not have been enough.
+///
+///   The collateral — every pre-3.0 artifact is now rejected, including boresight and
+///   design-spec-derived ones that were always correct — is accepted because artifacts are
+///   regenerable by policy and no *production* artifact ships in-repo (roadmap D9); the fix is
+///   to re-run the producer. If that ever stops being true, this is the row to revisit.
+///
+///   Two artifacts did have to be carried across:
+///   `antenna-model/tests/fixtures/calibration_data/test_uncalibrated_{x,s}band_boresight.bin`,
+///   the legacy headerless fixtures the postcard migration already regenerated once in July.
+///   They were **restamped, not rewritten** — decoded, `format_version` set, re-encoded — after
+///   checking that neither carried the vertex-relative feed position, which would have laundered
+///   a wrong artifact past the gate this bump exists to close. (One of them carries a 5 cm
+///   *lateral* design offset, which is legitimate and is what this field is for; the C13
+///   signature is specifically an axial component equal to the focal length.)
+pub const CALIBRATION_SCHEMA_VERSION: &str = "3.0";
 
 /// Complete calibration data for a single antenna-feed combination (v2.0 physics-based).
 ///
@@ -460,7 +486,25 @@ impl ReflectorGeometry {
 /// Describes the feed horn characteristics and position for physical optics computation.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FeedParameters {
-    /// Feed position in Cartesian coordinates (x, y, z) in meters
+    /// Feed **design offset from the focal point**, in antenna-frame metres `(x, y, z)`.
+    ///
+    /// **Origin: the focal point, not the reflector vertex.** An on-axis feed is
+    /// `(0.0, 0.0, 0.0)`; `z` is positive away from the vertex. `x`/`y` are the static
+    /// lateral displacement of this feed from the optical axis (what makes a multi-feed
+    /// antenna's feeds differ), and the *per-request* total offset — this design offset
+    /// plus the displacement induced by steering to `feed_pointing_location` — is what the
+    /// response reports as `GeometryInfo.physical_feed_offset_m`.
+    ///
+    /// Stated here because both producers write this field and the origin is not
+    /// recoverable from the numbers: the design-spec path (`antennas.yaml` →
+    /// `data::repository`) and the boresight path always used focus-relative `(0,0,0)`,
+    /// while full-mode `calibrate` wrote `(0, 0, focal_length)` under the same intent
+    /// ("feed at the focal point") until roadmap unit **C13** was fixed on 2026-08-02. The
+    /// service adds this offset to a steering position that is already vertex-origin
+    /// (`compute_feed_position_from_pointing`), so the vertex-relative reading placed the
+    /// feed at `z ≈ 2f` — a focal-length-sized phantom defocus, measured at 27.3 dB of
+    /// boresight gain on a 1.22 m dish at 12.1 GHz. Producers must write the offset; do not
+    /// reintroduce a vertex-origin reading here.
     pub position: (f64, f64, f64),
 
     /// q-factor for cos^q illumination pattern (typically 6-12)
@@ -1690,7 +1734,7 @@ mod tests {
         assert_eq!(metadata.r_squared, 0.98);
         assert_eq!(metadata.num_measurements, 1000);
         assert_eq!(metadata.notes, Some("Test calibration".to_string()));
-        assert_eq!(metadata.format_version, "2.0");
+        assert_eq!(metadata.format_version, CALIBRATION_SCHEMA_VERSION);
     }
 
     #[test]

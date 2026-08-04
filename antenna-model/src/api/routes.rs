@@ -861,9 +861,15 @@ mod tests {
         assert_eq!(azimuth.get(0).f64(), 0.0);
         assert_eq!(azimuth.get(1).f64(), 360.0);
 
-        // Check calibration info
+        // Check calibration info. The fixture takes the builder's default schema version, so
+        // this asserts against the constant rather than a literal — a literal here pinned
+        // "2.0" and failed the moment C13 bumped the schema to 3.0, which is drift, not a
+        // contract check. What the endpoint promises is that it echoes the artifact's stamp.
         let calibration = json_value.get("calibration").object();
-        assert_eq!(calibration.get("version").string(), "2.0");
+        assert_eq!(
+            calibration.get("version").string(),
+            crate::data::types::CALIBRATION_SCHEMA_VERSION
+        );
         assert_eq!(calibration.get("rmse_db").f64(), 0.5);
 
         // Check physical parameters
