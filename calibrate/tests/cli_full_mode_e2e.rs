@@ -410,6 +410,27 @@ fn cli_full_mode_writes_a_service_loadable_artifact() {
          `with_uncorrected_physics_gates(false)` and choose per artifact the way \
          calibrate_boresight does"
     );
+
+    // **Roadmap D23, through the real binary.** This fixture's class is
+    // `UHF_Array_Element`, whose `asymmetry_factor` is 1.1 — the largest of any shipped
+    // class, and the geometry the 1.20 dB worst case was measured on. Until D23 the
+    // artifact had no field for it, so `calibrate` fitted residuals against an asymmetric
+    // illumination and the service rebuilt the feed at the builder default of 1.0.
+    //
+    // The unit tests pin each producer in-process; this pins the whole path a user actually
+    // exercises — CLI → postcard → the service's loader — where a positional format makes
+    // "the field is there but shifted" a real failure mode that an in-process round trip
+    // through the same structs cannot see.
+    assert_eq!(
+        calibration.physical_config.feed.asymmetry_factor, FIXTURE_ASYMMETRY_FACTOR,
+        "the artifact must carry the fitting model's asymmetry_factor across the real \
+         CLI → postcard → loader path"
+    );
+    assert_ne!(
+        FIXTURE_ASYMMETRY_FACTOR, 1.0,
+        "negative control: this fixture's class must be asymmetric, or the assertion above \
+         passes against the very default it exists to exclude"
+    );
 }
 
 #[test]

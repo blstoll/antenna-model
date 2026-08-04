@@ -44,6 +44,25 @@ use std::fmt;
 ///
 /// # History
 ///
+/// - **4.0 (2026-08-03, roadmap D23)** — `PhysicalAntennaConfig.feed.asymmetry_factor` added.
+///   A **layout** change, so unlike 3.0 this one moves the container axis too
+///   ([`crate::data::loader::ANTC_ARTIFACT_VERSION`] 2 → 3): a 3.0 payload is one `f64`
+///   short and postcard, being positional, would decode the following bytes into the wrong
+///   fields rather than complain. The field closes the last known instance of the C13 class
+///   — a model parameter `calibrate` fits against that the artifact cannot carry, so the
+///   service rebuilds the feed without it. Worst measured cost 1.20 dB on
+///   `UHF_Array_Element` (0.0003 dB at boresight, which is why it outlived C13); see the
+///   field's own doc comment.
+///
+///   Bumping both axes twice in two days is deliberate and costs nothing: no artifact ships
+///   in-repo (roadmap D9), so there is no population to migrate. The same two committed
+///   `.bin` fixtures were carried across again, but **migrated rather than restamped** —
+///   restamping is only available when the layout holds still. Each was decoded through
+///   `physical_config` with a shim carrying the old field set, re-encoded with the new one,
+///   and its remaining bytes appended verbatim: +8 bytes, everything else bit-identical.
+///   See `docs/calibration-workflow-guide.md` §10.5.1 for the procedure and for the C13
+///   check that must be re-run before writing.
+///
 /// - **3.0 (2026-08-02, roadmap C13 under D14)** — `PhysicalAntennaConfig.feed.position`.
 ///   The byte layout did not move and the container axis did not move: a 2.0 artifact still
 ///   decodes perfectly. That is exactly why this is a MAJOR. Full-mode `calibrate` wrote that
@@ -67,7 +86,7 @@ use std::fmt;
 ///   a wrong artifact past the gate this bump exists to close. (One of them carries a 5 cm
 ///   *lateral* design offset, which is legitimate and is what this field is for; the C13
 ///   signature is specifically an axial component equal to the focal length.)
-pub const CALIBRATION_SCHEMA_VERSION: &str = "3.0";
+pub const CALIBRATION_SCHEMA_VERSION: &str = "4.0";
 
 /// Complete calibration data for a single antenna-feed combination (v2.0 physics-based).
 ///
@@ -519,6 +538,31 @@ pub struct FeedParameters {
     /// the explicit defocus knob.
     #[serde(default)]
     pub axial_defocus_m: f64,
+
+    /// E-plane / H-plane illumination asymmetry. `1.0` is a symmetric feed; values
+    /// above 1.0 broaden the E-plane. Modulates the effective q-factor by `cos 2φ'`
+    /// in the aperture integrand (`model::illumination`).
+    ///
+    /// **This field exists because a model parameter that only one side of the pipeline
+    /// knows about is a wrong answer waiting to be served** (roadmap **D23**, 2026-08-03).
+    /// `calibrate` fits its residuals against a model built from the antenna class's
+    /// `feed.asymmetry_factor`, and until this field existed the artifact had nowhere to
+    /// put it: the service rebuilt the feed with `FeedParametersBuilder`'s default of 1.0,
+    /// so the correction surface was fitted against an asymmetric illumination and applied
+    /// on top of a symmetric one. It also silently changed which integrator branch ran —
+    /// a non-unity factor routes through the azimuthal-mode path, 1.0 through the
+    /// symmetric one.
+    ///
+    /// Measured cost on the two shipped classes that carry a non-unity factor, over the
+    /// D12 fixture grid (8 m dish, 400–700 MHz, cone 0–24°, clock 0–345°):
+    /// `UHF_Array_Element` (1.1) worst **1.20 dB** at cone 14° / 700 MHz, 0.27–0.38 dB RMS;
+    /// `GroundStation_13m` (1.05) worst **0.60 dB**. At **boresight it is 0.0003 dB** — the
+    /// error is φ-dependent, so a boresight check cannot see it, which is why this outlived
+    /// C13 in the same function.
+    ///
+    /// Every producer must write the class/design value; do not reintroduce a default here
+    /// that silently substitutes a symmetric feed.
+    pub asymmetry_factor: f64,
 }
 
 impl FeedParameters {
@@ -534,6 +578,17 @@ impl FeedParameters {
                 parameter: "q_factor".to_string(),
                 value: self.q_factor,
                 reason: "must be between 0 and 20".to_string(),
+            });
+        }
+
+        // Mirrors `model::geometry::FeedParameters::validate`. The model layer would
+        // reject a non-positive factor anyway, but only once a request reaches the
+        // integrator; rejecting it here means a bad artifact fails at load.
+        if self.asymmetry_factor <= 0.0 || !self.asymmetry_factor.is_finite() {
+            return Err(ValidationError::InvalidPhysicalParameter {
+                parameter: "asymmetry_factor".to_string(),
+                value: self.asymmetry_factor,
+                reason: "must be positive (1.0 is a symmetric feed)".to_string(),
             });
         }
 
@@ -1422,6 +1477,7 @@ pub struct FeedParametersBuilder {
     q_factor: Option<f64>,
     phase_center_offset_m: Option<f64>,
     axial_defocus_m: Option<f64>,
+    asymmetry_factor: Option<f64>,
 }
 
 impl FeedParametersBuilder {
@@ -1445,12 +1501,23 @@ impl FeedParametersBuilder {
         self
     }
 
+    /// E/H illumination asymmetry; `1.0` (the default) is a symmetric feed.
+    pub fn asymmetry_factor(mut self, factor: f64) -> Self {
+        self.asymmetry_factor = Some(factor);
+        self
+    }
+
     pub fn build(self) -> Result<FeedParameters, String> {
         Ok(FeedParameters {
             position: self.position.ok_or("position is required")?,
             q_factor: self.q_factor.ok_or("q_factor is required")?,
             phase_center_offset_m: self.phase_center_offset_m.unwrap_or(0.0),
             axial_defocus_m: self.axial_defocus_m.unwrap_or(0.0),
+            // Symmetric unless stated. Unlike `position`, an unset asymmetry has a
+            // physically meaningful default, so this builder does not demand one — but a
+            // *producer* writing an artifact must pass the class's value through rather
+            // than accept this (roadmap D23); each one has a test pinning that it does.
+            asymmetry_factor: self.asymmetry_factor.unwrap_or(1.0),
         })
     }
 }

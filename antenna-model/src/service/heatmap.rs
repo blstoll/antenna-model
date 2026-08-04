@@ -725,6 +725,7 @@ mod tests {
                     q_factor: 8.0,
                     phase_center_offset_m: 0.0,
                     axial_defocus_m: 0.0,
+                    asymmetry_factor: 1.0,
                 },
                 mesh: Some(MeshParameters {
                     mesh_spacing_mm: 5.0,
@@ -830,6 +831,7 @@ mod tests {
                     q_factor: 8.0,
                     phase_center_offset_m: 0.0,
                     axial_defocus_m: 0.0,
+                    asymmetry_factor: 1.0,
                 },
                 mesh: Some(MeshParameters {
                     mesh_spacing_mm: 5.0,

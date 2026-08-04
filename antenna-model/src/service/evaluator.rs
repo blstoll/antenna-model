@@ -198,6 +198,12 @@ pub fn compute_gain_from_request_with_budget(
         .q_factor(calibration.physical_config.feed.q_factor)
         .phase_center_offset(calibration.physical_config.feed.phase_center_offset_m)
         .axial_defocus(calibration.physical_config.feed.axial_defocus_m)
+        // Roadmap D23: every field this builder can take must come from the artifact,
+        // never from the builder's own default. Omitting this one substituted a
+        // symmetric feed for an asymmetric one — worth up to 1.20 dB, and it also
+        // silently moved the evaluation from the azimuthal-mode integrator branch to
+        // the symmetric one.
+        .asymmetry_factor(calibration.physical_config.feed.asymmetry_factor)
         .build()
         .map_err(|e| AntennaModelError::Generic(format!("Failed to build feed: {}", e)))?;
 
@@ -821,6 +827,7 @@ mod tests {
                     q_factor: 8.0,
                     phase_center_offset_m: 0.0,
                     axial_defocus_m: 0.0,
+                    asymmetry_factor: 1.0,
                 },
                 mesh: Some(MeshParameters {
                     mesh_spacing_mm: 5.0,
@@ -2263,6 +2270,7 @@ mod tests {
                     q_factor: 8.0,
                     phase_center_offset_m: 0.0,
                     axial_defocus_m: 0.0,
+                    asymmetry_factor: 1.0,
                 },
                 mesh: Some(MeshParameters {
                     mesh_spacing_mm: 5.0,
@@ -2489,6 +2497,7 @@ mod tests {
             .q_factor(phys.feed.q_factor)
             .phase_center_offset(phys.feed.phase_center_offset_m)
             .axial_defocus(phys.feed.axial_defocus_m)
+            .asymmetry_factor(phys.feed.asymmetry_factor)
             .build()
             .unwrap();
         let mut cfg_builder = AntennaConfiguration::builder()
@@ -2533,6 +2542,108 @@ mod tests {
              same integrator, same canonical params",
             response.gain_db,
             direct
+        );
+    }
+
+    /// **Roadmap D23, the served half.** An artifact's `asymmetry_factor` must reach the
+    /// model the service evaluates — the exit criterion this unit exists for.
+    ///
+    /// Structure mirrors `served_offaxis_matches_direct_compute_gain_db` above, with the
+    /// artifact carrying a **non-unity** factor: reconstruct the model twice, once with the
+    /// artifact's asymmetry and once with the symmetric default the service used to
+    /// substitute, and require the served gain to match the first and *not* the second. The
+    /// second assertion is the whole test. Without it this would pass on a build that
+    /// ignores the field entirely, since 1.1 and 1.0 agree at boresight to 0.0003 dB — which
+    /// is precisely how the defect survived C13's pass over the same function.
+    ///
+    /// The producer halves are `calibrate::main::exported_asymmetry_factor_is_the_class_
+    /// value_not_a_symmetric_default`, `boresight_artifact_carries_the_design_spec_
+    /// asymmetry_factor`, and `repository::declared_asymmetry_factor_reaches_the_loaded_
+    /// calibration`.
+    #[test]
+    fn served_gain_uses_the_artifacts_asymmetry_factor() {
+        use crate::model::{
+            FeedParameters as ModelFeedParams, FeedPosition, MeshParameters as ModelMeshParams,
+            ReflectorGeometry as ModelReflector,
+        };
+
+        let mut repo = CalibrationRepository::new();
+        let mut calibration = create_test_calibration(CalibrationStatus::Uncalibrated {
+            accuracy_estimate_db: 3.0,
+            loss_accuracy_estimate_db: 2.0,
+        });
+        calibration.physical_config.feed.asymmetry_factor = 1.1;
+        let phys = calibration.physical_config.clone();
+        repo.add_calibration(calibration);
+
+        let request = create_deep_offaxis_request();
+        let response = compute_gain_from_request(&request, &repo).unwrap();
+
+        let focal = phys.reflector.focal_length_m;
+        let fo = &response.geometry.physical_feed_offset_m;
+        let rebuild = |asymmetry: f64| {
+            let reflector = ModelReflector::new(
+                phys.reflector.diameter_m,
+                focal,
+                phys.reflector.surface_rms_mm / 1000.0,
+            )
+            .unwrap();
+            let feed = ModelFeedParams::builder()
+                .position(FeedPosition::new(fo.x, fo.y, fo.z + focal))
+                .q_factor(phys.feed.q_factor)
+                .phase_center_offset(phys.feed.phase_center_offset_m)
+                .axial_defocus(phys.feed.axial_defocus_m)
+                .asymmetry_factor(asymmetry)
+                .build()
+                .unwrap();
+            let mut cfg_builder = AntennaConfiguration::builder()
+                .id("test_antenna")
+                .name("Test Antenna")
+                .reflector(reflector)
+                .feed(feed);
+            if let Some(m) = phys.mesh.as_ref() {
+                cfg_builder = cfg_builder.mesh(
+                    ModelMeshParams::builder()
+                        .spacing(m.mesh_spacing_mm / 1000.0)
+                        .wire_diameter(m.wire_diameter_mm / 1000.0)
+                        .build()
+                        .unwrap(),
+                );
+            }
+            let config = cfg_builder.build().unwrap();
+
+            let mut params = IntegrationParams::adaptive();
+            params.apply_spillover = true;
+            params.apply_sidelobe_floor = true;
+
+            compute_gain_db(
+                response.geometry.emitter_elevation_deg.to_radians(),
+                response.geometry.emitter_azimuth_deg.to_radians(),
+                &config,
+                request.frequency_mhz * 1e6,
+                &params,
+            )
+            .unwrap()
+            .gain
+        };
+
+        let with_artifact_value = rebuild(1.1);
+        let with_symmetric_default = rebuild(1.0);
+
+        assert!(
+            (with_artifact_value - response.gain_db).abs() < 1e-9,
+            "served gain {} dBi must equal the model built with the artifact's \
+             asymmetry_factor 1.1 ({} dBi)",
+            response.gain_db,
+            with_artifact_value
+        );
+        assert!(
+            (with_symmetric_default - response.gain_db).abs() > 1e-6,
+            "negative control failed: the symmetric-default model gives {} dBi and the \
+             served gain is {} dBi, so this geometry cannot tell the two apart and the \
+             assertion above proves nothing. Pick an angle where asymmetry matters.",
+            with_symmetric_default,
+            response.gain_db
         );
     }
 

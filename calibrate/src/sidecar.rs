@@ -167,4 +167,55 @@ mod tests {
         assert!((parsed.corrected_rmse - 0.5).abs() < 1e-12);
         assert!(parsed.meets_accuracy_requirements);
     }
+
+    /// A report whose cross-validation scored **nothing** must still round-trip.
+    ///
+    /// The test above carries `cross_validation: None`, so it never exercised the aggregate
+    /// statistics at all. Roadmap **D22** made a fold refit failure non-fatal, which created a
+    /// reachable state where no fold scores and there is no mean to report. Representing that
+    /// as `f64::NAN` would have written JSON `null` — `serde_json` cannot encode non-finite
+    /// floats — and a plain `f64` field cannot read `null` back, so the report this very
+    /// function writes would not have parsed. `Option<f64>` is why it does.
+    #[test]
+    fn a_report_with_no_scored_cross_validation_folds_round_trips() {
+        use crate::validator::{CrossValidationResults, FoldFailure};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("report_no_folds.json");
+
+        let mut report = test_validation_report();
+        report.cross_validation = Some(CrossValidationResults {
+            num_folds: 2,
+            fold_rmse_values: vec![],
+            failed_folds: vec![
+                FoldFailure {
+                    fold: 1,
+                    training_points: 5,
+                    reason: "fold 1/2 could not refit".to_string(),
+                },
+                FoldFailure {
+                    fold: 2,
+                    training_points: 5,
+                    reason: "fold 2/2 could not refit".to_string(),
+                },
+            ],
+            mean_rmse: None,
+            std_rmse: None,
+            min_rmse: None,
+            max_rmse: None,
+        });
+
+        export_validation_json(&report, &path).expect("export report");
+        let text = std::fs::read_to_string(&path).expect("read report");
+        let parsed: ValidationReport = serde_json::from_str(&text)
+            .expect("a report with an unscored cross-validation must parse back");
+
+        let cv = parsed.cross_validation.expect("cross-validation present");
+        assert!(
+            cv.mean_rmse.is_none(),
+            "no fold scored, so there is no mean"
+        );
+        assert_eq!(cv.failed_folds.len(), 2);
+        assert!(!cv.is_complete());
+    }
 }

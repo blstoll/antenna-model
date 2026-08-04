@@ -238,6 +238,9 @@ impl CalibrationRepository {
                 q_factor: feed_spec.q_factor,
                 phase_center_offset_m: feed_spec.phase_center_offset_m,
                 axial_defocus_m: feed_spec.axial_defocus_m,
+                // Roadmap D23: the design spec is the declared source for this, and it
+                // must reach the served model — see the field's docs in `data::types`.
+                asymmetry_factor: feed_spec.asymmetry_factor,
             };
 
             let mesh = design.mesh.as_ref().map(|m| MeshParameters {
@@ -964,6 +967,67 @@ antennas:
         assert_eq!(cal.metadata.data_source, "design_specifications");
         assert_eq!(cal.metadata.num_measurements, 0);
         assert!(!cal.metadata.parameters_tuned);
+    }
+
+    /// **Roadmap D23, design-spec producer half.** A declared `asymmetry_factor` must reach
+    /// the loaded calibration, and an omitted one must default to a symmetric 1.0.
+    ///
+    /// Both halves matter. The declared case is the round trip this unit exists for; the
+    /// omitted case is what keeps every already-written `antennas.yaml` — none of which
+    /// names the field — loading as the symmetric antennas they are.
+    #[test]
+    fn declared_asymmetry_factor_reaches_the_loaded_calibration() {
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path();
+
+        let antenna_config_yaml = r#"
+antennas:
+  - id: "asym_test"
+    name: "Asymmetry Round-Trip"
+    calibration_status: "uncalibrated"
+    enabled: true
+    design_specs:
+      diameter_m: 8.0
+      focal_length_m: 3.6
+      f_over_d_ratio: 0.45
+      surface_rms_mm: 2.0
+      feeds:
+        - id: "declared"
+          name: "Declared asymmetric feed"
+          position: [0.0, 0.0, 0.0]
+          q_factor: 5.0
+          phase_center_offset_m: 0.0
+          asymmetry_factor: 1.1
+          frequency_range: [400.0, 700.0]
+        - id: "omitted"
+          name: "Feed with no asymmetry stated"
+          position: [0.0, 0.0, 0.0]
+          q_factor: 5.0
+          phase_center_offset_m: 0.0
+          frequency_range: [400.0, 700.0]
+"#;
+        let config_path = data_dir.join("antennas.yaml");
+        std::fs::write(&config_path, antenna_config_yaml).unwrap();
+
+        let repo = CalibrationRepository::load_from_config(&CalibrationConfig {
+            data_directory: data_dir.to_path_buf(),
+            antenna_config_file: config_path,
+            fail_fast: true,
+        })
+        .unwrap();
+
+        let declared = repo.get_calibration("asym_test", "declared").unwrap();
+        assert_eq!(
+            declared.physical_config.feed.asymmetry_factor, 1.1,
+            "a declared asymmetry must survive YAML -> calibration; before D23 the field \
+             did not exist and the served model silently used 1.0"
+        );
+
+        let omitted = repo.get_calibration("asym_test", "omitted").unwrap();
+        assert_eq!(
+            omitted.physical_config.feed.asymmetry_factor, 1.0,
+            "an unstated asymmetry means a symmetric feed"
+        );
     }
 
     #[test]

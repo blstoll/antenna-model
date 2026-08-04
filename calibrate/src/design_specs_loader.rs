@@ -65,8 +65,22 @@ pub struct FeedSpecs {
     /// Phase center offset in meters
     pub phase_center_offset_m: f64,
 
+    /// E-plane / H-plane illumination asymmetry (optional; default 1.0 = symmetric).
+    ///
+    /// Roadmap **D23** made asymmetry a *declared* design property rather than a tuned
+    /// one: it is a horn geometry property, and it is φ-dependent, so the boresight data
+    /// this producer runs on carries no information about it (0.0003 dB at boresight
+    /// against 1.20 dB off-axis). Tuning it here would fit noise.
+    #[serde(default = "default_asymmetry_factor")]
+    pub asymmetry_factor: f64,
+
     /// Frequency range [min, max] in MHz
     pub frequency_range: [f64; 2],
+}
+
+/// A feed is symmetric unless the design spec says otherwise.
+fn default_asymmetry_factor() -> f64 {
+    1.0
 }
 
 /// Mesh reflector specifications
@@ -266,6 +280,21 @@ impl FeedSpecs {
             );
         }
 
+        // `!is_finite()` as well as `<= 0.0`, because NaN fails every ordered comparison —
+        // `NaN <= 0.0` is false, so a bare sign check waves it through. This is the last gate
+        // before the value reaches the integrator: `model::geometry::FeedParameters::validate`
+        // tests only `<= 0.0`, so a NaN asymmetry from a design-specs file would otherwise
+        // reach the aperture integrand and poison every gain silently. (`q_factor` above has
+        // the same hole; it is pre-existing and not this unit's to change, but the same
+        // reasoning applies if anyone touches it.)
+        if self.asymmetry_factor <= 0.0 || !self.asymmetry_factor.is_finite() {
+            anyhow::bail!(
+                "asymmetry_factor must be a positive finite number (1.0 is a symmetric feed), \
+                 got {}",
+                self.asymmetry_factor
+            );
+        }
+
         // Validate frequency range
         if self.frequency_range[0] >= self.frequency_range[1] {
             anyhow::bail!(
@@ -349,6 +378,64 @@ mesh:
   wire_diameter_mm: 0.5
 "#
         .to_string()
+    }
+
+    /// **Roadmap D23.** A declared asymmetry loads; an omitted one is symmetric; a
+    /// non-positive *or non-finite* one is rejected here, at the file boundary.
+    ///
+    /// The NaN case is the one worth having. `NaN <= 0.0` is false — NaN fails every ordered
+    /// comparison — so a bare sign check waves it through, and
+    /// `model::geometry::FeedParameters::validate` does exactly that. This is the last gate
+    /// before the value reaches the aperture integrand, where it would poison every gain
+    /// while every validator reported the feed as fine.
+    #[test]
+    fn asymmetry_factor_is_optional_but_must_be_positive_and_finite() {
+        let load = |feed_line: &str| {
+            let yaml = format!(
+                r#"
+antenna_id: "t"
+antenna_name: "T"
+reflector:
+  diameter_m: 3.7
+  focal_length_m: 1.85
+  surface_rms_mm: 1.5
+feeds:
+  - feed_id: "x_band"
+    name: "X"
+    position: [0.0, 0.0, 0.0]
+    q_factor: 8.0
+    phase_center_offset_m: 0.0
+{feed_line}    frequency_range: [7100.0, 8500.0]
+"#
+            );
+            let mut f = NamedTempFile::new().unwrap();
+            f.write_all(yaml.as_bytes()).unwrap();
+            f.flush().unwrap();
+            DesignSpecs::load_from_file(f.path())
+        };
+
+        let declared = load("    asymmetry_factor: 1.1\n").expect("a declared factor loads");
+        assert_eq!(declared.feeds[0].asymmetry_factor, 1.1);
+
+        let omitted = load("").expect("an omitted factor loads");
+        assert_eq!(
+            omitted.feeds[0].asymmetry_factor, 1.0,
+            "an unstated asymmetry means a symmetric feed"
+        );
+
+        let err = load("    asymmetry_factor: -1.0\n")
+            .expect_err("a negative asymmetry must be rejected");
+        assert!(
+            format!("{err:?}").contains("asymmetry_factor"),
+            "the error must name the field; got: {err:?}"
+        );
+
+        let err = load("    asymmetry_factor: .nan\n")
+            .expect_err("a NaN asymmetry must be rejected — it passes every `<= 0.0` check");
+        assert!(
+            format!("{err:?}").contains("asymmetry_factor"),
+            "the error must name the field; got: {err:?}"
+        );
     }
 
     #[test]

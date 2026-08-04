@@ -40,6 +40,16 @@ pub const NOMINAL_SURFACE_RMS_MM: f64 = 2.0;
 /// by the full-mode tuner and would just add an unattributable residual.
 pub const PERTURBED_SURFACE_RMS_MM: f64 = 2.6;
 
+/// E/H illumination asymmetry of `UHF_Array_Element`, from `calibrate/antenna_classes.yaml`.
+///
+/// The largest of any shipped class, and the geometry roadmap **D23** measured its worst case
+/// on: 1.20 dB at cone 14° / 700 MHz between this value and the 1.0 the service used to
+/// substitute, against 0.0003 dB at boresight. Named here rather than written inline so
+/// [`fixture_config`] and the artifact assertion in `cli_full_mode_e2e.rs` cannot drift apart —
+/// if they did, the fixture would be *generated* with one illumination and *checked* against
+/// another, which is a small-scale copy of the defect D23 closed.
+pub const FIXTURE_ASYMMETRY_FACTOR: f64 = 1.1;
+
 /// System noise temperature of `UHF_Array_Element`, from `antenna_classes.yaml`.
 /// The CSV's `temperature_k` column must match this or the G/T values are inconsistent
 /// with what the calibrator computes.
@@ -144,7 +154,7 @@ pub fn fixture_config(surface_rms_mm: f64) -> AntennaConfiguration {
         .at_focus(focal_length)
         .q_factor(5.0)
         .phase_center_offset(0.0)
-        .asymmetry_factor(1.1)
+        .asymmetry_factor(FIXTURE_ASYMMETRY_FACTOR)
         .build()
         .expect("fixture feed parameters");
 

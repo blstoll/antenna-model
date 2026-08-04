@@ -88,15 +88,17 @@ echo "==> step 2/2: fit the correction surface and write the artifact"
 # split still sees 2592 (roadmap D20 — an underdetermined fit is now a hard error, and a
 # fold is what has to clear the count, not just the whole grid).
 #
-# READ THE CV NUMBERS WITH CARE. The validator assigns folds as CONTIGUOUS slices of the
-# input file, and this file is written frequency-major, so the first and last folds hold
-# out an entire frequency slab and the fit has to extrapolate the frequency axis to reach
-# it. Measured here: fold RMSEs 10.07 / 0.56 / 0.12 / 0.64 / 10.86 dB — the interior folds
-# report the surface's actual interpolation error and the two edge folds report a
-# frequency extrapolation nobody asked for. The mean (4.45 dB) is therefore not this
-# artifact's accuracy; `corrected_rmse` (0.027 dB) and the served comparisons in
-# calibrate/tests/cli_full_mode_real_data_e2e.rs are. Filed as roadmap unit **D22**, with
-# the measurement, by D14.
+# Folds are STRIDED (point i is held out by fold i % 5), so each fold's training set spans
+# every frequency in the file and every fold scores an interpolation. Measured here after
+# roadmap D22 landed (2026-08-03): fold RMSEs 0.029 / 0.031 / 0.031 / 0.060 / 0.046 dB
+# against an in-sample corrected_rmse of 0.027 dB.
+#
+# Until D22 the validator cut folds as CONTIGUOUS slices of the input file, and this file is
+# written frequency-major, so the first and last folds held out an entire frequency slab and
+# the fit had to extrapolate the frequency axis to reach it: 10.07 / 0.56 / 0.12 / 0.64 /
+# 10.86 dB, a mean of 4.45 dB that described the file's sort order more than the artifact.
+# Kept here because it is the reference point for reading the numbers above — a fold that
+# climbs back into that range means the fold assignment regressed, not that the surface did.
 "$BIN_DIR/calibrate" \
   --calibration-mode full \
   --input "$OUT_DIR/cr159703_grid.csv" \

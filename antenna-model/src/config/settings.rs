@@ -536,8 +536,20 @@ pub struct FeedSpecConfig {
     #[serde(default)]
     pub axial_defocus_m: f64,
 
+    /// E-plane / H-plane illumination asymmetry (optional; default 1.0 = symmetric).
+    /// Values above 1.0 broaden the E-plane. Declared here rather than tuned: it is a
+    /// horn geometry property, and being φ-dependent it is invisible to the boresight
+    /// data the tuner runs on. Roadmap D23.
+    #[serde(default = "default_asymmetry_factor")]
+    pub asymmetry_factor: f64,
+
     /// Frequency range [min, max] in MHz
     pub frequency_range: [f64; 2],
+}
+
+/// A feed is symmetric unless the design spec says otherwise.
+fn default_asymmetry_factor() -> f64 {
+    1.0
 }
 
 /// Mesh configuration for mesh reflectors
@@ -775,6 +787,16 @@ impl FeedSpecConfig {
                     antenna_id, self.id
                 ),
                 reason: "must be between 0 and 20".to_string(),
+            });
+        }
+
+        if self.asymmetry_factor <= 0.0 || !self.asymmetry_factor.is_finite() {
+            return Err(ConfigError::InvalidValue {
+                key: format!(
+                    "antenna.{}.design_specs.feed.{}.asymmetry_factor",
+                    antenna_id, self.id
+                ),
+                reason: "must be positive (1.0 is a symmetric feed)".to_string(),
             });
         }
 

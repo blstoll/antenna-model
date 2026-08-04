@@ -426,12 +426,18 @@ pub fn fit_correction_surface(
             "Running {}-fold cross-validation...",
             params.cross_validation_folds
         );
+        // `None` when no fold could be refitted — reported as an absent figure, never as a
+        // failed run (roadmap D22; see `cross_validate`'s docs for why this is the copy that
+        // matters).
         let cv_rmse = cross_validate(&residuals, params)?;
-        info!("Cross-validation RMSE: {:.3} dB", cv_rmse);
+        match cv_rmse {
+            Some(rmse) => info!("Cross-validation RMSE: {:.3} dB", rmse),
+            None => info!("Cross-validation RMSE: not available (no fold could be refitted)"),
+        }
 
         let surface = CorrectionSurface {
             fit_stats: FitStatistics {
-                cross_validation_rmse: Some(cv_rmse),
+                cross_validation_rmse: cv_rmse,
                 ..surface.fit_stats
             },
             ..surface
@@ -1118,8 +1124,51 @@ fn compute_r_squared(original: &[f64], corrected: &[f64]) -> f64 {
     1.0 - (ss_res / ss_tot)
 }
 
-/// Perform k-fold cross-validation
-fn cross_validate(residuals: &[ResidualPoint], params: &CorrectionSurfaceParams) -> Result<f64> {
+/// Is point `index` held out by fold `fold` of `num_folds`?
+///
+/// **The single definition of fold assignment for this crate** — both cross-validation
+/// implementations call it (`cross_validate` below, and `validator::perform_cross_validation`),
+/// so they cannot report two numbers computed by two different partitions of the same data.
+/// That is not hypothetical: until roadmap **D22** they *did*, and only the validator's copy
+/// was ever examined.
+///
+/// **Strided**: point `i` is held out by fold `i % num_folds`. Folds used to be contiguous
+/// slices, `[k·n/K, (k+1)·n/K)`. Measurement files are grid-ordered — frequency-major for both
+/// calibrate fixtures and for any real swept measurement — so the first and last slices held
+/// out an entire frequency slab, and scoring them made the fit **extrapolate past its own
+/// knots**. Measured on D14's 3240-row artifact at 5 folds: 10.07 / 0.56 / 0.12 / 0.64 /
+/// 10.86 dB, a mean of 4.45 ± 4.92 dB against an in-sample 0.027 dB. That number was neither
+/// generalization error nor a deliberate extrapolation test but a mixture whose proportions
+/// depended on how the input file happened to be sorted — re-sorting the same measurements
+/// changed the headline quality claim of `--validate`. Strided, the same artifact scores
+/// 0.029 / 0.031 / 0.031 / 0.060 / 0.046 dB.
+///
+/// Striding is deterministic (no RNG, no seed to record) and is invariant to which axis varies
+/// fastest, which is the property that was actually missing. Its known bias is the opposite
+/// one: on a dense grid every held-out point has near neighbours in the training set, so the
+/// score leans **optimistic** and measures interpolation quality rather than extrapolation.
+/// That is the right default for a surface whose job is interpolation, and unlike the old
+/// behaviour it is a stated property rather than a side effect of row order. A deliberate
+/// extrapolation test would have to hold out a named axis on purpose — see D22's option 3.
+pub(crate) fn is_held_out(index: usize, fold: usize, num_folds: usize) -> bool {
+    index % num_folds == fold
+}
+
+/// Perform k-fold cross-validation.
+///
+/// Returns `None` when no fold could be scored, rather than failing the caller: a fold refits
+/// on `(1 − 1/folds)` of the data, and since roadmap **D20** an underdetermined fit is a hard
+/// error, so a dataset can clear the coefficient count on the full set and miss it on a split.
+/// Propagating that killed the whole run — and because `--validate` sets
+/// `cross_validation_folds`, it killed it *here*, inside the fit, before
+/// `validator::validate_calibration` or the artifact writer was ever reached. `--validate`
+/// could therefore **remove an artifact that the same command without it produces**, which is
+/// exactly what roadmap D22 decided it must not do. Fixing that only in the validator left
+/// this copy as the reachable one; both are non-fatal now.
+fn cross_validate(
+    residuals: &[ResidualPoint],
+    params: &CorrectionSurfaceParams,
+) -> Result<Option<f64>> {
     let k = params.cross_validation_folds;
     if k < 2 {
         return Err(CorrectionSurfaceError::CrossValidationError {
@@ -1127,25 +1176,17 @@ fn cross_validate(residuals: &[ResidualPoint], params: &CorrectionSurfaceParams)
         });
     }
 
-    let n = residuals.len();
-    let fold_size = n / k;
-
     let mut cv_errors = Vec::new();
+    let mut scored_folds = 0usize;
+    let mut failed_folds = 0usize;
 
     for fold in 0..k {
-        let start = fold * fold_size;
-        let end = if fold == k - 1 {
-            n
-        } else {
-            (fold + 1) * fold_size
-        };
-
-        // Split into training and validation sets
+        // Split into training and validation sets, through the shared assignment above.
         let mut training = Vec::new();
         let mut validation = Vec::new();
 
         for (i, res) in residuals.iter().enumerate() {
-            if i >= start && i < end {
+            if is_held_out(i, fold, k) {
                 validation.push(res.clone());
             } else {
                 training.push(res.clone());
@@ -1171,11 +1212,26 @@ fn cross_validate(residuals: &[ResidualPoint], params: &CorrectionSurfaceParams)
         // Fit surface on training fold. The fold fit must not cross-validate in turn —
         // `fit_correction_surface` would re-enter this function with the same fold count
         // and recurse until the training set falls below the fitting minimum.
-        let surface = fit_correction_surface(
+        let surface = match fit_correction_surface(
             &training_measurements,
             &training_predictions,
             &params.without_nested_cross_validation(),
-        )?;
+        ) {
+            Ok(surface) => surface,
+            Err(e) => {
+                failed_folds += 1;
+                warn!(
+                    "cross-validation fold {}/{k} could not refit on its training split of {} \
+                     points (the full set has {}, and its own fit succeeded — cross-validation \
+                     trains on {:.0}% of it): {e}",
+                    fold + 1,
+                    training.len(),
+                    residuals.len(),
+                    100.0 * (1.0 - 1.0 / k as f64),
+                );
+                continue;
+            }
+        };
 
         // Evaluate on validation fold
         for val_res in &validation {
@@ -1187,10 +1243,24 @@ fn cross_validate(residuals: &[ResidualPoint], params: &CorrectionSurfaceParams)
             let error = val_res.residual_db - correction;
             cv_errors.push(error);
         }
+        scored_folds += 1;
     }
 
-    let cv_rmse = compute_rmse(&cv_errors);
-    Ok(cv_rmse)
+    if scored_folds == 0 {
+        warn!(
+            "cross-validation could not score any of the {k} folds; the surface's own fit on \
+             the full dataset succeeded, so it is reported without a cross-validation figure"
+        );
+        return Ok(None);
+    }
+    if failed_folds > 0 {
+        warn!(
+            "cross-validation is INCOMPLETE: {scored_folds}/{k} folds scored; the figure below \
+             covers only those"
+        );
+    }
+
+    Ok(Some(compute_rmse(&cv_errors)))
 }
 
 // ============================================================================
@@ -1760,6 +1830,77 @@ mod tests {
         assert!(
             surface.fit_stats.cross_validation_rmse.is_some(),
             "the requested cross-validation should still have run"
+        );
+    }
+
+    /// **Roadmap D22, the reachable half.** A fold that cannot refit must not fail the fit.
+    ///
+    /// This is the copy of cross-validation that `--validate` actually reaches first:
+    /// `main::surface_fitting_params` sets `cross_validation_folds` from the flag, so
+    /// `fit_correction_surface` cross-validates *before* `validator::validate_calibration`
+    /// is ever called. While this propagated a fold failure, D22's decision — warn and still
+    /// ship — was unreachable from the CLI no matter what the validator did: the run died
+    /// here, and `--validate` **removed an artifact that the same command without it
+    /// produces**.
+    ///
+    /// The fixture is sized to fail: 448 points clear the 400 coefficients the shipped knot
+    /// counts declare, a 5-fold training split (358) does not.
+    #[test]
+    fn a_fold_that_cannot_refit_does_not_fail_the_fit() {
+        let mut measurements = Vec::new();
+        let mut predictions = Vec::new();
+        for fi in 0..2 {
+            let frequency_mhz = 8400.0 + 100.0 * fi as f64;
+            for ci in 0..28 {
+                let e_cone_deg = ci as f64;
+                for ki in 0..8 {
+                    let e_clock_deg = 45.0 * ki as f64;
+                    let ripple = 0.4 * e_clock_deg.to_radians().cos();
+                    measurements.push(MeasurementPoint::new(
+                        e_clock_deg,
+                        e_cone_deg,
+                        frequency_mhz,
+                        41.5 - 0.35 * e_cone_deg * e_cone_deg + ripple,
+                        50.0,
+                    ));
+                    predictions.push(41.5 - 0.33 * e_cone_deg * e_cone_deg);
+                }
+            }
+        }
+        assert_eq!(measurements.len(), 448);
+
+        let params = CorrectionSurfaceParams {
+            spline_order: 4,
+            num_knots_frequency: 4,
+            num_knots_econe: 6,
+            num_knots_eclock: 8,
+            regularization: 1e-3,
+            adaptive_knots: true,
+            cross_validation_folds: 5,
+            min_knot_spacing_frequency: 50.0,
+            min_knot_spacing_econe: 2.0,
+            min_knot_spacing_eclock: 5.0,
+        };
+
+        // Premise: the full set fits. If this ever stops holding the test below proves
+        // nothing, because there would be no artifact to protect in the first place.
+        fit_correction_surface(
+            &measurements,
+            &predictions,
+            &params.without_nested_cross_validation(),
+        )
+        .expect("the whole set must fit — that is the premise");
+
+        let surface = fit_correction_surface(&measurements, &predictions, &params).expect(
+            "a fold that cannot refit must not fail the fit: the surface's own fit on the \
+             full dataset succeeded, and --validate is not allowed to withhold an artifact \
+             it would otherwise have produced (roadmap D22)",
+        );
+
+        assert!(
+            surface.fit_stats.cross_validation_rmse.is_none(),
+            "no fold could be scored here, so there is no cross-validation figure to report \
+             — reporting one would describe folds that never ran"
         );
     }
 
