@@ -5088,6 +5088,60 @@ real fixture the counts bind at the same point.)
 
 ---
 
+### D25 — The JSON sidecar cannot represent a non-finite `f64` that the artifact can — Effort: S
+
+**Filed 2026-08-04**, from the code review of D21. Latent, not live: no shipped run produces a
+non-finite figure today. It is filed because the *value* is deliberate and the *encoding*
+cannot carry it, and nothing in either file says so.
+
+**The defect.** `sidecar::write_json` (`calibrate/src/sidecar.rs:98`) uses
+`serde_json::to_string_pretty`, and serde_json writes a non-finite `f64` as JSON `null`.
+`AngularResolution`'s four fields — and every other `f64` in `ArtifactMetadata` /
+`ValidationReport` — are plain `f64`, so a non-finite value produces a `--metadata` sidecar
+that will not parse back: `serde_json::from_str::<ArtifactMetadata>` fails with *invalid type:
+null, expected f64*. That round trip is not hypothetical; it is what `sidecar.rs:161` asserts,
+and it passes today only because its fixture sets `angular_resolution: None`.
+
+**Why it is worth a unit rather than a one-line patch.** The `.bin` copy of the same number is
+unaffected — postcard encodes infinities fine — so **the two serializations of one figure
+disagree about whether it can be read back**, and the artifact is the *more* permissive of the
+two. That is already a decided position elsewhere: D9's register row keeps
+`CalibrationMetadata.rmse_db` / `r_squared` as plain `f64` with a **NaN sentinel** by decision.
+So the pipeline has one encoding that tolerates non-finite values on purpose and another that
+silently destroys them, and the boundary between them is undocumented. Deciding that boundary
+is the unit; the call site is incidental.
+
+**Current reachability.** After the D21 cone fix (`c4f460d`) the only remaining producer is
+`correction_surface::widest_knot_gap`'s deliberate `f64::INFINITY` for a degenerate axis
+(`correction_surface.rs:335`), chosen over `0.0` precisely so a degenerate axis does not read
+as *infinitely well resolved*. `fit_correction_surface` cannot deliver such an axis —
+`generate_knot_vector` refuses a span below the minimum spacing — but `assess_angular_resolution`
+is public and assesses whatever surface it is handed. So the sentinel is unreachable through
+the CLI and reachable through the library.
+
+**Options, in the order they should be weighed:**
+
+1. **Make the sidecar say what the value is.** Serialize the affected fields through a
+   non-finite-aware helper (`Option<f64>` → `null`, or a tagged string). This is a sidecar
+   schema change and needs its own compatibility note — the sidecar has no version axis, which
+   is a smaller version of the question D2 answered for the artifact.
+2. **Refuse to write.** Fail the sidecar export on a non-finite field rather than emit JSON
+   that will not parse. Cheapest, and consistent with "a measurement with no defined value must
+   say so" (the rule `assess_angular_resolution`'s diameter check already follows).
+3. **Make non-finite unreachable and assert it.** Replace the sentinel with a refusal at the
+   source. Note this trades one silence for another unless the refusal is total: `0.0` is the
+   value the sentinel exists to avoid.
+
+**Exit criteria:** whichever option is taken, a test writes a sidecar carrying the non-finite
+case and reads it back — the existing round-trip fixture cannot see this, and that is why the
+gap survived D21's review. State the artifact-vs-sidecar domain difference in `sidecar.rs`'s
+module docs either way, since D9's NaN sentinel means it will not go away entirely.
+
+**Coupled to:** D9 (the NaN-sentinel decision this sits opposite), D21 (which produced the
+field that exposed it).
+
+---
+
 ## Phase 5 — Decision-gated features
 
 Do not start any of these until the corresponding decision-register row is Decided.

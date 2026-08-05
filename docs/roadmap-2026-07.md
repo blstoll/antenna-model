@@ -505,7 +505,12 @@ Unless a decision-register row flips them:
   8.42 dB deviation collapses. **The generalizable point:** "the real fix" had been recorded as
   a conclusion in two documents on the strength of a plausible mechanism, without anyone asking
   what evidence would distinguish it from the alternatives, or whether the project could
-  produce that evidence at all.
+  produce that evidence at all. D21's review pass closed one further defect in the new field —
+  the clock requirement was evaluated at the largest *signed* cone angle rather than the
+  outermost one, so a one-sided negative cut reported an infinite lobe period and a
+  "fully resolved" verdict on the worse axis (fixed 2026-08-04, `c4f460d`) — and filed one it
+  did not: **D25**, that a non-finite `f64` is representable in the postcard artifact (D9 keeps
+  a NaN sentinel there by decision) but becomes an unparseable `null` in the JSON sidecar.
 - **A constant fitted to measurements is coupled to every input of those measurements** (the
   generalizable finding from P13, 2026-08-01). `RADIAL_PRE_GATE_SAFETY = 32` was chosen in July
   to cover a measured worst case of 26×; a *performance* change with no physics content
