@@ -280,7 +280,6 @@ pub fn assess_angular_resolution(
 
     // Shortest wavelength in coverage ⇒ finest pattern structure ⇒ hardest to resolve.
     let max_frequency_mhz = axis_max(&surface.knots_frequency, "frequency")?;
-    let max_cone_deg = axis_max(&surface.knots_econe, "E-cone")?;
 
     if !(max_frequency_mhz.is_finite() && max_frequency_mhz > 0.0) {
         return Err(CorrectionSurfaceError::InvalidParameter {
@@ -291,6 +290,35 @@ pub fn assess_angular_resolution(
         });
     }
 
+    // *Outermost*, not largest-signed: `MeasurementPoint::validate` accepts E-cone in
+    // [-90, 90], so a one-sided cut recorded as -14°…0° has its worst case at -14° while
+    // its last knot is 0. Taking the last knot there would report `sin θ = 0` and hand the
+    // clock axis an infinite lobe period — i.e. "fully resolved" for an antenna that needs
+    // 4.8° clock knots. Clamped at 90° because |sin| peaks there: beyond it the clamp is
+    // conservative (a tighter requirement than the geometry demands), never optimistic.
+    let outermost_cone_deg = {
+        let knots = &surface.knots_econe;
+        let (first, last) = (
+            *knots
+                .first()
+                .ok_or_else(|| CorrectionSurfaceError::InvalidKnotVector {
+                    reason: "E-cone knot vector is empty".to_string(),
+                })?,
+            axis_max(knots, "E-cone")?,
+        );
+        // NaN must not reach the sine: `f64::max` ignores it, and the `> 0.0` test below is
+        // false for it, so an unchecked NaN would take the same infinite-period branch the
+        // signed-maximum defect took.
+        if !(first.is_finite() && last.is_finite()) {
+            return Err(CorrectionSurfaceError::InvalidKnotVector {
+                reason: format!(
+                    "E-cone knot vector must span finite angles, got bounds [{first}, {last}]"
+                ),
+            });
+        }
+        first.abs().max(last.abs()).min(90.0)
+    };
+
     let wavelength_m = wavelength_from_frequency(max_frequency_mhz * 1e6);
     let cone_lobe_period_deg = (wavelength_m / diameter_m).to_degrees();
 
@@ -299,10 +327,13 @@ pub fn assess_angular_resolution(
     // the *edge* of coverage and vanishes on axis — where every φ names the same direction
     // and no amount of clock resolution means anything. `f64::INFINITY` is the honest value
     // for a boresight-only cone axis and propagates to "resolved" through the ratio, which
-    // is correct: there is no clock structure there to miss.
-    let sin_max_cone = max_cone_deg.to_radians().sin().abs();
-    let clock_lobe_period_deg = if sin_max_cone > 0.0 {
-        cone_lobe_period_deg / sin_max_cone
+    // is correct: there is no clock structure there to miss. A surface from
+    // `fit_correction_surface` cannot reach it — `generate_knot_vector` refuses a cone span
+    // below the minimum spacing, so the outermost angle above is always non-zero — but this
+    // function assesses any `CorrectionSurface` it is handed, so the branch stays.
+    let sin_outermost_cone = outermost_cone_deg.to_radians().sin();
+    let clock_lobe_period_deg = if sin_outermost_cone > 0.0 {
+        cone_lobe_period_deg / sin_outermost_cone
     } else {
         f64::INFINITY
     };
@@ -1742,13 +1773,26 @@ mod tests {
         n_clock: usize,
         max_cone_deg: f64,
     ) -> (Vec<MeasurementPoint>, Vec<f64>) {
+        grid_over_cone_range(n_freq, n_cone, n_clock, 0.0, max_cone_deg)
+    }
+
+    /// As above but with both cone bounds explicit — the E-cone axis is valid over
+    /// [-90, 90], so a span need not start at boresight or even be positive.
+    fn grid_over_cone_range(
+        n_freq: usize,
+        n_cone: usize,
+        n_clock: usize,
+        min_cone_deg: f64,
+        max_cone_deg: f64,
+    ) -> (Vec<MeasurementPoint>, Vec<f64>) {
         let mut measurements = Vec::new();
         let mut predictions = Vec::new();
         for i in 0..n_freq {
             for j in 0..n_cone {
                 for k in 0..n_clock {
                     let frequency_mhz = 400.0 + 300.0 * i as f64 / (n_freq - 1).max(1) as f64;
-                    let e_cone_deg = max_cone_deg * j as f64 / (n_cone - 1).max(1) as f64;
+                    let e_cone_deg = min_cone_deg
+                        + (max_cone_deg - min_cone_deg) * j as f64 / (n_cone - 1).max(1) as f64;
                     let e_clock_deg = 315.0 * k as f64 / (n_clock - 1).max(1) as f64;
                     measurements.push(MeasurementPoint::new(
                         e_clock_deg,
@@ -1895,6 +1939,89 @@ mod tests {
         assert!(
             near_axis.clock_lobe_period_deg / wide.clock_lobe_period_deg > 3.0,
             "the difference must be large enough to be the sin θ ratio rather than noise"
+        );
+    }
+
+    fn fitted_surface_over(min_cone_deg: f64, max_cone_deg: f64) -> CorrectionSurface {
+        let (measurements, predictions) =
+            grid_over_cone_range(12, 12, 12, min_cone_deg, max_cone_deg);
+        fit_correction_surface(&measurements, &predictions, &shipped_shape_params())
+            .expect("fit should succeed")
+    }
+
+    /// The E-cone axis is valid over [-90, 90] (`MeasurementPoint::validate`), so the
+    /// outermost calibrated angle is the largest `|θ|` — not the largest *signed* one, which
+    /// is what a knot vector's last entry gives. The difference is the whole clock
+    /// assessment: a one-sided cut recorded as -14°…0° has its last knot at 0, so reading
+    /// the signed maximum yields `sin θ = 0`, an infinite clock lobe period, and an artifact
+    /// reporting its worse axis as fully resolved — for an antenna that needs ~5° clock
+    /// knots at 14° off-axis. That is the exact "claims a resolution it does not have"
+    /// failure this assessment exists to end.
+    ///
+    /// The control is the mirror: -14°…0° and 0°…14° cover the same angles off boresight and
+    /// must be assessed identically. A signed-maximum implementation separates them by
+    /// infinity.
+    #[test]
+    fn a_cone_axis_that_runs_negative_is_assessed_at_its_outermost_angle() {
+        let negative = assess_angular_resolution(&fitted_surface_over(-14.0, 0.0), 8.0)
+            .expect("negative-cone span");
+        let mirror =
+            assess_angular_resolution(&fitted_surface_over(0.0, 14.0), 8.0).expect("mirror span");
+
+        assert!(
+            negative.clock_lobe_period_deg.is_finite(),
+            "a span reaching 14° off boresight has real clock structure; reporting an \
+             infinite lobe period claims there is none to miss"
+        );
+        assert!(
+            (negative.clock_lobe_period_deg - mirror.clock_lobe_period_deg).abs() < 1e-9,
+            "mirrored coverage must be assessed identically: -14°…0° reported {:.3}° clock \
+             lobe period, 0°…14° reported {:.3}°",
+            negative.clock_lobe_period_deg,
+            mirror.clock_lobe_period_deg
+        );
+        assert!(
+            !negative.resolves_lobe_structure(),
+            "the negative span must inherit the mirror's verdict ({:.3} clock knots per lobe \
+             period), not a free pass",
+            negative.clock_knots_per_lobe_period()
+        );
+
+        // The requirement really is the one at 14°, not merely "finite": λ/D at the top of
+        // this grid's 700 MHz band on an 8 m dish is 3.07°, so sin 14° gives 12.7°.
+        let expected = negative.cone_lobe_period_deg / 14.0_f64.to_radians().sin();
+        assert!(
+            (negative.clock_lobe_period_deg - expected).abs() < 1e-9,
+            "expected the clock period evaluated at 14°: {expected:.3}°, got {:.3}°",
+            negative.clock_lobe_period_deg
+        );
+    }
+
+    /// The same defect in its non-degenerate form. A span of -20°…+3° is assessed at 20°,
+    /// where the pattern is finest in clock — reading the last knot evaluates at 3° instead
+    /// and reports a requirement ~6.6× too lax, with nothing infinite or NaN to notice.
+    #[test]
+    fn an_asymmetric_cone_span_is_assessed_at_its_wider_side() {
+        let asymmetric = assess_angular_resolution(&fitted_surface_over(-20.0, 3.0), 8.0)
+            .expect("asymmetric span");
+        let outer =
+            assess_angular_resolution(&fitted_surface_over(0.0, 20.0), 8.0).expect("outer span");
+        let inner =
+            assess_angular_resolution(&fitted_surface_over(0.0, 3.0), 8.0).expect("inner span");
+
+        assert!(
+            (asymmetric.clock_lobe_period_deg - outer.clock_lobe_period_deg).abs() < 1e-9,
+            "the clock requirement must come from the 20° edge: got {:.3}°, the 20° span \
+             reports {:.3}°",
+            asymmetric.clock_lobe_period_deg,
+            outer.clock_lobe_period_deg
+        );
+        assert!(
+            inner.clock_lobe_period_deg / outer.clock_lobe_period_deg > 3.0,
+            "the two candidate angles must be far enough apart for this test to have power: \
+             3° gives {:.3}°, 20° gives {:.3}°",
+            inner.clock_lobe_period_deg,
+            outer.clock_lobe_period_deg
         );
     }
 

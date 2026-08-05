@@ -150,6 +150,13 @@ own angular scale, so `Δφ = (λ/D) / sin θ`, evaluated at the coverage edge. 
 needs its finest resolution furthest off-axis and none at all on boresight — the opposite of
 what a single absolute floor assumes.
 
+"The coverage edge" is the largest `|θ|` the surface spans, not its largest signed cone
+angle: measurements are valid over [-90, 90] and a one-sided cut may run entirely negative,
+where the last knot is 0 and the signed maximum would report `sin θ = 0` — an infinite clock
+lobe period and a "fully resolved" verdict on the axis this section exists to flag as the
+worse one. `assess_angular_resolution` takes `max(|first knot|, |last knot|)`, clamped at 90°
+where `|sin|` peaks, and two tests pin it against the mirrored and asymmetric spans.
+
 That asymmetry is general, not a property of this fixture: the number of lobe periods around
 the coverage edge is `2π sin θ_max / (λ/D)`, and resolving them needs twice that many clock
 knots. Here that is **75.5 periods and ~151 knots, against the 8 shipped** — a factor of 19,

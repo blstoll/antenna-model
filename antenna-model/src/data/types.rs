@@ -369,6 +369,9 @@ pub struct AngularResolution {
     /// `Δφ = (λ/D) / sin θ`. The clock axis therefore needs its finest resolution at the
     /// *edge* of coverage and none at all on axis, which is the opposite of what a single
     /// absolute floor assumes.
+    ///
+    /// "Outermost" means the largest `|θ|` in coverage, not the largest signed one: the
+    /// E-cone axis is valid over [-90, 90] and a one-sided cut may run entirely negative.
     pub clock_lobe_period_deg: f64,
 }
 
