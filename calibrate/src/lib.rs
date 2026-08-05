@@ -39,8 +39,8 @@ pub use antenna_config::{
 };
 
 pub use correction_surface::{
-    compute_residuals, fit_correction_surface, CorrectionSurface, CorrectionSurfaceError,
-    CorrectionSurfaceParams, FitStatistics, ResidualPoint,
+    assess_angular_resolution, compute_residuals, fit_correction_surface, CorrectionSurface,
+    CorrectionSurfaceError, CorrectionSurfaceParams, FitStatistics, ResidualPoint,
 };
 
 pub use parameter_tuner::{tune_parameters, TuningMode, TuningResult};

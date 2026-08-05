@@ -8,7 +8,9 @@
 use antenna_model::data::loader::load_calibration_artifact;
 use antenna_model::data::types::CALIBRATION_SCHEMA_VERSION;
 use calibrate::artifact_export::{export_full_calibration, ExportPhysicalParams};
-use calibrate::correction_surface::{fit_correction_surface, CorrectionSurfaceParams};
+use calibrate::correction_surface::{
+    assess_angular_resolution, fit_correction_surface, CorrectionSurfaceParams,
+};
 use calibrate::parser::MeasurementPoint;
 
 /// Smooth synthetic residual over (clock, cone, freq).
@@ -98,6 +100,7 @@ fn test_full_export_loads_via_service() {
         0.99,
         0.9,
         true,
+        assess_angular_resolution(&surface, physical.diameter_m).expect("angular resolution"),
     )
     .expect("export");
 
@@ -184,6 +187,7 @@ fn test_full_export_correction_evaluates_against_3d() {
         0.99,
         0.9,
         true,
+        assess_angular_resolution(&surface, physical.diameter_m).expect("angular resolution"),
     )
     .expect("export");
 
@@ -209,5 +213,92 @@ fn test_full_export_correction_evaluates_against_3d() {
     assert!(
         max_err < 1e-9,
         "post-load round-trip max error {max_err:e} exceeds 1e-9"
+    );
+}
+
+/// D21: the angular-resolution assessment must survive producer → ANTC → service loader
+/// with its measured values intact.
+///
+/// The negative control is the second half: every field is required to match the value the
+/// producer measured from the fitted surface, **and** the assessment is required to be one
+/// this antenna actually fails. Without that second requirement the test would pass just as
+/// happily against a build that wrote a placeholder — an artifact claiming perfect resolution
+/// for every antenna is exactly the silence D21 exists to end, and it would look identical
+/// through an equality check alone.
+#[test]
+fn the_angular_resolution_assessment_round_trips_through_the_artifact() {
+    let measurements = build_measurements();
+    let predictions = vec![0.0; measurements.len()];
+    let params = CorrectionSurfaceParams {
+        spline_order: 4,
+        num_knots_frequency: 1,
+        num_knots_econe: 2,
+        num_knots_eclock: 2,
+        regularization: 1e-3,
+        adaptive_knots: false,
+        cross_validation_folds: 0,
+        min_knot_spacing_frequency: 50.0,
+        min_knot_spacing_econe: 1.0,
+        min_knot_spacing_eclock: 5.0,
+    };
+    let surface =
+        fit_correction_surface(&measurements, &predictions, &params).expect("surface fit");
+
+    let physical = ExportPhysicalParams {
+        diameter_m: 3.7,
+        focal_length_m: 1.85,
+        f_over_d_ratio: 0.5,
+        surface_rms_mm: 1.2,
+        feed_position_m: (0.0, 0.0, 0.0),
+        q_factor: 8.0,
+        phase_center_offset_m: 0.0,
+        asymmetry_factor: 1.0,
+        mesh: None,
+    };
+
+    let measured =
+        assess_angular_resolution(&surface, physical.diameter_m).expect("angular resolution");
+
+    let calibration = export_full_calibration(
+        "integ_antenna",
+        "x_band",
+        "Integ 3.7m",
+        "file://integ.csv".to_string(),
+        &physical,
+        &surface,
+        &measurements,
+        0.4,
+        0.99,
+        0.9,
+        true,
+        measured.clone(),
+    )
+    .expect("export");
+
+    let tmp = tempfile::NamedTempFile::new().expect("tmp");
+    write_antc(&calibration, tmp.path());
+    let loaded = load_calibration_artifact(tmp.path()).expect("service load");
+
+    let served = loaded
+        .metadata
+        .angular_resolution
+        .expect("a full-mode artifact must carry its angular resolution");
+    assert_eq!(
+        served, measured,
+        "the assessment must survive the round trip"
+    );
+
+    // The negative control: this really is an under-resolved geometry, so the round-tripped
+    // value cannot be a well-resolved placeholder.
+    assert!(
+        !served.resolves_lobe_structure(),
+        "a 3.7 m dish at X-band against these knots must not resolve its lobe structure: {}",
+        served.summary()
+    );
+    assert!(
+        served.cone_knots_per_lobe_period() < 1.0,
+        "expected well under one knot per lobe period, got {:.4} — if this geometry has \
+         become resolvable the control above is no longer doing anything",
+        served.cone_knots_per_lobe_period()
     );
 }

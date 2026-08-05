@@ -26,7 +26,14 @@ use std::path::Path;
 /// Chosen for its broad beam: at 450 MHz this class measures 8.91 dB/K at boresight,
 /// 7.93 at 2°, 2.55 at 5°, −19.75 at 10° and −41.53 at 20°. A narrow-beam class such as
 /// `GroundStation_13m` (33.08 → −10.60 dB/K between 0° and 1°) has a sub-degree main lobe
-/// that the fitter's 2° minimum E-cone knot spacing cannot represent.
+/// that the fitter's angular knots cannot represent.
+///
+/// **That choice was right for this fixture's purpose and wrong to leave unexamined**, which
+/// is what happened for a month: it made the pipeline's angular-resolution limit invisible to
+/// every test in the suite until D14 fitted a narrow-beam antenna and D21 measured it. The
+/// limit is no longer silent — `calibrate` warns and the artifact records the figures — but
+/// this comment is the reason it was ever silent, so it stays. Do not resolve a resolution
+/// finding by picking a broader-beam fixture again; see roadmap D21 and D24.
 pub const FIXTURE_CLASS: &str = "UHF_Array_Element";
 
 /// Nominal surface RMS of `UHF_Array_Element`, from `calibrate/antenna_classes.yaml`.

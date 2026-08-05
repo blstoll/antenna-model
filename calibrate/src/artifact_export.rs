@@ -40,10 +40,10 @@
 
 use antenna_model::data::loader::{ANTC_ARTIFACT_VERSION, ANTC_HEADER_LEN, ANTC_MAGIC};
 use antenna_model::data::types::{
-    AntennaCalibration, AntennaCalibrationBuilder, BSplineModel4D, CalibrationCoverageBuilder,
-    CalibrationMetadataBuilder, CalibrationStatus, FeedParameters as DataFeedParameters,
-    MeasurementDensity, MeshParameters as DataMeshParameters, ParameterSource,
-    PhysicalAntennaConfigBuilder, ReflectorGeometry as DataReflectorGeometry,
+    AngularResolution, AntennaCalibration, AntennaCalibrationBuilder, BSplineModel4D,
+    CalibrationCoverageBuilder, CalibrationMetadataBuilder, CalibrationStatus,
+    FeedParameters as DataFeedParameters, MeasurementDensity, MeshParameters as DataMeshParameters,
+    ParameterSource, PhysicalAntennaConfigBuilder, ReflectorGeometry as DataReflectorGeometry,
     ValidityRangesBuilder, CALIBRATION_SCHEMA_VERSION,
 };
 
@@ -316,6 +316,11 @@ pub struct ExportPhysicalParams {
 /// * `rmse_db` / `r_squared` - Combined-model quality metrics (from validation).
 /// * `physics_only_rmse_db` - Physics-only RMSE before correction.
 /// * `parameters_tuned` - Whether physical parameters were tuned.
+/// * `angular_resolution` - What `surface`'s knots can resolve against this antenna's own
+///   `λ/D` (roadmap D21), from
+///   [`crate::correction_surface::assess_angular_resolution`]. Passed in rather than
+///   derived here because the dish diameter lives on the antenna class, which this function
+///   only sees the already-flattened [`ExportPhysicalParams`] view of.
 #[allow(clippy::too_many_arguments)]
 pub fn export_full_calibration(
     antenna_id: &str,
@@ -329,6 +334,7 @@ pub fn export_full_calibration(
     r_squared: f64,
     physics_only_rmse_db: f64,
     parameters_tuned: bool,
+    angular_resolution: AngularResolution,
 ) -> Result<AntennaCalibration> {
     let extents = measurement_extents(measurements)?;
 
@@ -421,6 +427,7 @@ pub fn export_full_calibration(
             points_per_beam: 0.0,
         })
         .physics_model_version(PHYSICS_MODEL_VERSION)
+        .angular_resolution(angular_resolution)
         .notes(format!(
             "Full calibration with 4D correction surface (shape {:?}), R²={:.6}",
             correction.shape, r_squared
@@ -685,6 +692,8 @@ mod tests {
             0.99,
             0.9,
             true,
+            crate::correction_surface::assess_angular_resolution(&surface, physical.diameter_m)
+                .expect("angular resolution"),
         )
         .expect("export should succeed");
 

@@ -281,6 +281,11 @@ impl CalibrationRepository {
                 parameters_source: Some(crate::data::types::ParameterSource::DesignSpecifications),
                 measurement_density: Some(crate::data::types::MeasurementDensity::None),
                 physics_model_version: crate::model::PHYSICS_MODEL_VERSION,
+                // No correction surface was fitted, so there are no knots whose angular
+                // resolution could be assessed (roadmap D21). `None` here means "not
+                // applicable", not "unknown" — a design-spec antenna serves raw physics,
+                // which has no resolution limit of its own.
+                angular_resolution: None,
             };
 
             // Build validity ranges (use config override or default from design)
