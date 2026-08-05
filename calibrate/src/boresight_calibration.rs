@@ -1015,6 +1015,36 @@ frequency_mhz,g_over_t_db,temperature_k
         );
     }
 
+    /// D21: a boresight artifact must record **no** angular resolution.
+    ///
+    /// `None` here means *not applicable*, not *unknown*: boresight mode fits a frequency
+    /// correction over a degenerate angular domain, so there are no angular knots whose
+    /// spacing could be compared to anything. Populating the field would fabricate a
+    /// measurement this mode never makes — and it would read, to any consumer, exactly like a
+    /// full-mode artifact's honest assessment.
+    #[test]
+    fn a_boresight_artifact_records_no_angular_resolution() {
+        let specs = create_test_design_specs();
+        let measurements = create_test_measurements();
+        let result = calibrate_boresight(&specs, "x_band", &measurements, Some(20))
+            .expect("boresight calibration");
+        let artifact = build_calibration_artifact(
+            &specs,
+            "x_band",
+            &measurements,
+            &result,
+            "test".to_string(),
+        )
+        .expect("build artifact");
+
+        assert!(
+            artifact.metadata.angular_resolution.is_none(),
+            "boresight mode fits no angular surface, so it must not claim an angular \
+             resolution: {:?}",
+            artifact.metadata.angular_resolution
+        );
+    }
+
     /// Negative control for the test above: a non-unity asymmetry must actually change the
     /// number the tuner is fitting. If it did not, that test would be pinning a field that
     /// travels but does nothing, which is the shape of the defect D23 closed.

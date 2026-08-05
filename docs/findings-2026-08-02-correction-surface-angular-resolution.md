@@ -3,11 +3,20 @@
 **Filed 2026-08-02 by roadmap unit D14**, which is the first unit to fit a correction surface
 to a *real* antenna's measured sidelobe structure. Roadmap work unit: **D21**.
 
+> **Resolved 2026-08-04 by D21, taking option 2. Two things in the original filing below were
+> wrong, and both are corrected in §"What D21 measured" at the end — read that before acting
+> on the options table.** In short: the binding constraint on the cone axis is the knot
+> *count* as much as the spacing floor, so "derive the floors from `λ/D`" (option 1) would on
+> its own have changed nothing; and the clock axis, which this filing treats as the milder
+> case, is the **worse-resolved of the two** by a factor of five. Option 1 is no longer
+> described here as "the real fix" — see the last section for what would have to be true
+> first.
+
 ## The finding in one line
 
 `calibrate` ships one angular knot configuration for every antenna — 6 cone knots, minimum
 spacing 2°, 8 clock knots, minimum spacing 5° — but the angular scale a pattern varies on is
-`λ/D`, which across the antennas this repository already models spans **0.06° to 4.3°**. On a
+`λ/D`, which across the antennas this repository already models spans **0.06° to 5.4°**. On a
 small dish at a high frequency the surface cannot represent the residual it is being asked to
 fit, and nothing in the pipeline says so: the in-sample RMSE stays excellent, because the
 grid is sampled no finer than the knots either.
@@ -98,6 +107,80 @@ sampled at least that finely to notice.
 Recommended default: **option 2 now, option 1 as the real fix**, in that order. Option 2 is
 small and makes every future artifact self-describing; option 1 changes what the pipeline can
 promise but needs a maintainer decision on the coefficient-count/dataset-size trade it forces.
+
+*(The "option 1 as the real fix" half of that recommendation was **withdrawn** on 2026-08-04
+— see below. Option 2 was taken.)*
+
+---
+
+## What D21 measured (2026-08-04)
+
+Option 2 shipped: every full-mode fit now computes what its knots resolve against `λ/D`,
+warns when it falls short, and records the figures in the artifact
+(`CalibrationMetadata.angular_resolution`) and the `--metadata` sidecar. Two things in the
+filing above turned out to be wrong.
+
+### 1. The knot *count* binds, not only the spacing floor
+
+The filing says "the binding constraint is `min_knot_spacing_econe = 2.0`, a constant". On
+this fixture the six requested cone knots land on 2/4/6/8/10/12°, which *is* exactly the 2°
+floor — but only because six knots over a 0–14° span happen to want that spacing anyway.
+Lowering the floor alone would have moved nothing; `num_knots_econe = 6` binds at the same
+point. **Option 1 as written — "derive the angular knot floors from `λ/D`" — would have had
+no effect on this artifact.** A real option 1 has to raise the counts too, which is a
+materially bigger change than the filing costs it at.
+
+This is also why the shipped assessment reads the **delivered** knot vectors rather than
+`CorrectionSurfaceParams`. Reading the requested floors would have reported the wrong number
+on both axes, in opposite directions.
+
+### 2. The clock axis is the worse of the two, by 5×
+
+The filing treats the 5° clock floor as the milder case. Measured on this artifact:
+
+| axis | delivered knot spacing | lobe period | knots per lobe period |
+|---|---|---|---|
+| cone | 2.00° (six knots, on the 2° floor) | 1.154° (`λ/D` at 12.2 GHz) | **0.577** |
+| clock | **40.0°** (eight knots over 350°) | 4.770° | **0.119** |
+
+The clock spacing is *eight times* its own 5° floor, because eight knots over a 350° axis is
+what binds — the floor never engages at all. And the requirement is tighter than the cone
+axis's, not looser: traversing φ at polar angle θ crosses an arc of `sin θ` in the pattern's
+own angular scale, so `Δφ = (λ/D) / sin θ`, evaluated at the coverage edge. The clock axis
+needs its finest resolution furthest off-axis and none at all on boresight — the opposite of
+what a single absolute floor assumes.
+
+That asymmetry is general, not a property of this fixture: the number of lobe periods around
+the coverage edge is `2π sin θ_max / (λ/D)`, and resolving them needs twice that many clock
+knots. Here that is **75.5 periods and ~151 knots, against the 8 shipped** — a factor of 19,
+where the cone axis is short by a factor of 3.5.
+
+### Why option 1 is no longer called "the real fix"
+
+It is **unproven and currently untestable**, which is a different thing from deferred:
+
+- **No data in this repository can validate it.** D14's grid is `model + a weighted
+  least-squares quadratic residual trend per half-plane` — by construction it contains no
+  lobe-scale residual structure. A finer surface fitted to it would recover nothing, because
+  there is nothing finer in it to recover. The only lobe-scale evidence available is the 19
+  digitized anchors, and those are the *test* set. Option 1 would ship more coefficients, a
+  larger dataset requirement, and no measurement showing it helps.
+- **It may be unreachable for the antennas that need it most.** Since D20 an underdetermined
+  fit is a hard error. Deriving the floors from `λ/D` would make `calibrate` demand a 3D grid
+  sampled at ~0.03° in cone for `dsn_34m` X-band — and D14's own register row records the
+  maintainer-approved finding that full 3D G/T grids are essentially never published, judged
+  a permanent constraint. The result would be `calibrate` refusing to produce an artifact at
+  all for the narrow-beam ground stations D9 exists to ship: worse than the present state.
+- **The structure may not be the surface's to carry.** Residual lobe structure at this scale
+  is as plausibly a lobe/null *position* mismatch — feed position, phase centre, surface
+  phase — as a level error. An additive smooth dB surface is the wrong instrument for a
+  positional error at any resolution; that fix would belong in the physics/tuning layer.
+  Nobody has measured which it is.
+
+The two preconditions for revisiting it are therefore: **real measurements sampled finer than
+`λ/D`**, and **evidence that the residual's lobe structure is a level error rather than a
+position error**. Recorded as its own roadmap unit rather than left inside D21's closeout,
+because neither is a coding task.
 
 ## Pointers
 

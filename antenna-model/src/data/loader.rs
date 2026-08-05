@@ -68,10 +68,15 @@ pub const ANTC_MAGIC: &[u8; 4] = b"ANTC";
 /// *before* that happens, which is exactly the "existing files can no longer be decoded"
 /// case the module docs' bump policy assigns to it.
 ///
+/// Bumped 3 → 4 by roadmap **D21** (2026-08-04), which added
+/// `CalibrationMetadata.angular_resolution`. Same mechanism as 2 → 3 one field earlier in
+/// the payload: an `Option` costs at least its one-byte discriminant, so a version-3 payload
+/// is short by that byte and every field after it decodes from the wrong offset.
+///
 /// Writers use this constant through
 /// `calibrate::artifact_export::write_calibration_artifact`, so the reader and both
 /// producers cannot disagree about the framing.
-pub const ANTC_ARTIFACT_VERSION: u32 = 3;
+pub const ANTC_ARTIFACT_VERSION: u32 = 4;
 
 /// Byte length of an ANTC header: 4 (magic) + 4 (version) + 4 (crc) + 8 (len) = 20.
 pub const ANTC_HEADER_LEN: usize = 20;

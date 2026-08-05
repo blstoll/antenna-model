@@ -44,6 +44,18 @@ use std::fmt;
 ///
 /// # History
 ///
+/// - **5.0 (2026-08-04, roadmap D21)** — `CalibrationMetadata.angular_resolution` added, so
+///   an artifact can state whether its correction surface's knots can resolve the antenna's
+///   own `λ/D` lobe period. A **layout** change like 4.0, so the container axis moves too
+///   ([`crate::data::loader::ANTC_ARTIFACT_VERSION`] 3 → 4).
+///
+///   Unlike 3.0 and 4.0 this bump fixes no wrong number: every 4.0 artifact means exactly
+///   what it said, and nothing on the served path reads the new field. It is a MAJOR purely
+///   because postcard is positional — a 4.0 payload is short by the `Option` discriminant and
+///   everything after it decodes from the wrong offset. That is the whole reason the bump
+///   table's first two rows are about *layout*, not about correctness: an additive,
+///   consequence-free field is still undecodable by the wrong build.
+///
 /// - **4.0 (2026-08-03, roadmap D23)** — `PhysicalAntennaConfig.feed.asymmetry_factor` added.
 ///   A **layout** change, so unlike 3.0 this one moves the container axis too
 ///   ([`crate::data::loader::ANTC_ARTIFACT_VERSION`] 2 → 3): a 3.0 payload is one `f64`
@@ -86,7 +98,7 @@ use std::fmt;
 ///   a wrong artifact past the gate this bump exists to close. (One of them carries a 5 cm
 ///   *lateral* design offset, which is legitimate and is what this field is for; the C13
 ///   signature is specifically an axial component equal to the focal length.)
-pub const CALIBRATION_SCHEMA_VERSION: &str = "4.0";
+pub const CALIBRATION_SCHEMA_VERSION: &str = "5.0";
 
 /// Complete calibration data for a single antenna-feed combination (v2.0 physics-based).
 ///
@@ -269,12 +281,133 @@ pub struct CalibrationMetadata {
     /// pre-P1b `.bin` artifacts no longer decode (none exist — sanctioned by P1b).
     #[serde(default)]
     pub physics_model_version: u32,
+
+    // ========== Angular resolution of the correction surface (roadmap D21) ==========
+    /// How finely the fitted correction surface can vary in angle, against how finely this
+    /// antenna's pattern does. `None` when no correction surface was fitted, or when it
+    /// carries no angular structure to assess (boresight mode fits frequency only).
+    ///
+    /// See [`AngularResolution`]. The producer records it; nothing on the served path
+    /// branches on it. It exists so an artifact can state a limitation that its own
+    /// in-sample RMSE structurally cannot show.
+    #[serde(default)]
+    pub angular_resolution: Option<AngularResolution>,
 }
 
 impl CalibrationMetadata {
     /// Creates a new builder for constructing CalibrationMetadata.
     pub fn builder() -> CalibrationMetadataBuilder {
         CalibrationMetadataBuilder::default()
+    }
+}
+
+/// Knots per lobe period below which a correction surface cannot follow the pattern's
+/// lobe structure on that axis.
+///
+/// **Derived, not fitted** (roadmap P13's rule). Representing a periodic feature requires
+/// at least two degrees of freedom per period — the Nyquist criterion — and a B-spline's
+/// degrees of freedom on an axis are placed by its knots. At one knot per period the basis
+/// has no way to distinguish a lobe from the trend it rides on; below that it necessarily
+/// returns a smoothed envelope. This is the same "≥2 knots per lobe period" the D21 filing
+/// names, stated once here so producer and consumer cannot disagree about it.
+///
+/// It is a *representability* bound, not an accuracy target: clearing it does not promise
+/// any particular dB figure, and failing it does not mean a given artifact is wrong — only
+/// that lobe-scale residual structure, if the data contains any, was not carried.
+pub const MIN_KNOTS_PER_LOBE_PERIOD: f64 = 2.0;
+
+/// How finely a fitted correction surface can vary in angle, against how finely the
+/// antenna's own pattern does (roadmap **D21**).
+///
+/// # Why this is recorded
+///
+/// `calibrate` ships one angular knot configuration for every antenna, while the angular
+/// scale a reflector pattern varies on is `λ/D` — 0.06° to 5.4° across the antennas this
+/// repository already models. On a small dish at a high frequency the surface cannot
+/// represent the residual it is asked to fit, and **in-sample RMSE cannot see it**: a
+/// measurement grid sampled no finer than the knots carries no structure the knots cannot
+/// follow, so the fit reproduces its own data and reports an excellent number. Measured on
+/// the NASA CR-159703 1.22 m dish at 12.1 GHz (`λ/D` = 1.16° against a delivered 2° cone knot
+/// spacing): the fit is 0.027 dB in sample while 19 independently digitized envelope peaks
+/// sit up to 8.42 dB off the smoothest representable curve.
+///
+/// Only a comparison against something *off* the fitted grid exposes that, which no
+/// production run has. So the producer records what it could resolve and what the antenna
+/// needed, and the artifact carries the answer instead of the question.
+///
+/// # What the fields mean
+///
+/// Both spacings are the **widest gap between consecutive distinct knots actually placed**,
+/// not the requested minimum spacing. Those differ in both directions and neither substitutes
+/// for the other: adaptive placement and the interior-only rule (D19) can deliver *fewer*
+/// knots than requested, while the knot *count* — not the minimum-spacing floor — is what
+/// binds on a wide axis. On the CR-159703 grid the cone axis lands exactly on its 2° floor
+/// and the clock axis lands at ~40°, eight times its 5° floor. Reading the floor constants
+/// would have reported the second one as resolved.
+///
+/// Both lobe periods are evaluated at the **highest** calibrated frequency (shortest
+/// wavelength, finest structure) and, for clock, at the **outermost** calibrated cone angle —
+/// the worst case on each axis, so a surface that clears this bound clears it everywhere in
+/// its own coverage.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AngularResolution {
+    /// Widest gap between consecutive distinct cone (polar) knots, degrees.
+    pub cone_knot_spacing_deg: f64,
+
+    /// The pattern's lobe period in cone angle at the highest calibrated frequency,
+    /// degrees: `λ/D`, the first-null spacing of an aperture of this diameter.
+    pub cone_lobe_period_deg: f64,
+
+    /// Widest gap between consecutive distinct clock (azimuthal) knots, degrees.
+    pub clock_knot_spacing_deg: f64,
+
+    /// The pattern's lobe period in *clock* angle, degrees, at the highest calibrated
+    /// frequency and the outermost calibrated cone angle.
+    ///
+    /// Derived rather than copied from the cone period: a feature of angular size `λ/D`
+    /// subtends an arc `sin θ · Δφ` when traversed in φ at polar angle θ, so
+    /// `Δφ = (λ/D) / sin θ`. The clock axis therefore needs its finest resolution at the
+    /// *edge* of coverage and none at all on axis, which is the opposite of what a single
+    /// absolute floor assumes.
+    pub clock_lobe_period_deg: f64,
+}
+
+impl AngularResolution {
+    /// Knots per lobe period on the cone axis. Below [`MIN_KNOTS_PER_LOBE_PERIOD`] the
+    /// surface carries the residual's envelope trend, not its lobe structure.
+    pub fn cone_knots_per_lobe_period(&self) -> f64 {
+        self.cone_lobe_period_deg / self.cone_knot_spacing_deg
+    }
+
+    /// Knots per lobe period on the clock axis, at the outermost calibrated cone angle.
+    pub fn clock_knots_per_lobe_period(&self) -> f64 {
+        self.clock_lobe_period_deg / self.clock_knot_spacing_deg
+    }
+
+    /// Whether **both** angular axes clear [`MIN_KNOTS_PER_LOBE_PERIOD`].
+    ///
+    /// A surface that does not is still useful and is still written — on the CR-159703
+    /// artifact it takes the digitized peaks from 11.58 dB RMS to 3.19 dB while resolving
+    /// 0.58 knots per lobe period. What it cannot do is follow lobe-scale residual
+    /// structure, so per-lobe accuracy off the main beam is not offered.
+    pub fn resolves_lobe_structure(&self) -> bool {
+        self.cone_knots_per_lobe_period() >= MIN_KNOTS_PER_LOBE_PERIOD
+            && self.clock_knots_per_lobe_period() >= MIN_KNOTS_PER_LOBE_PERIOD
+    }
+
+    /// One line naming both axes and both ratios, for logs and reports.
+    pub fn summary(&self) -> String {
+        format!(
+            "cone {:.2}° knots vs {:.2}° lobe period ({:.2} knots/period); \
+             clock {:.2}° knots vs {:.2}° lobe period ({:.2} knots/period); \
+             minimum {MIN_KNOTS_PER_LOBE_PERIOD:.1}",
+            self.cone_knot_spacing_deg,
+            self.cone_lobe_period_deg,
+            self.cone_knots_per_lobe_period(),
+            self.clock_knot_spacing_deg,
+            self.clock_lobe_period_deg,
+            self.clock_knots_per_lobe_period(),
+        )
     }
 }
 
@@ -1212,6 +1345,7 @@ pub struct CalibrationMetadataBuilder {
     parameters_source: Option<ParameterSource>,
     measurement_density: Option<MeasurementDensity>,
     physics_model_version: Option<u32>,
+    angular_resolution: Option<AngularResolution>,
 }
 
 impl CalibrationMetadataBuilder {
@@ -1290,6 +1424,13 @@ impl CalibrationMetadataBuilder {
         self
     }
 
+    /// Record the fitted correction surface's angular resolution against this antenna's
+    /// pattern scale (roadmap D21). Leave unset when no angular surface was fitted.
+    pub fn angular_resolution(mut self, resolution: AngularResolution) -> Self {
+        self.angular_resolution = Some(resolution);
+        self
+    }
+
     pub fn build(self) -> Result<CalibrationMetadata, String> {
         Ok(CalibrationMetadata {
             antenna_name: self.antenna_name.ok_or("antenna_name is required")?,
@@ -1313,6 +1454,7 @@ impl CalibrationMetadataBuilder {
             parameters_source: self.parameters_source,
             measurement_density: self.measurement_density,
             physics_model_version: self.physics_model_version.unwrap_or(0),
+            angular_resolution: self.angular_resolution,
         })
     }
 }
@@ -2554,6 +2696,87 @@ mod tests {
         assert!(
             model.validate().is_err(),
             "Expected validation to fail for spline_order=0"
+        );
+    }
+
+    // ========================================================================
+    // D21 — angular resolution of the correction surface
+    // ========================================================================
+
+    /// Both ratios are lobe period ÷ knot spacing, and the bound is on the *worse* axis.
+    /// Asserted with an axis that passes while the other fails, in both orders — a
+    /// `resolves_lobe_structure` that only consulted one axis would pass one of these
+    /// arrangements and fail the other.
+    #[test]
+    fn resolution_is_bounded_by_the_worse_of_the_two_angular_axes() {
+        let comfortable = AngularResolution {
+            cone_knot_spacing_deg: 0.5,
+            cone_lobe_period_deg: 5.0,
+            clock_knot_spacing_deg: 2.0,
+            clock_lobe_period_deg: 20.0,
+        };
+        assert_eq!(comfortable.cone_knots_per_lobe_period(), 10.0);
+        assert_eq!(comfortable.clock_knots_per_lobe_period(), 10.0);
+        assert!(comfortable.resolves_lobe_structure());
+
+        let cone_starved = AngularResolution {
+            cone_knot_spacing_deg: 4.0,
+            ..comfortable.clone()
+        };
+        assert_eq!(cone_starved.cone_knots_per_lobe_period(), 1.25);
+        assert!(
+            cone_starved.clock_knots_per_lobe_period() >= MIN_KNOTS_PER_LOBE_PERIOD,
+            "the clock axis must still pass, or this proves nothing about which axis bound it"
+        );
+        assert!(!cone_starved.resolves_lobe_structure());
+
+        let clock_starved = AngularResolution {
+            clock_knot_spacing_deg: 40.0,
+            ..comfortable.clone()
+        };
+        assert!(
+            clock_starved.cone_knots_per_lobe_period() >= MIN_KNOTS_PER_LOBE_PERIOD,
+            "the cone axis must still pass, or this proves nothing about which axis bound it"
+        );
+        assert!(!clock_starved.resolves_lobe_structure());
+    }
+
+    /// Exactly at the bound is resolved; a hair under is not. Pins the comparison's
+    /// direction, which is the one thing about a threshold that can silently invert.
+    #[test]
+    fn the_minimum_knots_per_lobe_period_is_inclusive() {
+        let at_bound = AngularResolution {
+            cone_knot_spacing_deg: 1.0,
+            cone_lobe_period_deg: MIN_KNOTS_PER_LOBE_PERIOD,
+            clock_knot_spacing_deg: 1.0,
+            clock_lobe_period_deg: MIN_KNOTS_PER_LOBE_PERIOD,
+        };
+        assert!(at_bound.resolves_lobe_structure());
+
+        let just_under = AngularResolution {
+            cone_lobe_period_deg: MIN_KNOTS_PER_LOBE_PERIOD * 0.999,
+            ..at_bound
+        };
+        assert!(!just_under.resolves_lobe_structure());
+    }
+
+    /// A boresight-only cone axis has no clock structure to miss: every φ names the same
+    /// direction. The producer records that as an infinite clock lobe period, which must
+    /// read as resolved rather than as a NaN or a spurious failure.
+    #[test]
+    fn a_degenerate_clock_axis_reads_as_resolved_not_as_a_failure() {
+        let on_axis = AngularResolution {
+            cone_knot_spacing_deg: 0.1,
+            cone_lobe_period_deg: 1.0,
+            clock_knot_spacing_deg: 90.0,
+            clock_lobe_period_deg: f64::INFINITY,
+        };
+        assert!(on_axis.clock_knots_per_lobe_period().is_infinite());
+        assert!(on_axis.resolves_lobe_structure());
+        assert!(
+            on_axis.summary().contains("inf"),
+            "the summary must not hide a degenerate axis: {}",
+            on_axis.summary()
         );
     }
 }

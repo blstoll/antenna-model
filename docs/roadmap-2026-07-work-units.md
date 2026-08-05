@@ -205,6 +205,37 @@ G1 ─┬─ G2 ── G3
     │      in-sample 0.027 (worst fold 370x   │
     │      -> 2.2x). D21 is the only D14      │
     │      filing still open.                 │
+    │  D21 DONE 2026-08-04 — the last D14     │
+    │      filing. Option 2: every full-mode  │
+    │      fit measures what its knots resolve│
+    │      against lambda/D, warns when short,│
+    │      and records it in the run output,  │
+    │      the --metadata sidecar and the     │
+    │      artifact (CalibrationMetadata.     │
+    │      angular_resolution). Both version  │
+    │      axes moved (schema 5.0, container  │
+    │      4) — the first bump here that      │
+    │      fixes NO wrong number: purely      │
+    │      layout, because postcard is        │
+    │      positional. Corrected TWO errors   │
+    │      in its own filing: (a) the knot    │
+    │      COUNT binds, not just the spacing  │
+    │      floor, so "derive the floors from  │
+    │      lambda/D" would have changed       │
+    │      nothing; (b) the clock axis is 5x  │
+    │      WORSE than cone (0.119 vs 0.577    │
+    │      knots/lobe), delivering 40deg      │
+    │      against its own 5deg floor, and    │
+    │      its requirement TIGHTENS off-axis  │
+    │      (dphi = (lambda/D)/sin theta).     │
+    │      FILED D24: option 1 was recorded   │
+    │      in two docs as "the real fix" and  │
+    │      is neither proven nor testable —   │
+    │      D14's fill contains no lobe-scale  │
+    │      residual BY CONSTRUCTION, and      │
+    │      deriving knots from lambda/D would │
+    │      make calibrate REFUSE the narrow-  │
+    │      beam antennas D9 exists to ship.   │
     └─ (Phases 1–3 done) ─ D4 ─ D7
 Superseded by C8 (do not implement): S7, C5, C6
 Phase 5: F1..F9 (F8 done) gated on register rows (P3, P5/F4, F5, D9, F9); P1 + C8 DECIDED 2026-07-08;
@@ -4706,7 +4737,85 @@ The real check has to run after `generate_knot_vector`, where the count is known
   not a number to widen.
 - **Depends on:** D19 (which changes the coefficient count this checks). **Blocks:** D14.
 
-### D21 — The correction surface's angular knot floors are absolute; the pattern scale is λ/D — Effort: M
+### D21 — The correction surface's angular knot floors are absolute; the pattern scale is λ/D — Effort: M — ✅ **DONE 2026-08-04**
+
+**✅ DONE 2026-08-04**, maintainer taking **option 2** (report the mismatch) and, on the
+follow-up question this unit raised, **re-filing option 1 honestly rather than carrying it as
+"the real fix"** — see D24 below.
+
+Every full-mode fit now measures what its knots resolve against `λ/D`, warns when it falls
+short, and records the figures in three places: the run's own output, the `--metadata`
+sidecar, and the artifact itself (`CalibrationMetadata.angular_resolution`, a new typed
+`AngularResolution`). Nothing on the served path branches on it — it exists so an artifact can
+state a limitation that **its own in-sample RMSE structurally cannot show**.
+
+**Two things in the filing were wrong, and both matter more than the fix.**
+
+**1. The knot *count* binds, not only the spacing floor.** The filing named
+`min_knot_spacing_econe = 2.0` as "the binding constraint". On D14's fixture the six requested
+cone knots land on 2/4/6/8/10/12° — which *is* exactly the 2° floor, but only because six
+knots over a 0–14° span want that spacing anyway. **Option 1 as written — "derive the angular
+knot floors from `λ/D`" — would have changed nothing on this artifact**, because
+`num_knots_econe = 6` binds at the same point. A real option 1 has to raise the counts too,
+which is a materially bigger change than the filing costs it at. This is also why the shipped
+assessment reads the **delivered** knot vectors rather than `CorrectionSurfaceParams`: the
+requested floors give the wrong answer on both axes, in opposite directions.
+
+**2. The clock axis is the worse of the two, by 5×** — the opposite of the filing's reading,
+which treats the 5° clock floor as the milder case.
+
+| axis | delivered spacing | lobe period | knots per lobe period |
+|---|---|---|---|
+| cone | 2.00° (six knots, on the 2° floor) | 1.154° (`λ/D` at 12.2 GHz) | **0.577** |
+| clock | **40.0°** (eight knots over 350°) | 4.770° | **0.119** |
+
+The clock spacing is *eight times* its own floor — the floor never engages, the knot count
+does. And the requirement is **tighter**, not looser: traversing φ at polar angle θ crosses an
+arc of `sin θ` in the pattern's angular scale, so `Δφ = (λ/D) / sin θ`, evaluated at the
+coverage edge. The clock axis needs its finest resolution furthest off-axis and none at all on
+boresight, which is the opposite of what a single absolute floor assumes. That asymmetry is
+general: the coverage edge carries `2π sin θ_max / (λ/D)` lobe periods and needs twice that
+many clock knots — here **75.5 periods and ~151 knots against the 8 shipped**, a factor of 19,
+where the cone axis is short by a factor of 3.5.
+
+**`MIN_KNOTS_PER_LOBE_PERIOD = 2.0` is derived, not fitted** (P13's rule): representing a
+periodic feature needs two degrees of freedom per period, and a B-spline's degrees of freedom
+on an axis are placed by its knots. It carries no margin test because there is no margin to
+assert — it is the Nyquist criterion, not a measurement.
+
+**Version axes.** Adding the field moved **both** (`CALIBRATION_SCHEMA_VERSION` 4.0 → **5.0**,
+`ANTC_ARTIFACT_VERSION` 3 → **4**). Unlike C13 and D23 this bump **fixes no wrong number** —
+every 4.0 artifact means exactly what it said, and no consumer reads the new field. It is a
+MAJOR purely because postcard is positional: a 4.0 payload is short by the `Option`
+discriminant and everything after it decodes from the wrong offset. Worth recording because it
+is the first bump here that is *purely* mechanical, which is precisely what the bump table's
+layout rows are for. The two committed `.bin` fixtures were migrated by the D23 procedure
+(prefix-decode through `metadata` with an old-field-set shim, re-encode, append the tail
+verbatim): +1 byte each, tail bit-identical, `angular_resolution: None` because they are
+boresight artifacts with no angular surface to assess. The bump found **no** new hardcoded
+version literals — D23's cleanup held.
+
+**Guards, each with a negative control.** `assess_angular_resolution` is pinned to read
+delivered knots (the control asserts the clock axis delivers >3× its requested floor, so an
+implementation reading params would report a different number); to track `λ/D` and nothing
+else (same surface, ×4 diameter, ratio must be exactly 4 and must cross the bound); and to
+tighten the clock requirement with coverage (two fits differing only in cone span). The
+artifact round-trip test requires the served value to equal the measured one **and** to be one
+this antenna fails — without the second half it would pass against a build stamping a
+well-resolved placeholder. The D14 e2e pins 0.5770 / 0.1193 and re-derives both from the dish
+geometry in the test, so neither can be a constant that happens to match; it also asserts the
+CLI *said* so, since the artifact metadata is for consumers and the warning is for whoever
+read the 0.0272 dB in-sample RMSE two lines above it. On the other side,
+`boresight_calibration::a_boresight_artifact_records_no_angular_resolution` pins the `None`:
+boresight mode fits no angular surface, so a populated field there would be a fabricated
+measurement that reads exactly like an honest one.
+
+**What this did not do.** D14's `ANCHOR_RMS_BUDGET_DB` (3.5) and `MIN_ANCHORS_IMPROVED` (17)
+are unmoved: the unit's exit criteria say to re-measure and tighten them *if option 1 is
+taken*, and it was not. The 3.19 dB anchor RMS is still the unrepresentable lobe structure,
+now stated by the artifact rather than only by a findings doc.
+
+*Original filing follows.*
 
 **Filed 2026-08-02 by D14**, the first unit to fit a correction surface to a real antenna's
 measured sidelobe structure. Full analysis and the option trade:
@@ -4920,6 +5029,62 @@ The residual surface is therefore fitted against one illumination and applied on
   now is; both version axes bumped in one step.
 - **Depends on:** nothing. **Coupled to:** D9 (must land before any artifact for an affected
   class ships), D2 (owns the version-axis procedure).
+
+### D24 `[DECISION]` — Should the correction surface's angular knots be derived from λ/D? — Effort: L — **BLOCKED on evidence, not on effort**
+
+**Filed 2026-08-04 by D21**, which shipped the reporting half and then found that the fix half
+it had inherited — recorded in two documents as "option 1, the real fix" — is **unproven and
+currently untestable**. This unit exists so that characterization stops being carried as a
+settled conclusion. It is not scheduled work; it is a stated question with the two conditions
+that would make it answerable.
+
+**The proposition.** Derive `min_knot_spacing_econe` / `_eclock` *and* `num_knots_econe` /
+`_eclock` from `λ/D` at ≥ `MIN_KNOTS_PER_LOBE_PERIOD` knots per lobe period, so the surface can
+represent lobe-scale residual structure instead of only the envelope trend. (D21 established
+that the counts must move too — deriving the floors alone changes nothing, because on the one
+real fixture the counts bind at the same point.)
+
+**Why it is not simply deferred:**
+
+1. **No data in this repository can validate it.** D14's grid is `model + a weighted
+   least-squares quadratic residual trend per half-plane` — by construction it contains no
+   lobe-scale residual structure. A finer surface fitted to it recovers nothing, because there
+   is nothing finer in it to recover. The only lobe-scale evidence available is the 19
+   digitized anchors, and those are the *test* set. Shipping option 1 today means more
+   coefficients, a larger dataset requirement, and no measurement showing it helps — the shape
+   P13 retired a constant for.
+2. **It may be unreachable for the antennas that need it most.** Since D20 an underdetermined
+   fit is a hard error. Deriving the knots from `λ/D` makes `calibrate` demand a 3D grid
+   sampled at ~0.03° in cone for `dsn_34m` X-band, and D14's register row records the
+   maintainer-approved finding that full 3D G/T grids are essentially never published, judged a
+   **permanent** constraint. The result would be `calibrate` refusing to produce an artifact at
+   all for the narrow-beam ground stations D9 exists to ship — strictly worse than a
+   self-describing envelope-only surface.
+3. **The structure may not be the surface's to carry.** Residual lobe structure at this scale
+   is as plausibly a lobe/null *position* mismatch — feed position, phase centre, surface phase
+   — as a level error. An additive smooth dB surface is the wrong instrument for a positional
+   error at *any* resolution, and it would generalize badly across frequency even where it
+   fitted. Nobody has measured which it is. If it is positional, the fix belongs in the
+   physics/tuning layer and this unit should be closed as "wrong instrument", not implemented.
+
+- **Preconditions — both, before this becomes implementable:** (a) real measurements for some
+  antenna sampled finer than its own `λ/D` in cone *and* clock, over a frequency span, i.e. a
+  dataset D14 concluded does not exist today; (b) evidence separating the two hypotheses in
+  (3), e.g. whether the anchor residuals move coherently in angle with frequency (positional)
+  or in level (representable).
+- **The cheap version of (b), if anyone wants a result sooner:** refit D14's anchors against a
+  physics model with a perturbed feed position and see whether the 8.42 dB deviation collapses.
+  That is a measurement, not a pipeline change, and it would settle the question either way.
+- **Exit criteria (if it ever proceeds):** the derived knots are justified by a measurement on
+  real data, not by the Nyquist argument alone; D14's `ANCHOR_RMS_BUDGET_DB` and
+  `MIN_ANCHORS_IMPROVED` are re-measured and **tightened** (that is what would make it worth
+  doing); and `calibrate`'s behaviour on a dataset too sparse for the derived knots is a
+  decided policy, not a D20 hard error inherited by accident.
+- **Do not** resolve this by choosing a broader-beam fixture. D12 did that, legitimately, and
+  it is what left the constant unexamined for a month — D21's own gotcha, still standing.
+- **Depends on:** data that does not exist. **Coupled to:** D9 (this decides what a shipped
+  artifact can promise off the main lobe), D20 (any finer surface runs into its sufficiency
+  check).
 
 ---
 

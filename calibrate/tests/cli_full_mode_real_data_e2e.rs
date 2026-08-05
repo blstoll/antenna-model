@@ -151,12 +151,19 @@ const BORESIGHT_BUDGET_DB: f64 = 0.25;
 /// curve the shipped knot spacing can carry by up to **8.42 dB** (measured; the deviation
 /// column of the generator's anchor table), because a 2° minimum cone knot spacing cannot
 /// follow a pattern whose lobes are 1.16° apart. The largest served error is **8.03 dB**, at
-/// the −3.6° H-plane row — consistent with that deviation, and at the same place. Per this
-/// unit's charter the limitation is *reported as a finding* —
-/// `docs/findings-2026-08-02-correction-surface-angular-resolution.md` — rather than absorbed
-/// silently, and it is why this file also asserts [`ANCHOR_RMS_BUDGET_DB`],
-/// [`MIN_ANCHORS_IMPROVED`] and the RMS improvement over the uncorrected model: those are what
-/// would actually notice a pipeline regression, which this bound alone is too loose to catch.
+/// the −3.6° H-plane row — consistent with that deviation, and at the same place. The
+/// limitation is *reported*, not absorbed silently — D14 filed it
+/// (`docs/findings-2026-08-02-correction-surface-angular-resolution.md`) and **D21 made the
+/// artifact state it**: see
+/// [`the_artifact_records_that_its_knots_cannot_resolve_this_antennas_lobe_structure`], which
+/// pins the same limitation as a *measured ratio* (0.577 cone / 0.119 clock knots per lobe
+/// period) rather than as slack in this budget. That is why this file also asserts
+/// [`ANCHOR_RMS_BUDGET_DB`], [`MIN_ANCHORS_IMPROVED`] and the RMS improvement over the
+/// uncorrected model: those are what would actually notice a pipeline regression, which this
+/// bound alone is too loose to catch.
+///
+/// **If the knot configuration changes, this constant and the two ratios move together** —
+/// they are three views of one quantity. Re-measure all three; do not widen this one alone.
 const ANCHOR_STRUCTURE_ALLOWANCE_DB: f64 = 8.5;
 
 /// RMS budget over all 19 anchors, dB. Measured **3.19 dB**, dominated by the two peaks the
@@ -1116,4 +1123,118 @@ fn the_correction_is_reached_across_the_calibrated_region() {
              correction absorbs it empirically)"
         );
     }
+}
+
+// ============================================================================
+// D21 — the artifact states the limitation its own RMSE cannot show
+// ============================================================================
+
+/// Cone knots per lobe period this artifact achieves.
+///
+/// Measured **0.5770**: `λ/D` = 1.1540° at the grid's top frequency (12.2 GHz, 1.22 m dish)
+/// against a delivered 2.0° cone knot spacing — the fitter's six cone knots land on
+/// 2/4/6/8/10/12°, exactly its 2° minimum spacing, and the widest gap is 2.0°.
+///
+/// This is the number behind the 3.19 dB anchor RMS above. Both are pinned, and they are not
+/// independent: [`ANCHOR_STRUCTURE_ALLOWANCE_DB`] exists because of *this*.
+const CONE_KNOTS_PER_LOBE_PERIOD: f64 = 0.5770;
+
+/// Clock knots per lobe period, measured **0.1193** — five times worse than the cone axis.
+///
+/// Two reasons, and neither is the 5° minimum spacing the D21 filing named. The delivered
+/// clock spacing is **40°**, eight times that floor, because eight requested knots over a
+/// 350° axis is what binds. And the requirement is tighter than the cone axis's: traversing φ
+/// at the coverage edge (cone 14°) crosses `sin 14°` of the pattern's angular scale, so the
+/// clock lobe period is `1.1540° / sin 14°` = 4.770°.
+///
+/// Recorded because it inverts the filing's own reading: the axis the filing described as
+/// having the laxer floor is the worse-resolved of the two.
+const CLOCK_KNOTS_PER_LOBE_PERIOD: f64 = 0.1193;
+
+/// The artifact carries its own angular resolution, and it says this antenna is not resolved.
+///
+/// The assertion that matters is the last one: the recorded figure must be *derived from this
+/// artifact*, not a constant. Two independent checks force that — the cone ratio must match
+/// `λ/D` computed here from the dish diameter and the grid's top frequency, and the clock
+/// ratio must differ from the cone ratio by the `sin θ` factor. A build that stamped a
+/// plausible fixed value would pass an equality check against one measured number and fail
+/// both of these.
+#[test]
+fn the_artifact_records_that_its_knots_cannot_resolve_this_antennas_lobe_structure() {
+    let calibration = pipeline().load();
+    let resolution = calibration
+        .metadata
+        .angular_resolution
+        .as_ref()
+        .expect("a full-mode artifact must record its angular resolution");
+
+    assert!(
+        !resolution.resolves_lobe_structure(),
+        "this 1.22 m dish at 12.1 GHz cannot be resolved by 2° cone knots, and the artifact \
+         must say so: {}",
+        resolution.summary()
+    );
+
+    for (label, measured, pinned) in [
+        (
+            "cone",
+            resolution.cone_knots_per_lobe_period(),
+            CONE_KNOTS_PER_LOBE_PERIOD,
+        ),
+        (
+            "clock",
+            resolution.clock_knots_per_lobe_period(),
+            CLOCK_KNOTS_PER_LOBE_PERIOD,
+        ),
+    ] {
+        assert!(
+            (measured - pinned).abs() < 0.001,
+            "{label} knots per lobe period moved: {measured:.4} against a pinned {pinned:.4}. \
+             If the knot configuration changed deliberately, re-measure this and the anchor \
+             budgets with it — they describe the same limitation. Full assessment: {}",
+            resolution.summary()
+        );
+    }
+
+    // Derived here from the dish geometry, so the recorded value cannot be a constant that
+    // happens to match. 1.22 m is the class fixture's diameter; 12.2 GHz is the grid's
+    // highest frequency, which is the frequency the assessment must use (shortest wavelength,
+    // finest structure) — not the 12.1 GHz anchor frequency.
+    let expected_lobe_period_deg = (299_792_458.0 / 12_200e6 / 1.22_f64).to_degrees();
+    assert!(
+        (resolution.cone_lobe_period_deg - expected_lobe_period_deg).abs() < 1e-6,
+        "the recorded cone lobe period {:.6}° must be λ/D at the grid's top frequency \
+         ({expected_lobe_period_deg:.6}°)",
+        resolution.cone_lobe_period_deg
+    );
+
+    let sin_coverage_edge = 14.0_f64.to_radians().sin();
+    assert!(
+        (resolution.clock_lobe_period_deg * sin_coverage_edge - resolution.cone_lobe_period_deg)
+            .abs()
+            < 1e-6,
+        "the clock lobe period must be the cone period divided by sin(coverage edge); got \
+         {:.6}° against a cone period of {:.6}°",
+        resolution.clock_lobe_period_deg,
+        resolution.cone_lobe_period_deg
+    );
+}
+
+/// The run that produced the artifact said so out loud, and said it as a warning.
+///
+/// The artifact metadata is for consumers; this is for whoever ran `calibrate` and read the
+/// 0.0272 dB in-sample RMSE two lines above it. That number cannot see this limitation — the
+/// grid is sampled no finer than the knots — so the run has to volunteer it.
+#[test]
+fn the_calibrate_run_warns_that_the_surface_cannot_resolve_the_lobe_structure() {
+    let output = &pipeline().calibrate_output;
+    assert!(
+        output.contains("cannot resolve this antenna's lobe structure"),
+        "calibrate must warn on an under-resolved fit. Output:\n{output}"
+    );
+    assert!(
+        output.contains("envelope trend"),
+        "the warning must say what the artifact does carry, not only what it does not. \
+         Output:\n{output}"
+    );
 }

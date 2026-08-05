@@ -33,6 +33,8 @@
 //! ```
 
 use crate::parser::MeasurementPoint;
+use antenna_model::data::types::AngularResolution;
+use antenna_model::model::phase::wavelength_from_frequency;
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -230,6 +232,109 @@ pub struct FitStatistics {
 // ============================================================================
 // Main API Functions
 // ============================================================================
+
+/// Assess how finely a fitted surface can vary in angle against how finely this antenna's
+/// pattern does (roadmap **D21**).
+///
+/// The two axes of the comparison come from opposite places on purpose:
+///
+/// - **What the surface delivered** is read off `surface`'s own knot vectors, *after*
+///   adaptive placement, the minimum-spacing floor and D19's interior-only rule have all had
+///   their say. Reading [`CorrectionSurfaceParams`] instead would report the *request*, and
+///   the request is wrong in both directions — placement can deliver fewer knots than asked
+///   for, and on a wide axis the knot **count** binds long before the spacing floor does.
+///   Measured on the CR-159703 grid: the cone axis lands on its 2° floor while the clock
+///   axis lands at ~40°, eight times its 5° floor, so the floor constants alone would have
+///   called the clock axis resolved when it is the worse of the two.
+/// - **What the antenna needed** comes from `λ/D` at the surface's own highest calibrated
+///   frequency and outermost calibrated cone angle — the worst case within its coverage, so
+///   clearing the bound here clears it everywhere the artifact claims to apply.
+///
+/// This function only measures; it never refuses. An under-resolved surface is still worth
+/// fitting and shipping (the CR-159703 artifact resolves 0.58 knots per lobe period and
+/// still takes the digitized peaks from 11.58 dB RMS to 3.19 dB), and refusing would have
+/// removed the repository's only served full-mode artifact. The caller warns.
+pub fn assess_angular_resolution(
+    surface: &CorrectionSurface,
+    diameter_m: f64,
+) -> Result<AngularResolution> {
+    // `is_finite()` first so NaN and infinity are refused explicitly rather than falling
+    // through a comparison that is false for NaN by accident.
+    if !(diameter_m.is_finite() && diameter_m > 0.0) {
+        return Err(CorrectionSurfaceError::InvalidParameter {
+            param: "diameter_m".to_string(),
+            value: diameter_m,
+            reason: "reflector diameter must be finite and positive to derive a lobe period"
+                .to_string(),
+        });
+    }
+
+    let axis_max = |knots: &[f64], axis: &str| -> Result<f64> {
+        knots
+            .last()
+            .copied()
+            .ok_or_else(|| CorrectionSurfaceError::InvalidKnotVector {
+                reason: format!("{axis} knot vector is empty"),
+            })
+    };
+
+    // Shortest wavelength in coverage ⇒ finest pattern structure ⇒ hardest to resolve.
+    let max_frequency_mhz = axis_max(&surface.knots_frequency, "frequency")?;
+    let max_cone_deg = axis_max(&surface.knots_econe, "E-cone")?;
+
+    if !(max_frequency_mhz.is_finite() && max_frequency_mhz > 0.0) {
+        return Err(CorrectionSurfaceError::InvalidParameter {
+            param: "max_frequency_mhz".to_string(),
+            value: max_frequency_mhz,
+            reason: "the surface's frequency axis must reach a finite positive frequency"
+                .to_string(),
+        });
+    }
+
+    let wavelength_m = wavelength_from_frequency(max_frequency_mhz * 1e6);
+    let cone_lobe_period_deg = (wavelength_m / diameter_m).to_degrees();
+
+    // Traversing φ at polar angle θ covers an arc of sin θ · Δφ, so a feature of angular
+    // size λ/D subtends Δφ = (λ/D) / sin θ in clock. The requirement is therefore hardest at
+    // the *edge* of coverage and vanishes on axis — where every φ names the same direction
+    // and no amount of clock resolution means anything. `f64::INFINITY` is the honest value
+    // for a boresight-only cone axis and propagates to "resolved" through the ratio, which
+    // is correct: there is no clock structure there to miss.
+    let sin_max_cone = max_cone_deg.to_radians().sin().abs();
+    let clock_lobe_period_deg = if sin_max_cone > 0.0 {
+        cone_lobe_period_deg / sin_max_cone
+    } else {
+        f64::INFINITY
+    };
+
+    Ok(AngularResolution {
+        cone_knot_spacing_deg: widest_knot_gap(&surface.knots_econe),
+        cone_lobe_period_deg,
+        clock_knot_spacing_deg: widest_knot_gap(&surface.knots_eclock),
+        clock_lobe_period_deg,
+    })
+}
+
+/// The widest gap between consecutive *distinct* knots — the coarsest the basis gets, and so
+/// the feature scale the surface can guarantee nowhere finer than.
+///
+/// Distinctness matters because a clamped knot vector repeats its end values `order` times;
+/// those zero-width gaps say nothing about resolution. A vector with no two distinct values
+/// cannot occur here (`generate_knot_vector` rejects a data range below the minimum spacing),
+/// but returning `INFINITY` rather than 0 for it keeps this a bound rather than a claim:
+/// zero would report a degenerate axis as infinitely well resolved.
+fn widest_knot_gap(knots: &[f64]) -> f64 {
+    let widest = knots
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .fold(0.0_f64, f64::max);
+
+    if widest > 0.0 {
+        widest
+    } else {
+        f64::INFINITY
+    }
+}
 
 /// Compute residuals between measurements and model predictions
 ///
@@ -1622,6 +1727,190 @@ mod tests {
             vec![0.0, 0.0, 0.0, 0.0, 2.0, 4.0, 6.0, 12.0, 16.0, 20.0, 24.0, 24.0, 24.0, 24.0],
             "the cone axis was correct before D19 and must be bit-identical after"
         );
+    }
+
+    // ========================================================================
+    // D21 — angular resolution of the fitted surface against the pattern scale
+    // ========================================================================
+
+    use antenna_model::data::types::MIN_KNOTS_PER_LOBE_PERIOD;
+
+    /// Grid over an explicit cone span, so a test can vary coverage independently of density.
+    fn grid_over_cone_span(
+        n_freq: usize,
+        n_cone: usize,
+        n_clock: usize,
+        max_cone_deg: f64,
+    ) -> (Vec<MeasurementPoint>, Vec<f64>) {
+        let mut measurements = Vec::new();
+        let mut predictions = Vec::new();
+        for i in 0..n_freq {
+            for j in 0..n_cone {
+                for k in 0..n_clock {
+                    let frequency_mhz = 400.0 + 300.0 * i as f64 / (n_freq - 1).max(1) as f64;
+                    let e_cone_deg = max_cone_deg * j as f64 / (n_cone - 1).max(1) as f64;
+                    let e_clock_deg = 315.0 * k as f64 / (n_clock - 1).max(1) as f64;
+                    measurements.push(MeasurementPoint::new(
+                        e_clock_deg,
+                        e_cone_deg,
+                        frequency_mhz,
+                        10.0,
+                        290.0,
+                    ));
+                    predictions.push(9.0);
+                }
+            }
+        }
+        (measurements, predictions)
+    }
+
+    fn shipped_shape_params() -> CorrectionSurfaceParams {
+        // The counts and floors `main::surface_fitting_params` ships.
+        CorrectionSurfaceParams {
+            spline_order: 4,
+            num_knots_frequency: 4,
+            num_knots_econe: 6,
+            num_knots_eclock: 8,
+            regularization: 1e-3,
+            adaptive_knots: true,
+            cross_validation_folds: 0,
+            min_knot_spacing_frequency: 50.0,
+            min_knot_spacing_econe: 2.0,
+            min_knot_spacing_eclock: 5.0,
+        }
+    }
+
+    fn fitted_surface(max_cone_deg: f64) -> CorrectionSurface {
+        let (measurements, predictions) = grid_over_cone_span(12, 12, 12, max_cone_deg);
+        fit_correction_surface(&measurements, &predictions, &shipped_shape_params())
+            .expect("fit should succeed")
+    }
+
+    /// The delivered knot spacing is what the surface can actually follow, and it is not the
+    /// requested floor — in either direction. This is the whole reason the assessment reads
+    /// the fitted knot vectors rather than [`CorrectionSurfaceParams`].
+    ///
+    /// The negative control is the clock axis: it is requested with a 5° floor and delivers
+    /// roughly 35°, because on a wide axis the knot **count** binds long before the spacing
+    /// floor does. An implementation that reported `min_knot_spacing_eclock` would call that
+    /// axis seven times better resolved than it is — and it is the worse of the two.
+    #[test]
+    fn angular_resolution_reads_the_knots_the_fit_delivered_not_the_spacing_it_requested() {
+        let params = shipped_shape_params();
+        let surface = fitted_surface(24.0);
+        let resolution =
+            assess_angular_resolution(&surface, 8.0).expect("assessment should succeed");
+
+        assert!(
+            resolution.clock_knot_spacing_deg > params.min_knot_spacing_eclock * 3.0,
+            "the clock axis must deliver far coarser knots than its floor requests, or this \
+             test cannot tell the two apart: delivered {:.2}°, floor {:.2}°",
+            resolution.clock_knot_spacing_deg,
+            params.min_knot_spacing_eclock
+        );
+        assert!(
+            (resolution.cone_knot_spacing_deg - params.min_knot_spacing_econe).abs() > 1e-9,
+            "the cone axis must not coincidentally equal its floor here either, or the \
+             assertion above is the only thing separating delivered from requested"
+        );
+
+        // Both spacings must be readable back out of the surface itself.
+        for (spacing, knots, axis) in [
+            (
+                resolution.cone_knot_spacing_deg,
+                &surface.knots_econe,
+                "cone",
+            ),
+            (
+                resolution.clock_knot_spacing_deg,
+                &surface.knots_eclock,
+                "clock",
+            ),
+        ] {
+            let widest = knots
+                .windows(2)
+                .map(|p| p[1] - p[0])
+                .fold(0.0_f64, f64::max);
+            assert!(
+                (spacing - widest).abs() < 1e-12,
+                "{axis}: reported {spacing} but the surface's widest knot gap is {widest}"
+            );
+        }
+    }
+
+    /// `λ/D` is the whole point: the *same* fitted surface is adequate for a small dish and
+    /// inadequate for a large one, and only the diameter changed. A ×4 diameter must divide
+    /// the knots-per-lobe-period by 4 and take it across the bound.
+    #[test]
+    fn angular_resolution_tracks_lambda_over_d_and_nothing_else() {
+        let surface = fitted_surface(24.0);
+
+        let small = assess_angular_resolution(&surface, 1.0).expect("small dish");
+        let large = assess_angular_resolution(&surface, 4.0).expect("large dish");
+
+        assert!(
+            (small.cone_knot_spacing_deg - large.cone_knot_spacing_deg).abs() < 1e-12,
+            "the diameter must not move what the knots deliver — only what is required"
+        );
+        let ratio = small.cone_lobe_period_deg / large.cone_lobe_period_deg;
+        assert!(
+            (ratio - 4.0).abs() < 1e-9,
+            "lobe period must be inversely proportional to diameter, got a ratio of {ratio}"
+        );
+
+        assert!(
+            small.cone_knots_per_lobe_period() >= MIN_KNOTS_PER_LOBE_PERIOD,
+            "the 1 m dish must clear the cone bound ({:.2} knots/period), or the flip below \
+             proves nothing",
+            small.cone_knots_per_lobe_period()
+        );
+        assert!(
+            large.cone_knots_per_lobe_period() < MIN_KNOTS_PER_LOBE_PERIOD,
+            "the 4 m dish must fail the cone bound ({:.2} knots/period)",
+            large.cone_knots_per_lobe_period()
+        );
+    }
+
+    /// The clock requirement is not a copy of the cone requirement: traversing φ at polar
+    /// angle θ covers an arc of `sin θ · Δφ`, so the same antenna needs finer clock knots the
+    /// further off-axis its coverage reaches. Two fits differing *only* in cone span must
+    /// therefore report different clock lobe periods — an implementation that reused the cone
+    /// period, or evaluated at a fixed angle, would report the same one twice.
+    #[test]
+    fn the_clock_requirement_tightens_as_coverage_reaches_further_off_axis() {
+        let near_axis = assess_angular_resolution(&fitted_surface(4.0), 8.0).expect("near axis");
+        let wide = assess_angular_resolution(&fitted_surface(24.0), 8.0).expect("wide");
+
+        assert!(
+            (near_axis.cone_lobe_period_deg - wide.cone_lobe_period_deg).abs() < 1e-12,
+            "cone lobe period depends on λ/D alone and must not move with coverage"
+        );
+        assert!(
+            wide.clock_lobe_period_deg < near_axis.clock_lobe_period_deg,
+            "reaching further off-axis must tighten the clock requirement, got {:.2}° at 24° \
+             cone against {:.2}° at 4°",
+            wide.clock_lobe_period_deg,
+            near_axis.clock_lobe_period_deg
+        );
+        assert!(
+            near_axis.clock_lobe_period_deg / wide.clock_lobe_period_deg > 3.0,
+            "the difference must be large enough to be the sin θ ratio rather than noise"
+        );
+    }
+
+    /// A diameter that cannot produce a lobe period is refused rather than silently
+    /// producing an infinite or negative one — the assessment is a measurement, and a
+    /// measurement with no defined value must say so.
+    #[test]
+    fn a_nonpositive_diameter_is_refused() {
+        let surface = fitted_surface(24.0);
+        for bad in [0.0, -3.7, f64::NAN] {
+            assert!(
+                assess_angular_resolution(&surface, bad).is_err(),
+                "diameter {bad} must be refused"
+            );
+        }
+        assert!(assess_angular_resolution(&surface, 3.7).is_ok());
     }
 
     // ========================================================================

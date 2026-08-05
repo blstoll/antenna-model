@@ -13,6 +13,7 @@ use calibrate::artifact_export::{
     export_full_calibration, write_calibration_artifact, ExportPhysicalParams,
 };
 use calibrate::{
+    assess_angular_resolution,
     build_calibration_artifact,
     // Boresight calibration imports
     calibrate_boresight,
@@ -672,6 +673,29 @@ async fn run_calibration(args: Args) -> Result<()> {
         correction_surface.fit_stats.improvement_percent
     );
 
+    // How finely the surface we just fitted can vary in angle, against how finely this
+    // antenna's pattern does (roadmap D21). Reported, never enforced: the fit above is
+    // useful whether or not it clears the bound, and refusing here would have removed the
+    // repository's only served full-mode artifact. What is *not* acceptable is staying
+    // silent — the RMSE printed two lines up structurally cannot see this, because a grid
+    // sampled no finer than the knots carries no structure the knots cannot follow.
+    let angular_resolution =
+        assess_angular_resolution(&correction_surface, class.geometry.diameter_m)?;
+    if angular_resolution.resolves_lobe_structure() {
+        info!("    Angular resolution: {}", angular_resolution.summary());
+    } else {
+        warn!(
+            "  ⚠ The correction surface cannot resolve this antenna's lobe structure: {}",
+            angular_resolution.summary()
+        );
+        warn!(
+            "    It carries the residual's envelope trend, not its lobe structure. The \
+             in-sample RMSE above cannot see this — it is measured on a grid no finer than \
+             the knots. Per-lobe accuracy off the main beam is not offered for this \
+             artifact; the figure is recorded in its metadata."
+        );
+    }
+
     // Step 6: Validation
     info!("Step 6/6: Running validation...");
 
@@ -764,6 +788,7 @@ async fn run_calibration(args: Args) -> Result<()> {
         )),
         frequency_range: quality_report.frequency_range,
         angular_range: quality_report.e_cone_range,
+        angular_resolution: Some(angular_resolution.clone()),
     };
 
     // Build a service-loadable AntennaCalibration (4D B-spline correction
@@ -785,6 +810,7 @@ async fn run_calibration(args: Args) -> Result<()> {
         correction_surface.fit_stats.r_squared,
         model_only_rmse,
         args.tune_parameters,
+        angular_resolution.clone(),
     )
     .context("Failed to build service-loadable calibration artifact")?;
 

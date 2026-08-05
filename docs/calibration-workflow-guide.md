@@ -792,6 +792,52 @@ Output: calibration_data/antenna_1_xband_full.bin (128 KB)
 - **First sidelobe** (3-10° off-axis): Must be <1.0 dB RMS
 - **Full coverage**: Target <1.5 dB RMS, <3 dB max absolute
 
+#### 4.5.1 Angular resolution — the one number the RMSE above cannot tell you
+
+*(Roadmap D21, 2026-08-04.)*
+
+Every RMSE in the report above is measured **on the fitted grid**. If that grid is sampled no
+finer than the correction surface's own knots — and it usually is — then the fit can reproduce
+every point it was given while missing structure that exists *between* them, and the reported
+number will look excellent either way. It is not a bad metric; it simply cannot see this.
+
+So `calibrate` measures it separately, and warns:
+
+```
+⚠ The correction surface cannot resolve this antenna's lobe structure: cone 2.00° knots
+  vs 1.15° lobe period (0.58 knots/period); clock 40.00° knots vs 4.77° lobe period
+  (0.12 knots/period); minimum 2.0
+  It carries the residual's envelope trend, not its lobe structure. The in-sample RMSE
+  above cannot see this — it is measured on a grid no finer than the knots. Per-lobe
+  accuracy off the main beam is not offered for this artifact; the figure is recorded in
+  its metadata.
+```
+
+**Reading it.** A reflector pattern varies on an angular scale of `λ/D` — the lobe period.
+Representing something periodic takes at least two degrees of freedom per period, so the
+surface needs ≥2 knots per lobe period on each angular axis. The warning reports what it got.
+
+- **Cone (polar).** Lobe period is `λ/D` at your highest calibrated frequency.
+- **Clock (azimuthal).** Tighter than the cone axis, and it tightens the further off-axis your
+  coverage reaches: traversing φ at polar angle θ crosses an arc of `sin θ`, so the clock lobe
+  period is `(λ/D) / sin θ` at the edge of coverage. A boresight-only artifact has no clock
+  requirement at all — every φ names the same direction.
+
+**What to do about it.** Usually nothing: the warning is not an error, the artifact is still
+written, and it is still worth having. The NASA CR-159703 exemplar resolves 0.58 knots per
+lobe period and still takes 19 independently digitized peaks from 11.58 dB RMS to 3.19 dB. What
+the warning tells you is **what not to claim** — the surface carries the residual's envelope
+trend, so do not quote per-lobe accuracy off the main beam for that artifact.
+
+Sampling your measurement grid more finely will *not* by itself help: the knot counts and
+spacing floors are compile-time constants in `calibrate/src/main.rs::surface_fitting_params`.
+Whether they should be derived from `λ/D` instead is an open question with real arguments on
+both sides — see roadmap unit **D24** and
+`docs/findings-2026-08-02-correction-surface-angular-resolution.md` before changing them.
+
+The same figures are written to `CalibrationMetadata.angular_resolution` inside the artifact
+and to the `--metadata` sidecar, so a consumer can read them without re-running the fit.
+
 ### 4.6 Using Fully Calibrated Antennas
 
 **API Response:**
@@ -1716,7 +1762,7 @@ confuse because they all sound like "the version" — they answer different ques
 
 | Axis | Type | Location | Question it answers |
 |------|------|----------|----------------------|
-| ANTC **container** version | `u32` (file header, *outside* the payload) | `ANTC_ARTIFACT_VERSION` in `data/loader.rs` | How do file bytes become a payload byte string — the `[magic][version][crc32][len]` framing and which codec decodes the payload? Bumped 1→2 on the bincode→postcard migration, 2→3 by D23's layout change (a version-2 payload is one `f64` short, and postcard reads positionally, so the decode itself cannot be trusted). |
+| ANTC **container** version | `u32` (file header, *outside* the payload) | `ANTC_ARTIFACT_VERSION` in `data/loader.rs` | How do file bytes become a payload byte string — the `[magic][version][crc32][len]` framing and which codec decodes the payload? Bumped 1→2 on the bincode→postcard migration, 2→3 by D23's layout change (a version-2 payload is one `f64` short, and postcard reads positionally, so the decode itself cannot be trusted), 3→4 by D21's for the same reason one field earlier. |
 | **Schema** version (`format_version`) | `String` `"MAJOR.MINOR"` (*inside* the payload) | `CALIBRATION_SCHEMA_VERSION` in `data/types.rs`, stamped into `CalibrationMetadata::format_version` | What does the decoded `AntennaCalibration` **mean** — which fields exist, in what order, meaning what? |
 | **Physics-model** version | `u32` (inside the payload) | `CalibrationMetadata::physics_model_version` | Which `gain_physics` implementation was this artifact's correction surface fitted against? |
 
@@ -1782,6 +1828,20 @@ is bit-identical. Check first that the artifact does not carry the defect the bu
 reject — restamping a wrong artifact launders it past the new gate. (For C13 that check is
 "the feed's axial offset is not the focal length"; a lateral offset is legitimate, and one of
 these two fixtures has one.)
+
+**5.0 (D21, 2026-08-04) is the first bump here that fixes no wrong number.** It added
+`CalibrationMetadata.angular_resolution` — what the fitted correction surface's knots can
+resolve against the antenna's own `λ/D` lobe period. Every 4.0 artifact means exactly what it
+said, and nothing on the served path reads the new field, so there is no defect to launder and
+no re-check to run before migrating. It is a MAJOR (and a container bump, 3 → 4) purely because
+postcard is positional: a 4.0 payload is short by the `Option`'s one-byte discriminant, and
+every field after it decodes from the wrong offset. **That is the whole reason the table's
+first two rows are about layout rather than correctness** — an additive, consequence-free field
+is still undecodable by the wrong build. The two committed fixtures were migrated by the same
+procedure as 4.0 (below), one byte each, with `angular_resolution: None`: they are
+boresight-mode artifacts, which fit no angular surface, so `None` means *not applicable* rather
+than *unknown*, and inventing a value would have fabricated a measurement the artifact never
+made. This bump found **no** new hardcoded version literals — the 3.0 and 4.0 cleanups held.
 
 For **4.0 (D23) restamping was not available**, because the layout moved: the same two
 fixtures were **migrated**. Postcard is positional, so the procedure is to decode the prefix

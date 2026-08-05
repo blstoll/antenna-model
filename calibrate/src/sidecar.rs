@@ -16,6 +16,7 @@
 //! fields. Nothing here writes a binary artifact.
 
 use crate::validator::ValidationReport;
+use antenna_model::data::types::AngularResolution;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
@@ -68,6 +69,15 @@ pub struct ArtifactMetadata {
 
     /// Angular range covered (E-cone degrees)
     pub angular_range: (f64, f64),
+
+    /// What the fitted correction surface's knots can resolve against this antenna's own
+    /// `λ/D` lobe period (roadmap D21). `None` for a mode that fits no angular surface.
+    ///
+    /// The same value the artifact carries in `CalibrationMetadata.angular_resolution`, put
+    /// here so it is readable without decoding the `.bin`. It is a limitation the fit's own
+    /// RMSE — two fields up in this same file — structurally cannot express.
+    #[serde(default)]
+    pub angular_resolution: Option<AngularResolution>,
 }
 
 // ============================================================================
@@ -108,6 +118,7 @@ mod tests {
             notes: Some("calibrated with class: TestClass".to_string()),
             frequency_range: (2000.0, 8000.0),
             angular_range: (0.0, 5.0),
+            angular_resolution: None,
         }
     }
 
