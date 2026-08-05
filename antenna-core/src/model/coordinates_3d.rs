@@ -40,8 +40,91 @@
 //! **IMPORTANT**: This module uses polar angle throughout. When interfacing with
 //! other coordinate systems, ensure consistent interpretation of "elevation".
 
-use crate::api::schemas::Position3D;
+use serde::{Deserialize, Serialize};
+
 use crate::error::{AntennaModelError, Result};
+
+/// Coordinate system type for 3D positions
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CoordinateSystem {
+    /// Earth-Centered Earth-Fixed coordinates (x, y, z in meters)
+    #[serde(rename = "ecef")]
+    ECEF,
+    /// Geodetic coordinates (longitude degrees, latitude degrees, altitude meters)
+    Geodetic,
+}
+
+/// 3D position in an explicitly named coordinate system.
+///
+/// Supports two coordinate systems, selected by the **required** `coordinate_system`
+/// field:
+/// - **ECEF** (Earth-Centered Earth-Fixed), `"ecef"`
+///   - x, y, z in meters from Earth's centre of mass
+/// - **Geodetic** (WGS84), `"geodetic"`
+///   - x = longitude in degrees (-180 to 180)
+///   - y = latitude in degrees (-90 to 90)
+///   - z = altitude in meters (above the WGS84 ellipsoid)
+///
+/// # Why the tag is required
+///
+/// Until roadmap unit C8 stage 2 the field was optional and the frame was inferred from
+/// coordinate magnitude (ECEF above a 6400 km threshold, geodetic below). That heuristic
+/// is not decidable: a geodetic GEO satellite at `z = 35,786,000` m and an ECEF position
+/// are indistinguishable by magnitude, so untagged GEO positions silently misparsed as
+/// near-Earth-centre ECEF and returned a confidently wrong gain. The frame is now stated,
+/// never guessed — a body that omits `coordinate_system` is rejected with a 400 naming the
+/// field.
+///
+// Construction examples live on `Position3D::ecef` / `Position3D::geodetic` and in
+// `constructor_examples_from_the_former_doctest` — the doc comment above is the
+// generated OpenAPI description, so a rustdoc doctest must not live in it.
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct Position3D {
+    /// X coordinate: ECEF X (meters) OR longitude (degrees)
+    pub x: f64,
+    /// Y coordinate: ECEF Y (meters) OR latitude (degrees)
+    pub y: f64,
+    /// Z coordinate: ECEF Z (meters) OR altitude (meters)
+    pub z: f64,
+    /// Required frame tag naming how to read `x`, `y`, `z`. There is no default and no
+    /// magnitude-based inference; omitting it is a deserialization error.
+    pub coordinate_system: CoordinateSystem,
+}
+
+impl Position3D {
+    /// Create an ECEF position (x, y, z in meters from Earth's centre).
+    pub fn ecef(x: f64, y: f64, z: f64) -> Self {
+        Self {
+            x,
+            y,
+            z,
+            coordinate_system: CoordinateSystem::ECEF,
+        }
+    }
+
+    /// Create a geodetic (WGS84) position: longitude °E, latitude °N, altitude meters.
+    pub fn geodetic(longitude_deg: f64, latitude_deg: f64, altitude_m: f64) -> Self {
+        Self {
+            x: longitude_deg,
+            y: latitude_deg,
+            z: altitude_m,
+            coordinate_system: CoordinateSystem::Geodetic,
+        }
+    }
+
+    /// Check if this position uses ECEF coordinates
+    pub fn is_ecef(&self) -> bool {
+        self.coordinate_system == CoordinateSystem::ECEF
+    }
+
+    /// Check if this position uses Geodetic coordinates
+    pub fn is_geodetic(&self) -> bool {
+        self.coordinate_system == CoordinateSystem::Geodetic
+    }
+}
 
 // ============================================================================
 // WGS84 Ellipsoid Parameters
