@@ -3,7 +3,8 @@
 //!
 //! This crate deliberately contains no web stack: no poem, no h3o, no tokio.
 //! The `openapi` feature gates the `utoipa::ToSchema` derives the service
-//! needs for spec generation, so `calibrate` never compiles utoipa.
+//! needs for spec generation, so a package-scoped `calibrate` build compiles
+//! no utoipa (a whole-workspace build still unifies features across members).
 
 // Compiler and linter configuration (kept identical to antenna-model's —
 // moved code must stay under the same unwrap/expect/panic policy).

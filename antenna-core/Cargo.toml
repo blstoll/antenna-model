@@ -5,13 +5,17 @@ edition.workspace = true
 authors.workspace = true
 
 [features]
-# `utoipa::ToSchema` derives on the API-visible types that live here
-# (Position3D, CoordinateSystem, ApiWarning, WarningCode). Only the service
-# needs OpenAPI schemas; calibrate must not compile utoipa (roadmap D4:
-# the CLI stops compiling the web stack).
+# `utoipa::ToSchema` derives on the API-visible types defined in this crate.
+# Only the service needs OpenAPI schemas. Precise property (roadmap D4): a
+# package-scoped build (`cargo build -p calibrate`, `cargo install --path
+# calibrate`) compiles no utoipa; a whole-workspace build still does, because
+# cargo unifies features across the members it builds together.
 openapi = ["dep:utoipa"]
 
 [dependencies]
+# crc32fast, num-complex, postcard, rayon, serde_json, tracing (and dev-dep
+# tempfile) are declared ahead of the model/ + data/ move in D4's next task, so
+# that diff stays a pure code move. Cargo does not warn on unused manifest deps.
 # config + serde_yaml exist solely for error.rs's `impl From<serde_yaml::Error>`
 # / `impl From<config::ConfigError>` on ConfigError — the orphan rule pins those
 # impls to the crate that defines ConfigError. Neither is web stack. (Discovered
@@ -32,6 +36,7 @@ thiserror = "2.0.18"
 tracing = "0.1.44"
 # Pinned to match antenna-model's exact pin (tests/openapi_spec.rs asserts
 # byte-for-byte spec equality; a utoipa upgrade must arrive as a deliberate PR).
+# Core's derives need only "macros"; the spec-affecting features (yaml, preserve_order) stay with antenna-model, which assembles the spec.
 utoipa = { version = "=5.5.0", features = ["macros"], optional = true }
 
 [dev-dependencies]

@@ -145,7 +145,8 @@ impl WarningCode {
     /// `openapi.yaml`.
     ///
     /// Used by the vocabulary drift test and available to consumers that need to
-    /// enumerate the set. Mirrors [`crate::api::schemas::ErrorCode::ALL`].
+    /// enumerate the set. Mirrors `ErrorCode::ALL` (in `antenna-model`'s
+    /// `api::schemas`).
     pub const ALL: &'static [WarningCode] = &[
         WarningCode::Extrapolated,
         WarningCode::OutOfCoverage,
