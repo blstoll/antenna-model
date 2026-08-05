@@ -16,10 +16,13 @@
 pub mod api;
 pub mod config;
 pub mod data;
-pub mod error;
 pub mod model;
 pub mod service;
-pub mod warnings;
+
+// The shared error/warning vocabulary lives in `antenna-core` (roadmap D4);
+// re-export the modules so every existing `antenna_model::{error,warnings}::…`
+// path — and `crate::…` within this crate — keeps resolving unchanged.
+pub use antenna_core::{error, warnings};
 
 // Re-export commonly used types for convenience
 pub use data::{AntennaCalibration, BSplineModel4D, CalibrationMetadata, ValidityRanges};

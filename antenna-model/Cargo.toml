@@ -5,6 +5,7 @@ edition.workspace = true
 authors.workspace = true
 
 [dependencies]
+antenna-core = { path = "../antenna-core", features = ["openapi"] }
 anyhow = "1.0.103"
 crc32fast = "1"
 # default-features off drops the `heapless-cas` default, which pulls heapless 0.7
