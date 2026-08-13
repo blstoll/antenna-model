@@ -80,6 +80,11 @@ pub enum CoordinateSystem {
 // Construction examples live on `Position3D::ecef` / `Position3D::geodetic` and in
 // `constructor_examples_from_the_former_doctest` — the doc comment above is the
 // generated OpenAPI description, so a rustdoc doctest must not live in it.
+// Any utoipa attribute on this type or `CoordinateSystem` must be written
+// `#[cfg_attr(feature = "openapi", schema(...))]`. A bare `#[schema(...)]`
+// compiles in every workspace build (the feature unifies ON via antenna-model)
+// and breaks only `cargo build -p calibrate`; scripts/check.sh's package-scoped
+// antenna-core clippy step is what catches it.
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct Position3D {

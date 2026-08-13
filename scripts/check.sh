@@ -16,6 +16,14 @@ fi
 echo "==> cargo fmt --all -- --check"
 cargo fmt --all -- --check
 
+echo "==> cargo clippy -p antenna-core --all-targets -- -D warnings (openapi OFF)"
+# The workspace build always unifies antenna-core's `openapi` feature ON, because
+# antenna-model enables it. This package-scoped check is the only thing that
+# compiles the feature-OFF configuration — the one `cargo build -p calibrate`
+# produces (roadmap D4). Without it, a bare `#[schema(...)]` attribute on a
+# feature-gated type passes every workspace check and breaks only the CLI build.
+cargo clippy -p antenna-core --all-targets -- -D warnings
+
 echo "==> cargo clippy --workspace --all-targets -- -D warnings"
 cargo clippy --workspace --all-targets -- -D warnings
 

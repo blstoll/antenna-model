@@ -39,6 +39,11 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
+      - name: Clippy (antenna-core, openapi feature OFF)
+        # See scripts/check.sh: the workspace build unifies this feature ON, so
+        # this is the only check that compiles the configuration the CLI builds
+        # under (roadmap D4).
+        run: cargo clippy -p antenna-core --all-targets -- -D warnings
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
