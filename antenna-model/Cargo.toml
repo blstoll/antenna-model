@@ -23,7 +23,6 @@ tokio = { version = "1.53.0", features = [
     "sync",
     "time",
 ] }
-toml = "1.1.3"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 # Pinned exactly: tests/openapi_spec.rs asserts byte-for-byte equality between the
@@ -45,7 +44,8 @@ uuid = { version = "1.24.0", features = ["v4", "serde"] }
 criterion = { version = "0.8.2", features = ["html_reports"] }
 # Test-only: the Hankel reference oracle in tests/reference_validation.rs.
 num-complex = "0.4.6"
-# Test-only: the `#[cfg(test)]` artifact writer in src/data/repository.rs.
+# Test-only: `src/data/repository.rs`'s `#[cfg(test)]` helper, which writes a bare
+# postcard payload (no ANTC header) for the repository's own unit tests.
 # default-features off drops the `heapless-cas` default, which pulls heapless 0.7
 # → the unmaintained atomic-polyfill (RUSTSEC-2023-0089). We only need std ser/de.
 postcard = { version = "1.1.3", default-features = false, features = [
