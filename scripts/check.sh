@@ -24,6 +24,22 @@ echo "==> cargo clippy -p antenna-core --all-targets -- -D warnings (openapi OFF
 # feature-gated type passes every workspace check and breaks only the CLI build.
 cargo clippy -p antenna-core --all-targets -- -D warnings
 
+echo "==> cargo build -p calibrate (CLI graph: normal deps only)"
+# The CLI must not compile the web stack (roadmap D4). Two properties, neither of
+# which any workspace-scoped check can see:
+#   1. `cargo build -p calibrate` uses ONLY calibrate's normal deps, so it is the
+#      one build that fails if calibrate relies on a feature it does not declare.
+#      `clippy -p calibrate --all-targets` does NOT substitute: --all-targets pulls
+#      the dev-dependency antenna-model back in and re-unifies the features.
+#   2. The dep-tree assertion below is what fails if antenna-model (or anything
+#      dragging poem/h3o/utoipa/dashmap) returns to calibrate's normal graph.
+# The surviving `lru` is calibrate's own, via aws-sdk-s3 — same carve-out as tokio.
+cargo build -p calibrate
+if cargo tree -p calibrate -e normal | grep -E 'poem|h3o|utoipa|dashmap'; then
+  echo "ERROR: web-stack dependency reachable from calibrate's normal graph (roadmap D4)" >&2
+  exit 1
+fi
+
 echo "==> cargo clippy --workspace --all-targets -- -D warnings"
 cargo clippy --workspace --all-targets -- -D warnings
 
