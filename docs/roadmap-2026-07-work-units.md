@@ -5222,6 +5222,123 @@ module docs either way, since D9's NaN sentinel means it will not go away entire
 **Coupled to:** D9 (the NaN-sentinel decision this sits opposite), D21 (which produced the
 field that exposed it).
 
+**Amended 2026-08-13 by D26, which contradicts this unit's reachability analysis.** The
+paragraph above reasons that `fit_correction_surface` cannot deliver a degenerate axis because
+"`generate_knot_vector` refuses a span below the minimum spacing". That premise is *not
+enforced*: `validate_fitting_inputs` (`correction_surface.rs:1406`) validates `spline_order`
+and `regularization` and never inspects `min_knot_spacing_econe` / `_eclock`, so a library
+caller passing a zero or negative spacing disables the span guard the argument rests on. The
+shipped CLI is still unaffected (it uses `surface_fitting_params`' constants), so "latent" is
+right for the *binary* — but the reachability claim as written is a property nobody checks.
+See D26 finding 4.
+
+---
+
+### D26 — D21's angular-resolution code: one served-output defect and four soundness gaps — Effort: M
+
+**Filed 2026-08-13**, from the code review of the merged D21 (`6f42799`, PR #41 — which
+includes the `c4f460d` cone fix). Filed as its own unit rather than fixed inside the D4 crate
+split, for the reason C9 was scheduled outside C8: D4's charter is a mechanical move whose
+whole reviewable property is that **no computed value changed**, and finding 1 changes served
+output. Fixing it there would have destroyed the evidence that the move was clean.
+
+All findings verified against `6f42799`. Line numbers are as of that commit; note `data/types.rs`
+moved to `antenna-core/src/data/types.rs` in D4.
+
+**1 — `export_full_calibration` clamps the elevation extent, so a negative-cone measurement set
+exports a coverage range that omits or inverts the calibrated region.** `[CORRECTNESS —
+changes served output. Fix first.]` `artifact_export.rs:381-382` computes
+`el_lo = extents.elevation_min_max.0.max(0.0)` and `el_hi = ….1.min(90.0)`. Negative E-cone is
+**legal, validated input** — `MeasurementPoint::validate` admits `[-90, 90]`
+(`parser.rs:95`), and D21's own
+`a_cone_axis_that_runs_negative_is_assessed_at_its_outermost_angle` uses a one-sided `-14°…0°`
+cut as a first-class case. For exactly that span the clamp yields `(0.0, 0.0)`. Consequences,
+all silent: `CalibrationCoverage::is_boresight_only` is
+`elevation_range.0 == 0.0 && elevation_range.1 <= BORESIGHT_COVERAGE_CONE_DEG`, so a full-mode
+artifact over thousands of measurements **reports as boresight-only**; and `contains()` /
+`service::evaluator::is_in_coverage` admit no elevation but exactly 0.0, so **the correction
+surface is never applied** and the service serves raw physics while reporting the artifact
+healthy. A wholly-negative span such as `-14°…-1°` is worse still: it produces the *inverted*
+range `(0.0, -1.0)`, where `lo > hi` rejects everything by construction. This is the same
+observable-signature class as D13's boresight-coverage defect — "every observable healthy
+except the one nobody asserted".
+
+**2 — The assessed diameter reaches the artifact out-of-band from the stamped one, and the doc
+comment justifying that is false.** `[CORRECTNESS — C13/D23 shape, same function.]`
+`export_full_calibration`'s `angular_resolution` parameter is documented (`artifact_export.rs:320-323`)
+as "passed in rather than derived here because the dish diameter lives on the antenna class,
+which this function only sees the already-flattened `ExportPhysicalParams` view of." That
+reason does not hold: `ExportPhysicalParams.diameter_m` exists (`:283`) and is what the function
+stamps into the artifact (`:350`). Meanwhile `main.rs:683` assesses against a **second,
+independent read**, `class.geometry.diameter_m`. So the artifact's `angular_resolution` can
+describe a different antenna than the artifact's own `diameter_m` — precisely the invariant
+C13 and D23 established two lines apart in this same function: *every parameter the fitting
+model uses must be in the artifact, or the artifact describes something other than what it
+serves*. Nothing can currently observe a divergence: the in-crate test (`:695`) passes
+`physical.diameter_m` for both, and the e2e oracle hardcodes the fixture's 1.22 m instead of
+reading the artifact (finding 5).
+
+**3 — `widest_knot_gap` silently swallows NaN gaps, reporting an axis as *better* resolved than
+it is.** `correction_surface.rs:357-368` folds with `fold(0.0_f64, f64::max)`; `f64::max`
+returns the non-NaN operand, so a NaN gap is discarded and the widest *finite* gap is reported
+— a smaller spacing, i.e. a better-resolved verdict, from corrupt input. That is the exact
+failure mode D21 exists to prevent (an artifact claiming a resolution it does not have). The
+irony is local: ~90 lines above, `assess_angular_resolution`'s diameter guard carries the
+comment "`is_finite()` first so NaN and infinity are refused explicitly rather than falling
+through a comparison that is false for NaN by accident." Related: `knots_eclock` receives none
+of the emptiness/finiteness validation the frequency and E-cone axes get.
+
+**4 — The span-guard reachability premise is unenforced.** `validate_fitting_inputs`
+(`correction_surface.rs:1406-1445`) validates `spline_order` and `regularization` and **never**
+checks that `min_knot_spacing_econe` / `_eclock` are positive, so the `generate_knot_vector`
+span guard can be disabled by a library caller passing zero or negative spacing. This is what
+the comment at `:319` — and D25's reachability paragraph — assume holds. See the D25 amendment
+above.
+
+**5 — `f64::INFINITY` carries two opposite meanings in one struct, and two test helpers can't
+see what they measure.** In `widest_knot_gap`, `INFINITY` means *infinitely coarse knots* —
+the worst case. In `clock_lobe_period_deg`, `INFINITY` means *no clock structure to resolve* —
+the best case, the `sin θ → 0` boresight path D21 documents at `correction_surface.rs:1956`. A
+surface degenerate on both clock inputs therefore computes `INF/INF = NaN`, which reaches
+`summary()`, the artifact metadata, and `PartialEq` (breaking round-trip asserts). Alongside:
+`AngularResolution`'s ratio accessors divide by a deserialized knot spacing with no zero guard,
+and neither `AntennaCalibration::validate()` nor the loader inspects `metadata`, so a decoded
+artifact with `cone_knot_spacing_deg = 0.0` reports `resolves_lobe_structure() == true`;
+`angular_resolution: None` is an unenforced sentinel that `CalibrationMetadataBuilder::build()`
+defaults silently; the under-resolved warning is emitted only inside the CLI binary, so a
+library embedder using the equally-public `assess_angular_resolution` + `export_full_calibration`
+path gets no signal at all; the `shipped_shape_params()` test helper hand-copies the shipped
+knot configuration that `main.rs`'s private `surface_fitting_params` owns (a **third** copy,
+alongside `validator.rs`'s `artifact_params`), so in-crate tests can describe a shape nothing
+ships; and `cli_full_mode_real_data_e2e.rs:1203`'s "derived, not a constant" oracle hardcodes
+the 1.22 m fixture diameter rather than reading it off the artifact it just loaded, defeating
+half the property it exists to prove.
+
+**Exit criteria.**
+1. A negative-cone measurement set exports a coverage/validity elevation range that contains
+   the calibrated region, pinned by a test that **serves** such an artifact and asserts the
+   correction is applied — not merely that the range looks right. Assert `is_boresight_only()`
+   is `false` for it.
+2. The angular assessment and the stamped `diameter_m` provably come from one source, with a
+   test that **fails if they disagree** (pass deliberately divergent values and require the
+   export to reject or reconcile them). Correct or delete the false doc comment.
+3. `widest_knot_gap` refuses non-finite gaps explicitly; `knots_eclock` gets the validation its
+   sibling axes have.
+4. `min_knot_spacing_*` validated in `validate_fitting_inputs`, or the comment at `:319` and
+   D25's paragraph rewritten to claim only what is enforced.
+5. The two `INFINITY` meanings separated (distinct sentinels, or an enum), so no input yields
+   `NaN` into metadata; zero-guard on the ratio accessors.
+6. The shipped knot configuration has **one** owner that tests read, not three; the e2e oracle
+   reads the diameter off the artifact.
+
+**Gotchas.** Finding 1 changes served output, so it moves numbers in the D14 real-anchored e2e
+— that is the fix working, and the known-defect pins should be inverted the way D22's were,
+not loosened. Findings 3 and 5 are the same family as D25 and should land together or in a
+stated order; D25's reachability paragraph is wrong until finding 4 is resolved.
+
+**Depends on:** D4 (merge first — `data/types.rs` now lives in `antenna-core`, so this unit
+should be written against the post-split tree to avoid a pointless conflict).
+
 ---
 
 ## Phase 5 — Decision-gated features
