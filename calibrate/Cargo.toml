@@ -29,13 +29,25 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 serde_yaml = "0.9.34"
 thiserror = "2.0.18"
-tokio = "1.53"
+# `macros` + `rt-multi-thread` back `#[tokio::main]` in main.rs (and the runtime
+# aws-sdk-s3's `rt-tokio` needs). Declared explicitly since D4: these used to
+# arrive by feature unification from the antenna-model dependency, so dropping
+# that dependency broke a package-scoped `cargo build -p calibrate` while a
+# whole-workspace build still passed. Nothing here is web stack.
+tokio = { version = "1.53", features = ["macros", "rt-multi-thread"] }
 toml = "1.1.3"
 tracing = "0.1.44"
-tracing-subscriber = "0.3.23"
+# `env-filter` backs `EnvFilter` / `.with_env_filter()` in main.rs — same D4
+# unification story as tokio above.
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
-# Antenna model dependency for physics engine
-antenna-model = { path = "../antenna-model" }
+# Physics engine + artifact types. Deliberately antenna-core, not
+# antenna-model: the CLI build must not compile the web stack (roadmap D4).
+antenna-core = { path = "../antenna-core" }
 
 [dev-dependencies]
 tempfile = "3.27.0"
+# Test-only: the e2e tests deliberately serve generated artifacts through the
+# real service loader/evaluator (`service::compute_gain_from_request`) — the
+# served path is what caught C13. Dev-only so the CLI build stays web-free.
+antenna-model = { path = "../antenna-model" }

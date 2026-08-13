@@ -127,14 +127,11 @@ name = "antenna-model"
 version = "0.1.0"
 dependencies = [
  "antenna-core",
- "anyhow",
  "config",
- "crc32fast",
  "criterion",
  "dashmap",
  "h3o",
  "lru 0.18.1",
- "ndarray",
  "num-complex",
  "parking_lot",
  "poem",
@@ -145,7 +142,6 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "tempfile",
- "thiserror",
  "tokio",
  "toml",
  "tracing",
@@ -786,6 +782,7 @@ dependencies = [
 name = "calibrate"
 version = "0.1.0"
 dependencies = [
+ "antenna-core",
  "antenna-model",
  "anyhow",
  "argmin",

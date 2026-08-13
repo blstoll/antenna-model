@@ -318,7 +318,7 @@ impl AntennaClass {
         }
 
         {
-            use antenna_model::model::geometry::{F_OVER_D_MAX, F_OVER_D_MIN};
+            use antenna_core::model::geometry::{F_OVER_D_MAX, F_OVER_D_MIN};
             if !(F_OVER_D_MIN..=F_OVER_D_MAX).contains(&self.geometry.f_over_d) {
                 return Err(format!(
                     "Invalid f/D ratio: {} (must be in [{}, {}])",

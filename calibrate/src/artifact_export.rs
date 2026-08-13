@@ -38,8 +38,8 @@
 //! Because azimuth := clock, these orderings differ; coefficients must be
 //! reindexed (not memcpy'd).
 
-use antenna_model::data::loader::{ANTC_ARTIFACT_VERSION, ANTC_HEADER_LEN, ANTC_MAGIC};
-use antenna_model::data::types::{
+use antenna_core::data::loader::{ANTC_ARTIFACT_VERSION, ANTC_HEADER_LEN, ANTC_MAGIC};
+use antenna_core::data::types::{
     AngularResolution, AntennaCalibration, AntennaCalibrationBuilder, BSplineModel4D,
     CalibrationCoverageBuilder, CalibrationMetadataBuilder, CalibrationStatus,
     FeedParameters as DataFeedParameters, MeasurementDensity, MeshParameters as DataMeshParameters,
@@ -47,7 +47,7 @@ use antenna_model::data::types::{
     ValidityRangesBuilder, CALIBRATION_SCHEMA_VERSION,
 };
 
-use antenna_model::model::PHYSICS_MODEL_VERSION;
+use antenna_core::model::PHYSICS_MODEL_VERSION;
 
 use crate::correction_surface::CorrectionSurface;
 use crate::parser::MeasurementPoint;
@@ -470,13 +470,13 @@ pub fn export_full_calibration(
 ///
 /// The layout is `[magic "ANTC"][version u32 LE][crc32 u32 LE][payload len u64 LE]`
 /// followed by the postcard payload, matching the CRC-checked path in
-/// [`antenna_model::data::loader::load_calibration_artifact`]. The magic, version, and
+/// [`antenna_core::data::loader::load_calibration_artifact`]. The magic, version, and
 /// header length come from that module's public constants rather than being restated here,
 /// so reader and writer share one definition of the container format.
 ///
 /// Note this stamps the **container** axis only. The **schema** axis
 /// (`metadata.format_version`) rides inside the payload and is set by whichever builder
-/// produced `calibration`; see [`antenna_model::data::types::CALIBRATION_SCHEMA_VERSION`].
+/// produced `calibration`; see [`antenna_core::data::types::CALIBRATION_SCHEMA_VERSION`].
 pub fn write_calibration_artifact(calibration: &AntennaCalibration, path: &Path) -> Result<()> {
     let payload =
         postcard::to_allocvec(calibration).map_err(|e| ArtifactExportError::SerializeFailed {
@@ -504,7 +504,7 @@ pub fn write_calibration_artifact(calibration: &AntennaCalibration, path: &Path)
 mod tests {
     use super::*;
     use crate::correction_surface::{fit_correction_surface, CorrectionSurfaceParams};
-    use antenna_model::model::evaluate_correction;
+    use antenna_core::model::evaluate_correction;
 
     /// Smooth synthetic residual function over (clock, cone, freq).
     fn residual(clock_deg: f64, cone_deg: f64, freq_mhz: f64, freq0: f64) -> f64 {

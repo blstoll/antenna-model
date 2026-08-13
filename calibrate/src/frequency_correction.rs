@@ -33,7 +33,7 @@
 //! same construction full mode uses for its temperature axis — which replicates
 //! the coefficient layer over a real interval. See roadmap unit D13.
 
-use antenna_model::data::types::BSplineModel4D;
+use antenna_core::data::types::BSplineModel4D;
 use thiserror::Error;
 
 use crate::artifact_export::flat_axis;
@@ -52,7 +52,7 @@ use crate::artifact_export::flat_axis;
 /// spans. That coverage is an on-axis **cone**, not a point: boresight is the pole
 /// of the (azimuth, polar-angle) system, so azimuth is degenerate there and
 /// coverage constrains elevation alone, to
-/// [`BORESIGHT_COVERAGE_CONE_DEG`](antenna_model::data::types::BORESIGHT_COVERAGE_CONE_DEG).
+/// [`BORESIGHT_COVERAGE_CONE_DEG`](antenna_core::data::types::BORESIGHT_COVERAGE_CONE_DEG).
 /// Writing it as `az ∈ [0,0] ∧ el ∈ [0,0]` — as boresight mode did until
 /// 2026-07-31 — constrains a coordinate that carries no information at the pole,
 /// and so rejected the very point it was meant to cover: the azimuth of a
@@ -309,7 +309,7 @@ fn create_knot_vector(data_points: &[f64], order: u8) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use antenna_model::model::evaluate_correction;
+    use antenna_core::model::evaluate_correction;
 
     #[test]
     fn test_should_fit_correction_with_small_residuals() {

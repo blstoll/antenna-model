@@ -34,7 +34,7 @@ use calibrate::{
     ValidationConfig,
 };
 
-use antenna_model::model::{
+use antenna_core::model::{
     compute_g_over_t, AntennaConfigurationBuilder, FeedParametersBuilder, IntegrationParams,
     MeshParametersBuilder, ReflectorGeometryBuilder,
 };
@@ -230,7 +230,7 @@ fn export_physical_params(
         //
         // `FeedParameters.position` is the feed's **design offset from the focal point**,
         // not its vertex-origin position — see the field's doc comment in
-        // `antenna_model::data::types`. "At the focus" is therefore the origin, and this
+        // `antenna_core::data::types`. "At the focus" is therefore the origin, and this
         // must NOT be `(0, 0, focal_length_m)`: the service adds this offset to a steering
         // position that is *already* vertex-origin (`compute_feed_position_from_pointing`
         // → `to_feed_position_with_bdf` returns `(dx, dy, f + dz)`), so writing the focal
