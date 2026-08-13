@@ -94,11 +94,11 @@ pub const ANTC_HEADER_LEN: usize = 20;
 ///
 /// # Example
 /// ```no_run
-/// use antenna_model::data::loader::load_calibration_artifact;
+/// use antenna_core::data::loader::load_calibration_artifact;
 ///
 /// let calibration = load_calibration_artifact("calibration_data/antenna_1.bin")?;
 /// println!("Loaded antenna: {}, feed: {}", calibration.antenna_id, calibration.feed_id);
-/// # Ok::<(), antenna_model::error::DataError>(())
+/// # Ok::<(), antenna_core::error::DataError>(())
 /// ```
 pub fn load_calibration_artifact<P: AsRef<Path>>(path: P) -> Result<AntennaCalibration, DataError> {
     let path = path.as_ref();

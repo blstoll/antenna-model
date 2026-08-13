@@ -30,6 +30,7 @@ cargo nextest run --workspace
 cargo nextest run --workspace --profile full
 
 # Run specific workspace member tests
+cargo nextest run -p antenna-core
 cargo nextest run -p antenna-model
 cargo nextest run -p calibrate
 
@@ -75,9 +76,23 @@ cargo audit
 cargo doc --open
 
 # Run all checks exactly as CI does (fmt --check, clippy --workspace
-# --all-targets -D warnings, full workspace tests, cargo audit) — single
-# entrypoint. Sets RUST_MIN_STACK to match CI; the ad-hoc one-liners above
-# do not, and calibrate's 3D→4D round-trip overflows the default stack.
+# --all-targets -D warnings, full workspace tests, doctests, cargo audit) —
+# single entrypoint. Sets RUST_MIN_STACK to match CI; the ad-hoc one-liners
+# above do not, and calibrate's 3D→4D round-trip overflows the default stack.
+#
+# It also runs two PACKAGE-scoped checks that no workspace-scoped command can
+# perform, because a workspace build unifies features ON across members and so
+# hides both properties (roadmap D4):
+#   - `cargo clippy -p antenna-core --all-targets` — the only compile of
+#     antenna-core with its `openapi` feature OFF, the configuration the CLI
+#     actually builds under. antenna-model enables it, so the workspace build
+#     never sees the OFF side.
+#   - `cargo build -p calibrate` + a `cargo tree -p calibrate -e normal`
+#     assertion — the only build using calibrate's normal deps alone, so the
+#     only one that fails if calibrate leans on a feature it does not declare,
+#     plus the guard that keeps poem/h3o/utoipa/dashmap out of the CLI graph.
+#     `clippy -p calibrate --all-targets` does NOT substitute: --all-targets
+#     pulls the dev-dependency antenna-model back in and re-unifies features.
 ./scripts/check.sh
 ```
 
@@ -85,15 +100,25 @@ cargo doc --open
 
 ### Workspace Structure
 ```
-antenna-model/           # Cargo workspace root
-├── antenna-model/      # REST API service binary
+antenna-model/           # Cargo workspace root — three members (roadmap D4)
+├── antenna-core/       # Physics engine + artifact data layer (no web stack)
+│   └── src/
+│       ├── model/      # Physics engine: bessel, coordinates, coordinates_3d,
+│       │               #   correction_interpolator, edge_cases, fft, geometry,
+│       │               #   illumination, integration, mesh, pattern, phase,
+│       │               #   ray_trace
+│       ├── data/       # Calibration artifact layer: types.rs + loader.rs (ANTC)
+│       ├── error.rs    # Shared error vocabulary
+│       └── warnings.rs # Shared WarningCode / ApiWarning vocabulary
+├── antenna-model/      # REST API service binary — depends on antenna-core
 │   └── src/
 │       ├── api/        # REST layer (poem framework)
-│       ├── service/    # Business logic (evaluator, batch, validator)
-│       ├── model/      # Physics engine (coordinates, geometry, phase, pattern)
-│       ├── data/       # Calibration data types
-│       └── config/     # Configuration system
-├── calibrate/          # CLI calibration tool binary
+│       ├── service/    # Business logic (evaluator, batch, cache, heatmap,
+│       │               #   h3_link_budget, validator)
+│       ├── data/       # repository.rs only; types/loader re-exported from core
+│       ├── config/     # Configuration system
+│       └── bin/        # generate_openapi
+├── calibrate/          # CLI calibration tool binary — depends on antenna-core
 │   └── src/
 │       ├── parser.rs             # CSV measurement parsing
 │       ├── parameter_tuner.rs    # Nelder-Mead simplex optimizer
@@ -104,6 +129,20 @@ antenna-model/           # Cargo workspace root
 │       └── bin/cr159703_grid.rs  # D14 dev tool: real-anchored measurement-grid generator
 └── calibration_data/   # Calibration config (antennas.yaml) + generated *.bin artifacts (none checked in; see roadmap D9)
 ```
+
+**`antenna-model` re-exports what moved**, so every pre-existing path still
+resolves: `lib.rs` does `pub use antenna_core::{error, model, warnings};` and
+`data/mod.rs` does `pub use antenna_core::data::{loader, types};` beside its own
+`pub mod repository;`. No test or bench import changed in the split. The
+canonical home of a physics or artifact type is nevertheless `antenna_core::…`;
+prefer that path in new code.
+
+**`calibrate` depends on `antenna-core` for production and keeps `antenna-model`
+as a *dev*-dependency** — deliberately and load-bearingly. `calibrate/tests/**`
+serve generated artifacts through the real service path
+(`service::compute_gain_from_request`), which is what caught the 27.3 dB C13
+defect; the dependency must stay dev-only so the shipped CLI compiles no web
+stack, and it must not be deleted as "unused" by a dependency audit.
 
 ### Data Flow: API Request → Response
 
@@ -134,14 +173,14 @@ antenna-model/           # Cargo workspace root
    - Combine: `Gain_final = Gain_physics + Correction`
    - Generate warnings for out-of-range queries
 
-4. **Data Layer** (`src/data/types.rs`) - `AntennaCalibration` structure
+4. **Data Layer** (`antenna-core/src/data/types.rs`) - `AntennaCalibration` structure
    - `physical_config: PhysicalAntennaConfig` - reflector geometry, feed parameters
    - `correction_surface: Option<BSplineModel4D>` - residual corrections
    - Loaded at startup from `.bin` artifacts referenced by `antennas.yaml`. **No `.bin` artifacts ship in-repo: the four `antennas.yaml` entries that reference a `.bin` calibration file are `enabled: false`, while the four uncalibrated design-spec antennas are `enabled: true` and load from `calibration_data/design_specs/` — see roadmap unit D9.** D9's worked generation path is `scripts/generate-cr159703-artifact.sh` (roadmap D14): committed inputs → generated grid → `calibrate` → `.bin`, written outside the repo tree and never committed.
    - **`physical_config.feed.position` is the feed's design offset *from the focal point*, not its vertex-origin position** — an on-axis feed is `(0, 0, 0)`. The service adds it to a steering position that is already vertex-origin, so the other reading places the feed at `z ≈ 2f`; full-mode `calibrate` did exactly that until roadmap **C13** was closed on 2026-08-02, costing **27.3 dB** of boresight gain on the first artifact ever served. See the field's doc comment in `data/types.rs`.
    - **Every parameter the fitting model uses must be in the artifact, or the service serves a different antenna than the residuals describe.** C13 and **D23** (closed 2026-08-03) were the same defect two lines apart in `export_physical_params`. D23's was `feed.asymmetry_factor`: `calibrate` fits against the antenna class's value, the artifact had no field for it, and `FeedParametersBuilder` defaulted the service to 1.0 — so a residual surface fitted against an asymmetric illumination was applied on top of a symmetric one, and the evaluation silently moved off the azimuthal-mode integrator branch onto the symmetric one. Worst measured **1.20 dB** (`UHF_Array_Element`, cone 14°, 700 MHz) and 0.60 dB (`GroundStation_13m`), but **0.0003 dB at boresight** — it is a φ-dependent error, which is exactly why C13's boresight-focused pass over the same function did not catch it. Asymmetry is a **declared** design property (`antennas.yaml` design specs, calibrate's `DesignSpecs::FeedSpecs`, and the class registry), deliberately not a tuned one: it is horn geometry, and boresight data carries no information about it. Each producer has its own round-trip guard, and the served-path guard in `service::evaluator` carries a negative control against the symmetric default.
 
-### Key Physics Modules (`antenna-model/src/model/`)
+### Key Physics Modules (`antenna-core/src/model/`)
 
 - **`coordinates.rs`** - ECEF ↔ Geodetic ↔ Antenna Frame ↔ Spherical transforms
 - **`geometry.rs`** - `ReflectorGeometry`, `FeedParameters`, `MeshParameters`
@@ -207,7 +246,9 @@ The `calibrate` tool processes measurement data:
 
 ### Physics Model Implementation
 
-1. **Coordinate Systems Are Declared, Never Inferred** (`api/schemas.rs`)
+1. **Coordinate Systems Are Declared, Never Inferred**
+   (`antenna-core/src/model/coordinates_3d.rs`, re-exported by
+   `antenna-model/src/api/schemas.rs`)
    - `Position3D.coordinate_system` is **required**: `"ecef"` (x,y,z meters from Earth's
      centre) or `"geodetic"` (lon°, lat°, alt m). Omitting it is a 400 naming the field.
    - Construct in Rust with `Position3D::ecef(...)` / `Position3D::geodetic(...)`; there is
@@ -236,11 +277,11 @@ The `calibrate` tool processes measurement data:
 ### Error Handling
 
 - **Never use `unwrap()` or `expect()` in production code** - use proper error propagation
-- Use `thiserror` for error types (`src/error.rs`)
+- Use `thiserror` for error types (`antenna-core/src/error.rs`)
 - Return actionable error messages specifying which field/parameter failed
 - Generate warnings (not errors) for extrapolation or edge cases. Response warnings are
   **typed**: `ApiWarning { code: WarningCode, message: String }` (roadmap C8 stage 3,
-  2026-07-27). `WarningCode` is a **closed** enum in `src/warnings.rs` — a peer of
+  2026-07-27). `WarningCode` is a **closed** enum in `antenna-core/src/warnings.rs` — a peer of
   `error.rs`, since the model layer produces warnings too. Adding a producer means adding
   a variant, updating `WarningCode::ALL` and `docs/api-documentation.md`, then regenerating
   `openapi.yaml` (`cargo run -p antenna-model --bin generate_openapi` — the spec is

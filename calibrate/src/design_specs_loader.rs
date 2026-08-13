@@ -246,7 +246,7 @@ impl ReflectorSpecs {
 
         let f_over_d = self.focal_length_m / self.diameter_m;
         {
-            use antenna_model::model::geometry::{F_OVER_D_MAX, F_OVER_D_MIN};
+            use antenna_core::model::geometry::{F_OVER_D_MAX, F_OVER_D_MIN};
             if !(F_OVER_D_MIN..=F_OVER_D_MAX).contains(&f_over_d) {
                 anyhow::bail!(
                     "f/D ratio {:.3} is outside supported range [{}, {}]",

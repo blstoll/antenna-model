@@ -26,7 +26,7 @@ use tracing::{debug, info, warn};
 
 use crate::antenna_config::{AntennaClass, ParameterBounds, TunableParameters};
 use crate::parser::MeasurementData;
-use antenna_model::model::{
+use antenna_core::model::{
     compute_g_over_t, AntennaConfiguration as PhysicsConfig, AntennaConfigurationBuilder,
     EClockConeCoordinates, FeedParametersBuilder, IntegrationParams, MeshParametersBuilder,
     ReflectorGeometryBuilder,

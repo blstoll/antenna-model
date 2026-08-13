@@ -51,7 +51,7 @@ use crate::model::geometry::{FeedParameters, FeedPosition};
 ///
 /// # Examples
 /// ```
-/// use antenna_model::model::illumination::cos_q_pattern;
+/// use antenna_core::model::illumination::cos_q_pattern;
 /// use std::f64::consts::PI;
 ///
 /// // On-axis (ψ = 0) gives maximum amplitude
@@ -102,8 +102,8 @@ pub fn cos_q_pattern(psi: f64, q: f64) -> f64 {
 ///
 /// # Examples
 /// ```
-/// use antenna_model::model::illumination::feed_angle;
-/// use antenna_model::model::geometry::FeedPosition;
+/// use antenna_core::model::illumination::feed_angle;
+/// use antenna_core::model::geometry::FeedPosition;
 /// use std::f64::consts::PI;
 ///
 /// // Centered feed at focus, looking at vertex (on-axis point)
@@ -212,8 +212,8 @@ pub fn feed_angle_cosine(
 ///
 /// # Examples
 /// ```
-/// use antenna_model::model::illumination::illumination_amplitude;
-/// use antenna_model::model::geometry::{FeedParameters, FeedPosition};
+/// use antenna_core::model::illumination::illumination_amplitude;
+/// use antenna_core::model::geometry::{FeedParameters, FeedPosition};
 ///
 /// let feed_pos = FeedPosition::at_focus(1.0);
 /// let feed_params = FeedParameters::new(
@@ -322,7 +322,7 @@ pub fn illumination_amplitude_precomputed(
 ///
 /// # Examples
 /// ```
-/// use antenna_model::model::illumination::edge_taper_db;
+/// use antenna_core::model::illumination::edge_taper_db;
 ///
 /// // For q=8 and f/D=0.5, edge taper is around -37.4 dB
 /// let taper = edge_taper_db(8.0, 0.5);
@@ -363,7 +363,7 @@ pub fn edge_taper_db(q: f64, f_over_d: f64) -> f64 {
 ///
 /// # Examples
 /// ```
-/// use antenna_model::model::illumination::q_factor_from_taper;
+/// use antenna_core::model::illumination::q_factor_from_taper;
 ///
 /// // For -35 dB edge taper and f/D=0.5, q should be around 8
 /// let q = q_factor_from_taper(-35.0, 0.5);

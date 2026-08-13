@@ -1074,7 +1074,7 @@ no per-error field sets — an earlier draft of this section described a variant
 `enum ApiError` with bespoke fields (`param`, `reason`, `antenna_id`) and `PascalCase`
 codes. None of that was ever built; it was corrected in roadmap unit C3.
 
-**Internal error type.** `error.rs` carries `ApiError` with status-shaped variants
+**Internal error type.** `antenna-core/src/error.rs` carries `ApiError` with status-shaped variants
 (`BadRequest`, `NotFound`, `UnprocessableEntity`, `InternalError`, `ServiceUnavailable`,
 `Timeout`, `PayloadTooLarge`, `RateLimitExceeded`) plus the domain error tree
 (`AntennaModelError`, `ValidationError`, `ComputationError`, `DataError`). Handlers map
@@ -1285,6 +1285,14 @@ docker push registry.local/antenna-model:v1.2.3
 ## 10. Dependencies
 
 ### 10.1 Core Dependencies
+
+> **This block is the original design sketch, not the shipped manifests.** Since
+> the D4 crate split there are three of those (`antenna-core/Cargo.toml`,
+> `antenna-model/Cargo.toml`, `calibrate/Cargo.toml`) and they are authoritative
+> — versions and membership below have drifted (e.g. `ndarray` is no longer a
+> dependency of either the service or the core crate). Each manifest carries
+> inline comments explaining any non-obvious dependency or feature pin.
+
 ```toml
 [dependencies]
 # Web framework
@@ -1322,72 +1330,114 @@ clap = { version = "4.4", features = ["derive"] }
 ## 11. Repository Structure
 
 ```
-antenna-model/
-├── Cargo.toml
+antenna-model/                       # Cargo workspace root (3 members, roadmap D4)
+├── Cargo.toml                       # [workspace] members = antenna-core,
+│                                    #   antenna-model, calibrate
 ├── Dockerfile
 ├── README.md
-├── ARCHITECTURE.md              # This document
-├── antenna-model-design-doc.md  # Original design doc
+├── CLAUDE.md
+├── docs/                            # This document, design doc, roadmap, findings
 │
-├── src/
-│   ├── main.rs                  # API service entry point
-│   ├── lib.rs                   # Shared library code
-│   │
-│   ├── api/                     # REST API layer
-│   │   ├── mod.rs
-│   │   ├── routes.rs            # Endpoint definitions
-│   │   ├── handlers.rs          # Request handlers
-│   │   ├── schemas.rs           # Request/response types
-│   │   └── middleware.rs        # Logging, etc.
-│   │
-│   ├── service/                 # Business logic
-│   │   ├── mod.rs
-│   │   ├── evaluator.rs         # Evaluation orchestration
-│   │   ├── validator.rs         # Input validation
-│   │   └── batch.rs             # Batch processing
-│   │
-│   ├── model/                   # Computation engine
-│   │   ├── mod.rs
-│   │   ├── interpolation.rs     # 4D B-spline interpolation
-│   │   ├── bspline.rs           # B-spline primitives
-│   │   └── extrapolation.rs     # Out-of-range handling
-│   │
-│   ├── data/                    # Data management
-│   │   ├── mod.rs
-│   │   ├── repository.rs        # Calibration data access
-│   │   ├── loader.rs            # Load artifacts at startup
-│   │   └── types.rs             # Data structures
-│   │
-│   └── config/                  # Configuration
-│       ├── mod.rs
-│       └── settings.rs          # Settings types
+├── antenna-core/                    # Physics engine + artifact data layer.
+│   ├── Cargo.toml                   #   No web stack; `openapi` feature gates
+│   └── src/                         #   the utoipa::ToSchema derives.
+│       ├── lib.rs
+│       ├── error.rs                 # Shared error vocabulary
+│       ├── warnings.rs              # WarningCode / ApiWarning vocabulary
+│       │
+│       ├── model/                   # Physics engine
+│       │   ├── mod.rs
+│       │   ├── bessel.rs            # In-house Bessel Jₘ + order ladder
+│       │   ├── coordinates.rs       # ECEF ↔ geodetic ↔ antenna ↔ spherical
+│       │   ├── coordinates_3d.rs    # 3D position → antenna-frame direction;
+│       │   │                        #   defines Position3D / CoordinateSystem
+│       │   ├── correction_interpolator.rs  # 4D B-spline correction surface
+│       │   ├── edge_cases.rs        # Special-case handling, spillover
+│       │   ├── fft.rs               # Mixed-radix FFT for the φ' transform
+│       │   ├── geometry.rs          # Reflector / feed / mesh parameters
+│       │   ├── illumination.rs      # Feed pattern (cos^q)
+│       │   ├── integration.rs       # Hankel / azimuthal-mode aperture integrator
+│       │   ├── mesh.rs              # Wire-mesh transparency
+│       │   ├── pattern.rs           # Far-field pattern, Ruze, obliquity
+│       │   ├── phase.rs             # Path / coma / mesh phase functions
+│       │   └── ray_trace.rs         # Large-feed-offset stub
+│       │
+│       └── data/                    # Calibration artifact layer
+│           ├── mod.rs
+│           ├── loader.rs            # ANTC header + postcard decode
+│           └── types.rs             # AntennaCalibration and friends
 │
-├── calibrate/                   # Calibration CLI tool
-│   ├── Cargo.toml
+├── antenna-model/                   # REST API service (depends on antenna-core
+│   ├── Cargo.toml                   #   with the `openapi` feature)
 │   ├── src/
-│   │   ├── main.rs              # CLI entry point
-│   │   ├── parser.rs            # Parse measurement CSV
-│   │   ├── fitter.rs            # B-spline fitting
-│   │   ├── validator.rs         # Validation logic
-│   │   ├── artifact_export.rs   # Write the service-loadable .bin artifact
-│   │   └── sidecar.rs           # Optional JSON metadata/report sidecars
-│   └── README.md
+│   │   ├── main.rs                  # API service entry point
+│   │   ├── lib.rs                   # Re-exports antenna_core::{error,model,warnings}
+│   │   │
+│   │   ├── api/                     # REST API layer
+│   │   │   ├── mod.rs
+│   │   │   ├── routes.rs            # Endpoint definitions
+│   │   │   ├── handlers.rs          # Request handlers
+│   │   │   ├── schemas.rs           # Request/response types; ErrorCode
+│   │   │   ├── middleware.rs        # Logging, request id, error handling
+│   │   │   ├── error_response.rs    # Error → HTTP response mapping
+│   │   │   ├── openapi.rs           # Spec assembly
+│   │   │   └── openapi_descriptions/, openapi_info.md
+│   │   │
+│   │   ├── service/                 # Business logic
+│   │   │   ├── mod.rs
+│   │   │   ├── evaluator.rs         # Evaluation orchestration
+│   │   │   ├── validator.rs         # Input validation
+│   │   │   ├── batch.rs             # Batch processing
+│   │   │   ├── cache.rs             # Result caching
+│   │   │   ├── heatmap.rs           # Rectangular heatmap grids
+│   │   │   ├── h3_link_budget.rs    # H3 per-cell link budget
+│   │   │   └── test_support.rs
+│   │   │
+│   │   ├── data/                    # Data management
+│   │   │   ├── mod.rs               # Re-exports antenna_core::data::{loader,types}
+│   │   │   └── repository.rs        # Calibration data access (service-side)
+│   │   │
+│   │   ├── config/                  # Configuration
+│   │   │   ├── mod.rs
+│   │   │   └── settings.rs          # Settings types
+│   │   │
+│   │   └── bin/generate_openapi.rs  # Regenerates the committed openapi.yaml
+│   ├── benches/                     # criterion: integration, modes, heatmap
+│   └── tests/                       # Integration + reference-validation suites
 │
-├── calibration_data/            # Committed artifacts
-│   ├── antennas.yaml            # Antenna configuration
-│   ├── antenna_1.bin
-│   └── antenna_2.bin
+├── calibrate/                       # Calibration CLI tool (depends on
+│   ├── Cargo.toml                   #   antenna-core; antenna-model is a
+│   ├── src/                         #   DEV-dependency only — see note below)
+│   │   ├── main.rs                  # CLI entry point
+│   │   ├── lib.rs
+│   │   ├── parser.rs                # Parse measurement CSV
+│   │   ├── parameter_tuner.rs       # Nelder-Mead simplex optimizer
+│   │   ├── correction_surface.rs    # B-spline/RBF fitting
+│   │   ├── boresight_calibration.rs # Boresight-mode calibration
+│   │   ├── frequency_correction.rs
+│   │   ├── antenna_config.rs
+│   │   ├── design_specs_loader.rs
+│   │   ├── validator.rs             # Cross-validation
+│   │   ├── artifact_export.rs       # Write the service-loadable .bin artifact
+│   │   ├── sidecar.rs               # Optional JSON metadata/report sidecars
+│   │   └── bin/cr159703_grid.rs     # D14 measurement-grid generator
+│   └── tests/                       # Incl. CLI e2e suites that serve artifacts
+│                                    #   through the real service path
 │
-├── config/                      # Runtime configuration
-│   └── service.yaml
-│
-├── helm/antenna-model           # Kubernetes Helm chart
-│
-└── tests/
-    ├── integration/
-    ├── performance/
-    └── fixtures/
+├── calibration_data/                # antennas.yaml + design_specs/ (no .bin
+│                                    #   artifacts committed — roadmap D9)
+├── config/                          # Runtime configuration
+├── scripts/check.sh                 # Local CI gate
+├── openapi.yaml                     # Generated, never hand-edited
+├── helm/antenna-model               # Kubernetes Helm chart
+└── tests/load/                      # Load-test harness
 ```
+
+**Why `antenna-model` is a dev-dependency of `calibrate`:** the CLI e2e tests
+deliberately serve generated artifacts through the real service loader and
+evaluator (`service::compute_gain_from_request`) — that path is what caught the
+27.3 dB C13 defect. Keeping it dev-only is what lets the shipped CLI compile no
+web stack; `scripts/check.sh` asserts both halves (roadmap D4).
 
 ## 12. Acceptance Criteria
 

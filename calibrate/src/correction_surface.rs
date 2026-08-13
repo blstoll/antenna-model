@@ -33,8 +33,8 @@
 //! ```
 
 use crate::parser::MeasurementPoint;
-use antenna_model::data::types::AngularResolution;
-use antenna_model::model::phase::wavelength_from_frequency;
+use antenna_core::data::types::AngularResolution;
+use antenna_core::model::phase::wavelength_from_frequency;
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -1764,7 +1764,7 @@ mod tests {
     // D21 — angular resolution of the fitted surface against the pattern scale
     // ========================================================================
 
-    use antenna_model::data::types::MIN_KNOTS_PER_LOBE_PERIOD;
+    use antenna_core::data::types::MIN_KNOTS_PER_LOBE_PERIOD;
 
     /// Grid over an explicit cone span, so a test can vary coverage independently of density.
     fn grid_over_cone_span(

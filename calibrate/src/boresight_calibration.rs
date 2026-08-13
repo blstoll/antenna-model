@@ -30,14 +30,14 @@ use tracing::{debug, info};
 
 use crate::design_specs_loader::{DesignSpecs, TuningBounds};
 use crate::frequency_correction;
-use antenna_model::data::types::{
+use antenna_core::data::types::{
     AntennaCalibration, AntennaCalibrationBuilder, BSplineModel4D, CalibrationCoverageBuilder,
     CalibrationMetadataBuilder, CalibrationStatus, FeedParameters as DataFeedParameters,
     MeasurementDensity, MeshParameters as DataMeshParameters, ParameterSource,
     PhysicalAntennaConfigBuilder, ReflectorGeometry as DataReflectorGeometry,
     ValidityRangesBuilder, BORESIGHT_COVERAGE_CONE_DEG, CALIBRATION_SCHEMA_VERSION,
 };
-use antenna_model::model::{
+use antenna_core::model::{
     compute_g_over_t, AntennaConfigurationBuilder, FeedParametersBuilder, IntegrationParams,
     MeshParametersBuilder, ReflectorGeometryBuilder, PHYSICS_MODEL_VERSION,
 };

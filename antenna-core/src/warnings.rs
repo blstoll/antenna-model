@@ -53,19 +53,8 @@ use std::fmt;
 ///
 /// Serializes as the snake_case string shown on each variant. See the module
 /// documentation for the stability contract (codes are frozen, messages are not).
-#[derive(
-    Debug,
-    Clone,
-    Copy,
-    PartialEq,
-    Eq,
-    Hash,
-    PartialOrd,
-    Ord,
-    Serialize,
-    Deserialize,
-    utoipa::ToSchema,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum WarningCode {
     /// `extrapolated` — the correction surface was evaluated outside the range of
@@ -156,7 +145,8 @@ impl WarningCode {
     /// `openapi.yaml`.
     ///
     /// Used by the vocabulary drift test and available to consumers that need to
-    /// enumerate the set. Mirrors [`crate::api::schemas::ErrorCode::ALL`].
+    /// enumerate the set. Mirrors `ErrorCode::ALL` (in `antenna-model`'s
+    /// `api::schemas`).
     pub const ALL: &'static [WarningCode] = &[
         WarningCode::Extrapolated,
         WarningCode::OutOfCoverage,
@@ -217,9 +207,8 @@ impl fmt::Display for WarningCode {
 ///
 /// `Ord` is derived (code first, then message) so aggregating endpoints can sort
 /// their deduplicated set into a stable order without a bespoke comparator.
-#[derive(
-    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, utoipa::ToSchema,
-)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 pub struct ApiWarning {
     /// Machine-readable classification. Stable; branch on this.
     pub code: WarningCode,

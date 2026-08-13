@@ -1,11 +1,13 @@
 //! Data management module for antenna calibration.
 //!
-//! This module contains data structures, serialization, and repository
-//! functionality for managing antenna calibration data.
+//! The artifact types and ANTC loader live in `antenna-core` (roadmap D4) and
+//! are re-exported here so existing `antenna_model::data::…` paths keep
+//! resolving. The service-side repository stays local — it depends on the
+//! service configuration system.
 
-pub mod loader;
+pub use antenna_core::data::{loader, types};
+
 pub mod repository;
-pub mod types;
 
 // Re-export commonly used types for convenience
 pub use types::{

@@ -20,7 +20,7 @@ likelihood of success.
 2. **Never change a physics formula, sign, or coefficient in a non-physics unit.** In
    particular, never touch the feed-steering / beam-deviation sign convention
    (`coordinates.rs` negation + BDF) anywhere, in any unit.
-3. After any change under `antenna-model/src/model/`, run `cargo test --workspace`, not
+3. After any change under `antenna-core/src/model/`, run `cargo test --workspace`, not
    just the touched module's tests.
 4. `openapi.yaml` is **generated** (unit C7, 2026-07-29) — never hand-edit it. After any
    request/response schema, handler `#[utoipa::path]`, or `api::openapi` change, run
@@ -316,7 +316,7 @@ flag; warning pinned on all four endpoints, H3 cache-hit gap fixed)
      commands, **verified green on current HEAD** before merging.
   3. Decision-register row **G1-hosting** filed (default: GitHub).
 - **Assumptions:** current HEAD passes `clippy -D warnings`. If it doesn't, fix only
-  mechanical lints; defer anything touching `antenna-model/src/model/` semantics and list
+  mechanical lints; defer anything touching `antenna-core/src/model/` semantics and list
   the deferred items in the PR description.
 - **Gotchas:** Linux CI needs a BLAS backend for `calibrate` (e.g. `libopenblas-dev`) —
   check `calibrate/Cargo.toml` features before writing the workflow. The macOS
@@ -328,9 +328,9 @@ flag; warning pinned on all four endpoints, H3 cache-hit gap fixed)
 **✅ DONE 2026-07-09** — `8c65946`. All six exit criteria met (live B-spline, Sprints 1–7, deleted-module refs, `antennas.yaml`, property-tests→D7 annotation, precomputed-artifact claim, module map). Also caught & corrected the false "all `antennas.yaml` disabled" claim (4 of 8 are enabled) — see the notes in D9/S5/P1b below.
 
 - **Entrance / read first:** CLAUDE.md in full. Truth sources: `docs/implementation-plan.md`
-  (sprints 5–7 marked complete), `antenna-model/src/model/correction_interpolator.rs` +
+  (sprints 5–7 marked complete), `antenna-core/src/model/correction_interpolator.rs` +
   `antenna-model/src/service/evaluator.rs:265-287` (B-spline correction is live),
-  `ls antenna-model/src/model/`, `calibration_data/antennas.yaml`.
+  `ls antenna-core/src/model/`, `calibration_data/antennas.yaml`.
 - **Exit criteria:**
   1. No claim that B-spline correction is unimplemented; sprint status matches
      `implementation-plan.md`.
@@ -379,7 +379,7 @@ flag; warning pinned on all four endpoints, H3 cache-hit gap fixed)
   on the uncalibrated path. Staged approach: **spillover now** (this unit); **blockage =
   F3** (data-gated on geometry parameters that don't exist in the config yet);
   **cross-pol out of scope** (<0.1 dB on-axis for symmetric prime-focus dishes).
-- **Entrance / read first:** `antenna-model/src/model/pattern.rs:130-141`
+- **Entrance / read first:** `antenna-core/src/model/pattern.rs:130-141`
   (`overall_efficiency` = Ruze × mesh only); `edge_cases.rs:170` (`estimate_spillover` —
   currently computed for warnings only, never multiplied into gain);
   `service/evaluator.rs:265-287` (correction-surface application + calibration-status
@@ -440,7 +440,7 @@ flag; warning pinned on all four endpoints, H3 cache-hit gap fixed)
 
 ### P1b — Physics-model version stamp in calibration artifacts — Effort: S
 **✅ DONE 2026-07-10** — `1746bc0`. `PHYSICS_MODEL_VERSION` constant added
-(`antenna-model/src/model/mod.rs`), stamped into calibration artifacts as
+(`antenna-core/src/model/mod.rs`), stamped into calibration artifacts as
 `CalibrationMetadata.physics_model_version` by the calibrate writers; the loader compares
 against the service's constant and **warns** (never errors) on mismatch, naming both
 values. Bumped to `2` when P7 landed (auto-refocus changes `gain_physics` output for
@@ -450,7 +450,7 @@ identical inputs, per this unit's own bump policy).
   change to the physics model (P1 here, F2/F3 later) invalidates surfaces fitted against
   the older model. Artifacts must record which physics-model version they were fitted
   against, or future recalibrations will silently mix eras.
-- **Entrance / read first:** the metadata struct in `antenna-model/src/data/types.rs`; the
+- **Entrance / read first:** the metadata struct in `antenna-core/src/data/types.rs`; the
   version checks in `data/loader.rs` (around `:165`); the writer in
   `calibrate/src/artifact_export.rs`; unit D2 (the two existing version axes) — coordinate
   so this doesn't become a third, uncoordinated version mechanism.
@@ -816,7 +816,7 @@ as a unit; raise one if a consumer needs wide-angle Ka heatmaps.
 
 **Filed 2026-07-15 (post-P10 assessment).**
 
-- **Finding:** `radial_points_for` (`antenna-model/src/model/integration.rs:776`) sizes the
+- **Finding:** `radial_points_for` (`antenna-core/src/model/integration.rs:776`) sizes the
   radial density from `kernel + coma + defocus` cycles but **omits the dish-depth chirp**
   `k·ρ²/(4f)·(1−cosθ)`. In the forward hemisphere the chirp is subdominant (which is why every
   P10 test passes), but behind the dish it inverts: as θ→180°, `sinθ→0` collapses the kernel
@@ -1454,7 +1454,7 @@ red first) cover below-range/above-range rejection + boundary acceptance at mode
 settings, and both calibrate seams; full workspace green (in-range behavior unchanged).
 Domain-contract `f_over_d` glossary row + open-items entry re-trued in the same change.
 
-- **Entrance / read first:** `antenna-model/src/model/geometry.rs:100-105` — the
+- **Entrance / read first:** `antenna-core/src/model/geometry.rs:100-105` — the
   `if !(0.2..=1.0).contains(&f_over_d)` block has an **empty body** (silent no-op). Trace
   where f/D originates: `data/loader.rs`, `calibrate/src/antenna_config.rs`,
   `calibration_data/design_specs/*.yaml` — it comes from artifacts/config, not requests, so
@@ -1479,7 +1479,7 @@ Domain-contract gains a `temperature_k` glossary row: T is a user-supplied passt
 (noise-temperature modeling = F4); the missing H3 temperature bound stays S6's job. No
 warning/schema text changed, so no openapi.yaml mirror needed (standing rule 4).
 
-- **Entrance / read first:** `antenna-model/src/model/pattern.rs:512`
+- **Entrance / read first:** `antenna-core/src/model/pattern.rs:512`
   (`compute_g_over_t` — zero non-test callers) vs the inline duplicate at
   `service/h3_link_budget.rs:585` (`gain_db - 10.0 * t.log10()`); `service/evaluator.rs:61`
   — the module doc diagram advertises a `g_over_t_db` output that `GainResponse`
@@ -1520,7 +1520,7 @@ carrying nonzero datasheet phase-center offsets at both X-band (0.015 m) and Ka-
   the old design specs had) silently costs multi-dB at Ka. Full diagnosis:
   `docs/findings-2026-07-10-ka-phase-center-defocus.md`.
 - **Entrance / read first:** the findings doc above (decomposition table + root cause);
-  `antenna-model/src/model/integration.rs:526` (`feed_axial_offset =
+  `antenna-core/src/model/integration.rs:526` (`feed_axial_offset =
   position.z − focal_length + phase_center_offset` — the term to change);
   `test_phase_center_offset_produces_defocus_loss` (`integration.rs:994`);
   the `phase_center_offset` glossary entry in `docs/domain-contract.md`; the harness fixture
@@ -2539,7 +2539,7 @@ as a later feature if a consumer ever needs cross-request comparability.
 from the response body for uncalibrated antennas". **The code cannot do that.** Three
 places have to line up and none of them do:
 
-- `antenna-model/src/data/types.rs:148,151` types the underlying `CalibrationMetadata`
+- `antenna-core/src/data/types.rs:148,151` types the underlying `CalibrationMetadata`
   fields as plain `f64`, so `None` is not even representable upstream.
 - `antenna-model/src/data/repository.rs:259-260` fills them with `f64::NAN` for design-spec
   (uncalibrated) antennas — the sentinel the `Option` was supposed to be.
@@ -2617,7 +2617,7 @@ Three guards, one per place the frame can be got wrong, exactly as this unit ask
 - `calibrate/tests/cli_full_mode_real_data_e2e.rs::served_feed_sits_at_the_focus` — end to end
   through the real binary and the real service path.
 
-The origin is now documented **on the field** (`antenna_model::data::types::FeedParameters::
+The origin is now documented **on the field** (`antenna_core::data::types::FeedParameters::
 position`), which is where a third producer would look.
 
 ---
@@ -2638,7 +2638,7 @@ the underlying artifact field disagrees:
 Consuming code assumes the design-spec convention. `antenna-model/src/service/evaluator.rs:170-174`
 adds `design_pos` to a steering position that is **already vertex-origin** —
 `compute_feed_position_from_pointing` → `to_feed_position_with_bdf`, which returns
-`(dx, dy, focal_length + dz)` (`antenna-model/src/model/coordinates.rs:250`) — and the sum is
+`(dx, dy, focal_length + dz)` (`antenna-core/src/model/coordinates.rs:250`) — and the sum is
 converted to focus-relative once, by the single `− focal_length_m` at `evaluator.rs:181`. A
 `.bin`-calibrated antenna would therefore land at z ≈ 2f and report
 `GeometryInfo.physical_feed_offset_m.z ≈ f` instead of ≈ 0: a focal-length-sized phantom
@@ -3308,7 +3308,8 @@ troubleshooting now distinguishes the two rejection messages and adds the CRC on
   poem/h3o/the web stack for a CLI; `ndarray` 0.15.6 and 0.16.1 are both in the tree
   (calibrate pinned via ndarray-linalg 0.16).
 - **Recommended default:** **Do it.** Extract `antenna-core` (contents of
-  `antenna-model/src/model/` + `data/types.rs`) as a third workspace member; service and
+  `antenna-model/src/model/` + `data/types.rs`, as they stood pre-split) as a third
+  workspace member; service and
   calibrate both depend on it. Attempt ndarray unification during the split; if
   ndarray-linalg blocks it, document and accept dual versions.
 - **Exit criteria:** three-crate workspace; `cargo tree -p calibrate` shows no
@@ -3318,17 +3319,98 @@ troubleshooting now distinguishes the two rejection messages and adds the CRC on
   `git mv` files, fix `use` paths, change nothing else; commit in reviewable steps. **If
   any test value changes, the move went wrong.**
 - **Depends on:** Phases 1–3 complete (merge-conflict avoidance).
+- **Delivered 2026-08-13.** Three-crate workspace. **`antenna-core`** took
+  `src/model/` whole (all 14 files: `bessel`, `coordinates`, `coordinates_3d`,
+  `correction_interpolator`, `edge_cases`, `fft`, `geometry`, `illumination`,
+  `integration`, `mesh`, `mod`, `pattern`, `phase`, `ray_trace`), the artifact data layer
+  (`data/types.rs` + `data/loader.rs`), `error.rs` and `warnings.rs`. **`data/repository.rs`
+  stayed with the service** — it depends on the service configuration system, so it is not
+  shared code. `antenna-model` keeps `api/`, `service/`, `config/`, `data/repository.rs`,
+  `main.rs` and `bin/`.
+
+  **The move was import-transparent, and that is the reviewable property.** `lib.rs` does
+  `pub use antenna_core::{error, model, warnings};` and `data/mod.rs` does
+  `pub use antenna_core::data::{loader, types};` beside its own `pub mod repository;`, so
+  every pre-existing `antenna_model::…` path — and every `crate::…` path inside the service
+  — still resolves. **Not one test or bench file changed:**
+  `git diff --stat 0661a5a~1 4d36d34 -- antenna-model/tests antenna-model/benches
+  calibrate/tests tests` is empty, and so is the same diff over `openapi.yaml`. Per the
+  unit's own gotcha, no test value moved; the full tier passes at the same count it did
+  before the split.
+
+  **`Position3D` and `CoordinateSystem` now live in `antenna_core::model::coordinates_3d`**,
+  beside the coordinate math that consumes them, and `api::schemas` re-exports them. They
+  carry `utoipa::ToSchema` derives, which is what forced the feature question below; the
+  proof it came out clean is that `openapi.yaml` is byte-identical and
+  `tests/openapi_spec.rs` — which asserts the committed spec equals
+  `ApiDoc::openapi().to_yaml()` byte for byte — still passes untouched.
+
+  **The `openapi` feature.** `utoipa` is an *optional* dependency of `antenna-core` behind
+  `openapi = ["dep:utoipa"]`; `antenna-model` enables it, `calibrate` does not, so a
+  package-scoped calibrate build compiles no utoipa at all. That immediately exposed the
+  first of two latent defects (below), because **nothing in the build compiled the
+  feature-OFF configuration** — a workspace build unifies features across the members it
+  builds together, so `antenna-model` turning `openapi` on turned it on for everyone. The
+  gate now runs `cargo clippy -p antenna-core --all-targets -- -D warnings`.
+
+  **`antenna-model` is a *dev*-dependency of `calibrate`, and that is load-bearing.**
+  `calibrate/tests/**` serve generated artifacts through the real service loader and
+  evaluator (`service::compute_gain_from_request`) — the path that caught C13's 27.3 dB
+  defect. Dev-only is what keeps the shipped CLI web-free without giving up that coverage.
+  It must not be pruned as "unused"; the doc phrasing to avoid is "calibrate no longer
+  depends on antenna-model", which is false.
+
+  **Measured: calibrate's normal dependency tree went 9 → 1** on
+  `cargo tree -p calibrate -e normal | grep -cE 'poem|h3o|utoipa|dashmap|lru'`. All eight
+  web-stack lines are gone. The survivor is `lru v0.16.4`, which reaches calibrate through
+  **its own** `aws-sdk-s3` — the same carve-out `tokio` gets — as
+  `cargo tree -p calibrate -e normal -i lru@0.16.4` shows. It is **not** 9 → 0, and writing
+  that would be wrong.
+
+  **Housekeeping in the same pass.** The orphaned 16-line `calibrate/src/mod.rs` was
+  deleted (nothing declared it; `lib.rs` is the crate root). Dead deps pruned from
+  `antenna-model`: `crc32fast`, `thiserror`, `anyhow`, `ndarray` removed, `num-complex` and
+  `postcard` demoted to dev-dependencies; `toml` removed from both `antenna-model` and
+  `calibrate` (the `config` crate does its own TOML parsing) and `rayon` from
+  `antenna-core`, which never used it. Note the filed premise about `ndarray` was already
+  stale: the tree carried a single unified 0.16.1, not 0.15.6 *and* 0.16.1, and
+  `ndarray-linalg` had long since gone — so nothing had to be accepted or documented.
+  Cargo does not warn on unused manifest deps, so each of these was found by grep, and the
+  surviving non-obvious ones now have a comment naming their user.
+
+  **The two latent defects the split exposed are the same class, and both now have
+  guards.** Each was a property that held only because a workspace build unified a feature
+  ON. (1) antenna-core's `openapi`-OFF configuration was compiled by nothing, so a bare
+  `#[schema(...)]` attribute on a feature-gated type would have passed every check and
+  broken only the CLI build. (2) `calibrate` used `#[tokio::main]` and `EnvFilter` while
+  declaring neither `tokio/{macros,rt-multi-thread}` nor `tracing-subscriber/env-filter` —
+  it had been inheriting them from the `antenna-model` dependency, so dropping that
+  dependency broke `cargo build -p calibrate` while a whole-workspace build still passed.
+  Both features are now declared, and `scripts/check.sh` + CI run
+  `cargo build -p calibrate` followed by a `cargo tree -p calibrate -e normal` assertion
+  against `poem|h3o|utoipa|dashmap`. **The subtlety worth keeping:**
+  `cargo clippy -p calibrate --all-targets` does *not* substitute for that build —
+  `--all-targets` pulls the dev-dependency `antenna-model` back into the graph and
+  re-unifies the features, so it passes even with the declarations missing. Only a bare
+  `cargo build -p calibrate` (lib + bins, normal deps only) exercises the shipped
+  configuration. Per P13's rule, the assertion's power was checked rather than assumed:
+  restoring `antenna-model` as a normal dependency makes it fail, listing
+  `utoipa`/`dashmap`/`h3o`/`poem`; reverting makes it pass.
 
 ### D5 — Design-docs truth sweep — Effort: M
 
-- **Entrance / read first:** `docs/architecture.md:~1350-1372` (lists nonexistent
-  `interpolation.rs`/`bspline.rs`/`extrapolation.rs`; calibrate `fitter.rs`);
-  `docs/antenna-model-design-doc.md` — Zernike per-point sections (:269,317 —
+- **Entrance / read first:** ~~`docs/architecture.md:~1350-1372` (lists nonexistent
+  `interpolation.rs`/`bspline.rs`/`extrapolation.rs`; calibrate `fitter.rs`)~~ —
+  **exit criterion 1 was done by D4 on 2026-08-13**: architecture.md §11's tree now matches
+  `ls` for all three crates (and §10.1's dependency block is marked as the original design
+  sketch, with the three shipped manifests named as authoritative). The remaining criteria
+  below are untouched. `docs/antenna-model-design-doc.md` — Zernike per-point sections (:269,317 —
   unimplemented; the correction surface absorbs surface error), direct-path interference
   (:170 — the mode was removed in `c850165`), feed-steering sign section (:130-132);
   `docs/review-findings-2026-06-10.md`.
 - **Exit criteria:**
-  1. architecture.md module lists match `ls` reality for both crates.
+  1. ✅ architecture.md module lists match `ls` reality for all three crates (done by D4,
+     2026-08-13 — the workspace grew a third member, `antenna-core`).
   2. Design-doc sections either corrected or marked "historical — not implemented".
   3. The feed-steering sign section **verified against `model/coordinates.rs` code**
      (post-`aee11f9` it may already match): add a "verified 2026-07 vs code" note if it
@@ -3822,7 +3904,7 @@ top knot span. That is why 699.999 MHz returned 0.000090 while the basis there w
 ≈1.0 — the basis was fine; the coefficient it multiplied had already been destroyed.
 
 **The service-side 4D interpolator was never defective — this is the correction to D12's
-finding.** `antenna-model/src/model/correction_interpolator.rs` uses the standard NURBS-book
+finding.** `antenna-core/src/model/correction_interpolator.rs` uses the standard NURBS-book
 Cox-de Boor recurrence (`basis[0] = 1.0` then the triangular recurrence) — a different algorithm
 from calibrate's naive recursive `bspline_basis` — with a `find_knot_span` that clamps to the
 last valid span. Verified by partition of unity with coefficients built by hand (bypassing the
@@ -5139,6 +5221,123 @@ module docs either way, since D9's NaN sentinel means it will not go away entire
 
 **Coupled to:** D9 (the NaN-sentinel decision this sits opposite), D21 (which produced the
 field that exposed it).
+
+**Amended 2026-08-13 by D26, which contradicts this unit's reachability analysis.** The
+paragraph above reasons that `fit_correction_surface` cannot deliver a degenerate axis because
+"`generate_knot_vector` refuses a span below the minimum spacing". That premise is *not
+enforced*: `validate_fitting_inputs` (`correction_surface.rs:1406`) validates `spline_order`
+and `regularization` and never inspects `min_knot_spacing_econe` / `_eclock`, so a library
+caller passing a zero or negative spacing disables the span guard the argument rests on. The
+shipped CLI is still unaffected (it uses `surface_fitting_params`' constants), so "latent" is
+right for the *binary* — but the reachability claim as written is a property nobody checks.
+See D26 finding 4.
+
+---
+
+### D26 — D21's angular-resolution code: one served-output defect and four soundness gaps — Effort: M
+
+**Filed 2026-08-13**, from the code review of the merged D21 (`6f42799`, PR #41 — which
+includes the `c4f460d` cone fix). Filed as its own unit rather than fixed inside the D4 crate
+split, for the reason C9 was scheduled outside C8: D4's charter is a mechanical move whose
+whole reviewable property is that **no computed value changed**, and finding 1 changes served
+output. Fixing it there would have destroyed the evidence that the move was clean.
+
+All findings verified against `6f42799`. Line numbers are as of that commit; note `data/types.rs`
+moved to `antenna-core/src/data/types.rs` in D4.
+
+**1 — `export_full_calibration` clamps the elevation extent, so a negative-cone measurement set
+exports a coverage range that omits or inverts the calibrated region.** `[CORRECTNESS —
+changes served output. Fix first.]` `artifact_export.rs:381-382` computes
+`el_lo = extents.elevation_min_max.0.max(0.0)` and `el_hi = ….1.min(90.0)`. Negative E-cone is
+**legal, validated input** — `MeasurementPoint::validate` admits `[-90, 90]`
+(`parser.rs:95`), and D21's own
+`a_cone_axis_that_runs_negative_is_assessed_at_its_outermost_angle` uses a one-sided `-14°…0°`
+cut as a first-class case. For exactly that span the clamp yields `(0.0, 0.0)`. Consequences,
+all silent: `CalibrationCoverage::is_boresight_only` is
+`elevation_range.0 == 0.0 && elevation_range.1 <= BORESIGHT_COVERAGE_CONE_DEG`, so a full-mode
+artifact over thousands of measurements **reports as boresight-only**; and `contains()` /
+`service::evaluator::is_in_coverage` admit no elevation but exactly 0.0, so **the correction
+surface is never applied** and the service serves raw physics while reporting the artifact
+healthy. A wholly-negative span such as `-14°…-1°` is worse still: it produces the *inverted*
+range `(0.0, -1.0)`, where `lo > hi` rejects everything by construction. This is the same
+observable-signature class as D13's boresight-coverage defect — "every observable healthy
+except the one nobody asserted".
+
+**2 — The assessed diameter reaches the artifact out-of-band from the stamped one, and the doc
+comment justifying that is false.** `[CORRECTNESS — C13/D23 shape, same function.]`
+`export_full_calibration`'s `angular_resolution` parameter is documented (`artifact_export.rs:320-323`)
+as "passed in rather than derived here because the dish diameter lives on the antenna class,
+which this function only sees the already-flattened `ExportPhysicalParams` view of." That
+reason does not hold: `ExportPhysicalParams.diameter_m` exists (`:283`) and is what the function
+stamps into the artifact (`:350`). Meanwhile `main.rs:683` assesses against a **second,
+independent read**, `class.geometry.diameter_m`. So the artifact's `angular_resolution` can
+describe a different antenna than the artifact's own `diameter_m` — precisely the invariant
+C13 and D23 established two lines apart in this same function: *every parameter the fitting
+model uses must be in the artifact, or the artifact describes something other than what it
+serves*. Nothing can currently observe a divergence: the in-crate test (`:695`) passes
+`physical.diameter_m` for both, and the e2e oracle hardcodes the fixture's 1.22 m instead of
+reading the artifact (finding 5).
+
+**3 — `widest_knot_gap` silently swallows NaN gaps, reporting an axis as *better* resolved than
+it is.** `correction_surface.rs:357-368` folds with `fold(0.0_f64, f64::max)`; `f64::max`
+returns the non-NaN operand, so a NaN gap is discarded and the widest *finite* gap is reported
+— a smaller spacing, i.e. a better-resolved verdict, from corrupt input. That is the exact
+failure mode D21 exists to prevent (an artifact claiming a resolution it does not have). The
+irony is local: ~90 lines above, `assess_angular_resolution`'s diameter guard carries the
+comment "`is_finite()` first so NaN and infinity are refused explicitly rather than falling
+through a comparison that is false for NaN by accident." Related: `knots_eclock` receives none
+of the emptiness/finiteness validation the frequency and E-cone axes get.
+
+**4 — The span-guard reachability premise is unenforced.** `validate_fitting_inputs`
+(`correction_surface.rs:1406-1445`) validates `spline_order` and `regularization` and **never**
+checks that `min_knot_spacing_econe` / `_eclock` are positive, so the `generate_knot_vector`
+span guard can be disabled by a library caller passing zero or negative spacing. This is what
+the comment at `:319` — and D25's reachability paragraph — assume holds. See the D25 amendment
+above.
+
+**5 — `f64::INFINITY` carries two opposite meanings in one struct, and two test helpers can't
+see what they measure.** In `widest_knot_gap`, `INFINITY` means *infinitely coarse knots* —
+the worst case. In `clock_lobe_period_deg`, `INFINITY` means *no clock structure to resolve* —
+the best case, the `sin θ → 0` boresight path D21 documents at `correction_surface.rs:1956`. A
+surface degenerate on both clock inputs therefore computes `INF/INF = NaN`, which reaches
+`summary()`, the artifact metadata, and `PartialEq` (breaking round-trip asserts). Alongside:
+`AngularResolution`'s ratio accessors divide by a deserialized knot spacing with no zero guard,
+and neither `AntennaCalibration::validate()` nor the loader inspects `metadata`, so a decoded
+artifact with `cone_knot_spacing_deg = 0.0` reports `resolves_lobe_structure() == true`;
+`angular_resolution: None` is an unenforced sentinel that `CalibrationMetadataBuilder::build()`
+defaults silently; the under-resolved warning is emitted only inside the CLI binary, so a
+library embedder using the equally-public `assess_angular_resolution` + `export_full_calibration`
+path gets no signal at all; the `shipped_shape_params()` test helper hand-copies the shipped
+knot configuration that `main.rs`'s private `surface_fitting_params` owns (a **third** copy,
+alongside `validator.rs`'s `artifact_params`), so in-crate tests can describe a shape nothing
+ships; and `cli_full_mode_real_data_e2e.rs:1203`'s "derived, not a constant" oracle hardcodes
+the 1.22 m fixture diameter rather than reading it off the artifact it just loaded, defeating
+half the property it exists to prove.
+
+**Exit criteria.**
+1. A negative-cone measurement set exports a coverage/validity elevation range that contains
+   the calibrated region, pinned by a test that **serves** such an artifact and asserts the
+   correction is applied — not merely that the range looks right. Assert `is_boresight_only()`
+   is `false` for it.
+2. The angular assessment and the stamped `diameter_m` provably come from one source, with a
+   test that **fails if they disagree** (pass deliberately divergent values and require the
+   export to reject or reconcile them). Correct or delete the false doc comment.
+3. `widest_knot_gap` refuses non-finite gaps explicitly; `knots_eclock` gets the validation its
+   sibling axes have.
+4. `min_knot_spacing_*` validated in `validate_fitting_inputs`, or the comment at `:319` and
+   D25's paragraph rewritten to claim only what is enforced.
+5. The two `INFINITY` meanings separated (distinct sentinels, or an enum), so no input yields
+   `NaN` into metadata; zero-guard on the ratio accessors.
+6. The shipped knot configuration has **one** owner that tests read, not three; the e2e oracle
+   reads the diameter off the artifact.
+
+**Gotchas.** Finding 1 changes served output, so it moves numbers in the D14 real-anchored e2e
+— that is the fix working, and the known-defect pins should be inverted the way D22's were,
+not loosened. Findings 3 and 5 are the same family as D25 and should land together or in a
+stated order; D25's reachability paragraph is wrong until finding 4 is resolved.
+
+**Depends on:** D4 (merge first — `data/types.rs` now lives in `antenna-core`, so this unit
+should be written against the post-split tree to avoid a pointless conflict).
 
 ---
 

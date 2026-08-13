@@ -33,8 +33,8 @@ use num_complex::Complex64;
 /// across all four gain-computation helpers.
 ///
 /// `pub` since roadmap unit C10: `/h3-heatmap` re-emits this warning from the
-/// convergence flag carried on its cached gain values
-/// ([`crate::service::CachedGain`]), because the cache hit that serves a
+/// convergence flag carried on its cached gain values (`antenna-model`'s
+/// `service::CachedGain`), because the cache hit that serves a
 /// non-converged value is exactly the path that never runs the integration that
 /// would raise the warning here. Text identity matters there for a second reason
 /// after C8 stage 3: warning aggregation dedupes on `(code, message)`, so a
@@ -71,8 +71,8 @@ pub fn nonconvergence_warning() -> ApiWarning {
 /// The canonical ray-tracing-stub warning, code and message together.
 ///
 /// The single constructor for [`crate::warnings::WarningCode::RayTraceDegraded`];
-/// see [`crate::service::evaluator::ray_trace_stub_warning`] for the service-layer
-/// re-emission that keeps it alive across `/h3-heatmap` cache hits.
+/// see `antenna-model`'s `service::evaluator::ray_trace_stub_warning` for the
+/// service-layer re-emission that keeps it alive across `/h3-heatmap` cache hits.
 pub fn ray_trace_stub_warning() -> ApiWarning {
     WarningCode::RayTraceDegraded.with(RAY_TRACING_STUB_WARNING)
 }
@@ -146,7 +146,7 @@ fn select_integration_params(
 ///
 /// # Examples
 /// ```
-/// use antenna_model::model::pattern::ruze_efficiency;
+/// use antenna_core::model::pattern::ruze_efficiency;
 ///
 /// // 1mm RMS error at 8.4 GHz (λ ≈ 35.7mm)
 /// let efficiency = ruze_efficiency(0.001, 0.0357);
@@ -309,9 +309,9 @@ pub fn theoretical_max_gain(diameter: f64, wavelength: f64, aperture_efficiency:
 ///
 /// # Examples
 /// ```no_run
-/// use antenna_model::model::pattern::compute_gain;
-/// use antenna_model::model::integration::IntegrationParams;
-/// # use antenna_model::model::geometry::{AntennaConfiguration, ReflectorGeometry, FeedParameters};
+/// use antenna_core::model::pattern::compute_gain;
+/// use antenna_core::model::integration::IntegrationParams;
+/// # use antenna_core::model::geometry::{AntennaConfiguration, ReflectorGeometry, FeedParameters};
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// # let reflector = ReflectorGeometry::builder()
@@ -634,9 +634,9 @@ pub fn compute_gain_db(
 ///
 /// # Examples
 /// ```no_run
-/// use antenna_model::model::pattern::compute_g_over_t;
-/// use antenna_model::model::integration::IntegrationParams;
-/// # use antenna_model::model::geometry::{AntennaConfiguration, ReflectorGeometry, FeedParameters};
+/// use antenna_core::model::pattern::compute_g_over_t;
+/// use antenna_core::model::integration::IntegrationParams;
+/// # use antenna_core::model::geometry::{AntennaConfiguration, ReflectorGeometry, FeedParameters};
 ///
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
 /// # let reflector = ReflectorGeometry::builder()

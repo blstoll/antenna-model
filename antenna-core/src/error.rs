@@ -208,9 +208,9 @@ impl ApiError {
 /// says the resource is absent from this deployment.
 ///
 /// The mapping itself lives in exactly one place,
-/// `crate::api::error_response::validation_status`. Adding a variant here without
-/// a deliberate decision there gets the `422` default, which is the safe answer
-/// for anything parameter-shaped.
+/// `validation_status` (in `antenna-model`'s `api::error_response`). Adding a
+/// variant here without a deliberate decision there gets the `422` default,
+/// which is the safe answer for anything parameter-shaped.
 #[derive(Error, Debug)]
 pub enum ValidationError {
     /// Parameter out of valid range

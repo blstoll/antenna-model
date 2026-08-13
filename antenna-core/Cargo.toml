@@ -1,0 +1,47 @@
+[package]
+name = "antenna-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+
+[features]
+# `utoipa::ToSchema` derives on the API-visible types defined in this crate.
+# Only the service needs OpenAPI schemas. Precise property (roadmap D4): a
+# package-scoped build (`cargo build -p calibrate`, `cargo install --path
+# calibrate`) compiles no utoipa; a whole-workspace build still does, because
+# cargo unifies features across the members it builds together.
+openapi = ["dep:utoipa"]
+
+[dependencies]
+# What each non-obvious dep is here for, after D4's model/ + data/ move:
+# num-complex backs the aperture integrand, the mixed-radix FFT and the far-field
+# pattern (model/{integration,fft,pattern,ray_trace}.rs); postcard + crc32fast are
+# the ANTC artifact wire format and its header checksum (data/loader.rs); tracing
+# is used across model/ and the loader; serde_json is test-only today (the
+# warnings.rs / data/types.rs serde round-trips) and kept a normal dep because it
+# is the natural home for artifact/warning JSON. Cargo does not warn on unused
+# manifest deps, so this list is checked by grep, not by the compiler.
+# config + serde_yaml exist solely for error.rs's `impl From<serde_yaml::Error>`
+# / `impl From<config::ConfigError>` on ConfigError — the orphan rule pins those
+# impls to the crate that defines ConfigError. Neither is web stack. (Discovered
+# during execution: the original plan's dep scan missed these qualified paths.)
+config = "0.15.25"
+crc32fast = "1"
+num-complex = "0.4.6"
+# default-features off drops the `heapless-cas` default, which pulls heapless 0.7
+# → the unmaintained atomic-polyfill (RUSTSEC-2023-0089). We only need std ser/de.
+postcard = { version = "1.1.3", default-features = false, features = [
+    "use-std",
+] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+serde_yaml = "0.9.34"
+thiserror = "2.0.18"
+tracing = "0.1.44"
+# Pinned to match antenna-model's exact pin (tests/openapi_spec.rs asserts
+# byte-for-byte spec equality; a utoipa upgrade must arrive as a deliberate PR).
+# Core's derives need only "macros"; the spec-affecting features (yaml, preserve_order) stay with antenna-model, which assembles the spec.
+utoipa = { version = "=5.5.0", features = ["macros"], optional = true }
+
+[dev-dependencies]
+tempfile = "3.27.0"

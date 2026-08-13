@@ -16,7 +16,7 @@
 //! fields. Nothing here writes a binary artifact.
 
 use crate::validator::ValidationReport;
-use antenna_model::data::types::AngularResolution;
+use antenna_core::data::types::AngularResolution;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;

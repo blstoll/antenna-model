@@ -51,7 +51,7 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use std::path::PathBuf;
 
-use antenna_model::model::{
+use antenna_core::model::{
     compute_gain_db, g_over_t_from_gain_db, AntennaConfiguration, AntennaConfigurationBuilder,
     FeedParametersBuilder, IntegrationParams, MeshParametersBuilder, ReflectorGeometryBuilder,
 };

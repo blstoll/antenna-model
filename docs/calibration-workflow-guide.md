@@ -1162,7 +1162,7 @@ Single calibration status for the entire heatmap (same antenna/feed):
 
 ### 7.1 CalibrationStatus Enum
 
-The `CalibrationStatus` enum in `antenna-model/src/data/types.rs` defines three variants:
+The `CalibrationStatus` enum in `antenna-core/src/data/types.rs` defines three variants:
 
 ```rust
 pub enum CalibrationStatus {
@@ -1898,7 +1898,7 @@ only version guard is the schema stamp inside the payload.
 
 #### 10.5.2 Physics-model versioning
 
-**Bump policy:** bump `antenna_model::model::PHYSICS_MODEL_VERSION` whenever a
+**Bump policy:** bump `antenna_core::model::PHYSICS_MODEL_VERSION` whenever a
 change alters `gain_physics` output for identical inputs. It does **not** need to
 bump for changes that don't touch physics output (API-layer changes, new metadata
 fields, correction-surface fitting improvements, etc.).

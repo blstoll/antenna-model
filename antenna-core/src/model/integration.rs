@@ -500,8 +500,8 @@ impl IntegrationParams {
 ///
 /// # Examples
 /// ```
-/// use antenna_model::model::integration::{integrate_aperture, IntegrationParams};
-/// use antenna_model::model::geometry::{AntennaConfiguration, ReflectorGeometry, FeedParameters};
+/// use antenna_core::model::integration::{integrate_aperture, IntegrationParams};
+/// use antenna_core::model::geometry::{AntennaConfiguration, ReflectorGeometry, FeedParameters};
 ///
 /// // Example integration at boresight (θ=0)
 /// # fn example() -> Result<(), Box<dyn std::error::Error>> {
