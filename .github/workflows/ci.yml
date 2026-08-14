@@ -45,15 +45,14 @@ jobs:
         # under (roadmap D4).
         run: cargo clippy -p antenna-core --all-targets -- -D warnings
       - name: Build calibrate package-scoped (no web stack)
-        # See scripts/check.sh: the only build that uses calibrate's normal deps
-        # alone, plus the dep-tree assertion that keeps the web stack out
-        # (roadmap D4).
-        run: |
-          cargo build -p calibrate
-          if cargo tree -p calibrate -e normal | grep -E 'poem|h3o|utoipa|dashmap'; then
-            echo "ERROR: web-stack dependency reachable from calibrate's normal graph (roadmap D4)" >&2
-            exit 1
-          fi
+        # The only build that uses calibrate's normal deps alone, plus the
+        # dep-graph assertion that keeps the web stack out (roadmap D4).
+        #
+        # Runs the SAME script scripts/check.sh does. It used to be copy-pasted
+        # from there, so the banned-crate list lived in four places with nothing
+        # detecting drift — and both copies carried the same fail-open bug
+        # (roadmap D27).
+        run: ./scripts/assert-calibrate-dep-graph.sh
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test
