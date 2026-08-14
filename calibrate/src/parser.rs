@@ -8,7 +8,7 @@ use aws_sdk_s3::Client as S3Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
-use tracing::warn;
+use tracing::{info, warn};
 
 /// G/T range typical of a **boresight** figure for a realistic antenna, in dB/K.
 ///
@@ -111,6 +111,38 @@ impl MeasurementPoint {
             );
         }
         Ok(())
+    }
+
+    /// This point in the **polar convention**: E-cone non-negative, E-clock in [0, 360).
+    ///
+    /// E-clock/E-cone are spherical coordinates about boresight — clock is the azimuthal
+    /// angle φ, cone the polar angle θ — and `(φ, −θ)` names the same direction as
+    /// `(φ + 180°, θ)`. A one-sided pattern cut is routinely *recorded* the first way, with a
+    /// signed cone on a fixed clock plane, and [`Self::validate`] admits it: E-cone is legal
+    /// over [-90, 90].
+    ///
+    /// Nothing downstream can consume that form. The service's elevation is a polar angle
+    /// from boresight and is never negative, so a correction surface whose elevation axis
+    /// runs negative is unreachable on the served path; and the artifact's validity and
+    /// coverage ranges are polar-angle ranges too. Reflecting on the way in makes the whole
+    /// pipeline — predictions, residuals, knots, extents, coverage — speak one convention.
+    /// Roadmap **D26** finding 1.
+    ///
+    /// The reflection is physics-preserving, not a reinterpretation of the data: the model's
+    /// far-field computation satisfies the same identity to the accuracy of its quadrature
+    /// (`negative_cone_measurements_predict_the_same_gain_as_their_reflection` pins it), so
+    /// the residual a normalized point contributes is the residual the original contributes.
+    ///
+    /// Cone `0.0` is left entirely alone — clock is meaningless at the pole, so shifting it
+    /// there would invent a distinction the geometry does not have.
+    pub fn to_polar_convention(&self) -> Self {
+        if self.e_cone_deg >= 0.0 {
+            return self.clone();
+        }
+        let mut reflected = self.clone();
+        reflected.e_cone_deg = -self.e_cone_deg;
+        reflected.e_clock_deg = (self.e_clock_deg + 180.0).rem_euclid(360.0);
+        reflected
     }
 
     /// Whether this point's G/T falls outside the range typical of a *boresight* figure.
@@ -415,6 +447,7 @@ fn parse_csv_content(content: &str, source: &str) -> Result<MeasurementData> {
     let mut reader = csv::Reader::from_reader(content.as_bytes());
     let mut points = Vec::new();
     let mut errors = Vec::new();
+    let mut reflected = 0usize;
 
     for (line_num, result) in reader.deserialize().enumerate() {
         let record: MeasurementPoint = match result {
@@ -431,7 +464,13 @@ fn parse_csv_content(content: &str, source: &str) -> Result<MeasurementData> {
             continue;
         }
 
-        points.push(record);
+        // Reflect signed-cone rows onto the polar convention every consumer speaks; see
+        // `MeasurementPoint::to_polar_convention` (roadmap D26 finding 1). A no-op for
+        // data already recorded that way, which is all of it in this tree today.
+        if record.e_cone_deg < 0.0 {
+            reflected += 1;
+        }
+        points.push(record.to_polar_convention());
     }
 
     if points.is_empty() {
@@ -470,6 +509,22 @@ fn parse_csv_content(content: &str, source: &str) -> Result<MeasurementData> {
                 errors.len() - MAX_REPORTED_PARSE_ERRORS
             );
         }
+    }
+
+    // Said out loud, not inferred from the numbers looking different: the reported E-cone
+    // range and every artifact range derived from it describe the reflected data, so an
+    // operator comparing them against the input file needs to know a reflection happened.
+    if reflected > 0 {
+        info!(
+            source = source,
+            reflected,
+            retained = points.len(),
+            "Reflected {} of {} rows with negative E-cone onto the polar convention \
+             (clock + 180°, |cone|); this names the same direction and is what the served \
+             path and the artifact's coverage range speak",
+            reflected,
+            points.len()
+        );
     }
 
     Ok(MeasurementData::new(points, source.to_string()))
@@ -570,6 +625,77 @@ mod tests {
         assert_eq!(point.frequency_mhz, 8400.0);
         assert_eq!(point.g_over_t_db, 41.5);
         assert_eq!(point.temperature_k, 50.0);
+    }
+
+    // ========================================================================
+    // Polar convention (roadmap D26 finding 1)
+    // ========================================================================
+
+    #[test]
+    fn a_negative_cone_row_is_reflected_onto_the_polar_convention() {
+        let signed = MeasurementPoint::new(30.0, -14.0, 12_100.0, 12.5, 290.0);
+        let polar = signed.to_polar_convention();
+
+        assert_eq!(polar.e_cone_deg, 14.0, "cone must become its magnitude");
+        assert_eq!(polar.e_clock_deg, 210.0, "clock must advance by 180°");
+        // Everything else is the same measurement.
+        assert_eq!(polar.frequency_mhz, signed.frequency_mhz);
+        assert_eq!(polar.g_over_t_db, signed.g_over_t_db);
+        assert_eq!(polar.temperature_k, signed.temperature_k);
+        // And the result is itself in the convention, so the map is idempotent.
+        let twice = polar.to_polar_convention();
+        assert_eq!(twice.e_cone_deg, polar.e_cone_deg);
+        assert_eq!(twice.e_clock_deg, polar.e_clock_deg);
+    }
+
+    #[test]
+    fn reflection_wraps_the_clock_angle_and_leaves_non_negative_cones_alone() {
+        // Clock past 180 wraps into [0, 360) rather than running off the end of the
+        // validated range.
+        let wrapped = MeasurementPoint::new(300.0, -5.0, 8400.0, 20.0, 290.0).to_polar_convention();
+        assert_eq!(wrapped.e_clock_deg, 120.0);
+        assert!(wrapped.validate().is_ok(), "the reflection must stay valid");
+
+        // Non-negative cone is untouched — including cone 0, where clock names nothing and
+        // shifting it would invent a distinction the geometry does not have.
+        for (clock, cone) in [(0.0, 0.0), (37.0, 0.0), (37.0, 9.0)] {
+            let p = MeasurementPoint::new(clock, cone, 8400.0, 20.0, 290.0).to_polar_convention();
+            assert_eq!((p.e_clock_deg, p.e_cone_deg), (clock, cone));
+        }
+    }
+
+    #[test]
+    fn parsing_reflects_negative_cone_rows_and_leaves_the_rest_byte_for_byte() {
+        let csv = "e_clock_deg,e_cone_deg,frequency_mhz,g_over_t_db,temperature_k\n\
+                   0.0,-14.0,12100.0,10.0,290.0\n\
+                   0.0,-7.0,12100.0,15.0,290.0\n\
+                   0.0,0.0,12100.0,20.0,290.0\n\
+                   45.0,7.0,12100.0,15.0,290.0\n";
+        let data = parse_csv_content(csv, "test://negative-cone").expect("parse");
+
+        assert_eq!(data.points.len(), 4);
+        // The two negative rows landed at |cone| on the opposite clock plane.
+        assert_eq!(
+            (data.points[0].e_clock_deg, data.points[0].e_cone_deg),
+            (180.0, 14.0)
+        );
+        assert_eq!(
+            (data.points[1].e_clock_deg, data.points[1].e_cone_deg),
+            (180.0, 7.0)
+        );
+        // Boresight and the already-polar row are untouched.
+        assert_eq!(
+            (data.points[2].e_clock_deg, data.points[2].e_cone_deg),
+            (0.0, 0.0)
+        );
+        assert_eq!(
+            (data.points[3].e_clock_deg, data.points[3].e_cone_deg),
+            (45.0, 7.0)
+        );
+
+        // The reported extent is now a polar-angle range, which is what every artifact range
+        // downstream is built from. Before D26 this read (-14, 7).
+        assert_eq!(data.e_cone_range(), (0.0, 14.0));
     }
 
     #[test]

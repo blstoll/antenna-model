@@ -206,6 +206,14 @@ impl AntennaCalibration {
             coverage.validate()?;
         }
 
+        // Validate the recorded angular-resolution assessment if present. Nothing else in
+        // this method reads `metadata`, which is exactly how a `0.0` knot spacing could ride
+        // into a loaded artifact and answer `resolves_lobe_structure()` with `true`
+        // (roadmap D26 finding 5).
+        if let Some(ref resolution) = self.metadata.angular_resolution {
+            resolution.validate()?;
+        }
+
         Ok(())
     }
 }
@@ -349,6 +357,24 @@ pub const MIN_KNOTS_PER_LOBE_PERIOD: f64 = 2.0;
 /// wavelength, finest structure) and, for clock, at the **outermost** calibrated cone angle —
 /// the worst case on each axis, so a surface that clears this bound clears it everywhere in
 /// its own coverage.
+/// `period / spacing`, refusing to divide by a spacing that cannot mean one.
+///
+/// The producer (`calibrate::correction_surface::assess_angular_resolution`) cannot emit a
+/// non-positive or non-finite spacing — it errors instead. But an [`AngularResolution`] also
+/// arrives by *deserialization*, where nothing upstream of this call has looked at the bytes,
+/// and `finite / 0.0` is `INFINITY`, which reads as "infinitely many knots per lobe" — the
+/// best possible verdict from the worst possible input. Returning 0.0 instead makes the
+/// verdict conservative in exactly the direction the D21 reporting exists to protect: an
+/// unreadable assessment claims nothing. Roadmap **D26** finding 5.
+fn knots_per_lobe_period(period_deg: f64, spacing_deg: f64) -> f64 {
+    if !(spacing_deg.is_finite() && spacing_deg > 0.0) || period_deg.is_nan() || period_deg < 0.0 {
+        return 0.0;
+    }
+    // `period_deg` may legitimately be `INFINITY` (no clock structure on axis); dividing it
+    // by a finite positive spacing gives `INFINITY`, which is the correct "fully resolved".
+    period_deg / spacing_deg
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AngularResolution {
     /// Widest gap between consecutive distinct cone (polar) knots, degrees.
@@ -372,6 +398,15 @@ pub struct AngularResolution {
     ///
     /// "Outermost" means the largest `|θ|` in coverage, not the largest signed one: the
     /// E-cone axis is valid over [-90, 90] and a one-sided cut may run entirely negative.
+    ///
+    /// **`f64::INFINITY` is meaningful here and only here.** It says there is no clock
+    /// structure to resolve — the `sin θ → 0` boresight case — which is the *best* case, and
+    /// it propagates through the ratio to "resolved". No field of this struct uses infinity
+    /// to mean the opposite (roadmap D26 finding 5): the knot spacings are always finite and
+    /// positive, because the producer refuses a degenerate knot vector rather than encoding
+    /// "infinitely coarse" as `INFINITY`. Were both meanings present, a surface degenerate on
+    /// both clock inputs would compute `INF/INF = NaN` into this artifact's metadata and into
+    /// `PartialEq`.
     pub clock_lobe_period_deg: f64,
 }
 
@@ -379,12 +414,60 @@ impl AngularResolution {
     /// Knots per lobe period on the cone axis. Below [`MIN_KNOTS_PER_LOBE_PERIOD`] the
     /// surface carries the residual's envelope trend, not its lobe structure.
     pub fn cone_knots_per_lobe_period(&self) -> f64 {
-        self.cone_lobe_period_deg / self.cone_knot_spacing_deg
+        knots_per_lobe_period(self.cone_lobe_period_deg, self.cone_knot_spacing_deg)
     }
 
     /// Knots per lobe period on the clock axis, at the outermost calibrated cone angle.
     pub fn clock_knots_per_lobe_period(&self) -> f64 {
-        self.clock_lobe_period_deg / self.clock_knot_spacing_deg
+        knots_per_lobe_period(self.clock_lobe_period_deg, self.clock_knot_spacing_deg)
+    }
+
+    /// Whether every field is a figure this type's accessors can divide.
+    ///
+    /// Called from [`AntennaCalibration::validate`], so a decoded artifact carrying a
+    /// meaningless assessment is refused at load rather than answering
+    /// [`Self::resolves_lobe_structure`] with `true` (roadmap **D26** finding 5: a
+    /// deserialized `cone_knot_spacing_deg = 0.0` divided into a finite lobe period gives
+    /// `INFINITY`, i.e. "perfectly resolved", from a field that means the opposite).
+    /// [`Self::cone_knots_per_lobe_period`] and its sibling are conservative for the same
+    /// input, so nothing *computes* a wrong verdict; this is what stops such an artifact
+    /// being loaded and reported on at all.
+    pub fn validate(&self) -> Result<(), ValidationError> {
+        for (name, spacing) in [
+            ("cone_knot_spacing_deg", self.cone_knot_spacing_deg),
+            ("clock_knot_spacing_deg", self.clock_knot_spacing_deg),
+        ] {
+            if !(spacing.is_finite() && spacing > 0.0) {
+                return Err(ValidationError::InvalidAngularResolution {
+                    field: name.to_string(),
+                    value: spacing,
+                    reason: "knot spacing must be finite and positive".to_string(),
+                });
+            }
+        }
+        // Cone period: finite and positive. Clock period: the same, *or* `INFINITY` for the
+        // on-axis case documented on the field. NaN is refused on both.
+        if !(self.cone_lobe_period_deg.is_finite() && self.cone_lobe_period_deg > 0.0) {
+            return Err(ValidationError::InvalidAngularResolution {
+                field: "cone_lobe_period_deg".to_string(),
+                value: self.cone_lobe_period_deg,
+                reason: "lobe period must be finite and positive".to_string(),
+            });
+        }
+        // Spelled with an explicit NaN test rather than `!(x > 0.0)`: infinity is legal here
+        // (the on-axis case), so this cannot use the `is_finite() && > 0.0` form its three
+        // siblings do, and the negated comparison it would otherwise need hides that NaN is
+        // the thing being excluded.
+        if self.clock_lobe_period_deg.is_nan() || self.clock_lobe_period_deg <= 0.0 {
+            return Err(ValidationError::InvalidAngularResolution {
+                field: "clock_lobe_period_deg".to_string(),
+                value: self.clock_lobe_period_deg,
+                reason: "lobe period must be positive (infinite is legal: no clock \
+                         structure on axis)"
+                    .to_string(),
+            });
+        }
+        Ok(())
     }
 
     /// Whether **both** angular axes clear [`MIN_KNOTS_PER_LOBE_PERIOD`].
@@ -1212,6 +1295,13 @@ pub enum ValidationError {
         value: f64,
         reason: String,
     },
+
+    /// A recorded [`AngularResolution`] field cannot be interpreted (roadmap D26).
+    InvalidAngularResolution {
+        field: String,
+        value: f64,
+        reason: String,
+    },
 }
 
 impl fmt::Display for ValidationError {
@@ -1252,6 +1342,17 @@ impl fmt::Display for ValidationError {
                     f,
                     "Invalid physical parameter '{}' = {}: {}",
                     parameter, value, reason
+                )
+            }
+            ValidationError::InvalidAngularResolution {
+                field,
+                value,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "Invalid angular-resolution field '{}' = {}: {}",
+                    field, value, reason
                 )
             }
         }
@@ -2781,5 +2882,126 @@ mod tests {
             "the summary must not hide a degenerate axis: {}",
             on_axis.summary()
         );
+    }
+
+    // ========================================================================
+    // D26 — a deserialized assessment cannot answer with a verdict it has not earned
+    // ========================================================================
+
+    /// The producer errors on a non-positive knot spacing, but an `AngularResolution` also
+    /// arrives by deserialization, where nothing upstream has looked at the bytes. `finite /
+    /// 0.0` is `INFINITY`, which reads as "infinitely many knots per lobe" — the *best*
+    /// verdict from the worst input. Roadmap D26 finding 5.
+    #[test]
+    fn a_zero_or_non_finite_knot_spacing_resolves_nothing() {
+        for bad in [0.0, -2.0, f64::NAN, f64::INFINITY] {
+            let cone_bad = AngularResolution {
+                cone_knot_spacing_deg: bad,
+                cone_lobe_period_deg: 5.0,
+                clock_knot_spacing_deg: 2.0,
+                clock_lobe_period_deg: 20.0,
+            };
+            assert_eq!(
+                cone_bad.cone_knots_per_lobe_period(),
+                0.0,
+                "cone spacing {bad} must yield no resolution, not infinite resolution"
+            );
+            assert!(
+                !cone_bad.resolves_lobe_structure(),
+                "cone spacing {bad} must not read as resolved"
+            );
+            assert!(
+                cone_bad.validate().is_err(),
+                "cone spacing {bad} must be refused by validate()"
+            );
+
+            let clock_bad = AngularResolution {
+                cone_knot_spacing_deg: 0.5,
+                clock_knot_spacing_deg: bad,
+                ..cone_bad.clone()
+            };
+            assert_eq!(clock_bad.clock_knots_per_lobe_period(), 0.0);
+            assert!(!clock_bad.resolves_lobe_structure());
+            assert!(clock_bad.validate().is_err());
+        }
+    }
+
+    /// The two `INFINITY` meanings used to collide: `INF` clock spacing (infinitely coarse,
+    /// worst case) over `INF` clock period (no structure, best case) is `NaN`, which reached
+    /// `summary()`, the artifact metadata and `PartialEq` — where `NaN != NaN` breaks a
+    /// round-trip assert on a value that did round-trip. Only one meaning survives; the other
+    /// is an error at the producer.
+    #[test]
+    fn no_input_produces_a_nan_verdict() {
+        let both_degenerate = AngularResolution {
+            cone_knot_spacing_deg: f64::INFINITY,
+            cone_lobe_period_deg: f64::INFINITY,
+            clock_knot_spacing_deg: f64::INFINITY,
+            clock_lobe_period_deg: f64::INFINITY,
+        };
+        assert!(!both_degenerate.cone_knots_per_lobe_period().is_nan());
+        assert!(!both_degenerate.clock_knots_per_lobe_period().is_nan());
+        assert!(!both_degenerate.resolves_lobe_structure());
+        assert!(both_degenerate.validate().is_err());
+        // The struct still compares equal to itself, which a NaN field would not.
+        assert_eq!(both_degenerate, both_degenerate.clone());
+    }
+
+    /// `AntennaCalibration::validate()` never inspected `metadata`, so an artifact carrying
+    /// a meaningless assessment loaded cleanly and was reported on. It is now refused.
+    #[test]
+    fn an_artifact_carrying_an_uninterpretable_assessment_is_refused_at_validate() {
+        let metadata = CalibrationMetadata::builder()
+            .antenna_name("Test")
+            .calibration_date("2026-08-13")
+            .data_source("test.csv")
+            .rmse_db(0.5)
+            .r_squared(0.98)
+            .num_measurements(100)
+            .build()
+            .unwrap();
+        let mut cal = AntennaCalibration::builder()
+            .antenna_id("test_antenna")
+            .feed_id("primary")
+            .metadata(metadata)
+            .physical_config(create_test_physical_config())
+            .validity_ranges(
+                ValidityRanges::builder()
+                    .azimuth_range(0.0, 360.0)
+                    .elevation_range(0.0, 90.0)
+                    .frequency_range(8000.0, 8500.0)
+                    .temperature(290.0)
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap();
+        assert!(
+            cal.validate().is_ok(),
+            "the fixture must validate before the field is corrupted"
+        );
+
+        cal.metadata.angular_resolution = Some(AngularResolution {
+            cone_knot_spacing_deg: 0.0,
+            cone_lobe_period_deg: 1.16,
+            clock_knot_spacing_deg: 40.0,
+            clock_lobe_period_deg: 4.8,
+        });
+        let err = cal
+            .validate()
+            .expect_err("a zero knot spacing must not load as a valid artifact");
+        assert!(
+            matches!(err, ValidationError::InvalidAngularResolution { .. }),
+            "expected InvalidAngularResolution, got {err:?}"
+        );
+
+        // A well-formed assessment — including the legal infinite clock period — still passes.
+        cal.metadata.angular_resolution = Some(AngularResolution {
+            cone_knot_spacing_deg: 2.0,
+            cone_lobe_period_deg: 1.16,
+            clock_knot_spacing_deg: 40.0,
+            clock_lobe_period_deg: f64::INFINITY,
+        });
+        assert!(cal.validate().is_ok());
     }
 }

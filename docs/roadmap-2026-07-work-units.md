@@ -236,6 +236,38 @@ G1 ─┬─ G2 ── G3
     │      deriving knots from lambda/D would │
     │      make calibrate REFUSE the narrow-  │
     │      beam antennas D9 exists to ship.   │
+    │  D26 DONE 2026-08-13 — D21's code       │
+    │      reviewed after the D4 merge. The   │
+    │      served-output finding needed a     │
+    │      SECOND half nobody had named: the  │
+    │      surface's elevation axis is the    │
+    │      fitted E-cone axis, so on a        │
+    │      negative cut its knots run below   │
+    │      zero while served elevation is a   │
+    │      polar angle and never does --      │
+    │      widening the coverage range alone  │
+    │      would have traded "no correction"  │
+    │      for "a correction read at a        │
+    │      clamped edge". Fixed as a          │
+    │      CONVENTION: the parser reflects    │
+    │      (phi, -theta) onto the identical   │
+    │      (phi+180, theta), pinned physics-  │
+    │      preserving to 3.2e-6 dB on the     │
+    │      asymmetric branch, and the export  │
+    │      now REFUSES an out-of-convention   │
+    │      extent instead of clamping. No     │
+    │      existing fixture has a negative    │
+    │      cone row (D14's generator already  │
+    │      encodes half-planes in clock), so  │
+    │      NO number moved -- the filing's    │
+    │      "this moves D14's e2e" was wrong.  │
+    │      Findings 3+5 collapsed: the WORSE  │
+    │      of the two INFINITY meanings was   │
+    │      deleted rather than renamed, so    │
+    │      INF/INF=NaN is unreachable by      │
+    │      construction. Finding 2 fixed by   │
+    │      DELETING the parameter, not        │
+    │      validating it.                     │
     └─ (Phases 1–3 done) ─ D4 ─ D7
 Superseded by C8 (do not implement): S7, C5, C6
 Phase 5: F1..F9 (F8 done) gated on register rows (P3, P5/F4, F5, D9, F9); P1 + C8 DECIDED 2026-07-08;
@@ -5232,9 +5264,91 @@ shipped CLI is still unaffected (it uses `surface_fitting_params`' constants), s
 right for the *binary* — but the reachability claim as written is a property nobody checks.
 See D26 finding 4.
 
+**Re-amended 2026-08-13 by D26's implementation: the reachability premise now holds.**
+`validate_fitting_inputs` requires all three `min_knot_spacing_*` to be finite and strictly
+positive, pinned by `a_nonpositive_minimum_knot_spacing_is_refused` (all three axes × four bad
+values). The paragraph above may be read as written again. **This does not close D25**, which
+is about the *sidecar's encoding*, not about reachability: `serde_json` still cannot serialize
+a non-finite `f64`, and D9's NaN sentinel means the domain difference between the artifact and
+its JSON sidecar remains unstated. D25's own exit criterion is untouched.
+
 ---
 
-### D26 — D21's angular-resolution code: one served-output defect and four soundness gaps — Effort: M
+### D26 — D21's angular-resolution code: one served-output defect and four soundness gaps — Effort: M — ✅ **DONE 2026-08-13**
+
+> **Closeout 2026-08-13** (branch `fix/d26-angular-resolution-soundness`). All six exit
+> criteria met. The headline is that **finding 1's fix is a convention, not a range
+> calculation** — and the filing, which framed it as "export a coverage range that contains
+> the calibrated region", would not have produced a working artifact on its own.
+>
+> **Finding 1 needed a second half the filing did not name.** Widening the exported elevation
+> range to the `|θ|` extent fixes `is_boresight_only()` and `contains()`, and is where the
+> obvious fix stops. But the *correction surface* would still have been unreachable: its
+> elevation axis is the fitted E-cone axis, so on a `-14°…0°` cut its knots run negative,
+> while the served elevation is a polar angle from boresight and is **never** negative
+> (`compute_emitter_direction_with_attitude`). The service would then have reported the query
+> in coverage and evaluated the surface outside its own knot span — trading "no correction"
+> for "a correction read at a clamped edge", which is worse, because the first is at least
+> visible as `correction_applied: false`. So the fix normalizes at ingest instead:
+> `MeasurementPoint::to_polar_convention` reflects `(φ, −θ)` onto the identical direction
+> `(φ + 180°, θ)` in the parser, and predictions, residuals, knots, extents, validity and
+> coverage all speak one convention thereafter. The export's clamp is replaced by a **refusal**
+> — a clamp cannot distinguish "already correct" from "silently truncated", which is precisely
+> how this survived.
+>
+> **The reflection is physics-preserving, and that is now pinned rather than assumed.** The
+> far-field computation carries `sin θ` signed, and `Jₘ(−u) = (−1)ᵐ Jₘ(u)` cancels against
+> `e^{im(φ+π)} = (−1)ᵐ e^{imφ}` mode by mode while the obliquity factor depends on the even
+> `cos θ`. Measured on the asymmetric (azimuthal-mode) branch, where the cancellation is real
+> rather than trivial: **3.2e-6 dB** worst difference, i.e. quadrature, with a negative control
+> proving the geometry varies with clock at all.
+>
+> **Nothing in the existing tree moved.** No fixture in the repository contains a negative
+> E-cone row — D14's CR-159703 generator already encodes half-planes in *clock* and takes
+> `.abs()` of the peak angle, which is the same convention arrived at independently — so the
+> normalization is a no-op on every existing dataset and the D14 e2e numbers are unchanged.
+> The filing's gotcha ("finding 1 moves numbers in the D14 real-anchored e2e") was wrong for
+> that reason; there were no known-defect pins to invert.
+>
+> **Findings 3 and 5 collapsed into one change.** Rather than separate the two `INFINITY`
+> meanings with two sentinels, the *worse* one was deleted: `widest_knot_gap` now returns
+> `Result` and refuses an empty, degenerate or non-finite axis instead of encoding "infinitely
+> coarse" as `INFINITY`. Only the clock-period meaning survives (no structure to resolve — the
+> best case), so `INF/INF = NaN` is unreachable by construction rather than by guard. The
+> deserialization side is separately protected: the ratio accessors return **0.0** for a
+> spacing that cannot be divided by, and `AngularResolution::validate` — now called from
+> `AntennaCalibration::validate`, which never inspected `metadata` before — refuses such an
+> artifact at load.
+>
+> **Finding 2 was fixed by removing the parameter, not by validating it.** The exit criterion
+> asked for a test that fails if the assessed and stamped diameters disagree; making them
+> unrepresentable as different values is stronger. `export_full_calibration` derives the
+> assessment from `physical.diameter_m` — the same field it stamps — and the test re-derives
+> it from the **artifact's own** `reflector.diameter_m`, with a 12 m dish as the negative
+> control. `main.rs` now builds `export_physical_params` before the assessment so its warning
+> and the artifact describe the same dish. The false doc comment is gone.
+>
+> **One finding-5 item is deliberately not addressed:** the under-resolved warning is still
+> emitted only by the CLI, so a library embedder calling `assess_angular_resolution` +
+> `export_full_calibration` still gets no warning. It is not in the exit criteria, and the
+> natural fix (warn inside the export) makes the CLI log the same warning twice, at a worse
+> place than the deliberate one right after the in-sample RMSE. Left as filed prose.
+>
+> **Found while testing, not fixed (pre-existing, not D26's):** `CalibrationCoverage::contains`
+> is a closed comparison against a range built from the measured extents, so a query at the
+> exact azimuth maximum is decided by floating point — a requested clock of 315° arrives as
+> `315.00000000000017` and falls out of coverage. The new e2e probes off the boundary and says
+> so in a comment. Worth its own unit if edge-of-coverage behaviour ever matters.
+>
+> **What landed:** `MeasurementPoint::to_polar_convention` + parser reflection with an `info!`
+> line naming the count; the export elevation guard; `export_full_calibration` losing its
+> `angular_resolution` parameter; `widest_knot_gap` returning `Result` and covering the clock
+> axis; `min_knot_spacing_*` validated in `validate_fitting_inputs`; `knots_per_lobe_period`
+> guard + `AngularResolution::validate` + `ValidationError::InvalidAngularResolution`;
+> `CorrectionSurfaceParams::shipped()` as the single owner of the shipped knot configuration
+> (three hand-copies deleted); the D14 oracle reading its diameter off the artifact. New test
+> binary `calibrate/tests/negative_cone_served_coverage_e2e.rs` (5 tests, 0.46 s — no slow-tier
+> entry needed); **all five fail with the clamp and the normalization reverted**, checked.
 
 **Filed 2026-08-13**, from the code review of the merged D21 (`6f42799`, PR #41 — which
 includes the `c4f460d` cone fix). Filed as its own unit rather than fixed inside the D4 crate

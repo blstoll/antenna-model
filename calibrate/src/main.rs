@@ -141,21 +141,14 @@ struct Args {
 
 /// Parameters the shipped correction surface is fitted with (full-mode step 5).
 ///
-/// Deliberately sparser and more strongly regularized than
-/// [`CorrectionSurfaceParams::default`]: this is the model family the artifact ships, and
-/// [`validation_config`] must score *this* family, not the default one.
+/// The shape itself lives on [`CorrectionSurfaceParams::shipped`] — its single owner, so
+/// that a test cannot describe a configuration the CLI does not ship (roadmap D26 exit
+/// criterion 6). All this adds is the one field that is a CLI flag rather than a property of
+/// the model family: whether to cross-validate.
 fn surface_fitting_params(validate: bool, cv_folds: usize) -> CorrectionSurfaceParams {
     CorrectionSurfaceParams {
-        spline_order: 4,
-        num_knots_frequency: 4,
-        num_knots_econe: 6,
-        num_knots_eclock: 8,
-        regularization: 1e-3,
-        adaptive_knots: true,
         cross_validation_folds: if validate { cv_folds } else { 0 },
-        min_knot_spacing_frequency: 50.0, // 50 MHz minimum spacing
-        min_knot_spacing_econe: 2.0,      // 2 degrees minimum spacing
-        min_knot_spacing_eclock: 5.0,     // 5 degrees minimum spacing
+        ..CorrectionSurfaceParams::shipped()
     }
 }
 
@@ -673,6 +666,13 @@ async fn run_calibration(args: Args) -> Result<()> {
         correction_surface.fit_stats.improvement_percent
     );
 
+    // The physical parameters this run will stamp into the artifact. Built here, well before
+    // the export, so the diameter the assessment below reports against is *the same value*
+    // the artifact carries — not a second, independent read of `class.geometry.diameter_m`.
+    // `export_full_calibration` derives its own copy of the assessment from this struct's
+    // `diameter_m` for the same reason (roadmap D26 finding 2).
+    let export_physical = export_physical_params(class, &tunable_params);
+
     // How finely the surface we just fitted can vary in angle, against how finely this
     // antenna's pattern does (roadmap D21). Reported, never enforced: the fit above is
     // useful whether or not it clears the bound, and refusing here would have removed the
@@ -680,7 +680,7 @@ async fn run_calibration(args: Args) -> Result<()> {
     // silent — the RMSE printed two lines up structurally cannot see this, because a grid
     // sampled no finer than the knots carries no structure the knots cannot follow.
     let angular_resolution =
-        assess_angular_resolution(&correction_surface, class.geometry.diameter_m)?;
+        assess_angular_resolution(&correction_surface, export_physical.diameter_m)?;
     if angular_resolution.resolves_lobe_structure() {
         info!("    Angular resolution: {}", angular_resolution.summary());
     } else {
@@ -795,8 +795,8 @@ async fn run_calibration(args: Args) -> Result<()> {
     // surface) and write it as the binary artifact. `artifact_metadata` above
     // and `validation_report` only drive the optional `--metadata`/`--report`
     // JSON sidecars below; neither is part of the on-disk binary format.
-    let export_physical = export_physical_params(class, &tunable_params);
-
+    // (`export_physical` was built back at step 5, so the assessment reported there and the
+    // one the artifact carries describe the same dish.)
     let feed_id = args.feed_id.as_deref().unwrap_or("primary");
     let service_calibration = export_full_calibration(
         &args.antenna_id,
@@ -810,7 +810,6 @@ async fn run_calibration(args: Args) -> Result<()> {
         correction_surface.fit_stats.r_squared,
         model_only_rmse,
         args.tune_parameters,
-        angular_resolution.clone(),
     )
     .context("Failed to build service-loadable calibration artifact")?;
 

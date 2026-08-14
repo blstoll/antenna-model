@@ -1181,20 +1181,12 @@ mod tests {
         (points, predictions)
     }
 
-    /// The parameters `calibrate` actually fits the shipped artifact with.
+    /// The parameters `calibrate` actually fits the shipped artifact with, read from their
+    /// one owner. This helper used to hand-copy them (roadmap D26 exit criterion 6), which
+    /// is how a test asserting "the CV folds score the shipped model family" could keep
+    /// passing against a family the CLI had stopped shipping.
     fn artifact_params() -> CorrectionSurfaceParams {
-        CorrectionSurfaceParams {
-            spline_order: 4,
-            num_knots_frequency: 4,
-            num_knots_econe: 6,
-            num_knots_eclock: 8,
-            regularization: 1e-3,
-            adaptive_knots: true,
-            cross_validation_folds: 0,
-            min_knot_spacing_frequency: 50.0,
-            min_knot_spacing_econe: 2.0,
-            min_knot_spacing_eclock: 5.0,
-        }
+        CorrectionSurfaceParams::shipped()
     }
 
     fn config_with(correction_params: CorrectionSurfaceParams) -> ValidationConfig {

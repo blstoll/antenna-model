@@ -697,7 +697,7 @@ e_clock,e_cone,frequency_mhz,g_over_t_db,temperature_k
 
 **Column Descriptions:**
 - `e_clock`: Azimuth angle in degrees (0-360)
-- `e_cone`: Cone angle (off-axis) in degrees (0-90)
+- `e_cone`: Cone angle (off-axis) in degrees (**-90 to 90** — see below)
 - `frequency_mhz`: Measurement frequency
 - `g_over_t_db`: Measured G/T in dB/K
 - `temperature_k`: Ambient temperature
@@ -706,6 +706,30 @@ e_clock,e_cone,frequency_mhz,g_over_t_db,temperature_k
 - `e_clock=0, e_cone=0`: Boresight
 - `e_clock`: Azimuth rotation around boresight axis
 - `e_cone`: Off-axis angle from boresight
+
+**Signed `e_cone` is accepted, and normalized on the way in.** A pattern cut is often
+recorded on one fixed clock plane with the cone angle running through zero (`-14°` … `+14°`),
+or on one side of it only. That is legal input. `e_clock`/`e_cone` are spherical coordinates
+about boresight, so `(φ, −θ)` names the *same direction* as `(φ + 180°, θ)`, and the parser
+rewrites every negative-cone row into the second form before anything else sees it — logging
+how many rows it reflected. Everything downstream (the physics predictions, the residuals,
+the correction surface's knots, and the artifact's validity and coverage ranges) is then in
+the polar convention the service uses, where elevation is a polar angle from boresight and is
+never negative.
+
+Two consequences worth knowing:
+
+- The `e_cone` range reported in the run output and in the `--metadata` sidecar is the range
+  of the **reflected** data: a `-14°…0°` cut reports `0°…14°`. That is the region the
+  artifact is calibrated over.
+- Half-planes end up encoded in `e_clock`, so a two-sided cut at `e_clock = 0` becomes data
+  at `e_clock = 0` and `e_clock = 180`. If you are generating a grid yourself, writing it
+  that way directly is equivalent and is what the CR-159703 exemplar generator does.
+
+Before roadmap **D26** (2026-08-13) this was handled by silently clamping the exported
+elevation range at zero, which turned a `-14°…0°` cut into the range `(0, 0)`: the artifact
+reported itself boresight-only and the service applied **no correction at all**, with every
+other health signal reading normal.
 
 ### 4.3 Running Full Grid Calibration
 
@@ -830,7 +854,10 @@ the warning tells you is **what not to claim** — the surface carries the resid
 trend, so do not quote per-lobe accuracy off the main beam for that artifact.
 
 Sampling your measurement grid more finely will *not* by itself help: the knot counts and
-spacing floors are compile-time constants in `calibrate/src/main.rs::surface_fitting_params`.
+spacing floors are compile-time constants, owned by
+`CorrectionSurfaceParams::shipped()` in `calibrate/src/correction_surface.rs` (roadmap D26 —
+they lived in three hand-copied places before, so a test could describe a shape nothing
+shipped; `main.rs::surface_fitting_params` now only adds the `--validate` fold count).
 Whether they should be derived from `λ/D` instead is an open question with real arguments on
 both sides — see roadmap unit **D24** and
 `docs/findings-2026-08-02-correction-surface-angular-resolution.md` before changing them.

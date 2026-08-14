@@ -157,6 +157,39 @@ impl CorrectionSurfaceParams {
             ..self.clone()
         }
     }
+
+    /// The knot configuration a shipped full-mode artifact is fitted with.
+    ///
+    /// **This is the one definition of that shape.** It existed in three hand-copied places
+    /// — `main::surface_fitting_params`, `validator`'s `artifact_params` test helper, and
+    /// `correction_surface`'s own `shipped_shape_params` test helper — so a test could
+    /// describe, and pass against, a shape nothing ships (roadmap **D26** exit criterion 6).
+    /// The two consumers that must agree with the CLI are the cross-validation config (which
+    /// has to score *this* model family, not [`Self::default`]'s more flexible one — roadmap
+    /// D10) and every test that claims to measure what the shipped artifact does.
+    ///
+    /// Deliberately sparser and more strongly regularized than [`Self::default`].
+    /// `cross_validation_folds` is 0 here: whether to cross-validate is a CLI flag
+    /// (`--validate`), not a property of the shape, so the caller sets it.
+    ///
+    /// The angular counts and floors are absolute while the pattern scale is `λ/D`; what a
+    /// given antenna's fit can therefore resolve is measured per-run by
+    /// [`assess_angular_resolution`] and recorded in the artifact (roadmap D21). Whether the
+    /// knots should be derived from `λ/D` instead is roadmap D24, and open.
+    pub fn shipped() -> Self {
+        Self {
+            spline_order: 4,
+            num_knots_frequency: 4,
+            num_knots_econe: 6,
+            num_knots_eclock: 8,
+            regularization: 1e-3,
+            adaptive_knots: true,
+            cross_validation_folds: 0,
+            min_knot_spacing_frequency: 50.0, // 50 MHz minimum spacing
+            min_knot_spacing_econe: 2.0,      // 2 degrees minimum spacing
+            min_knot_spacing_eclock: 5.0,     // 5 degrees minimum spacing
+        }
+    }
 }
 
 impl Default for CorrectionSurfaceParams {
@@ -250,10 +283,14 @@ pub struct FitStatistics {
 ///   frequency and outermost calibrated cone angle — the worst case within its coverage, so
 ///   clearing the bound here clears it everywhere the artifact claims to apply.
 ///
-/// This function only measures; it never refuses. An under-resolved surface is still worth
-/// fitting and shipping (the CR-159703 artifact resolves 0.58 knots per lobe period and
-/// still takes the digitized peaks from 11.58 dB RMS to 3.19 dB), and refusing would have
-/// removed the repository's only served full-mode artifact. The caller warns.
+/// **It never refuses a verdict; it only refuses to invent one.** An under-resolved surface
+/// is still worth fitting and shipping (the CR-159703 artifact resolves 0.58 knots per lobe
+/// period and still takes the digitized peaks from 11.58 dB RMS to 3.19 dB), and refusing
+/// would have removed the repository's only served full-mode artifact — so a *low* ratio is
+/// returned, not an error, and the caller warns. What does error is input that supports no
+/// measurement at all: a degenerate or non-finite knot vector on either angular axis, or an
+/// assessment whose fields the ratio accessors could not divide. Roadmap **D26** findings 3
+/// and 5 — before them those cases returned a number, and the number was optimistic.
 pub fn assess_angular_resolution(
     surface: &CorrectionSurface,
     diameter_m: f64,
@@ -338,32 +375,87 @@ pub fn assess_angular_resolution(
         f64::INFINITY
     };
 
-    Ok(AngularResolution {
-        cone_knot_spacing_deg: widest_knot_gap(&surface.knots_econe),
+    // Both spacings come from `widest_knot_gap`, which refuses an empty, degenerate or
+    // non-finite axis rather than reporting a number for it — the clock axis included. It
+    // received none of the checks its two siblings got above until roadmap D26 found that a
+    // NaN gap on it was silently discarded, reporting the axis as *better* resolved than it
+    // is.
+    let resolution = AngularResolution {
+        cone_knot_spacing_deg: widest_knot_gap(&surface.knots_econe, "E-cone")?,
         cone_lobe_period_deg,
-        clock_knot_spacing_deg: widest_knot_gap(&surface.knots_eclock),
+        clock_knot_spacing_deg: widest_knot_gap(&surface.knots_eclock, "E-clock")?,
         clock_lobe_period_deg,
-    })
+    };
+
+    // The consumer-side invariant, asserted at the point of production: every field is one
+    // the ratio accessors can divide, so `resolves_lobe_structure()` is a real verdict.
+    resolution
+        .validate()
+        .map_err(|e| CorrectionSurfaceError::InvalidKnotVector {
+            reason: format!("angular-resolution assessment is not interpretable: {e}"),
+        })?;
+
+    Ok(resolution)
 }
 
 /// The widest gap between consecutive *distinct* knots — the coarsest the basis gets, and so
 /// the feature scale the surface can guarantee nowhere finer than.
 ///
 /// Distinctness matters because a clamped knot vector repeats its end values `order` times;
-/// those zero-width gaps say nothing about resolution. A vector with no two distinct values
-/// cannot occur here (`generate_knot_vector` rejects a data range below the minimum spacing),
-/// but returning `INFINITY` rather than 0 for it keeps this a bound rather than a claim:
-/// zero would report a degenerate axis as infinitely well resolved.
-fn widest_knot_gap(knots: &[f64]) -> f64 {
-    let widest = knots
-        .windows(2)
-        .map(|pair| pair[1] - pair[0])
-        .fold(0.0_f64, f64::max);
+/// those zero-width gaps say nothing about resolution.
+///
+/// **Every way of not having an answer is an error, never a value** (roadmap **D26**
+/// findings 3 and 5). Two things used to be encoded instead:
+///
+/// - A `NaN` gap was *discarded*. The fold was `fold(0.0, f64::max)`, and `f64::max` returns
+///   the non-NaN operand, so a corrupt knot vector reported its widest *finite* gap — a
+///   smaller spacing, i.e. a **better**-resolved verdict, from input that supports no verdict
+///   at all. That is precisely the failure the D21 assessment exists to prevent.
+/// - A vector with no two distinct values returned `f64::INFINITY`, meaning "infinitely
+///   coarse". [`AngularResolution`] also uses `INFINITY` on its clock *period* to mean the
+///   opposite — no structure to resolve, the best case — and a surface degenerate on both
+///   computed `INF/INF = NaN` straight into the artifact's metadata and its `PartialEq`.
+///
+/// Neither case is reachable from [`fit_correction_surface`] (`generate_knot_vector` rejects
+/// a data range below the minimum spacing, and the fit refuses non-finite input), but this
+/// module's assessment is public and grades any [`CorrectionSurface`] it is handed.
+fn widest_knot_gap(knots: &[f64], axis: &str) -> Result<f64> {
+    if knots.len() < 2 {
+        return Err(CorrectionSurfaceError::InvalidKnotVector {
+            reason: format!(
+                "{axis} knot vector has {} knot(s); at least 2 are needed to measure a gap",
+                knots.len()
+            ),
+        });
+    }
+
+    let mut widest = 0.0_f64;
+    for pair in knots.windows(2) {
+        let gap = pair[1] - pair[0];
+        if !gap.is_finite() {
+            return Err(CorrectionSurfaceError::InvalidKnotVector {
+                reason: format!(
+                    "{axis} knot vector has a non-finite gap between {} and {}",
+                    pair[0], pair[1]
+                ),
+            });
+        }
+        if gap > widest {
+            widest = gap;
+        }
+    }
 
     if widest > 0.0 {
-        widest
+        Ok(widest)
     } else {
-        f64::INFINITY
+        Err(CorrectionSurfaceError::InvalidKnotVector {
+            reason: format!(
+                "{axis} knot vector has no two distinct knots (all {} values equal {}), \
+                 so it resolves nothing and no spacing can be reported",
+                knots.len(),
+                knots[0]
+            ),
+        })
     }
 }
 
@@ -1442,6 +1534,33 @@ fn validate_fitting_inputs(
         });
     }
 
+    // The minimum knot spacings are what `generate_knot_vector`'s span guard compares a
+    // data range against (`max - min < min_spacing`). At zero or negative that comparison
+    // can never fire, so a fully degenerate axis — every value equal — would be accepted and
+    // produce a knot vector with no two distinct knots. Everything downstream assumes that
+    // cannot happen: `assess_angular_resolution` says so in prose, and roadmap D25's
+    // reachability argument for non-finite metadata rests on it. It was assumed, never
+    // checked, until roadmap **D26** finding 4; a library caller could disable the guard
+    // just by passing 0.0.
+    for (name, spacing) in [
+        (
+            "min_knot_spacing_frequency",
+            params.min_knot_spacing_frequency,
+        ),
+        ("min_knot_spacing_econe", params.min_knot_spacing_econe),
+        ("min_knot_spacing_eclock", params.min_knot_spacing_eclock),
+    ] {
+        if !(spacing.is_finite() && spacing > 0.0) {
+            return Err(CorrectionSurfaceError::InvalidParameter {
+                param: name.to_string(),
+                value: spacing,
+                reason: "Must be finite and strictly positive: it is the guard that keeps a \
+                         degenerate axis out of the fit"
+                    .to_string(),
+            });
+        }
+    }
+
     Ok(())
 }
 
@@ -1809,19 +1928,9 @@ mod tests {
     }
 
     fn shipped_shape_params() -> CorrectionSurfaceParams {
-        // The counts and floors `main::surface_fitting_params` ships.
-        CorrectionSurfaceParams {
-            spline_order: 4,
-            num_knots_frequency: 4,
-            num_knots_econe: 6,
-            num_knots_eclock: 8,
-            regularization: 1e-3,
-            adaptive_knots: true,
-            cross_validation_folds: 0,
-            min_knot_spacing_frequency: 50.0,
-            min_knot_spacing_econe: 2.0,
-            min_knot_spacing_eclock: 5.0,
-        }
+        // The shape the CLI ships, read from its one owner rather than hand-copied here —
+        // this helper *was* the third copy (roadmap D26 exit criterion 6).
+        CorrectionSurfaceParams::shipped()
     }
 
     fn fitted_surface(max_cone_deg: f64) -> CorrectionSurface {
@@ -2038,6 +2147,132 @@ mod tests {
             );
         }
         assert!(assess_angular_resolution(&surface, 3.7).is_ok());
+    }
+
+    // ========================================================================
+    // D26 — the assessment refuses input it cannot measure
+    // ========================================================================
+
+    /// A NaN gap used to be **discarded**, not noticed: `fold(0.0, f64::max)` returns the
+    /// non-NaN operand, so the axis reported its widest *finite* gap — a smaller spacing,
+    /// i.e. a better-resolved verdict, out of a corrupt knot vector. Roadmap D26 finding 3.
+    #[test]
+    fn a_non_finite_knot_gap_is_refused_not_skipped_over() {
+        // A vector whose *widest* real gap is 10 but which also contains a NaN. The old fold
+        // reported 10.0 and called the axis resolved to 10°.
+        let corrupt = vec![0.0, 10.0, f64::NAN, 12.0, 13.0];
+        let err = widest_knot_gap(&corrupt, "E-clock")
+            .expect_err("a NaN gap must be refused, not skipped");
+        assert!(
+            format!("{err}").contains("non-finite"),
+            "the error must name the reason, got: {err}"
+        );
+
+        // Negative control: the same vector without the NaN measures normally, so the test
+        // is detecting the NaN and not merely the vector's shape.
+        assert_eq!(
+            widest_knot_gap(&[0.0, 10.0, 12.0, 13.0], "E-clock").expect("clean vector"),
+            10.0
+        );
+    }
+
+    /// The other half of finding 3: a degenerate axis is an error, not `INFINITY`.
+    ///
+    /// `INFINITY` is [`AngularResolution`]'s *clock lobe period* sentinel, where it means the
+    /// opposite (no structure to resolve — the best case). With both meanings live, a surface
+    /// degenerate on both clock inputs computed `INF/INF = NaN` into the artifact metadata and
+    /// into `PartialEq`, breaking round-trip asserts. Roadmap D26 finding 5.
+    #[test]
+    fn a_degenerate_axis_is_refused_so_infinity_keeps_one_meaning() {
+        for knots in [vec![5.0; 8], vec![0.0], vec![]] {
+            assert!(
+                widest_knot_gap(&knots, "E-cone").is_err(),
+                "a vector with no two distinct knots resolves nothing: {knots:?}"
+            );
+        }
+
+        // The surviving `INFINITY` — on-axis coverage, so no clock structure exists — still
+        // reads as fully resolved, and produces no NaN because the spacing beside it is a
+        // real number.
+        let on_axis = AngularResolution {
+            cone_knot_spacing_deg: 2.0,
+            cone_lobe_period_deg: 8.0,
+            clock_knot_spacing_deg: 40.0,
+            clock_lobe_period_deg: f64::INFINITY,
+        };
+        assert!(on_axis.clock_knots_per_lobe_period().is_infinite());
+        assert!(on_axis.validate().is_ok());
+        assert!(on_axis.resolves_lobe_structure());
+    }
+
+    /// The clock axis received none of the emptiness/finiteness validation its siblings got.
+    /// It now goes through the same gate, and the assessment refuses rather than reporting.
+    #[test]
+    fn the_clock_axis_is_validated_like_its_siblings() {
+        let mut surface = fitted_surface(24.0);
+        surface.knots_eclock = vec![7.0; surface.knots_eclock.len()];
+        let err = assess_angular_resolution(&surface, 8.0)
+            .expect_err("a degenerate clock axis must be refused");
+        assert!(
+            format!("{err}").contains("E-clock"),
+            "the error must name the offending axis, got: {err}"
+        );
+
+        let mut nan_clock = fitted_surface(24.0);
+        nan_clock.knots_eclock[2] = f64::NAN;
+        assert!(
+            assess_angular_resolution(&nan_clock, 8.0).is_err(),
+            "a non-finite clock knot must be refused"
+        );
+
+        // Control: untouched, it assesses fine.
+        assert!(assess_angular_resolution(&fitted_surface(24.0), 8.0).is_ok());
+    }
+
+    /// Finding 4: the span guard in `generate_knot_vector` is `max - min < min_spacing`,
+    /// which at zero or negative spacing can never fire. Everything downstream — this
+    /// module's own prose, and roadmap D25's reachability argument — assumed it always holds.
+    #[test]
+    fn a_nonpositive_minimum_knot_spacing_is_refused() {
+        let (measurements, predictions) = grid_measurements(8, 8, 8);
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            for axis in 0..3 {
+                let mut params = CorrectionSurfaceParams::shipped();
+                match axis {
+                    0 => params.min_knot_spacing_frequency = bad,
+                    1 => params.min_knot_spacing_econe = bad,
+                    _ => params.min_knot_spacing_eclock = bad,
+                }
+                assert!(
+                    fit_correction_surface(&measurements, &predictions, &params).is_err(),
+                    "min spacing {bad} on axis {axis} must be refused: it disables the \
+                     degenerate-axis guard"
+                );
+            }
+        }
+    }
+
+    /// Exit criterion 6: the shipped knot configuration has one owner. This is the assertion
+    /// that the owner is the one the CLI uses — `main::surface_fitting_params` differs from
+    /// it in exactly one field, and that field is a CLI flag, not part of the shape.
+    #[test]
+    fn the_shipped_shape_is_a_real_fittable_configuration() {
+        let shipped = CorrectionSurfaceParams::shipped();
+        assert_eq!(
+            shipped.cross_validation_folds, 0,
+            "whether to cross-validate is --validate's business, not the shape's"
+        );
+        // It must differ from `default()`, or the D10 distinction it exists to carry is gone.
+        let default = CorrectionSurfaceParams::default();
+        assert!(
+            shipped.num_knots_econe != default.num_knots_econe
+                || shipped.regularization != default.regularization,
+            "the shipped family must remain distinguishable from the default one"
+        );
+        // And it must actually fit: 4/6/8 knots at order 4 declare 960 coefficients, so this
+        // also pins that the owner is sized for a real dataset.
+        let (measurements, predictions) = grid_measurements(12, 12, 12);
+        assert!(fit_correction_surface(&measurements, &predictions, &shipped).is_ok());
     }
 
     // ========================================================================
