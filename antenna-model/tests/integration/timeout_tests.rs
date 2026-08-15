@@ -10,10 +10,17 @@
 //! limitation): the timeout bounds the *response*, not the background compute —
 //! the rayon work is not cancelled and runs to completion (see S3).
 //!
-//! The single-gain case (roadmap S2b) is pinned on a **paused clock** and asserts
-//! no wall-clock threshold at all; see `test_heavy_single_gain_times_out_with_504`
-//! for why that works here and why it has to run in process rather than over a
-//! socket.
+//! **Both timeout cases here are pinned on a paused clock, in process, and assert
+//! no wall-clock threshold at all.** The single-gain case (roadmap S2b) was
+//! written that way; the heatmap case was converted to it 2026-08-15 under D18,
+//! having cost 131 s as a socket test that won a race against a *real* 50 ms
+//! deadline by being expensive. See `test_heavy_single_gain_times_out_with_504`
+//! for why the mocked clock works here and why it cannot be used over a socket.
+//!
+//! If you add a third timeout case, start from that pattern rather than from a
+//! real deadline plus a heavy request: sizing a request to outlast a real
+//! deadline couples the test's cost to the physics' cost, and the physics here is
+//! ~19x dearer in debug — which is exactly how the heatmap case reached 131 s.
 
 use crate::integration::helpers::*;
 use antenna_model::api::schemas::*;
@@ -43,12 +50,22 @@ fn fixture_config() -> ServiceConfig {
     cfg
 }
 
-/// A heatmap heavy enough that its compute dwarfs the sub-second test deadline
-/// by a wide margin. The large (13 m) Ka-band offset-feed antenna is the most
-/// expensive per-point integration in the fixtures (high D/λ, wide-angle coma);
-/// a 12x12 grid over the full 0-45 deg quadrant costs hundreds of ms — far above
-/// the 50 ms deadline the test sets, yet bounded so the un-cancellable
-/// background rayon (the S2/S3 limitation) finishes in well under a second.
+/// A heatmap whose compute is still running when the paused-clock test advances
+/// past the deadline. The large (13 m) Ka-band offset-feed antenna is the most
+/// expensive per-point integration in the fixtures (high D/λ, wide-angle coma).
+///
+/// Like [`heavy_gain_request`], the cost here is a **race margin, not a
+/// threshold** — nothing asserts on it — so the grid is deliberately the smallest
+/// one that clears the margin rather than the largest one that fits a wall-clock
+/// budget. A 2x2 grid is already ~4 Ka-band integrations, against the microseconds
+/// the test needs them to outlast.
+///
+/// It was a 12x12 grid (0-45 deg at 4 deg steps) until 2026-08-15, when the test
+/// moved to the paused clock. That grid was sized by a comment claiming "hundreds
+/// of ms" of compute, a *release*-profile figure; tests run in debug, where the
+/// same geometry is ~19x dearer (~2.7 s per point), so 144 points cost **131 s**
+/// and made this the single most expensive test in the suite. Do not re-size this
+/// grid against a release measurement.
 fn heavy_heatmap_request() -> HeatmapRequest {
     let mut req = builders::simple_heatmap_request();
     req.antenna_id = "test_large".to_string();
@@ -58,12 +75,12 @@ fn heavy_heatmap_request() -> HeatmapRequest {
         azimuth_range_deg: RangeConfig {
             min: 0.0,
             max: 45.0,
-            step: 4.0,
+            step: 45.0,
         },
         elevation_range_deg: RangeConfig {
             min: 0.0,
             max: 45.0,
-            step: 4.0,
+            step: 45.0,
         },
     };
     req
@@ -238,61 +255,104 @@ async fn test_single_gain_under_timeout_still_succeeds() {
 /// standard JSON body, and the 504 is correlatable (carries `x-request-id`,
 /// echoing a client-supplied id).
 ///
-/// The deadline is set to 50 ms via the `Duration` seam so the assertion rests
-/// on a large margin (hundreds of ms of compute vs 50 ms), not on exact
-/// wall-clock timing — robust across hardware and future integrator speedups.
-/// The *deterministic* firing of the timeout mechanism itself is pinned
-/// separately by the sleep-based middleware unit tests in `api::middleware`.
-#[tokio::test]
+/// Runs on the **paused clock**, in process, for the same reasons as
+/// `test_heavy_single_gain_times_out_with_504` above — read that test's docs for
+/// why the mocked clock cannot be used over a socket. Nothing here asserts a
+/// wall-clock threshold.
+///
+/// # Why this is not a socket test any more (2026-08-15)
+///
+/// It used to bind a real server, set a 50 ms deadline, and win the race by
+/// making the request expensive enough to outlast it in *real* time. That cost
+/// **131 s** — the most expensive test in the suite — because the grid had been
+/// sized against release-profile figures while tests run in debug (see
+/// [`heavy_heatmap_request`]). Under a mocked clock the deadline is crossed by
+/// `advance`, so the race no longer has to be won with compute, and the grid
+/// shrinks to a 2x2.
+///
+/// **Negative control run at conversion time** (per P13 — a guard nothing has
+/// falsified is not known to have power): deleting the `advance` call and leaving
+/// everything else identical makes this test **fail with 200**, on a response body
+/// whose metadata reports `computation_time_ms: 1172`. So the 504 is genuinely
+/// produced by crossing the deadline, not by anything incidental, and the race
+/// margin is real — the clock is advanced microseconds in, against ~1.2 s of
+/// compute, ~5 orders of magnitude, the same margin the S2b test relies on.
+///
+/// All three assertions survive the move: `build_in_process_app` calls
+/// `create_routes_with_timeout`, and that and the production `create_routes`
+/// delegate to the **same `build_app`** — so the middleware stack under test,
+/// `RequestId` included, is the one the server binds to a port.
+///
+/// What is *not* covered here is real TCP and hyper's serialization of a 504.
+/// That is still held over a socket by
+/// `budget_tests::test_over_budget_single_gain_returns_504`, which binds a real
+/// server and asserts a 504 with the standard JSON body — though on S3's
+/// `computation_budget_exceeded` rather than S2's `request_timeout`, and without
+/// the `x-request-id` assertion. The header echo on an error path is covered
+/// over a socket by `error_tests`, so no socket-level assertion is lost by this
+/// test moving in process; only this particular *combination* is now in-process
+/// only.
+#[tokio::test(start_paused = true)]
 async fn test_heavy_heatmap_times_out_with_504() {
-    let timeout = std::time::Duration::from_millis(50);
-    let server = TestServer::start_with_config_and_timeout(fixture_config(), timeout)
-        .await
-        .unwrap();
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(60))
-        .build()
-        .unwrap();
+    let timeout = Duration::from_secs(30);
+
+    // Same reasoning as the single-gain test above: the 504 is produced in mocked
+    // time, but the offloaded rayon work is not cancelled by it and the runtime
+    // waits for the blocking task at drop, so the *test* would otherwise pay the
+    // full grid compute. Bound it with S3's real per-integration budget. This
+    // cannot change the assertion — the request timeout fires in mocked time long
+    // before 250 ms of real time elapse, so the response is always
+    // `request_timeout`, never `computation_budget_exceeded`, and the assertion on
+    // the specific code below is what proves it.
+    let mut config = fixture_config();
+    config.performance.integration_budget_ms = 250;
+
+    let app = build_in_process_app(config, timeout).expect("in-process app must build");
 
     let request = heavy_heatmap_request();
     let custom_id = "timeout-correlation-test-id";
 
-    let start = std::time::Instant::now();
-    let response = client
-        .post(format!("{}/api/v1/heatmap", server.base_url))
-        .header("Content-Type", "application/json")
-        .header("x-request-id", custom_id)
-        .json(&request)
-        .send()
+    let handle = tokio::spawn(async move {
+        let app = app;
+        call_json_with_headers(
+            &app,
+            "/api/v1/heatmap",
+            &request,
+            &[("x-request-id", custom_id)],
+        )
         .await
-        .unwrap();
-    let elapsed = start.elapsed();
+    });
 
-    let status = response.status();
-    let echoed_id = response
-        .headers()
-        .get("x-request-id")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+    // Let the request reach the handler and register the timeout, then jump past
+    // the deadline and let the 504 propagate.
+    tokio::task::yield_now().await;
+    tokio::time::advance(timeout + Duration::from_secs(1)).await;
+    tokio::task::yield_now().await;
+
+    let (status, headers, body) = handle.await.expect("request task must not panic");
 
     assert_eq!(
-        status, 504,
-        "a heatmap exceeding the request timeout must return 504 Gateway Timeout (elapsed {elapsed:?})"
+        status,
+        504,
+        "a heatmap exceeding the request timeout must return 504 Gateway Timeout — body: {}",
+        String::from_utf8_lossy(&body)
     );
 
     // The 504 must be correlatable: RequestId (outermost) attaches the id even on
     // the timeout error path, echoing the client-supplied value.
+    let echoed_id = headers
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
     assert_eq!(
         echoed_id.as_deref(),
         Some(custom_id),
         "the 504 response must carry the x-request-id correlation header"
     );
 
-    let err: ErrorResponse = response.json().await.unwrap();
+    let err: ErrorResponse = serde_json::from_slice(&body).expect("standard JSON error body");
     assert_eq!(
         err.error, "request_timeout",
         "timeout body must be the standard ErrorResponse with code request_timeout"
     );
-
-    server.shutdown().await;
 }

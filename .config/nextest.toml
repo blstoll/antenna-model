@@ -44,15 +44,23 @@ slow-timeout = { period = "10s" }
 #   p12_phi_cap_removed_steered_feed_matches_converged_reference  125 s -> 15.7 s
 #     (43 s under a contended full run) — it sweeps four steered angles against a converged
 #     reference, so it pays the steered cost four times over.
-#   test_heavy_heatmap_times_out_with_504  16.3 s — it exists to exhaust S3's wall-clock
-#     budget, so it is slow by construction and no speedup will change that.
+# Removed from this list 2026-08-15 (roadmap D18):
+#   test_heavy_heatmap_times_out_with_504 — REJOINS the dev loop at 1.2 s (was 16.3 s here,
+#     130.9 s in a full run). Its entry claimed "it exists to exhaust S3's wall-clock budget,
+#     so it is slow by construction and no speedup will change that." Both halves were wrong.
+#     It exists to assert a 504 carries `request_timeout` and an `x-request-id`, which needs no
+#     wall clock at all; it now runs on a paused clock in process, the way its S2b sibling
+#     already did. Worth remembering as a pattern: "slow by construction" was asserted about
+#     the *mechanism* when it was really a property of one *implementation* of the assertion.
 # Added 2026-08-01 by roadmap unit P13:
 #   mode_path_reports_a_radial_error_even_when_the_density_cap_binds  ~1.9 s release, ~35 s
 #     debug — it pins that the mode path still reports a radial error estimate when
 #     radial_points_for clamps to RADIAL_POINTS_SAFETY_MAX, so it must actually reach that cap:
-#     ~3 × 65 537 radial samples, which is what "the cap binds" MEANS. Slow by construction, in
-#     the same class as test_heavy_heatmap_times_out_with_504; no speedup will change it, and
-#     shrinking the dish does not help because the cost is set by the cap, not by D/λ.
+#     ~3 × 65 537 radial samples, which is what "the cap binds" MEANS. Genuinely slow by
+#     construction — unlike test_heavy_heatmap_times_out_with_504, which was filed in this same
+#     class and turned out not to belong to it (see above), the cost here IS the thing asserted:
+#     the test's subject is what happens when the sample cap binds, so it must reach the cap.
+#     Shrinking the dish does not help, because the cost is set by the cap, not by D/λ.
 # Added 2026-08-02 by roadmap unit D14, on review:
 #   binary_id(calibrate::cli_full_mode_real_data_e2e) — the real-anchored full-mode e2e. No
 #     single test crosses the 10 s marker (measured 2.6–5.4 s, 7.6 s for the binary), so the
@@ -67,7 +75,6 @@ not (
   + binary_id(calibrate::cli_full_mode_real_data_e2e)
   + test(p12_phi_cap_removed_steered_feed_matches_converged_reference)
   + test(p12_mode_path_radial_convergence_anchors)
-  + test(test_heavy_heatmap_times_out_with_504)
   + test(mode_path_reports_a_radial_error_even_when_the_density_cap_binds)
 )
 """

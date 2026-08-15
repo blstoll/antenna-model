@@ -252,15 +252,39 @@ pub async fn call_json<E: poem::Endpoint, B: serde::Serialize>(
     path: &str,
     body: &B,
 ) -> (poem::http::StatusCode, Vec<u8>) {
-    let request = poem::Request::builder()
+    let (status, _headers, bytes) = call_json_with_headers(app, path, body, &[]).await;
+    (status, bytes)
+}
+
+/// As [`call_json`], but sets the given request headers and also returns the
+/// *response* headers.
+///
+/// Separate from `call_json` because most callers only assert on status and body;
+/// this exists for the ones that assert a header survives a given path — notably
+/// that `RequestId` still echoes `x-request-id` on an error response, which is a
+/// property of the outermost middleware and so is exactly what an in-process call
+/// through the shared `build_app` stack is able to observe.
+pub async fn call_json_with_headers<E: poem::Endpoint, B: serde::Serialize>(
+    app: &E,
+    path: &str,
+    body: &B,
+    headers: &[(&str, &str)],
+) -> (poem::http::StatusCode, poem::http::HeaderMap, Vec<u8>) {
+    let mut builder = poem::Request::builder()
         .method(poem::http::Method::POST)
         .uri(path.parse().expect("valid test URI"))
-        .header("content-type", "application/json")
-        .body(serde_json::to_vec(body).expect("serializable request body"));
+        .header("content-type", "application/json");
+
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+
+    let request = builder.body(serde_json::to_vec(body).expect("serializable request body"));
 
     let response = app.get_response(request).await;
 
     let status = response.status();
+    let response_headers = response.headers().clone();
     let bytes = response
         .into_body()
         .into_bytes()
@@ -268,7 +292,7 @@ pub async fn call_json<E: poem::Endpoint, B: serde::Serialize>(
         .expect("readable response body")
         .to_vec();
 
-    (status, bytes)
+    (status, response_headers, bytes)
 }
 
 /// Test data builders for creating realistic API requests
