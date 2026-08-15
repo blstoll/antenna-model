@@ -17,15 +17,25 @@ openapi = ["dep:utoipa"]
 # num-complex backs the aperture integrand, the mixed-radix FFT and the far-field
 # pattern (model/{integration,fft,pattern,ray_trace}.rs); postcard + crc32fast are
 # the ANTC artifact wire format and its header checksum (data/loader.rs); tracing
-# is used across model/ and the loader; serde_json is test-only today (the
-# warnings.rs / data/types.rs serde round-trips) and kept a normal dep because it
-# is the natural home for artifact/warning JSON. Cargo does not warn on unused
-# manifest deps, so this list is checked by grep, not by the compiler.
-# config + serde_yaml exist solely for error.rs's `impl From<serde_yaml::Error>`
-# / `impl From<config::ConfigError>` on ConfigError — the orphan rule pins those
-# impls to the crate that defines ConfigError. Neither is web stack. (Discovered
-# during execution: the original plan's dep scan missed these qualified paths.)
-config = "0.15.25"
+# is used across model/ and the loader. Cargo does not warn on unused manifest
+# deps, so this list is checked by grep, not by the compiler — and by the weight
+# assertion in scripts/assert-calibrate-dep-graph.sh, which is what stops a
+# non-web-stack dependency from creeping back in unnoticed (roadmap D27).
+#
+# Deliberately NOT here (roadmap D27, findings 4 and 5):
+#   config, serde_yaml — D4 moved error.rs wholesale, bringing
+#     `impl From<serde_yaml::Error>` / `impl From<config::ConfigError>` for
+#     ConfigError with it, and the orphan rule pinned both to this crate.
+#     Nothing in model/ or data/ produces either error type, and the serde_yaml
+#     impl had no call site anywhere in the workspace. Both impls are gone;
+#     antenna-model converts at its own call site (config/settings.rs). Between
+#     them they pulled json5, ron, rust-ini, toml, yaml-rust2, async-trait,
+#     serde-untagged and an end-of-life unsafe-libyaml into a crate that is
+#     supposed to be physics + artifacts.
+#   serde_json — every use is inside a `#[cfg(test)]` module, so it is a
+#     dev-dependency. It was kept normal on the prediction that it is "the
+#     natural home for artifact/warning JSON"; move it back when something
+#     ships that needs it, not before.
 crc32fast = "1"
 num-complex = "0.4.6"
 # default-features off drops the `heapless-cas` default, which pulls heapless 0.7
@@ -34,8 +44,6 @@ postcard = { version = "1.1.3", default-features = false, features = [
     "use-std",
 ] }
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.150"
-serde_yaml = "0.9.34"
 thiserror = "2.0.18"
 tracing = "0.1.44"
 # Pinned to match antenna-model's exact pin (tests/openapi_spec.rs asserts
@@ -44,4 +52,7 @@ tracing = "0.1.44"
 utoipa = { version = "=5.5.0", features = ["macros"], optional = true }
 
 [dev-dependencies]
+# Test-only: the warnings.rs and data/types.rs serde round-trips (roadmap D27
+# finding 5). See the note in [dependencies] before promoting it back.
+serde_json = "1.0.150"
 tempfile = "3.27.0"

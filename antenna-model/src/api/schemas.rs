@@ -31,8 +31,10 @@ pub use crate::warnings::{ApiWarning, WarningCode};
 
 // Position3D and CoordinateSystem live with the coordinate math in
 // `antenna-core` (roadmap D4); re-exported here so the API schema path —
-// and the generated OpenAPI components — are unchanged.
-pub use crate::model::coordinates_3d::{CoordinateSystem, Position3D};
+// and the generated OpenAPI components — are unchanged. Taken from the short
+// `model::` path, which is the one CLAUDE.md tells new code to prefer and which
+// these two types only gained in D27 finding 6.
+pub use crate::model::{CoordinateSystem, Position3D};
 
 /// Custom serialization for f64 that handles NaN as null in JSON
 mod nan_as_null {

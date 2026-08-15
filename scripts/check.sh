@@ -24,11 +24,11 @@ echo "==> cargo clippy -p antenna-core --all-targets -- -D warnings (openapi OFF
 # feature-gated type passes every workspace check and breaks only the CLI build.
 cargo clippy -p antenna-core --all-targets -- -D warnings
 
-echo "==> scripts/assert-calibrate-dep-graph.sh (CLI graph: normal deps only)"
-# The build + dep-graph assertion live in one script that CI runs too, so the
+echo "==> scripts/assert-dep-graphs.sh (CLI graph + antenna-core weight)"
+# The build + dep-graph assertions live in one script that CI runs too, so the
 # banned-crate list has a single home (roadmap D27). It was inlined here and
 # copy-pasted into ci.yml, and in both copies the assertion **failed open**.
-./scripts/assert-calibrate-dep-graph.sh
+./scripts/assert-dep-graphs.sh
 
 echo "==> cargo clippy --workspace --all-targets -- -D warnings"
 cargo clippy --workspace --all-targets -- -D warnings

@@ -46,13 +46,14 @@ jobs:
         run: cargo clippy -p antenna-core --all-targets -- -D warnings
       - name: Build calibrate package-scoped (no web stack)
         # The only build that uses calibrate's normal deps alone, plus the
-        # dep-graph assertion that keeps the web stack out (roadmap D4).
+        # dep-graph assertions that keep the web stack out of the CLI (roadmap
+        # D4) and the config-file stack out of antenna-core (roadmap D27).
         #
         # Runs the SAME script scripts/check.sh does. It used to be copy-pasted
         # from there, so the banned-crate list lived in four places with nothing
         # detecting drift — and both copies carried the same fail-open bug
         # (roadmap D27).
-        run: ./scripts/assert-calibrate-dep-graph.sh
+        run: ./scripts/assert-dep-graphs.sh
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Test

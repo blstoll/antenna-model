@@ -473,23 +473,22 @@ impl From<ValidationError> for ComputationError {
     }
 }
 
-impl From<serde_yaml::Error> for ConfigError {
-    fn from(err: serde_yaml::Error) -> Self {
-        ConfigError::ParseError {
-            path: "unknown".to_string(),
-            reason: err.to_string(),
-        }
-    }
-}
-
-impl From<config::ConfigError> for ConfigError {
-    fn from(err: config::ConfigError) -> Self {
-        ConfigError::ParseError {
-            path: "config".to_string(),
-            reason: err.to_string(),
-        }
-    }
-}
+// There is deliberately no `From<serde_yaml::Error>` or `From<config::ConfigError>` here
+// (roadmap D27 finding 4). Both impls existed until 2026-08-14, and the orphan rule pinned
+// them to this crate because `ConfigError` is defined here — which meant a crate documented
+// as "physics engine + artifact layer, no web stack" carried `config` (json5, ron, rust-ini,
+// toml, yaml-rust2, async-trait, serde-untagged, …) and an end-of-life `serde_yaml`
+// (`0.9.34+deprecated` → unsafe-libyaml) for two conversions it never performs. Nothing in
+// `model/` or `data/` constructs a `ConfigError` at all.
+//
+// The `serde_yaml` impl had no call site anywhere in the workspace; every YAML parse maps its
+// own error explicitly. The `config` impl had exactly one consumer, `antenna_model::config::
+// settings::ServiceConfig::from_file`, which now converts at its own call site. The type stays
+// here because it is part of this crate's error vocabulary (`AntennaModelError::Config`, and
+// the `DataError` conversion below); only the foreign-crate conversions moved out.
+//
+// If a future caller wants `?` ergonomics over `config::ConfigError`, convert at the boundary
+// in the crate that owns the config stack — do not reintroduce the dependency here to get it.
 
 // Convert ConfigError to DataError for data loading operations
 impl From<ConfigError> for DataError {

@@ -6,6 +6,20 @@ use crate::error::ConfigError;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Convert a `config`-crate error into this project's [`ConfigError`].
+///
+/// This lives here rather than as a `From` impl in `antenna-core` because the orphan rule
+/// would pin such an impl to the crate defining `ConfigError` — which is `antenna-core`, and
+/// which would therefore have to depend on the `config` crate for a conversion it never
+/// performs (roadmap D27 finding 4). `antenna-model` is the only crate that reads config
+/// files, so it is the one that owns the dependency and the conversion.
+fn config_crate_err(err: config::ConfigError) -> ConfigError {
+    ConfigError::ParseError {
+        path: "config".to_string(),
+        reason: err.to_string(),
+    }
+}
+
 /// Main service configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceConfig {
@@ -337,6 +351,21 @@ impl ServiceConfig {
     /// println!("Server listening on {}:{}", config.server.host, config.server.port);
     /// ```
     pub fn from_file(config_path: &str) -> Result<Self, ConfigError> {
+        let config: ServiceConfig =
+            Self::load_unvalidated(config_path).map_err(config_crate_err)?;
+        config.validate()?;
+
+        Ok(config)
+    }
+
+    /// Assemble and deserialize the layered configuration, without validating it.
+    ///
+    /// Split out of [`ServiceConfig::from_file`] so the `config`-crate error type is converted
+    /// in exactly one place. `antenna-core` used to own an `impl From<config::ConfigError> for
+    /// ConfigError`, which made `?` work directly here at the cost of putting the whole
+    /// config-file stack into a crate that is meant to be physics and artifacts only (roadmap
+    /// D27 finding 4). This crate owns the `config` dependency, so the conversion belongs here.
+    fn load_unvalidated(config_path: &str) -> Result<Self, config::ConfigError> {
         let settings = config::Config::builder()
             // Start with default values
             .set_default("server.host", default_host())?
@@ -405,10 +434,7 @@ impl ServiceConfig {
             )
             .build()?;
 
-        let config: ServiceConfig = settings.try_deserialize()?;
-        config.validate()?;
-
-        Ok(config)
+        settings.try_deserialize()
     }
 
     /// Load configuration from the default path ("config/service.yaml")
