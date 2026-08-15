@@ -5991,6 +5991,53 @@ own" adjacent problems).
 
 ---
 
+### D29 — Two gaps left by D18's timeout-test conversion — Effort: S
+
+**Filed 2026-08-15**, on review of the D18 branch. Both are consequences of moving
+`test_heavy_heatmap_times_out_with_504` in process (130.9 s → 1.2 s); neither is a regression
+in served behaviour, and the conversion was right — these are the debts it left.
+
+**1. No test asserts an S2 `request_timeout` 504 over a real socket (low).** Both timeout cases
+in `antenna-model/tests/integration/timeout_tests.rs` now run in process through
+`Endpoint::call`. The doc block on the converted test is honest about this and names the two
+partial substitutes, but neither covers the *combination*:
+
+- `budget_tests::test_over_budget_single_gain_returns_504` is a socket-level 504 with the
+  standard JSON body — but from S3's per-integration budget, a different middleware, carrying
+  `computation_budget_exceeded`.
+- `error_tests` asserts the `x-request-id` echo on an error path over a socket — but on a 413.
+
+So a hyper-level serialization regression *specific to the RequestTimeout 504 response* would
+pass in process and ship. **Recommended fix:** one cheap socket test that keeps the real
+deadline but pays a *small* compute — the expensive request only existed to win a race against
+a real 50 ms deadline, and a request need only be slower than the deadline, not dramatically
+slower, once nothing else is being asserted about margin. Do **not** restore the 12x12 grid;
+see the note in `heavy_heatmap_request`. Consider instead a deliberately tiny
+`request_timeout` with a modest request, accepting the flake risk that the paused-clock tests
+exist to avoid — which is the tradeoff to think about, and the reason this is filed rather
+than done: a flaky socket test is worse than the gap.
+
+**2. `call_json_with_headers` swallows bad header pairs (low).** `poem::RequestBuilder::header`
+*appends* and silently drops a pair whose name or value fails `TryInto`. In a helper whose
+entire purpose is header injection this is a sharp edge in two directions: passing
+`("content-type", …)` yields **two** `content-type` headers rather than overriding the one the
+helper already sets, and a typo'd header name vanishes with no panic — so a test asserting that
+a header is *absent*, or that a malformed header is rejected, would pass while asserting
+nothing. **Recommended fix:** validate in the helper — build `HeaderName`/`HeaderValue`
+explicitly and `expect` on failure (test-only code, so a panic is the right response to a
+malformed test input), and either document the append semantics or switch to replace. Both
+current call sites pass a single well-formed `x-request-id`, so nothing is wrong today; this is
+about the next caller.
+
+**Exit criteria:** item 1 — either a socket-level `request_timeout` 504 test exists, or a
+decision is recorded here that the gap is accepted and why. Item 2 — a malformed header pair
+fails loudly, pinned by a test that would have passed under the current helper.
+
+**Depends on:** nothing. **Coupled to:** D18 (which created both), D28 (same suite-health
+charter).
+
+---
+
 ## Phase 5 — Decision-gated features
 
 Do not start any of these until the corresponding decision-register row is Decided.

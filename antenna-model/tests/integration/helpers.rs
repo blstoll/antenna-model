@@ -264,6 +264,13 @@ pub async fn call_json<E: poem::Endpoint, B: serde::Serialize>(
 /// that `RequestId` still echoes `x-request-id` on an error response, which is a
 /// property of the outermost middleware and so is exactly what an in-process call
 /// through the shared `build_app` stack is able to observe.
+///
+/// **Sharp edge, roadmap D29 item 2:** `poem::RequestBuilder::header` *appends*,
+/// and silently drops a pair whose name or value fails `TryInto`. So passing
+/// `("content-type", …)` here yields two `content-type` headers rather than
+/// overriding the one set above, and a typo'd header name vanishes without a
+/// panic — a test asserting a header's *absence* would pass while asserting
+/// nothing. Both current callers pass a single well-formed `x-request-id`.
 pub async fn call_json_with_headers<E: poem::Endpoint, B: serde::Serialize>(
     app: &E,
     path: &str,

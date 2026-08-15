@@ -1,7 +1,8 @@
 # Test tiers — roadmap unit D18 (filed 2026-08-01).
 #
 #   default = the dev inner loop. Excludes the slow tail: three heavy physics
-#             pins and the whole calibrate full-mode e2e binary. Measured
+#             pins and both whole calibrate full-mode e2e binaries (the second,
+#             cli_full_mode_real_data_e2e, was added by D14). Measured
 #             2026-08-01 after P10-perf: 980 tests, 85.9 s wall (was 963 tests
 #             / 72.8 s when the exclusion list held nine physics pins — P10-perf
 #             returned six of them, so the loop covers 17 more tests for 13 s).
@@ -35,7 +36,8 @@ slow-timeout = { period = "10s" }
 #   dsn34m_offset_feed_mode_count_converges                         -> 1.8 s
 #   p2_moderate_offset_exact_only_gain_pinned_and_routes_standard_po-> 1.8 s
 #   test_beam_steering_from_feed_displacement                       -> 1.8 s
-# The three that stay:
+# The two that stay (three until 2026-08-15, when test_heavy_heatmap_times_out_with_504 left
+# the tier — see the "Removed from this list" note below):
 #   p12_mode_path_radial_convergence_anchors  7.3 s sequential, 9.1 s in a full run — under
 #     the 10 s marker, but it became the dev loop's single longest test and therefore its
 #     critical path: returning it took the loop from 72.8 s to 92.8 s, over D18's 90 s budget,

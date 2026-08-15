@@ -291,7 +291,9 @@ async fn test_single_gain_under_timeout_still_succeeds() {
 /// the `x-request-id` assertion. The header echo on an error path is covered
 /// over a socket by `error_tests`, so no socket-level assertion is lost by this
 /// test moving in process; only this particular *combination* is now in-process
-/// only.
+/// only — meaning a hyper-level serialization regression specific to the
+/// RequestTimeout 504 response would pass here. Filed as roadmap **D29** item 1
+/// rather than fixed by restoring a heavy socket test.
 #[tokio::test(start_paused = true)]
 async fn test_heavy_heatmap_times_out_with_504() {
     let timeout = Duration::from_secs(30);

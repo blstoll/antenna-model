@@ -20,7 +20,7 @@ Sprints 1–7 of 8 are complete (see `docs/implementation-plan.md`): physics eng
 cargo build --release
 
 # Run all tests — dev inner loop (1040 tests, ~25 s, measured 2026-08-15 on an
-# idle 8-core machine). The default nextest profile excludes the slow tier: two
+# idle 8-core machine). The default nextest profile excludes the slow tier: three
 # heavy physics pins + the two calibrate full-mode e2e binaries. See
 # .config/nextest.toml and roadmap D18. (P10-perf returned six pins to this tier
 # on 2026-08-01 — the list is meant to shrink, not ratchet.)
@@ -107,14 +107,25 @@ cargo doc --open
 #     alone, so the only one that fails if calibrate leans on a feature it does
 #     not declare. `clippy -p calibrate --all-targets` does NOT substitute:
 #     --all-targets pulls the dev-dependency antenna-model back in and
-#     re-unifies features. The script then asserts two graph invariants, each
-#     with a negative control pointed at antenna-model (where the detector MUST
-#     fire, so a dead detector fails the gate instead of blessing everything):
-#     antenna-model is not a *normal* dep of calibrate, keeping the web stack
-#     out of the CLI (D4); and antenna-core carries no config-file stack and no
-#     more than CORE_MAX_DEPS packages, keeping it a physics/artifact crate
-#     (D27). Do not weaken either negative control — a guard whose power
-#     nothing asserts is the exact rot P13 records.
+#     re-unifies features. The script then asserts three graph invariants, each
+#     with a control proving the detector is alive (so a dead detector fails the
+#     gate instead of blessing everything). The first two use a negative control
+#     pointed at antenna-model, where the detector MUST fire: antenna-model is
+#     not a *normal* dep of calibrate, keeping the web stack out of the CLI (D4);
+#     and antenna-core carries no config-file stack and no more than
+#     CORE_MAX_DEPS packages, keeping it a physics/artifact crate (D27). The
+#     third (D18) asserts reqwest resolves without the `system-proxy` feature,
+#     which on macOS costs ~11.8 s per `reqwest::Client` construction — i.e.
+#     ~11.8 s per test that starts a `TestServer`, worth 848 s vs 33 s on the
+#     antenna-model suite. It is the only invariant here that **no compile can
+#     observe**: restoring `default-features` keeps build, clippy and CI green
+#     and silently costs ~14 minutes a run. Its control is a positive one
+#     (`reqwest feature "json"` must be present), because after the fix no graph
+#     contains the banned feature to point a negative control at; it asserts the
+#     *feature* edge rather than the `system-configuration` package because that
+#     package is macOS-only and so a package check is vacuous on Linux CI.
+#     Do not weaken any of the three controls — a guard whose power nothing
+#     asserts is the exact rot P13 records.
 ./scripts/check.sh
 ```
 
