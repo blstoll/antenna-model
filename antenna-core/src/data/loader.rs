@@ -37,8 +37,30 @@
 //! **Enforcement.** Container mismatch and schema-MAJOR mismatch are hard errors; a
 //! differing schema MINOR warns and loads. Both producers in `calibrate` write the ANTC
 //! header via one shared writer, so every artifact this repo produces carries a container
-//! stamp. The headerless reader below survives only for artifacts written before that was
-//! true; it is deliberately *not* a supported output format.
+//! stamp.
+//!
+//! **ANTC framing is required; there is no headerless fallback** (roadmap D27 finding 9,
+//! removed 2026-08-14). Until D2 (2026-07-30) the boresight producer wrote a bare postcard
+//! payload, and this loader accepted one by skipping straight to the decode — which meant
+//! skipping *both* integrity checks, the container version gate and the CRC32. It was kept
+//! afterwards to stay compatible with artifacts written before D2. That compatibility turned
+//! out to be empty: the schema gate below runs on every artifact regardless of framing, and
+//! [`crate::data::types::CALIBRATION_SCHEMA_VERSION`] has since moved 2.0 → 3.0 → 4.0 → 5.0,
+//! so every artifact the fallback existed for is refused on the schema axis anyway. It could
+//! therefore only ever succeed on a bare postcard encoding at the *current* schema.
+//!
+//! Two such files did exist and were **not** test helpers, which is worth recording because
+//! it is the part the roadmap filing got wrong:
+//! `antenna-model/tests/fixtures/calibration_data/test_uncalibrated_{x,s}band_boresight.bin`
+//! are committed fixtures that had been carried across every schema bump by *restamping*
+//! (decode, set `format_version`, re-encode bare) rather than by re-running `calibrate` —
+//! which is why they stayed headerless long after D2 made framing universal, and why the
+//! regeneration commands in `antenna-model/tests/README.md` would not have reproduced them.
+//! They were reframed in place when the fallback was removed: a pure 20-byte prepend, payload
+//! bytes untouched, so no fixture value moved.
+//!
+//! Requiring the header trades nothing away and makes a truncated or corrupted file fail as a
+//! rejection instead of as an arbitrary decode.
 
 use crate::data::types::{AntennaCalibration, CALIBRATION_SCHEMA_VERSION};
 use crate::error::DataError;
@@ -81,6 +103,40 @@ pub const ANTC_ARTIFACT_VERSION: u32 = 4;
 /// Byte length of an ANTC header: 4 (magic) + 4 (version) + 4 (crc) + 8 (len) = 20.
 pub const ANTC_HEADER_LEN: usize = 20;
 
+/// Encode a calibration into ANTC container bytes: `[magic][version][crc32][len][payload]`.
+///
+/// This is the counterpart of [`load_calibration_artifact`] and lives beside it so the
+/// framing has **one** definition rather than one per writer. Writers should reach for this
+/// instead of laying out the header themselves —
+/// `calibrate::artifact_export::write_calibration_artifact` (the tool's only artifact writer,
+/// roadmap D2) is a thin wrapper over it, and test helpers that need a loadable artifact use
+/// it too.
+///
+/// That indirection is not ceremony: hand-rolled copies of this layout have been a recurring
+/// defect. D23 found a fourth one in a test carrying a hardcoded container version, which
+/// would have sailed straight past its own version bump, and D27 found a fifth writing no
+/// header at all. A copy cannot drift from [`ANTC_ARTIFACT_VERSION`] if there is no copy.
+///
+/// Note this stamps the **container** axis only. The **schema** axis
+/// (`metadata.format_version`) rides inside the payload and comes from whichever builder
+/// produced `calibration`; see [`crate::data::types::CALIBRATION_SCHEMA_VERSION`].
+pub fn encode_calibration_artifact(
+    calibration: &AntennaCalibration,
+) -> Result<Vec<u8>, postcard::Error> {
+    let payload = postcard::to_allocvec(calibration)?;
+    let crc = crc32fast::hash(&payload);
+
+    let mut bytes = Vec::with_capacity(ANTC_HEADER_LEN + payload.len());
+    bytes.extend_from_slice(ANTC_MAGIC);
+    bytes.extend_from_slice(&ANTC_ARTIFACT_VERSION.to_le_bytes());
+    bytes.extend_from_slice(&crc.to_le_bytes());
+    bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(&payload);
+    debug_assert_eq!(bytes.len() - payload.len(), ANTC_HEADER_LEN);
+
+    Ok(bytes)
+}
+
 /// Load a calibration artifact from a binary file
 ///
 /// Deserializes and validates a calibration artifact from a .bin file.
@@ -111,8 +167,24 @@ pub fn load_calibration_artifact<P: AsRef<Path>>(path: P) -> Result<AntennaCalib
         reason: format!("Failed to read file: {}", e),
     })?;
 
-    // Detect ANTC header format or fall back to legacy headerless format.
-    let payload: &[u8] = if bytes.len() >= ANTC_HEADER_LEN && &bytes[0..4] == ANTC_MAGIC {
+    // ANTC framing is required. There is deliberately no headerless fallback (roadmap D27
+    // finding 9); the module docs record why removing it changed nothing that was actually
+    // loadable.
+    if bytes.len() < ANTC_HEADER_LEN || &bytes[0..4] != ANTC_MAGIC {
+        return Err(DataError::LoadError {
+            path: path.display().to_string(),
+            reason: format!(
+                "missing ANTC container header (expected magic {:?} in the first 4 bytes). \
+                 Artifacts are framed by `calibrate` and carry a container version and a \
+                 CRC32; a bare postcard payload cannot be integrity-checked, so it is \
+                 refused rather than decoded. Regenerate the artifact with a current \
+                 `calibrate` build.",
+                std::str::from_utf8(ANTC_MAGIC).unwrap_or("ANTC")
+            ),
+        });
+    }
+
+    let payload: &[u8] = {
         // Parse ANTC header: [magic 4][version u32 LE][crc u32 LE][len u64 LE][payload]
         let version_bytes: [u8; 4] = bytes[4..8].try_into().map_err(|_| DataError::LoadError {
             path: path.display().to_string(),
@@ -167,9 +239,6 @@ pub fn load_calibration_artifact<P: AsRef<Path>>(path: P) -> Result<AntennaCalib
 
         debug!("ANTC CRC32 verified successfully");
         payload_slice
-    } else {
-        debug!("No ANTC magic detected; using legacy headerless format");
-        &bytes
     };
 
     // Deserialize using postcard
@@ -426,6 +495,24 @@ mod tests {
         bytes
     }
 
+    /// Write `bytes` to a temp file — the raw-byte escape hatch for framing tests.
+    fn write_bytes(bytes: &[u8]) -> NamedTempFile {
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(bytes).unwrap();
+        temp_file.flush().unwrap();
+        temp_file
+    }
+
+    /// Write a calibration the way a real producer does: postcard payload inside ANTC framing.
+    ///
+    /// Tests that are not *about* framing must use this rather than a bare
+    /// `postcard::to_allocvec`. Several did until 2026-08-14, which is how the headerless
+    /// fallback ended up load-bearing for the test suite while no producer wrote one
+    /// (roadmap D27 finding 9).
+    fn write_framed(calibration: &AntennaCalibration) -> NamedTempFile {
+        write_bytes(&encode_calibration_artifact(calibration).unwrap())
+    }
+
     fn create_test_calibration() -> AntennaCalibration {
         let metadata = CalibrationMetadata::builder()
             .antenna_name("Test Antenna")
@@ -479,12 +566,7 @@ mod tests {
     #[test]
     fn test_load_calibration_artifact_success() {
         let calibration = create_test_calibration();
-
-        // Serialize to a temporary file (headerless legacy format)
-        let mut temp_file = NamedTempFile::new().unwrap();
-        let encoded = postcard::to_allocvec(&calibration).unwrap();
-        temp_file.write_all(&encoded).unwrap();
-        temp_file.flush().unwrap();
+        let temp_file = write_framed(&calibration);
 
         // Load it back
         let loaded = load_calibration_artifact(temp_file.path()).unwrap();
@@ -508,17 +590,43 @@ mod tests {
 
     #[test]
     fn test_load_calibration_artifact_invalid_data() {
-        let mut temp_file = NamedTempFile::new().unwrap();
-        temp_file.write_all(b"invalid binary data").unwrap();
-        temp_file.flush().unwrap();
+        let temp_file = write_bytes(b"invalid binary data");
 
         let result = load_calibration_artifact(temp_file.path());
         assert!(result.is_err());
         match result {
             Err(DataError::LoadError { reason, .. }) => {
-                assert!(reason.contains("deserialize"));
+                assert!(
+                    reason.contains("ANTC"),
+                    "unframed input must be refused for its framing, got: {reason}"
+                );
             }
-            _ => panic!("Expected LoadError with deserialization failure"),
+            _ => panic!("Expected LoadError for missing ANTC framing"),
+        }
+    }
+
+    /// The decode-failure path, which `test_load_calibration_artifact_invalid_data` used to
+    /// cover before ANTC framing became mandatory: a file that *is* framed, whose header
+    /// is self-consistent and whose CRC matches, but whose payload is not a decodable
+    /// `AntennaCalibration`. Truncating a real payload is used rather than random bytes so
+    /// the failure is deterministic — postcard reads positionally and a short buffer always
+    /// runs out.
+    #[test]
+    fn framed_artifact_with_undecodable_payload_is_refused() {
+        let payload = postcard::to_allocvec(&create_test_calibration()).unwrap();
+        let truncated = &payload[..payload.len() / 2];
+        // CRC over the truncated bytes, so this reaches the decode rather than tripping the
+        // integrity check — it is the decode that is under test here.
+        let temp_file = write_bytes(&make_antc_bytes(truncated, ANTC_ARTIFACT_VERSION, None));
+
+        match load_calibration_artifact(temp_file.path()) {
+            Err(DataError::LoadError { reason, .. }) => {
+                assert!(
+                    reason.contains("deserialize"),
+                    "expected a decode failure, got: {reason}"
+                );
+            }
+            other => panic!("expected LoadError for an undecodable payload, got {other:?}"),
         }
     }
 
@@ -776,23 +884,30 @@ mod tests {
         }
     }
 
-    /// The legacy headerless path is guarded by the schema axis too — it is the *only*
-    /// version check such a file gets, since it carries no container stamp at all.
+    /// A bare postcard payload is refused for its *framing*, before any of its contents are
+    /// read (roadmap D27 finding 9). This is the negative control for removing the legacy
+    /// headerless fallback, and it deliberately uses a calibration that is valid in every
+    /// other respect — current schema, current physics stamp, passes `validate()` — so the
+    /// only thing it can be rejected for is the missing container header. If someone
+    /// reinstates the fallback, this is the test that fails.
     #[test]
-    fn test_load_rejects_foreign_schema_version_headerless() {
-        let mut calibration = create_test_calibration();
-        calibration.metadata.format_version = "1.0".to_string();
+    fn headerless_artifact_is_refused_even_when_otherwise_valid() {
+        let calibration = create_test_calibration();
+        // Control: the identical calibration loads when framed.
+        load_calibration_artifact(write_framed(&calibration).path())
+            .expect("the framed form of this fixture must load, or the test proves nothing");
 
-        let mut temp_file = NamedTempFile::new().unwrap();
-        temp_file
-            .write_all(&postcard::to_allocvec(&calibration).unwrap())
-            .unwrap();
-        temp_file.flush().unwrap();
+        let temp_file = write_bytes(&postcard::to_allocvec(&calibration).unwrap());
 
-        assert!(
-            load_calibration_artifact(temp_file.path()).is_err(),
-            "a headerless artifact with a foreign schema major must still be rejected"
-        );
+        match load_calibration_artifact(temp_file.path()) {
+            Err(DataError::LoadError { reason, .. }) => {
+                assert!(
+                    reason.contains("ANTC"),
+                    "the refusal must name the missing container header, got: {reason}"
+                );
+            }
+            other => panic!("expected LoadError for a headerless artifact, got {other:?}"),
+        }
     }
 
     #[test]
@@ -833,11 +948,7 @@ mod tests {
     fn test_load_artifact_with_mismatched_physics_model_version() {
         let mut calibration = create_test_calibration();
         calibration.metadata.physics_model_version = 999;
-
-        let mut temp_file = NamedTempFile::new().unwrap();
-        let encoded = postcard::to_allocvec(&calibration).unwrap();
-        temp_file.write_all(&encoded).unwrap();
-        temp_file.flush().unwrap();
+        let temp_file = write_framed(&calibration);
 
         // Mismatch must WARN, not error: load succeeds and preserves the stamp.
         let loaded = load_calibration_artifact(temp_file.path()).unwrap();

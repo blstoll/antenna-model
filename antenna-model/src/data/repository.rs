@@ -553,10 +553,19 @@ mod tests {
             .unwrap()
     }
 
+    /// Write an artifact the way a real producer does — ANTC framing around the postcard
+    /// payload, matching `calibrate::artifact_export::write_calibration_artifact`.
+    ///
+    /// This used to write a bare `postcard::to_allocvec`, which meant every load test in this
+    /// module went down the loader's legacy headerless branch and none exercised the version
+    /// gate or the CRC32 (roadmap D27 finding 9). That branch no longer exists, so these
+    /// tests would now fail at the framing check — but the point is that they were testing
+    /// the wrong path even while they passed.
     fn write_calibration_file(calibration: &AntennaCalibration) -> NamedTempFile {
+        let bytes = antenna_core::data::loader::encode_calibration_artifact(calibration).unwrap();
+
         let mut temp_file = NamedTempFile::new().unwrap();
-        let encoded = postcard::to_allocvec(calibration).unwrap();
-        temp_file.write_all(&encoded).unwrap();
+        temp_file.write_all(&bytes).unwrap();
         temp_file.flush().unwrap();
         temp_file
     }

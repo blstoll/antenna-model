@@ -93,6 +93,11 @@ use std::fmt;
 ///   Two artifacts did have to be carried across:
 ///   `antenna-model/tests/fixtures/calibration_data/test_uncalibrated_{x,s}band_boresight.bin`,
 ///   the legacy headerless fixtures the postcard migration already regenerated once in July.
+///   (**They are no longer headerless.** D27 removed the loader's headerless fallback on
+///   2026-08-14 and reframed both in place — a 20-byte ANTC prepend, payload bytes untouched.
+///   Restamping them for a future schema bump therefore means re-encoding *the payload* and
+///   re-framing, not rewriting the file whole; `loader::encode_calibration_artifact` does the
+///   framing half.)
 ///   They were **restamped, not rewritten** — decoded, `format_version` set, re-encoded — after
 ///   checking that neither carried the vertex-relative feed position, which would have laundered
 ///   a wrong artifact past the gate this bump exists to close. (One of them carries a 5 cm

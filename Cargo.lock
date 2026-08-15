@@ -787,7 +787,6 @@ dependencies = [
  "aws-sdk-s3",
  "chrono",
  "clap",
- "crc32fast",
  "csv",
  "ndarray",
  "postcard",
