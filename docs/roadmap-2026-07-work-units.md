@@ -236,6 +236,68 @@ G1 ─┬─ G2 ── G3
     │      deriving knots from lambda/D would │
     │      make calibrate REFUSE the narrow-  │
     │      beam antennas D9 exists to ship.   │
+    │  D26 DONE 2026-08-13 — D21's code       │
+    │      reviewed after the D4 merge. The   │
+    │      served-output finding needed a     │
+    │      SECOND half nobody had named: the  │
+    │      surface's elevation axis is the    │
+    │      fitted E-cone axis, so on a        │
+    │      negative cut its knots run below   │
+    │      zero while served elevation is a   │
+    │      polar angle and never does --      │
+    │      widening the coverage range alone  │
+    │      would have traded "no correction"  │
+    │      for "a correction read at a        │
+    │      clamped edge". Fixed as a          │
+    │      CONVENTION: the parser reflects    │
+    │      (phi, -theta) onto the identical   │
+    │      (phi+180, theta), pinned physics-  │
+    │      preserving to 3.2e-6 dB on the     │
+    │      asymmetric branch, and the export  │
+    │      now REFUSES an out-of-convention   │
+    │      extent instead of clamping. No     │
+    │      existing fixture has a negative    │
+    │      cone row (D14's generator already  │
+    │      encodes half-planes in clock), so  │
+    │      NO number moved -- the filing's    │
+    │      "this moves D14's e2e" was wrong.  │
+    │      Findings 3+5 collapsed: the WORSE  │
+    │      of the two INFINITY meanings was   │
+    │      deleted rather than renamed, so    │
+    │      INF/INF=NaN is unreachable by      │
+    │      construction. Finding 2 fixed by   │
+    │      DELETING the parameter, not        │
+    │      validating it.                     │
+    │  D27 filed 2026-08-14 — the D4 review.  │
+    │      Findings 1-3 FIXED immediately: a  │
+    │      gate that did not gate. The web-   │
+    │      stack dep check FAILED OPEN under  │
+    │      set -euo pipefail (a nonzero cargo │
+    │      tree just selects the if's false   │
+    │      branch, so the gate printed        │
+    │      success without checking); it      │
+    │      asserted a symptom list with no    │
+    │      negative control; and it was copy- │
+    │      pasted into ci.yml, so the same    │
+    │      bug lived in both. Now ONE script  │
+    │      both callers run, with the         │
+    │      INVARIANT (antenna-model is not a  │
+    │      normal dep of calibrate) asserted  │
+    │      first and the detector pointed at  │
+    │      antenna-model's own graph, where   │
+    │      it MUST fire. 4-9 open: core       │
+    │      carries config + serde_yaml for    │
+    │      two From impls; serde_json normal  │
+    │      but test-only; Position3D/         │
+    │      CoordinateSystem not re-exported;  │
+    │      data/mod.rs duplicates a nine-name │
+    │      list; domain-contract line numbers │
+    │      stale -- NOT by a flat 88 as filed │
+    │      (28/88/96/167), so a mechanical    │
+    │      sweep would corrupt most of them;  │
+    │      loader's headerless fallback skips │
+    │      version+CRC and is the ONLY branch │
+    │      repository tests cover.            │
     └─ (Phases 1–3 done) ─ D4 ─ D7
 Superseded by C8 (do not implement): S7, C5, C6
 Phase 5: F1..F9 (F8 done) gated on register rows (P3, P5/F4, F5, D9, F9); P1 + C8 DECIDED 2026-07-08;
@@ -4519,7 +4581,7 @@ are meaningful rather than dominated by a topology gap.
   the pipeline or the fill*, not a reason to widen the budget") is unanswerable while a known
   pipeline defect is outstanding. Feeds D9.
 
-### D18 — Test-suite latency budget + tiering — Effort: S/M (tiering ✅ landed 2026-08-01; tasks 2–3 open)
+### D18 — Test-suite latency budget + tiering — Effort: S/M (tiering ✅ landed 2026-08-01; tasks 2–4 open, task 4 added 2026-08-14)
 
 **Filed 2026-08-01 (maintainer).** The full suite reached **505 s** under `cargo test`; the
 2026-08-01 nextest adoption cut the same coverage to ~190–226 s. No unit owned the budget, so
@@ -4612,6 +4674,57 @@ changes *how often tests get run*, which is a correctness input, not a comfort.
   lever is a *separate, smaller* grid for the tuner tests — they exercise the tuner, not the
   correction surface's resolution — which the `generate_rows_without_bias()` split already
   anticipates.
+
+---
+
+**Task 4, added 2026-08-14: the dev loop's wall time is neither what the docs claimed nor a
+stable quantity, and the reason is un-diagnosed.** `[NEEDS INVESTIGATION — do not act on the
+hypothesis below without measuring it]`
+
+Filed while correcting CLAUDE.md's stale "~86 s, 980 tests" line (D27 finding 9). The count
+part was simple — the default tier is **1038 tests** (1021 before D26 added 17). The wall
+time was not:
+
+| run | wall | tests | "slow" (>10 s marker) | conditions |
+|---|---|---|---|---|
+| 1 | **339 s** | 1038 | 120 | least contended |
+| 2 | **821 s** | 1038 | 120 | overlapped another cargo run |
+| 3 | **931 s** | 1038 | 123 | overlapped another cargo run |
+| 4 | 546 s (partial, 770 tests) | — | 79 | killed mid-run |
+
+Same commit, same machine (idle 8-core, warm build), same command. **A 2.7× spread between
+the cleanest and dirtiest run means no single figure belongs in a doc**, which is why
+CLAUDE.md now quotes none and says to measure your own machine.
+
+Two observations that should shape the investigation:
+
+1. **The "slow" markers are not measuring test cost.** Among the tests marked slow are
+   `error_tests::test_nonexistent_endpoint` (>40 s), `api_tests::test_status_endpoint`
+   (>60 s), `api_tests::test_empty_batch_is_rejected` (>10 s) and
+   `error_tests::test_oversized_batch_request` (>40 s). A 404 test does not consume 40 s of
+   CPU. These are **blocked on wall clock, not busy** — so the headline "120 slow" describes
+   scheduling, not expense, and any effort spent making those tests faster is wasted.
+2. **The genuinely expensive tests are already excluded.** In the full-profile run the top of
+   the table is entirely `cli_full_mode_e2e` (129, 84, 84, 82, 78, 71 s) plus
+   `test_heavy_heatmap_times_out_with_504` (62 s) and the two P12 pins (36, 34 s) — every one
+   of which the default tier already skips. So the default tier's wall time is **not**
+   concentrated where this unit's exclusion list is pointing.
+
+**Untested hypothesis, offered only as a starting point:** `.config/nextest.toml` gives
+`test_sustained_load` `threads-required = "num-test-threads"` in *both* profiles. Nextest must
+drain every other slot before starting it and runs nothing alongside it, so it serializes the
+run around one test while the trivial HTTP tests sharing `antenna-model::integration` queue up
+behind it accruing wall clock. That override is deliberate and well argued where it is defined
+— the test asserts a *rate*, which no speedup makes schedule-independent — and its reasoning
+should not be undone casually. What is missing is any measurement of what it costs total wall
+time. **This is a guess consistent with the evidence, not a diagnosis; measure before acting,
+and if it is wrong, record that here.**
+
+**Exit criteria for task 4:** a reproducible wall-clock measurement procedure (stated machine
+state, stated command, stated repetitions) and an explanation for the spread. If the answer is
+"the loop is fine and the measurements were contended", say so and close it — that is a
+legitimate outcome and worth writing down, because the next person to see 900 s will otherwise
+re-run this investigation.
 
 ### D19 — Adaptive knot placement lands internal knots on the axis bounds — Effort: S/M — ✅ **DONE 2026-08-02**
 
@@ -5232,9 +5345,91 @@ shipped CLI is still unaffected (it uses `surface_fitting_params`' constants), s
 right for the *binary* — but the reachability claim as written is a property nobody checks.
 See D26 finding 4.
 
+**Re-amended 2026-08-13 by D26's implementation: the reachability premise now holds.**
+`validate_fitting_inputs` requires all three `min_knot_spacing_*` to be finite and strictly
+positive, pinned by `a_nonpositive_minimum_knot_spacing_is_refused` (all three axes × four bad
+values). The paragraph above may be read as written again. **This does not close D25**, which
+is about the *sidecar's encoding*, not about reachability: `serde_json` still cannot serialize
+a non-finite `f64`, and D9's NaN sentinel means the domain difference between the artifact and
+its JSON sidecar remains unstated. D25's own exit criterion is untouched.
+
 ---
 
-### D26 — D21's angular-resolution code: one served-output defect and four soundness gaps — Effort: M
+### D26 — D21's angular-resolution code: one served-output defect and four soundness gaps — Effort: M — ✅ **DONE 2026-08-13**
+
+> **Closeout 2026-08-13** (branch `fix/d26-angular-resolution-soundness`). All six exit
+> criteria met. The headline is that **finding 1's fix is a convention, not a range
+> calculation** — and the filing, which framed it as "export a coverage range that contains
+> the calibrated region", would not have produced a working artifact on its own.
+>
+> **Finding 1 needed a second half the filing did not name.** Widening the exported elevation
+> range to the `|θ|` extent fixes `is_boresight_only()` and `contains()`, and is where the
+> obvious fix stops. But the *correction surface* would still have been unreachable: its
+> elevation axis is the fitted E-cone axis, so on a `-14°…0°` cut its knots run negative,
+> while the served elevation is a polar angle from boresight and is **never** negative
+> (`compute_emitter_direction_with_attitude`). The service would then have reported the query
+> in coverage and evaluated the surface outside its own knot span — trading "no correction"
+> for "a correction read at a clamped edge", which is worse, because the first is at least
+> visible as `correction_applied: false`. So the fix normalizes at ingest instead:
+> `MeasurementPoint::to_polar_convention` reflects `(φ, −θ)` onto the identical direction
+> `(φ + 180°, θ)` in the parser, and predictions, residuals, knots, extents, validity and
+> coverage all speak one convention thereafter. The export's clamp is replaced by a **refusal**
+> — a clamp cannot distinguish "already correct" from "silently truncated", which is precisely
+> how this survived.
+>
+> **The reflection is physics-preserving, and that is now pinned rather than assumed.** The
+> far-field computation carries `sin θ` signed, and `Jₘ(−u) = (−1)ᵐ Jₘ(u)` cancels against
+> `e^{im(φ+π)} = (−1)ᵐ e^{imφ}` mode by mode while the obliquity factor depends on the even
+> `cos θ`. Measured on the asymmetric (azimuthal-mode) branch, where the cancellation is real
+> rather than trivial: **3.2e-6 dB** worst difference, i.e. quadrature, with a negative control
+> proving the geometry varies with clock at all.
+>
+> **Nothing in the existing tree moved.** No fixture in the repository contains a negative
+> E-cone row — D14's CR-159703 generator already encodes half-planes in *clock* and takes
+> `.abs()` of the peak angle, which is the same convention arrived at independently — so the
+> normalization is a no-op on every existing dataset and the D14 e2e numbers are unchanged.
+> The filing's gotcha ("finding 1 moves numbers in the D14 real-anchored e2e") was wrong for
+> that reason; there were no known-defect pins to invert.
+>
+> **Findings 3 and 5 collapsed into one change.** Rather than separate the two `INFINITY`
+> meanings with two sentinels, the *worse* one was deleted: `widest_knot_gap` now returns
+> `Result` and refuses an empty, degenerate or non-finite axis instead of encoding "infinitely
+> coarse" as `INFINITY`. Only the clock-period meaning survives (no structure to resolve — the
+> best case), so `INF/INF = NaN` is unreachable by construction rather than by guard. The
+> deserialization side is separately protected: the ratio accessors return **0.0** for a
+> spacing that cannot be divided by, and `AngularResolution::validate` — now called from
+> `AntennaCalibration::validate`, which never inspected `metadata` before — refuses such an
+> artifact at load.
+>
+> **Finding 2 was fixed by removing the parameter, not by validating it.** The exit criterion
+> asked for a test that fails if the assessed and stamped diameters disagree; making them
+> unrepresentable as different values is stronger. `export_full_calibration` derives the
+> assessment from `physical.diameter_m` — the same field it stamps — and the test re-derives
+> it from the **artifact's own** `reflector.diameter_m`, with a 12 m dish as the negative
+> control. `main.rs` now builds `export_physical_params` before the assessment so its warning
+> and the artifact describe the same dish. The false doc comment is gone.
+>
+> **One finding-5 item is deliberately not addressed:** the under-resolved warning is still
+> emitted only by the CLI, so a library embedder calling `assess_angular_resolution` +
+> `export_full_calibration` still gets no warning. It is not in the exit criteria, and the
+> natural fix (warn inside the export) makes the CLI log the same warning twice, at a worse
+> place than the deliberate one right after the in-sample RMSE. Left as filed prose.
+>
+> **Found while testing, not fixed (pre-existing, not D26's):** `CalibrationCoverage::contains`
+> is a closed comparison against a range built from the measured extents, so a query at the
+> exact azimuth maximum is decided by floating point — a requested clock of 315° arrives as
+> `315.00000000000017` and falls out of coverage. The new e2e probes off the boundary and says
+> so in a comment. Worth its own unit if edge-of-coverage behaviour ever matters.
+>
+> **What landed:** `MeasurementPoint::to_polar_convention` + parser reflection with an `info!`
+> line naming the count; the export elevation guard; `export_full_calibration` losing its
+> `angular_resolution` parameter; `widest_knot_gap` returning `Result` and covering the clock
+> axis; `min_knot_spacing_*` validated in `validate_fitting_inputs`; `knots_per_lobe_period`
+> guard + `AngularResolution::validate` + `ValidationError::InvalidAngularResolution`;
+> `CorrectionSurfaceParams::shipped()` as the single owner of the shipped knot configuration
+> (three hand-copies deleted); the D14 oracle reading its diameter off the artifact. New test
+> binary `calibrate/tests/negative_cone_served_coverage_e2e.rs` (5 tests, 0.46 s — no slow-tier
+> entry needed); **all five fail with the clamp and the normalization reverted**, checked.
 
 **Filed 2026-08-13**, from the code review of the merged D21 (`6f42799`, PR #41 — which
 includes the `c4f460d` cone fix). Filed as its own unit rather than fixed inside the D4 crate
@@ -5338,6 +5533,168 @@ stated order; D25's reachability paragraph is wrong until finding 4 is resolved.
 
 **Depends on:** D4 (merge first — `data/types.rs` now lives in `antenna-core`, so this unit
 should be written against the post-split tree to avoid a pointless conflict).
+
+---
+
+### D27 — D4's crate split: a gate that failed open, and five debt items it left — Effort: M
+
+**Filed 2026-08-14**, from the review of the merged D4 (`7ea584c`, PR #42). Findings 1–3 were
+**fixed immediately** on the D26 branch rather than filed, because they are a *gate that did
+not gate* — everything else in this unit is protected by it, so deferring them would have meant
+deferring the protection too. Findings 4–9 remain open.
+
+Every claim below was re-verified against the tree on 2026-08-14; where the original review was
+wrong about a detail, the correction is recorded with it (finding 8).
+
+---
+
+**1 — The web-stack dep guard failed open.** `[GATE — FIXED 2026-08-14]`
+`scripts/check.sh:38` and the copy at `.github/workflows/ci.yml:53` both read:
+
+```bash
+if cargo tree -p calibrate -e normal | grep -E 'poem|h3o|utoipa|dashmap'; then … exit 1; fi
+```
+
+Under `set -euo pipefail` a **nonzero `cargo tree` does not abort the script** — the failing
+pipeline simply selects the `if`'s false branch, and the gate prints success without having
+checked anything. Demonstrated: `bash -c 'set -euo pipefail; if false | grep -E poem; then echo
+FIRED; fi'` prints nothing and returns 0; with a real broken invocation
+(`cargo tree -p nonexistent-pkg`) the guard reported a clean graph. So a package rename, a
+manifest error, or a `cargo tree` behaviour change would have retired D4's central invariant
+silently. **Fixed:** output is captured and its exit status checked explicitly, and a failing
+`cargo tree` is now a hard error naming the fact that the guard did not run.
+
+**2 — The guard asserted a symptom list with no negative control.** `[GATE — FIXED 2026-08-14]`
+`poem|h3o|utoipa|dashmap` enumerates *today's* web stack, not the invariant D4 established,
+which is that **antenna-model is not a normal dependency of calibrate** (the web stack is
+reachable only through it; it is kept a dev-dependency on purpose, roadmap C13). Swap poem for
+axum and the symptom list goes quiet while the invariant does not. Nothing proved the grep
+still had power, either — the exact rot P13 records, where a fitted guard drifted 43.5× past
+its own constant with nothing able to notice. **Fixed:** the invariant is asserted first and
+the symptom list kept as defence in depth (it catches a web-stack crate arriving by some other
+route, which the invariant would not see); and the detector is pointed at **antenna-model's own
+graph first**, where it *must* fire, so a dead detector fails the gate instead of blessing
+everything. All three failure modes were verified to fire.
+
+**3 — The two gate steps were copy-pasted into CI.** `[GATE — FIXED 2026-08-14]` The
+banned-crate list lived in four places (two greps, two comments) with nothing detecting drift
+— and, as finding 1 shows, the drift that mattered was already there: both copies carried the
+same bug. **Fixed:** extracted to `scripts/assert-calibrate-dep-graph.sh`, which
+`scripts/check.sh` and `ci.yml` both call.
+
+> **Not done, and deliberately left as a maintainer call:** the review's stated fix was "CI
+> calls `scripts/check.sh`". That is a larger change than the drift it cures — CI runs the
+> steps separately for per-step annotations and caching, and splits `cargo audit` into its own
+> `continue-on-error` job, all of which a single `check.sh` invocation would flatten. Extracting
+> the one duplicated assertion removes the named harm; whether local and CI should be
+> byte-identical is a separate decision. **The other four steps remain duplicated.**
+
+---
+
+**4 — The "no web stack" core carries a config-file stack.** `antenna-core/Cargo.toml:28,38`.
+`error.rs` moved wholesale in D4, bringing `impl From<serde_yaml::Error>` and
+`impl From<config::ConfigError>` for `ConfigError` (`error.rs:476,485`) — and the orphan rule
+pins those impls to the crate defining `ConfigError`. Nothing in `model/` or `data/` produces
+either error type. Measured cost:
+
+```
+antenna-core → config v0.15.25 → json5, ron, rust-ini, toml, yaml-rust2,
+                                 serde_json, async-trait, serde-untagged, …
+             → serde_yaml v0.9.34+deprecated → unsafe-libyaml
+```
+
+None of it is web stack, so **the finding-1/2 guard cannot see it by construction** — the guard
+asks about poem, not about weight. `serde_yaml` is additionally end-of-life (the version string
+literally carries `+deprecated`). Options: move the config-facing `ConfigError` variants (and
+their impls) to `antenna-model`, leaving core a physics/artifact error vocabulary; or keep
+`ConfigError` in core and convert at the boundary in `antenna-model` with a local newtype.
+The first is the honest split; the second is smaller. **Exit criterion:** `cargo tree -p
+antenna-core -e normal` shows neither `config` nor `serde_yaml`, and the guard script gains a
+weight assertion so this cannot silently return.
+
+**5 — `serde_json` is a normal dependency with only test uses.**
+`antenna-core/Cargo.toml:37`. All six uses are inside `#[cfg(test)]` modules
+(`warnings.rs:256,283,289,298`, `data/types.rs:2323,2704`). The manifest comment is honest
+about it — "serde_json is test-only today … and kept a normal dep because it is the natural
+home for artifact/warning JSON" — but "natural home" is a prediction, and YAGNI says move it to
+`[dev-dependencies]` until something ships that needs it. **Exit criterion:** moved; `cargo
+build -p antenna-core` still succeeds.
+
+**6 — The short path CLAUDE.md tells new code to prefer does not exist for the two types D4
+moved.** `antenna-core/src/model/mod.rs:157` re-exports thirteen *functions* from
+`coordinates_3d` but neither `Position3D` nor `CoordinateSystem`
+(`coordinates_3d.rs:51,90`), so `antenna_core::model::Position3D` does not resolve and the only
+route is the full module path. Every other physics type in that file is re-exported. CLAUDE.md
+now says "the canonical home of a physics or artifact type is `antenna_core::…`; prefer that
+path in new code", which for these two is advice that does not compile. **Exit criterion:**
+both re-exported beside the functions; `antenna_model::api::schemas`'s re-export
+(`schemas.rs:35`) retargeted at the short path.
+
+**7 — `antenna-model/src/data/mod.rs:13` duplicates core's nine-name convenience list
+verbatim.** Adding a tenth to core silently fails to reach `antenna_model::data::`. Collapses
+to `pub use antenna_core::data::*;` (which also subsumes the `{loader, types}` line above it).
+Note the tradeoff to state in the commit: a glob re-export makes antenna-model's public surface
+track core's automatically, which is exactly what this facade wants and is not what you would
+want of a hand-curated API.
+
+**8 — `docs/domain-contract.md`'s `coordinates_3d.rs` line numbers are stale — but NOT by a
+uniform offset, and the original review was wrong about this.** The review reported "all five
+cited functions are off by 88". Measured:
+
+| function | doc says | actual | delta |
+|---|---|---|---|
+| `beam_deviation_factor` | 648 | 676 | **+28** |
+| `compute_feed_position_from_pointing` | 673 | 701 | **+28** |
+| `geodetic_to_ecef` | 169 | 257 | +88 |
+| `ecef_to_enu_rotation` | 263 | 359 | **+96** |
+| `quaternion_rotate` | 289 | 456 | **+167** |
+
+D4 did not merely prepend a module header: it moved `Position3D`/`CoordinateSystem` into the
+file and reordered, so the offset **grows through it**. There are ~20 `coordinates_3d.rs:N`
+citations in the file, not five. **A mechanical `+88` sweep would fix three and corrupt the
+rest** — this needs per-symbol re-verification. Worth doing because this document's whole
+standing is "ground truth"; it says so, and it says "if code and this contract disagree, stop
+and ask", which is advice that costs real time when the pointer is wrong. **Exit criterion:**
+every citation re-derived from the current tree, plus a note on whether line-level citations
+are worth keeping at all given they have now rotted twice (the header says they were last
+re-verified 2026-07-07).
+
+**9 — The loader's legacy headerless fallback skips both integrity checks, and it is the only
+branch the repository's load-path tests exercise.** `antenna-core/src/data/loader.rs:171`: when
+the ANTC magic is absent the loader takes `&bytes` directly, bypassing the version gate
+(`:140`) and the CRC32 check (`:157`). `antenna-model/src/data/repository.rs:558`'s
+`write_calibration_file` helper writes a bare `postcard::to_allocvec`, so **every** repository
+load test goes down the unchecked path — the framed path, which is the only one any real
+producer writes since D2, is untested there. This is a *fifth* unframed producer, after the
+fourth hand-rolled ANTC writer D23 found in a test.
+
+Pre-existing, and not D4's doing — flagged because D4 touched the file. It is really a
+`[DECISION]`: **does the headerless fallback still need to exist?** D2 made
+`write_calibration_artifact` the tool's only writer, and D9 means no `.bin` ships in-repo, so
+there may be no headerless artifact anywhere outside test helpers. If so, deleting the fallback
+is strictly better than testing it: a bare postcard payload would then be rejected rather than
+decoded without a CRC. **Exit criterion:** either the fallback is removed and the loader
+requires ANTC framing, or it stays with a stated reason and the repository tests are switched
+to the framed writer so both branches are covered.
+
+---
+
+**10 — CLAUDE.md's dev-loop figure was stale in both halves.** `[SPLIT — count FIXED
+2026-08-14; timing handed to D18 task 4]` The line read "~86 s, 980 tests". The **count** was
+four units stale and is corrected to 1038 (1021 before D26's 17 tests). The **wall clock**
+turned out not to be a correctable number at all: four runs of the identical suite on one idle
+8-core machine measured 339 s / 821 s / 931 s, a 2.7× spread. CLAUDE.md therefore now quotes
+**no** wall-clock figure and says to measure your own machine — replacing a stale number with a
+fresh number would have re-created the same rot within weeks. The spread itself, and the
+evidence that the "slow" markers land on trivial HTTP tests (a 404 test at >40 s) and so
+measure scheduling rather than cost, is filed as **D18 task 4** with an explicitly untested
+hypothesis. D18 owns the suite's latency budget; this unit should not also own it.
+
+**Suggested order.** 5 → 7 → 6 (mechanical, minutes each), then 4 (the real dependency
+decision), then 9 (needs a decision first), then 8 (a sweep, and the least load-bearing).
+10 is done bar D18's half.
+
+**Depends on:** nothing. Findings 4–7 are independent of each other.
 
 ---
 

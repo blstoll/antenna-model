@@ -1197,14 +1197,24 @@ fn the_artifact_records_that_its_knots_cannot_resolve_this_antennas_lobe_structu
     }
 
     // Derived here from the dish geometry, so the recorded value cannot be a constant that
-    // happens to match. 1.22 m is the class fixture's diameter; 12.2 GHz is the grid's
-    // highest frequency, which is the frequency the assessment must use (shortest wavelength,
-    // finest structure) — not the 12.1 GHz anchor frequency.
-    let expected_lobe_period_deg = (299_792_458.0 / 12_200e6 / 1.22_f64).to_degrees();
+    // happens to match. 12.2 GHz is the grid's highest frequency, which is the frequency the
+    // assessment must use (shortest wavelength, finest structure) — not the 12.1 GHz anchor
+    // frequency.
+    //
+    // The diameter is read off **the artifact just loaded**, not written as 1.22 here. That
+    // is half the property this assertion exists to prove: an `angular_resolution` describing
+    // a different dish than the artifact's own `diameter_m` is exactly roadmap D26 finding 2,
+    // and a hardcoded 1.22 agrees with both antennas at once, so it could not see it.
+    let stamped_diameter_m = calibration.physical_config.reflector.diameter_m;
+    assert!(
+        (stamped_diameter_m - 1.22).abs() < 1e-9,
+        "the fixture's dish is 1.22 m; the artifact stamped {stamped_diameter_m} m"
+    );
+    let expected_lobe_period_deg = (299_792_458.0 / 12_200e6 / stamped_diameter_m).to_degrees();
     assert!(
         (resolution.cone_lobe_period_deg - expected_lobe_period_deg).abs() < 1e-6,
-        "the recorded cone lobe period {:.6}° must be λ/D at the grid's top frequency \
-         ({expected_lobe_period_deg:.6}°)",
+        "the recorded cone lobe period {:.6}° must be λ/D at the grid's top frequency, for \
+         the diameter this same artifact stamps ({expected_lobe_period_deg:.6}°)",
         resolution.cone_lobe_period_deg
     );
 

@@ -100,7 +100,6 @@ fn test_full_export_loads_via_service() {
         0.99,
         0.9,
         true,
-        assess_angular_resolution(&surface, physical.diameter_m).expect("angular resolution"),
     )
     .expect("export");
 
@@ -187,7 +186,6 @@ fn test_full_export_correction_evaluates_against_3d() {
         0.99,
         0.9,
         true,
-        assess_angular_resolution(&surface, physical.diameter_m).expect("angular resolution"),
     )
     .expect("export");
 
@@ -271,7 +269,6 @@ fn the_angular_resolution_assessment_round_trips_through_the_artifact() {
         0.99,
         0.9,
         true,
-        measured.clone(),
     )
     .expect("export");
 
@@ -300,5 +297,97 @@ fn the_angular_resolution_assessment_round_trips_through_the_artifact() {
         "expected well under one knot per lobe period, got {:.4} — if this geometry has \
          become resolvable the control above is no longer doing anything",
         served.cone_knots_per_lobe_period()
+    );
+}
+
+/// The artifact's `angular_resolution` and its `diameter_m` describe the **same** dish.
+///
+/// Roadmap **D26** finding 2. `export_full_calibration` used to take the assessment as a
+/// parameter while the caller derived it from a second, independent read of the diameter
+/// (`class.geometry.diameter_m`), so the two fields could describe different antennas — the
+/// invariant C13 and D23 established two lines away in the same function. Nothing could
+/// observe a divergence, because every call site happened to pass the matching value.
+///
+/// This test re-derives the assessment **from the artifact's own stamped diameter** and
+/// requires it to reproduce the artifact's own stamped assessment. The negative control is
+/// what gives it power: a different diameter must produce a different answer, so the equality
+/// above is a real constraint rather than two ways of writing a constant.
+#[test]
+fn the_stamped_diameter_is_the_one_the_assessment_was_made_against() {
+    let measurements = build_measurements();
+    let predictions = vec![0.0; measurements.len()];
+    let params = CorrectionSurfaceParams {
+        spline_order: 4,
+        num_knots_frequency: 1,
+        num_knots_econe: 2,
+        num_knots_eclock: 2,
+        regularization: 1e-3,
+        adaptive_knots: false,
+        cross_validation_folds: 0,
+        min_knot_spacing_frequency: 50.0,
+        min_knot_spacing_econe: 1.0,
+        min_knot_spacing_eclock: 5.0,
+    };
+    let surface =
+        fit_correction_surface(&measurements, &predictions, &params).expect("surface fit");
+
+    const DIAMETER_M: f64 = 3.7;
+    const OTHER_DIAMETER_M: f64 = 12.0;
+
+    let physical = ExportPhysicalParams {
+        diameter_m: DIAMETER_M,
+        focal_length_m: 1.85,
+        f_over_d_ratio: 0.5,
+        surface_rms_mm: 1.2,
+        feed_position_m: (0.0, 0.0, 0.0),
+        q_factor: 8.0,
+        phase_center_offset_m: 0.0,
+        asymmetry_factor: 1.0,
+        mesh: None,
+    };
+
+    let calibration = export_full_calibration(
+        "integ_antenna",
+        "x_band",
+        "Integ 3.7m",
+        "file://integ.csv".to_string(),
+        &physical,
+        &surface,
+        &measurements,
+        0.4,
+        0.99,
+        0.9,
+        true,
+    )
+    .expect("export");
+
+    let tmp = tempfile::NamedTempFile::new().expect("tmp");
+    write_antc(&calibration, tmp.path());
+    let loaded = load_calibration_artifact(tmp.path()).expect("service load");
+
+    let stamped_diameter = loaded.physical_config.reflector.diameter_m;
+    assert_eq!(stamped_diameter, DIAMETER_M);
+
+    let stamped_resolution = loaded
+        .metadata
+        .angular_resolution
+        .expect("a full-mode artifact must carry its angular resolution");
+
+    // Re-derive from the artifact alone. Nothing outside the file is consulted.
+    let from_the_artifact =
+        assess_angular_resolution(&surface, stamped_diameter).expect("re-assessment");
+    assert_eq!(
+        stamped_resolution, from_the_artifact,
+        "the artifact's angular resolution must be the one its own diameter implies"
+    );
+
+    // Negative control: a different dish gives a different answer, so the equality above is
+    // a constraint on the diameter and not an identity that holds for anything.
+    let from_another_dish =
+        assess_angular_resolution(&surface, OTHER_DIAMETER_M).expect("control assessment");
+    assert_ne!(
+        stamped_resolution, from_another_dish,
+        "a {OTHER_DIAMETER_M} m dish must not produce the same assessment as a \
+         {DIAMETER_M} m one, or this test cannot detect a divergent diameter"
     );
 }
