@@ -1,184 +1,188 @@
 # Findings — test-suite execution time (2026-08-15)
 
-Measurements and analysis collected while verifying roadmap **D27**, written for whoever
-picks up **D18** (test-suite latency budget) and **D28** (test isolation). Everything here is
-measured unless explicitly labelled a hypothesis.
+Roadmap **D18** (test-suite latency budget). The suite's dominant cost was found and fixed;
+this records the measurements, the fix, and — because the first diagnosis was wrong in an
+instructive way — how the wrong answer survived a plausible-looking argument.
+
+**Headline:** `antenna-model` full-profile went from **848 s to 33.1 s** (25.6×), all 504
+tests passing, via a one-line change to a dev-dependency's feature set. The most expensive
+test in the suite, `test_heavy_heatmap_times_out_with_504`, went from **130.9 s to 1.2 s**
+separately, by converting it to the paused-clock pattern its sibling already used.
 
 **Machine and conditions:** macOS (darwin 25.6.0), 8-core, warm build, `debug` profile
-(`cargo nextest run`, i.e. unoptimized — this matters enormously, see §3). Read §5 before
-trusting any single number: some runs were contended, and the contention is called out
-per-row.
+(`cargo nextest run`, i.e. unoptimized — this matters, see §4). Read §6 before quoting any
+single number.
 
 ---
 
-## 1. Where the time actually goes
+## 1. The dominant cost: `reqwest::Client::builder().build()` — 11.8 s per call, on macOS
 
-All rows `--profile full`, run per package because the whole workspace in one invocation
-exceeds most tooling timeouts.
+Every integration test starts a `TestServer`, and `TestServer::start_inner` builds a
+`reqwest::Client`. Instrumented breakdown of `test_health_endpoint` — a test that starts a
+server, issues one `GET /health`, and asserts one field:
 
-| Scope | Tests | Wall | Slow-marked |
-|---|---:|---:|---:|
-| `antenna-core` | 331 | **40 s** | 0 |
-| `antenna-model` — all binaries | 504 | **848 s** | 39 |
-| ↳ `integration` binary **alone** | 126 | **522 s** | 17 |
-| ↳ 5 other binaries (`reference_validation`, `openapi_spec`, `openapi_routes_match`, `server_test`, `warning_code_vocabulary`) | 26 | 69 s | 2 |
-| `calibrate` | 235 | **535 s** | 8 |
-| `server_test` alone | 2 | 14 s | 0 |
+| Phase | Time |
+|---|---:|
+| `CalibrationRepository::load_from_config` | 2.7 ms |
+| `AppState::new` | 0.09 ms |
+| **`reqwest::Client::builder().build()`** | **11 793 ms** |
+| health-endpoint wait (1 attempt) | 1.8 ms |
+| **total test** | **12.0 s** |
 
-Total for a full-profile pass: **~24 minutes**, and that is with each package run separately.
+reqwest's default feature set includes `system-proxy`. On macOS, constructing *any* client
+therefore queries the system proxy configuration through `SCDynamicStore`
+(`system-configuration` → `configd`). That call is the entire cost of the test — 4 000× the
+cost of loading the whole calibration repository.
 
-Two things fall straight out:
+**Fix**, in `antenna-model/Cargo.toml` (reqwest is a **dev**-dependency only, so this cannot
+touch production):
 
-- **`antenna-core` is not the problem.** 331 tests — the physics engine, the Bessel ladder,
-  the FFT, the artifact layer — in 40 seconds. Whatever is wrong is not the physics.
-- **`antenna-model::integration` is the single biggest lever**: 25 % of that crate's tests
-  for ~62 % of its wall clock.
+```toml
+reqwest = { version = "0.13.4", default-features = false, features = ["json"] }
+```
 
-## 2. The cluster that matters
+Result: client construction **11.8 s → 8 ms**; `test_health_endpoint` **12.0 s → 0.18 s**.
 
-Slowest tests in the `antenna-model` full run:
+This is a one-line fix rather than 17 call-site edits, which matters: there are 17
+`reqwest::Client` construction sites across the test tree, several of them `Client::new()`
+*inside loops and spawned tasks* (`resilience_tests`, `error_tests`), which is why those
+tests were the slowest ones after the heatmap. A feature-level fix cannot be forgotten at a
+new call site. `.no_proxy()` on the builder was measured and works equally well
+(11.8 s → 1.1 ms) but only where someone remembers to write it.
 
-| Wall | Test |
-|---:|---|
-| 130.9 s | `integration::timeout_tests::test_heavy_heatmap_times_out_with_504` |
-| 104.8 s | `integration::status_code_matrix_tests::legacy_feed_position_key_is_rejected_with_400` |
-| 103.7 s | `integration::status_code_matrix_tests::malformed_body_is_400_everywhere` |
-| 100.4 s | `integration::status_code_matrix_tests::h3_grid_type_on_heatmap_is_rejected_with_400` |
-| 100.0 s | `integration::status_code_matrix_tests::non_finite_request_value_is_a_parse_failure` |
-| 97.1 s | `integration::status_code_matrix_tests::geo_altitude_geodetic_emitter_is_accepted_when_tagged` |
-| 96.4 s | `integration::status_code_matrix_tests::batch_never_returns_a_null_gain_for_a_validation_failure` |
-| 96.0 s | `integration::status_code_matrix_tests::batch_rejection_names_the_failing_item_index` |
-| 94.8 s | `integration::status_code_matrix_tests::degenerate_boresight_from_the_service_layer_is_422` |
-| 91.1 s | `integration::resilience_tests::test_service_stability_under_mixed_workload` |
-| 90.7 s | `integration::status_code_matrix_tests::semantically_invalid_body_is_422_everywhere` |
-| 89.7 s | `integration::status_code_matrix_tests::batch_level_constraints_are_422` |
-| 88.5 s | `integration::status_code_matrix_tests::a_position_without_coordinate_system_is_rejected_with_400` |
-| 85.9 s | `integration::status_code_matrix_tests::unknown_antenna_is_404_everywhere` |
-| 84.1 s | `integration::resilience_tests::test_recovery_after_multiple_failed_requests` |
-| 83.5 s | `integration::resilience_tests::test_rate_limiting_behavior_under_error_load` |
+Also dropped, all unreachable for a client that talks to an ephemeral loopback port over
+plain HTTP: `default-tls`/`rustls`, `http2`, `charset`. Verified absent from the graph
+workspace-wide (`cargo tree --workspace | grep -c system-configuration` → 0). **Do not
+restore `default-features`** to obtain one of them; add the feature by name.
 
-`legacy_feed_position_key_is_rejected_with_400` posts a body with a wrong JSON key and asserts
-a 400. It cannot consume 100 seconds of anything.
+## 2. Measured effect
 
-**The tell is the uniformity, not the magnitude.** Fifteen of the top sixteen sit in one
-binary, and thirteen of those land in a tight 83–105 s band. Tests doing genuinely different
-amounts of work do not converge like that. Tests that are all *blocked on the same thing*, and
-complete when it releases, do.
+| Scope | Before | After |
+|---|---:|---:|
+| `antenna-model`, `--profile full`, 504 tests | **848 s** | **33.1 s** |
+| ↳ `integration` binary alone, 126 tests | 522 s | — (folded into the above) |
+| `integration::timeout_tests::test_heavy_heatmap_times_out_with_504` | 130.9 s | **1.2 s** |
+| `integration::status_code_matrix_tests::legacy_feed_position_key_is_rejected_with_400` | 104.8 s | 0.19 s |
+| `integration::status_code_matrix_tests::malformed_body_is_400_everywhere` | 103.7 s | 0.19 s |
+| `integration::resilience_tests::test_rate_limiting_behavior_under_error_load` | 83.5 s | 1.5 s |
+| `integration::api_tests::test_health_endpoint` | 12.0 s | 0.18 s |
+| `antenna-core`, 331 tests | 40 s | 40 s (untouched — never the problem) |
 
-Supporting contrast: the same `integration` binary **run alone** did all 126 tests in 522 s,
-while inside the full-crate run these individual trivial assertions cost 85–105 s each. The
-per-test figures are therefore measuring queueing, not cost — which is the same conclusion
-D18 task 4 reached from a different direction (it saw a 404 test marked slow at >40 s).
+After the fix the two slowest tests in `antenna-model` are the genuine physics pins,
+`p12_phi_cap_removed_steered_feed_matches_converged_reference` (16.0 s) and
+`p12_mode_path_radial_convergence_anchors` (15.5 s) — i.e. the slow tier is now actually the
+slow tier, which is what `.config/nextest.toml` always claimed it was.
 
-**Leading hypothesis — NOT yet tested.** `.config/nextest.toml` gives `test_sustained_load`
-`threads-required = "num-test-threads"` in both profiles. Nextest must drain every other slot
-before starting it and runs nothing alongside it, so the run serializes around one test while
-everything sharing the `integration` binary queues behind it. That override is deliberate and
-well argued where it is defined — the test asserts a *rate*, which no speedup makes
-schedule-independent — so do not simply delete it.
+## 3. How the first diagnosis went wrong
 
-**The experiment that settles it**, and it is cheap: run the `integration` binary with and
-without that `threads-required` override and compare wall clock. If the 83–105 s band
-collapses, the fix is a scheduling change (isolate the rate test into its own binary or its
-own nextest group) and **no individual test needs to get faster**. If it does not collapse,
-the hypothesis is dead and the shared-fixture theory in D18 task 2 is next. Record the answer
-either way — D18 task 4 exists partly so the next person does not re-run this investigation.
+The first pass at this filed a different root cause, and it is worth recording why, because
+the reasoning looked sound.
 
-## 3. `test_heavy_heatmap_times_out_with_504` — 131 s, and it does not need to be
+The observation was right: **the tell was the uniformity, not the magnitude** — thirteen
+trivial assertions landing in a tight 83–105 s band, when tests doing genuinely different
+amounts of work do not converge like that. The inference drawn from it was also right in
+form: *tests that are all blocked on the same thing, and complete when it releases, look like
+this.*
 
-This one deserves separate treatment because it is the single most expensive test in the
-suite **and** the cheap version is already written, 200 lines above it, in the same file.
+The named suspect was wrong. The hypothesis was `test_sustained_load`'s
+`threads-required = "num-test-threads"` override in `.config/nextest.toml` serializing the
+run. The shared blocking resource was real, but it was **`configd`**, not nextest's
+scheduler: 126 processes each making a serialized system-configuration query.
 
-**Its own doc comment is wrong about its cost.** `heavy_heatmap_request()` is documented as
+Two things would have killed the wrong hypothesis faster, and both are cheaper than the
+experiment that was proposed to settle it:
+
+1. **Check the mechanism against the measurement.** nextest is process-per-test and reports
+   each test's *own process lifetime*. Time spent queued for a slot is therefore not in the
+   number. A scheduling reservation cannot inflate a per-test figure at all, so the
+   hypothesis was already inconsistent with the evidence that motivated it.
+2. **Run one slow test alone before theorising.** `malformed_body_is_400_everywhere` alone
+   was 14.1 s against 103.7 s in the full run. That immediately splits the problem into a
+   ~12 s intrinsic constant and a ~7× contention multiplier, and the intrinsic constant is
+   both the larger share and the one that can be attributed by instrumenting four lines.
+
+The general lesson, and the reason this section exists: *"which shared resource?"* was
+answered by picking the most visible candidate in the repo's own config rather than by
+measurement. The proposed experiment (toggle the override, compare wall clock) would have
+returned "no change" after ~20 minutes and left the actual cause unfound.
+
+## 4. `test_heavy_heatmap_times_out_with_504` — a second, independent defect
+
+Fixed in the same change, but a genuinely separate problem: this test was expensive for
+reasons unrelated to reqwest, and stayed the most expensive test even after §1.
+
+**Its doc comment was wrong about its own cost.** `heavy_heatmap_request()` was documented as
 costing "hundreds of ms — far above the 50 ms deadline the test sets, yet bounded so the
 un-cancellable background rayon finishes in well under a second." Measured: **130.9 s**.
 
 The cost model was written against *release* figures while tests run in *debug*. The sibling
-test's own comment supplies the conversion factor: the same 13 m Ka-band offset-feed geometry
-is "~2.7 s in debug, ~140 ms in release" for a **single** gain — roughly 19×. The heatmap does
-a 12×12 grid (0–45° at 4° steps) = **144 points** of exactly that geometry. 144 × 2.7 s ≈ 390 s
-of CPU, which across 8 cores is the ~131 s observed. The number is fully explained; the comment
-simply never accounted for the profile tests run in.
+test's comment supplies the conversion factor: the same 13 m Ka-band offset-feed geometry is
+"~2.7 s in debug, ~140 ms in release" for a **single** gain — roughly 19×. The heatmap ran a
+12×12 grid = **144 points** of exactly that geometry. 144 × 2.7 s ≈ 390 s of CPU, ≈ 131 s
+across 8 cores. Fully explained.
 
-**The technique to avoid it is already in this codebase.**
-`test_heavy_single_gain_times_out_with_504` (roadmap S2b, same file) runs on
-`#[tokio::test(start_paused = true)]`, drives the app in-process through `Endpoint::call`, and
-**asserts no wall-clock threshold at all**. Its documentation is worth reading in full before
-touching any of this — it records that the socket path *cannot* use a mocked clock (a 35 s
-mocked sleep completed in 320 µs of real time, so the deadline elapsed before the request even
-arrived and the request returned a late 200), which is exactly why it runs in process.
+**The cheap technique already existed 200 lines above, in the same file.**
+`test_heavy_single_gain_times_out_with_504` (roadmap S2b) runs on
+`#[tokio::test(start_paused = true)]`, drives the app in process through `Endpoint::call`, and
+asserts no wall-clock threshold at all. Its docs are worth reading before touching any of
+this: they record that the socket path *cannot* use a mocked clock (a 35 s mocked sleep
+completed in 320 µs real, so the deadline elapsed before the request arrived), which is
+exactly why it runs in process. It still uses an expensive request, but as a **race margin,
+not a threshold**, and bounds the real cost it pays with `integration_budget_ms = 250`.
 
-Crucially, that test still uses an expensive request — but as a **race margin, not a
-threshold**: the clock is advanced microseconds after the handler offloads, so any compute
-above that suffices, and it then bounds the real cost it pays with
-`config.performance.integration_budget_ms = 250`. That bound is the trick the heatmap test
-does not use.
+**The conversion.** The heatmap test now uses the same pattern: paused clock, in process,
+`integration_budget_ms = 250`, and a 2×2 grid instead of 12×12 (once `advance` crosses the
+deadline, the race no longer has to be won with compute). All three assertions are unchanged
+— 504, `x-request-id` echoed, `error == "request_timeout"` — because `build_in_process_app`
+calls `create_routes_with_timeout` and both that and production `create_routes` delegate to
+the **same `build_app`**, so the middleware stack including `RequestId` is identical. A new
+helper `call_json_with_headers` returns response headers, which `call_json` did not.
 
-**Nothing in the heatmap test's assertions requires real time or a real socket.** It asserts
-exactly three things:
+**What socket coverage moved, honestly stated.** The in-process form does not exercise real
+TCP or hyper's serialization of a 504. A socket-level 504 with the standard JSON body is
+still asserted by `budget_tests::test_over_budget_single_gain_returns_504` (on S3's
+`computation_budget_exceeded`, and without a request-id assertion), and `x-request-id` echo on
+an error path is still asserted over a socket by `error_tests` (on a 413). No socket-level
+assertion is lost; only this particular *combination* is now in-process only.
 
-1. status is `504`;
-2. `x-request-id` is echoed on the timeout error path;
-3. the body is the standard `ErrorResponse` with `error == "request_timeout"`.
+**Correction to the record:** an earlier assessment called this test's cost "legitimate — it's
+a timeout test, it's supposed to burn wall clock," and `.config/nextest.toml` said "slow by
+construction and no speedup will change that." Both were wrong, in the same way: a property
+was asserted of the *mechanism* (timeouts need wall clock) when it was really a property of
+one *implementation* of the assertion. The test has rejoined the dev-loop profile.
 
-All three survive an in-process conversion. `build_in_process_app` calls
-`create_routes_with_timeout`, and both that and the production `create_routes` delegate to the
-**same `build_app`** — identical middleware stack, RequestId included. The only missing piece
-is a helper: `call_json` currently returns `(status, body)` and would need a sibling that also
-returns headers, for assertion 2.
+## 5. Practical guidance for running this suite
 
-**Proposed fix** (hypothesis — expected result stated so it can be falsified): convert the
-test to `start_paused = true` + in-process, mirroring S2b, shrink the grid to whatever keeps
-the race margin (one Ka-band point is already ~5 orders of magnitude of margin), and bound the
-un-cancellable rayon with `integration_budget_ms`. **Expected: 131 s → under 1 s, with all
-three assertions unchanged.** Verify by measuring before and after; do not assume.
+Mostly hard-won before the fix; the first two matter much less now that a full `antenna-model`
+run is 33 s, but the rest still apply.
 
-**What would be lost, and the honest counter-argument.** The in-process form does not exercise
-real TCP, real hyper/reqwest serialization of the error response, or the socket-level 504. If
-that coverage is judged load-bearing, keep *one* socket-level timeout test — but it does not
-have to be the expensive one, and the reason the current test is expensive is that a heavy
-request was the only available way to win the race against a *real* 50 ms deadline. That
-constraint disappears the moment the clock is mocked.
-
-**Correction to the record:** an earlier assessment in this work called this test's cost
-"legitimate — it's a timeout test, it's supposed to burn wall clock." That is wrong. The
-*assertion* is legitimate; the implementation is the most expensive possible way to make it,
-and the cheap way already exists in the same file.
-
-## 4. Practical guidance for running this suite
-
-Hard-won during D27 verification; expect to lose an hour to these otherwise.
-
-- **Run per package, not `--workspace`.** A full-workspace run exceeds common 10-minute
-  tooling timeouts. `antenna-core` (40 s) and the non-`integration` `antenna-model` binaries
-  (69 s) are quick; budget ~9 min each for `antenna-model::integration` and `calibrate`.
-- **Split `antenna-model` further when you need results fast**: `-E 'binary(integration)'`
-  versus everything else. The first compile after a change costs an extra ~2–3 min, so a run
-  that fits the budget on the second attempt may not on the first.
 - **Output is buffered when stdout is not a TTY.** `nextest` writes nothing until it exits, so
-  a log that is 73 bytes long does *not* mean the run is stuck. Redirect to a file and check
-  the byte count, but do not conclude anything from an empty file.
-- **Do not read a summary line while the run is still writing.** A partial log will show
-  passes and no failures and look green; the failures land at the end. Wait for the `Summary`
-  line before drawing any conclusion.
+  a zero-byte log does *not* mean the run is stuck.
+- **Do not read a summary line while the run is still writing.** A partial log shows passes and
+  no failures and looks green; failures land at the end. Wait for the `Summary` line.
 - **Killing a run leaks bound sockets.** `server_test` binds literal ports 3001/3002 (see
-  **D28**), and aborted server tasks from a killed run can keep holding them, so the *next*
-  run fails with `AddrInUse` — surfaced misleadingly as `ConnectionRefused` against `/status`.
-  If you see that, check for orphaned processes before believing you broke something.
-- **Never run two suites concurrently** for the same reason. Also note `pkill -f "cargo-nextest
-  run …"` does **not** match: the real argv is `cargo-nextest nextest run …`.
+  **D28**), and aborted server tasks can keep holding them, so the *next* run fails with
+  `AddrInUse` — surfaced misleadingly as `ConnectionRefused` against `/status`. Check for
+  orphaned processes before believing you broke something, and do not run two suites at once.
+- `pkill -f "cargo-nextest run …"` does **not** match; the real argv is
+  `cargo-nextest nextest run …`.
+- `calibrate` (~535 s full profile) is now the workspace's dominant cost and is *not* affected
+  by any of this — it does not use reqwest. Its cost is real physics: parameter tuning and
+  surface fitting in debug. That is the next place to look, and nothing here says whether it is
+  reducible.
 
-## 5. Measurement hygiene — read before quoting these numbers
+## 6. Measurement hygiene
 
-- The 848 s `antenna-model` row was **contended**: it recorded two `server_test` failures from
-  ports held by a previous killed run, so some queueing in it is self-inflicted. The 522 s
-  `integration`-alone row and the 40 s / 535 s rows were clean.
-- These are **ad-hoc runs taken during verification, not a controlled study.** They are a
-  starting point for D18 task 4, not a substitute for its exit criterion, which asks for a
-  reproducible procedure with stated machine state, command, and repetitions.
+- The 848 s "before" figure was **contended** — it recorded two `server_test` failures from
+  ports held by a previously killed run, so some of it was self-inflicted. The 522 s
+  `integration`-alone and 40 s `antenna-core` rows were clean. The 33.1 s "after" figure was
+  clean. Treat 848 → 33.1 as approximate at the top end; the per-test rows (12.0 → 0.18 s,
+  130.9 → 1.2 s) are the trustworthy ones, and they are individually decisive.
 - D18 task 4 separately records four runs of the *identical* dev-profile suite on one idle
-  machine at 339 s / 821 s / 931 s — a 2.7× spread. Nothing here explains that spread; it is
-  still open. One further data point: a dev-profile run cancelled early by a test failure had
-  completed 453 of 1039 tests in 88 s, i.e. before reaching the `integration` cluster above.
-  That is consistent with the cluster owning most of the variance, but it is an observation,
-  not a measurement of it.
+  machine at 339 s / 821 s / 931 s — a 2.7× spread. **That spread is now explained**: a
+  contended global `configd` query, taken 126+ times, is exactly the kind of shared serialized
+  resource whose cost depends on unrelated system state. It should be re-measured post-fix to
+  confirm the variance is gone rather than assumed.
+- These were ad-hoc runs during D27/D18 work, not a controlled study. D18 task 4's exit
+  criterion asks for a reproducible procedure with stated machine state, command, and
+  repetitions; that is still worth doing, and is now cheap.

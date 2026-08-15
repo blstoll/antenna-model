@@ -19,20 +19,26 @@ Sprints 1–7 of 8 are complete (see `docs/implementation-plan.md`): physics eng
 # Build both service and calibration tool
 cargo build --release
 
-# Run all tests — dev inner loop (1038 tests as of 2026-08-14). The default
-# nextest profile excludes the slow tier: three heavy physics pins + the two
-# calibrate full-mode e2e binaries. See .config/nextest.toml and roadmap D18.
-# (P10-perf returned six pins to this tier on 2026-08-01 by making the mode
-# integrator 2.4–7.4× cheaper — the list is meant to shrink, not ratchet.)
+# Run all tests — dev inner loop (1040 tests, ~25 s, measured 2026-08-15 on an
+# idle 8-core machine). The default nextest profile excludes the slow tier: two
+# heavy physics pins + the two calibrate full-mode e2e binaries. See
+# .config/nextest.toml and roadmap D18. (P10-perf returned six pins to this tier
+# on 2026-08-01 — the list is meant to shrink, not ratchet.)
 #
-# NO wall-clock figure is quoted here on purpose. This line used to say
-# "~86 s, 980 tests" (measured 2026-08-01); the count was 4 units stale, and
-# four runs of the IDENTICAL suite on one idle 8-core machine on 2026-08-14
-# came out at 339 s, 821 s and 930 s. That spread is not a number a doc can
-# carry. Whatever causes it is un-diagnosed and filed under D18 — the slow
-# markers land on trivial HTTP tests (a 404 test at >40 s), so they measure
-# scheduling, not test cost. Measure your own machine; do not trust a
-# committed figure for this.
+# This line carried NO wall-clock figure between 2026-08-14 and 2026-08-15,
+# because four runs of the IDENTICAL suite on one idle machine came out at
+# 339 s, 821 s and 931 s and that spread is not a number a doc can carry. The
+# cause is now found and fixed (D18): reqwest's default `system-proxy` feature
+# made `reqwest::Client::builder().build()` cost **11.8 s** on macOS, via a
+# serialized `configd` query — paid once per test by every test that starts a
+# `TestServer`. A contended global system daemon is exactly the kind of shared
+# resource whose cost swings 2.7× with unrelated machine state, which is why the
+# figure was unquotable. `antenna-model` alone went 848 s -> 33 s.
+# See docs/findings-2026-08-15-test-suite-execution-time.md.
+#
+# Quoting a figure again is a deliberate reversal, and it is a tripwire: if your
+# run is minutes rather than ~25 s, something has regressed — check first that
+# `reqwest` in antenna-model/Cargo.toml still has `default-features = false`.
 cargo nextest run --workspace
 
 # Run BOTH tiers — what scripts/check.sh and CI run
