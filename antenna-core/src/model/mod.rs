@@ -159,7 +159,7 @@ pub use coordinates_3d::{
     compute_emitter_direction, compute_emitter_direction_with_attitude,
     compute_feed_position_from_pointing, ecef_to_enu_rotation, ecef_to_geodetic, geodetic_to_ecef,
     is_ecef_coordinates, normalize_azimuth_deg, quaternion_rotate, squint_corrected_direction,
-    validate_ecef, validate_geodetic,
+    validate_ecef, validate_geodetic, CoordinateSystem, Position3D,
 };
 
 pub use correction_interpolator::{evaluate_correction, CorrectionResult};

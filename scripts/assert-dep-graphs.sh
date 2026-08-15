@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# The CLI must not compile the web stack (roadmap D4), asserted in ONE place.
+# Two dependency-graph invariants, asserted in ONE place:
+#
+#   * the CLI must not compile the web stack (roadmap D4);
+#   * antenna-core must stay a physics/artifact crate (roadmap D27 finding 4).
 #
 # Called by both `scripts/check.sh` and `.github/workflows/ci.yml`. It used to be
 # copy-pasted into both, so the banned-crate list lived in four places with nothing
@@ -30,9 +33,15 @@ BANNED_RE='poem|h3o|utoipa|dashmap'
 # manifest error, or a cargo behaviour change made the gate print success without
 # having checked anything. Verified: `if false | grep -E poem; then echo FIRED; fi`
 # prints nothing and returns 0.
+#
+# `--prefix none` is deliberate: it emits bare "name version" lines instead of a drawn
+# tree, so every pattern below can anchor at `^` and match package identity rather than
+# whatever box-drawing characters precede it. An anchored pattern against a drawn tree
+# matches nothing — which is a silent pass, the exact failure mode this file exists to
+# prevent. Repeated subtrees still repeat, so counting requires `sort -u`.
 normal_deps_of() {
   local pkg="$1" out rc=0
-  out=$(cargo tree -p "$pkg" -e normal 2>&1) || rc=$?
+  out=$(cargo tree -p "$pkg" -e normal --prefix none 2>&1) || rc=$?
   if [ "$rc" -ne 0 ]; then
     echo "ERROR: 'cargo tree -p $pkg -e normal' failed (exit $rc); the web-stack guard" >&2
     echo "       did NOT run. Fix the command before trusting this gate." >&2
@@ -96,3 +105,66 @@ if printf '%s\n' "$calibrate_tree" | grep -Eq "$BANNED_RE"; then
 fi
 
 echo "    ok: calibrate's normal graph carries no web stack"
+
+# ---------------------------------------------------------------------------
+# antenna-core weight (roadmap D27 finding 4).
+#
+# Core is "the physics engine + artifact data layer, no web stack". The web-stack
+# assertions above cannot see a violation of that, by construction: they ask about
+# poem, not about weight. D4 moved error.rs wholesale, which brought
+# `impl From<serde_yaml::Error>` / `impl From<config::ConfigError>` along, and the
+# orphan rule pinned both to core — so core silently acquired the entire `config`
+# crate (json5, ron, rust-ini, toml, yaml-rust2, async-trait, serde-untagged, …)
+# plus an end-of-life serde_yaml, for two conversions nothing in model/ or data/
+# ever performs. 88 of core's then-114 normal packages were that stack.
+#
+# Both assertions below, same shape as above: a name-based list, and a count
+# ceiling that catches a heavy stack arriving under names this list does not know.
+# ---------------------------------------------------------------------------
+CONFIG_STACK_RE='^(config|serde_yaml|yaml-rust2|unsafe-libyaml|json5|rust-ini|ron) v'
+
+# Max unique packages in antenna-core's normal graph. Measured 21 on 2026-08-14, down
+# from 88 before the config stack came out. The headroom is for ordinary growth, not for
+# a new stack. If a legitimate dependency pushes past this, raise it deliberately and
+# say why — this number is meant to be argued with, not silently bumped.
+CORE_MAX_DEPS=28
+
+echo "--> negative control: the config-stack detector must fire on antenna-model's graph"
+# antenna-model declares both `config` and `serde_yaml` itself — it is the crate that
+# reads config files, which is the whole point of them not being in core. If the
+# detector finds neither here, the detector is broken and its verdict on core is worthless.
+if ! printf '%s\n' "$control_tree" | grep -Eq "$CONFIG_STACK_RE"; then
+  echo "ERROR: the config-stack detector matched NOTHING in antenna-model's normal graph." >&2
+  echo "       antenna-model depends on config and serde_yaml directly, so this cannot be" >&2
+  echo "       true: the detector itself is broken (cargo tree output format, or a crate" >&2
+  echo "       rename). Roadmap D27 finding 4." >&2
+  exit 1
+fi
+
+echo "--> asserting antenna-core's normal graph"
+core_tree=$(normal_deps_of antenna-core)
+
+if printf '%s\n' "$core_tree" | grep -Eq "$CONFIG_STACK_RE"; then
+  echo "ERROR: config-file stack reachable from antenna-core's normal graph (roadmap D27)." >&2
+  echo "       antenna-core is the physics engine and artifact layer; it does not read" >&2
+  echo "       config files. If you need a conversion from a config-crate error, do it in" >&2
+  echo "       the crate that owns the config stack (see antenna-model's config/settings.rs)" >&2
+  echo "       rather than adding a From impl here — the orphan rule will drag the whole" >&2
+  echo "       dependency in with it." >&2
+  printf '%s\n' "$core_tree" | grep -E "$CONFIG_STACK_RE" >&2
+  exit 1
+fi
+
+# Unique packages, not lines: `--prefix none` still repeats a shared subtree once per
+# path that reaches it, and a "(*)" suffix marks the elided repeats.
+core_dep_count=$(printf '%s\n' "$core_tree" | sed -e 's/ (\*)$//' -e '/^$/d' | sort -u | wc -l | tr -d ' ')
+if [ "$core_dep_count" -gt "$CORE_MAX_DEPS" ]; then
+  echo "ERROR: antenna-core's normal graph has $core_dep_count packages, over the" >&2
+  echo "       ceiling of $CORE_MAX_DEPS (roadmap D27 finding 4). This ceiling exists" >&2
+  echo "       because the named list above only knows today's config stack: a heavy" >&2
+  echo "       dependency arriving under any other name shows up here instead." >&2
+  echo "       Raise it deliberately, with a reason, or move the dependency out." >&2
+  exit 1
+fi
+
+echo "    ok: antenna-core carries no config stack ($core_dep_count/$CORE_MAX_DEPS packages)"

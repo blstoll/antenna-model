@@ -38,7 +38,7 @@
 //! Because azimuth := clock, these orderings differ; coefficients must be
 //! reindexed (not memcpy'd).
 
-use antenna_core::data::loader::{ANTC_ARTIFACT_VERSION, ANTC_HEADER_LEN, ANTC_MAGIC};
+use antenna_core::data::loader::encode_calibration_artifact;
 use antenna_core::data::types::{
     AngularResolution, AntennaCalibration, AntennaCalibrationBuilder, BSplineModel4D,
     CalibrationCoverageBuilder, CalibrationMetadataBuilder, CalibrationStatus,
@@ -513,29 +513,23 @@ pub fn export_full_calibration(
 /// instead of being rejected) and no integrity check (truncation surfaced as a decode
 /// error at best, wrong numbers at worst).
 ///
-/// The layout is `[magic "ANTC"][version u32 LE][crc32 u32 LE][payload len u64 LE]`
-/// followed by the postcard payload, matching the CRC-checked path in
-/// [`antenna_core::data::loader::load_calibration_artifact`]. The magic, version, and
-/// header length come from that module's public constants rather than being restated here,
-/// so reader and writer share one definition of the container format.
+/// The framing itself is [`antenna_core::data::loader::encode_calibration_artifact`], the
+/// counterpart of the loader that reads it — so reader and writer share one definition of
+/// the container format rather than agreeing by inspection. This function contributes the
+/// file I/O and this tool's error vocabulary, nothing more. (It used to lay the header out
+/// itself from the loader's public constants, which is closer but still a copy: D23 found a
+/// *fourth* hand-rolled writer in a test carrying a hardcoded container version, which would
+/// have sailed past its own bump.)
 ///
 /// Note this stamps the **container** axis only. The **schema** axis
 /// (`metadata.format_version`) rides inside the payload and is set by whichever builder
 /// produced `calibration`; see [`antenna_core::data::types::CALIBRATION_SCHEMA_VERSION`].
 pub fn write_calibration_artifact(calibration: &AntennaCalibration, path: &Path) -> Result<()> {
-    let payload =
-        postcard::to_allocvec(calibration).map_err(|e| ArtifactExportError::SerializeFailed {
+    let bytes = encode_calibration_artifact(calibration).map_err(|e| {
+        ArtifactExportError::SerializeFailed {
             reason: e.to_string(),
-        })?;
-
-    let crc = crc32fast::hash(&payload);
-    let mut bytes = Vec::with_capacity(ANTC_HEADER_LEN + payload.len());
-    bytes.extend_from_slice(ANTC_MAGIC);
-    bytes.extend_from_slice(&ANTC_ARTIFACT_VERSION.to_le_bytes());
-    bytes.extend_from_slice(&crc.to_le_bytes());
-    bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
-    bytes.extend_from_slice(&payload);
-    debug_assert_eq!(bytes.len() - payload.len(), ANTC_HEADER_LEN);
+        }
+    })?;
 
     std::fs::write(path, &bytes).map_err(|e| ArtifactExportError::WriteFailed {
         path: path.display().to_string(),

@@ -108,13 +108,11 @@ dependencies = [
 name = "antenna-core"
 version = "0.1.0"
 dependencies = [
- "config",
  "crc32fast",
  "num-complex",
  "postcard",
  "serde",
  "serde_json",
- "serde_yaml",
  "tempfile",
  "thiserror",
  "tracing",
@@ -789,7 +787,6 @@ dependencies = [
  "aws-sdk-s3",
  "chrono",
  "clap",
- "crc32fast",
  "csv",
  "ndarray",
  "postcard",
