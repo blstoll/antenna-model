@@ -285,19 +285,63 @@ G1 ─┬─ G2 ── G3
     │      normal dep of calibrate) asserted  │
     │      first and the detector pointed at  │
     │      antenna-model's own graph, where   │
-    │      it MUST fire. 4-9 open: core       │
-    │      carries config + serde_yaml for    │
-    │      two From impls; serde_json normal  │
-    │      but test-only; Position3D/         │
-    │      CoordinateSystem not re-exported;  │
-    │      data/mod.rs duplicates a nine-name │
-    │      list; domain-contract line numbers │
-    │      stale -- NOT by a flat 88 as filed │
-    │      (28/88/96/167), so a mechanical    │
-    │      sweep would corrupt most of them;  │
-    │      loader's headerless fallback skips │
-    │      version+CRC and is the ONLY branch │
-    │      repository tests cover.            │
+    │      it MUST fire.                      │
+    │  D27 DONE 2026-08-14 (findings 4-9,     │
+    │      branch fix/d27-crate-split-debt).  │
+    │      Finding 4 was TWO problems: the    │
+    │      serde_yaml From impl had ZERO call │
+    │      sites (pure deletion, no decision  │
+    │      needed); only the config impl was  │
+    │      load-bearing, for ONE caller.      │
+    │      Maintainer: keep ConfigError in    │
+    │      core, drop both impls, convert at  │
+    │      the call site. Core's normal graph │
+    │      88 -> 21 packages. Finding 9       │
+    │      decided by evidence the filing     │
+    │      lacked: the schema gate runs on    │
+    │      BOTH branches and the schema has   │
+    │      moved 2.0->5.0 since D2, so every  │
+    │      artifact the fallback existed for  │
+    │      was ALREADY refused -- it could    │
+    │      only accept a payload no producer  │
+    │      writes. Deleted; framing required. │
+    │      Avoided adding a SIXTH hand-rolled │
+    │      ANTC writer by giving the framing  │
+    │      one definition (encode_calibration_│
+    │      artifact) beside its loader.       │
+    │      Finding 8: not 4 offsets over 5    │
+    │      symbols but SEVEN over 14, with    │
+    │      two functions SWAPPED -- and the   │
+    │      other ~23 citations did NOT rot    │
+    │      (those files moved wholesale). So  │
+    │      the rot is specific to the one     │
+    │      file D4 also added types to.       │
+    │      Maintainer: cite file + symbol,    │
+    │      never a line number. Guard renamed │
+    │      assert-dep-graphs.sh, gained the   │
+    │      weight assertion + a ceiling + its │
+    │      own negative control; found and    │
+    │      fixed a latent fail-open in it     │
+    │      (drawn tree vs ^-anchored regex).  │
+    │      D18 task 4 (finding 10's half)     │
+    │      remains open.                      │
+    │  D28 filed 2026-08-14, from D27's       │
+    │      verification: server_test binds    │
+    │      LITERAL ports 3001/3002 (the only  │
+    │      test in the workspace that binds a │
+    │      real socket), so it cannot survive │
+    │      a concurrent run. The unit is      │
+    │      really about the DIAGNOSTIC: the   │
+    │      bind panics on an orphaned spawn,  │
+    │      so the reported failure is         │
+    │      ConnectionRefused on /status and   │
+    │      the real AddrInUse shows up only   │
+    │      as stray output -- a harness fault │
+    │      that reads as a service bug. A     │
+    │      fixed 500ms startup sleep produces │
+    │      the IDENTICAL signature under      │
+    │      load, so both halves must be fixed │
+    │      together.                          │
     └─ (Phases 1–3 done) ─ D4 ─ D7
 Superseded by C8 (do not implement): S7, C5, C6
 Phase 5: F1..F9 (F8 done) gated on register rows (P3, P5/F4, F5, D9, F9); P1 + C8 DECIDED 2026-07-08;
@@ -5536,12 +5580,89 @@ should be written against the post-split tree to avoid a pointless conflict).
 
 ---
 
-### D27 — D4's crate split: a gate that failed open, and five debt items it left — Effort: M
+### D27 — D4's crate split: a gate that failed open, and five debt items it left — Effort: M — ✅ **DONE 2026-08-14**
+
+> **Closeout 2026-08-14** (branch `fix/d27-crate-split-debt`). Findings 1–3 landed earlier the
+> same day on the D26 branch; 4–9 are closed here. Two maintainer decisions were taken first
+> (recorded at findings 4 and 9), and three things came out differently from the filing:
+>
+> **Finding 4 was two independent problems, not one.** The filing treats `config` and
+> `serde_yaml` as a single dependency question with a single fix. They are not: the
+> `From<serde_yaml::Error>` impl had **zero call sites anywhere in the workspace** — every YAML
+> parse in this tree maps its own error explicitly — so that half was pure deletion, needing no
+> relocation and no decision. Only the `config` impl was load-bearing, and only for
+> `ServiceConfig::from_file`. **Decision: keep `ConfigError` in core, drop both impls, convert
+> at the call site** — the smaller of the filing's two options, and the one that leaves the
+> public error path unmoved. `from_file`'s builder chain is untouched; it was split into a
+> private `load_unvalidated` returning `config::ConfigError` so the conversion happens once
+> instead of at nineteen `?` sites. **Measured: antenna-core's normal graph went 88 → 21 unique
+> packages** (`cargo tree -p antenna-core -e normal`), losing json5, ron, rust-ini, toml,
+> yaml-rust2, async-trait, serde-untagged and the end-of-life unsafe-libyaml.
+>
+> **Finding 9's evidence was stronger than the filing knew, and it decided the question.** The
+> filing asks whether the headerless fallback still needs to exist and reasons from "no `.bin`
+> ships in-repo". The decisive fact is different: `check_schema_version` runs on *both* branches,
+> and `CALIBRATION_SCHEMA_VERSION` has moved 2.0 → 3.0 → 4.0 → 5.0 since D2 made framing
+> universal — so **every artifact the fallback existed for is already refused on the schema
+> axis**. It could only ever succeed on a bare postcard payload at the *current* schema.
+> **Decision: delete it**; the loader now requires ANTC framing.
+>
+> **Two such payloads existed and were not test helpers — the filing missed them, and so did
+> this unit's own first analysis.** `antenna-model/tests/fixtures/calibration_data/
+> test_uncalibrated_{x,s}band_boresight.bin` are **committed** artifacts, and the test suite
+> caught it: `api::tests::test_initialize_repository_healthy_on_real_fixtures` failed on the
+> new framing check. They stayed headerless long after D2 made framing universal because every
+> schema bump *restamped* them (decode → set `format_version` → re-encode bare) instead of
+> re-running `calibrate` — so the regeneration commands in `antenna-model/tests/README.md`,
+> which invoke `calibrate` and would have produced framed output, did not describe how these
+> files were actually being maintained. Fixed by reframing both in place: a 20-byte ANTC
+> prepend with the payload bytes untouched (verified by hashing the payload before and after),
+> so **no fixture value moved**. The lesson is the one D23 and finding 9 keep re-teaching — a
+> producer that bypasses the shared writer stays invisible until something finally checks.
+>
+> Also corrected: the filing says the headerless branch "is the only branch the repository's
+> load-path tests exercise" — true of `repository.rs`, but `loader.rs` already tested both
+> (four ANTC tests plus a deliberate headerless schema-gate test).
+>
+> **A sixth hand-rolled ANTC writer was avoided rather than added.** Switching
+> `repository.rs`'s test helper to framed bytes meant writing the header layout out again — the
+> exact pattern D23 (fourth copy, in a test, with a hardcoded container version) and this unit's
+> finding 9 (fifth copy, no header at all) both record. The framing now has one definition,
+> `antenna_core::data::loader::encode_calibration_artifact`, sitting beside the loader that
+> reads it; `calibrate::artifact_export::write_calibration_artifact` is a thin wrapper over it
+> and both test helpers use it. The compiler made the case unprompted: the hand-rolled version
+> would have required pulling `crc32fast` into `antenna-model` to compile at all.
+>
+> **Finding 8 was scoped too widely, and the sweep is a policy change rather than a
+> correction.** The review said the `coordinates_3d.rs` citations were "off by 88"; the filing
+> corrected that to four offsets over five symbols. Measured across all 14 cited symbols it is
+> **seven distinct offsets** (+15, +21, +28, +88, +113, +115, +154), and
+> `compute_emitter_direction` / `compute_emitter_direction_with_attitude` have **swapped order**
+> — the citations were misleading about the file's shape, not merely stale. But the other
+> ~23 line citations in the document (`coordinates.rs`, `geometry.rs`, `pattern.rs`,
+> `integration.rs`, …) did **not** rot: those files moved wholesale in D4 without internal
+> reordering, and 10 spot-checks all landed on the construct described. So the rot is specific
+> to the one file D4 also *added types to* and reordered. **Maintainer decision: cite file +
+> symbol, never a line number.** `coordinates_3d.rs`'s citations are converted; the rest are
+> correct today and convert as they are touched, with the policy stated in the document header.
+>
+> **Guard.** `scripts/assert-calibrate-dep-graph.sh` is renamed `scripts/assert-dep-graphs.sh`
+> — it now gates two crates, and a script named for one of them would be its own small lie. It
+> gained the weight assertion finding 4's exit criterion asks for: a named config-stack list, a
+> unique-package ceiling (`CORE_MAX_DEPS = 28`, measured 21) to catch a heavy stack arriving
+> under names the list does not know, and a negative control pointed at antenna-model's graph
+> where both must fire. All three new failure modes were verified to fire and the script
+> restored. One latent bug was found and fixed while adding them: `normal_deps_of` returned a
+> *drawn* tree, so any `^`-anchored pattern would have matched nothing and passed silently —
+> the fail-open shape findings 1–2 exist to prevent. It now passes `--prefix none`.
+>
+> **Finding 10** was already split at filing time; its D18 task 4 half remains open and is not
+> this unit's.
 
 **Filed 2026-08-14**, from the review of the merged D4 (`7ea584c`, PR #42). Findings 1–3 were
 **fixed immediately** on the D26 branch rather than filed, because they are a *gate that did
 not gate* — everything else in this unit is protected by it, so deferring them would have meant
-deferring the protection too. Findings 4–9 remain open.
+deferring the protection too.
 
 Every claim below was re-verified against the tree on 2026-08-14; where the original review was
 wrong about a detail, the correction is recorded with it (finding 8).
@@ -5695,6 +5816,72 @@ decision), then 9 (needs a decision first), then 8 (a sweep, and the least load-
 10 is done bar D18's half.
 
 **Depends on:** nothing. Findings 4–7 are independent of each other.
+
+---
+
+### D28 — `server_test` binds hardcoded ports, and reports the collision as the wrong failure — Effort: S
+
+**Filed 2026-08-14**, found while verifying D27. Not introduced by it — pre-existing, and it
+survives because it only fires when something else holds the port, which on a single-run CI
+machine never happens.
+
+**The defect.** `antenna-model/tests/server_test.rs` binds **literal ports 3001 and 3002**
+(`test_config(3001)` at `:53`, `test_config(3002)` at `:121`, plus four request URLs at
+`:65,101,133,145`). This is the only test file in the workspace that binds a real socket —
+every other HTTP test drives poem in-process — so the blast radius is exactly these two tests,
+but they are unconditionally hostile to any concurrent run and to any developer whose machine
+already has 3001/3002 in use.
+
+**What makes it worth a unit is the diagnostic, not the collision.** The bind happens inside a
+`tokio::spawn`, so `.expect("Failed to start server")` panics on a *background task* that
+nothing joins. The test body carries on, sleeps 500 ms, and requests a port nothing is
+listening on — so the failure the runner reports is:
+
+```
+Request failed: … ConnectError("tcp connect error", 127.0.0.1:3001,
+                 Os { code: 61, kind: ConnectionRefused })
+```
+
+The actual cause (`Os { code: 48, kind: AddrInUse }`) appears only as a *second*, separate
+panic line from the orphaned task, and is easy to read as noise. Measured during D27
+verification: two concurrent nextest runs produced exactly this, and the first reading was
+"the server is failing to serve `/status`" — which is a service-layer conclusion drawn from a
+harness-layer fault. A test that misidentifies its own failure is worse than one that fails
+loudly, because it sends the reader into the wrong code.
+
+**A second, independent flake shares the same signature.** Readiness is a fixed
+`sleep(500ms)` before the first request (`:59`, `:127`). On a loaded machine a slow startup
+produces the *identical* `ConnectionRefused`, so the two causes are indistinguishable from the
+output. Fixing the ports without fixing the wait leaves a flake that now looks like the one
+just fixed. Note the suite is already known to run under heavy contention — D18 task 4
+measured a 2.7× wall-clock spread on an idle machine — so this is not hypothetical.
+
+**Fix, in one pass:**
+1. **Bind port 0 and read back the assigned port.** The OS hands out a free port; no literal,
+   no collision, no coordination between tests. This requires `start_server_with_config` (or a
+   test-only sibling) to *report* its bound address, which it currently does not — that is the
+   only non-trivial part of this unit, and it is worth doing anyway: nothing today can observe
+   what the server actually bound.
+2. **Join the spawn instead of orphaning it**, or `select!` the server future against the
+   request, so a bind failure fails *this* test with *that* error.
+3. **Replace the sleep with a readiness poll** — retry `/ready` (or the bound-address
+   connect) on a short interval up to a generous deadline. Faster in the common case and
+   immune to load in the bad case.
+
+**Exit criteria:** no literal port anywhere in `antenna-model/tests/`; both tests pass with two
+copies of the suite running concurrently (the reproduction — verify it fails before the fix);
+a forced bind failure surfaces as a failure of the test that caused it, naming `AddrInUse`; no
+fixed-duration sleep on the startup path.
+
+**Gotchas:** the fixture-path reasoning in `test_config`'s doc comment (crate-root-relative
+`data_directory`, `fail_fast` deliberately left at its shipped default) is load-bearing and
+documented for good reason — preserve it. This is the only test that drives the real
+`start_server_with_config` startup path, which is exactly why it should not be deleted or
+downgraded to an in-process harness to dodge the problem.
+
+**Depends on:** nothing. **Coupled to:** D18 (same suite-health charter; D18 owns latency, this
+owns isolation — filed separately for that reason, per D18's own note that it "should not also
+own" adjacent problems).
 
 ---
 
