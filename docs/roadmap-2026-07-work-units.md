@@ -4625,7 +4625,18 @@ are meaningful rather than dominated by a topology gap.
   the pipeline or the fill*, not a reason to widen the budget") is unanswerable while a known
   pipeline defect is outstanding. Feeds D9.
 
-### D18 — Test-suite latency budget + tiering — Effort: S/M (tiering ✅ landed 2026-08-01; tasks 2–4 open, task 4 added 2026-08-14)
+### D18 — Test-suite latency budget + tiering — Effort: S/M (tiering ✅ 2026-08-01; task 4 ✅ 2026-08-15 + task 3's heatmap half; task 2 moot, task 3's calibrate half open)
+
+> **2026-08-15 — the budget is met with room to spare.** Task 4 found the suite's dominant
+> cost (reqwest's `system-proxy` feature costing **11.8 s per client construction** on macOS)
+> and fixing it took the **dev loop to 24.8 s / 1040 tests** against this unit's 90 s budget,
+> and `antenna-model --profile full` from 848 s to 33.1 s. Task 2's premise was disproved in
+> the process (the integration class it targeted is now sub-second, and its cause was never
+> server spin-up or calibration loading). What remains open is task 3's calibrate half:
+> `cli_tuned_run_completes_for_every_tuning_mode`, in the slow tier, where `calibrate`
+> (~535 s full profile) is now the workspace's dominant cost and is unaffected by any of this
+> — its cost is real physics. Details in the task 4 section below and in
+> `docs/findings-2026-08-15-test-suite-execution-time.md`.
 
 **Filed 2026-08-01 (maintainer).** The full suite reached **505 s** under `cargo test`; the
 2026-08-01 nextest adoption cut the same coverage to ~190–226 s. No unit owned the budget, so
@@ -4658,11 +4669,19 @@ changes *how often tests get run*, which is a correctness input, not a comfort.
   the addition justified the way a `#[ignore]` would be. CI latency has no hard budget, but
   additions to the slow tier are one-in-one-out aspirational: prefer speeding the top offender.
 - **Open tasks:**
-  2. **Audit the mid-tier for structural waste.** The remaining 963 fast tests still cost
+  2. ~~**Audit the mid-tier for structural waste.** The remaining 963 fast tests still cost
      ~590 s CPU, dominated by `tests/integration/*` at 4–9 s *per test* with high sys time —
      suggesting per-test server spin-up / repeated calibration loading rather than physics.
      If a shared fixture (or `OnceLock`'d app) cuts that class to <1 s, the dev loop drops
-     toward 30 s. Measure before restructuring; do not weaken any assertion to win time.
+     toward 30 s. Measure before restructuring; do not weaken any assertion to win time.~~
+     **✅ MOOT 2026-08-15 (task 4).** Right about the symptom, wrong about the cause, and the
+     "high sys time" was the clue it did not follow: the cost was neither server spin-up
+     (~1 ms) nor calibration loading (2.7 ms) but an 11.8 s `configd` query inside
+     `reqwest::Client::builder().build()`. That class is now sub-second **without** a shared
+     fixture — which is the better outcome, since an `OnceLock`'d app shared across tests would
+     have coupled them and is exactly the pattern D14 records as looking free under
+     `cargo test` and not being. No assertion was weakened. Nothing left to audit here; if this
+     is reopened it needs a fresh premise and a fresh measurement.
   3. **Right-size the two 2-minute tests.** `cli_tuned_run_completes_for_every_tuning_mode`
      runs a full Nelder-Mead per tuning mode — check whether reduced iteration caps or a
      smaller fixture grid preserve the assertion (mode completes + recovers truth) at a
@@ -4675,7 +4694,10 @@ changes *how often tests get run*, which is a correctness input, not a comfort.
      what is left of this task.
 - **Exit criteria:** tiering config committed (✅); check.sh + CI on the `full` profile (✅);
   CLAUDE.md documents both tiers (✅); dev loop measured < 90 s and re-measured after tasks
-  2–3; the slow-tier list justified test-by-test or shrunk by the audits.
+  2–3 (✅ **24.8 s / 1040 tests, 2026-08-15**); the slow-tier list justified test-by-test or
+  shrunk by the audits (✅ shrunk — `test_heavy_heatmap_times_out_with_504` removed as not
+  belonging to the class it was filed under; the three remaining entries carry their
+  justification in `.config/nextest.toml`).
 - **Slow-tier list shrunk 2026-08-01 (P10-perf).** Nine physics tests → three. Six were returned
   to the dev inner loop because the mode-path speedup put them back under the 10 s line
   (`test_feed_steering_large_offset` 22.3 → 4.0 s; `azimuthal_modes_match_2d_small_dish_with_offset`
@@ -4764,11 +4786,95 @@ should not be undone casually. What is missing is any measurement of what it cos
 time. **This is a guess consistent with the evidence, not a diagnosis; measure before acting,
 and if it is wrong, record that here.**
 
-**Exit criteria for task 4:** a reproducible wall-clock measurement procedure (stated machine
-state, stated command, stated repetitions) and an explanation for the spread. If the answer is
-"the loop is fine and the measurements were contended", say so and close it — that is a
-legitimate outcome and worth writing down, because the next person to see 900 s will otherwise
-re-run this investigation.
+**✅ TASK 4 RESOLVED 2026-08-15 — and the hypothesis above was WRONG. It is left in place
+above, unedited, because how it was wrong is the useful part.**
+
+**Root cause: `reqwest`'s default `system-proxy` feature.** On macOS, constructing *any*
+`reqwest::Client` queries the system proxy configuration through `SCDynamicStore` → `configd`.
+Measured: `reqwest::Client::builder().build()` = **11.79 s**, against **2.7 ms** to load the
+entire calibration repository. Every test that starts a `TestServer` paid it once;
+`api_tests::test_health_endpoint` — start a server, one `GET /health`, assert one field — was
+**12.0 s**, of which 11.8 s was that single line.
+
+**Fix** (one line, `antenna-model/Cargo.toml`; reqwest is a dev-dependency only, so production
+is untouched): `default-features = false, features = ["json"]`. A feature-level fix rather than
+17 call-site `.no_proxy()` edits, several of which are `Client::new()` *inside loops* — a
+feature cannot be forgotten at a new call site.
+
+| | before | after |
+|---|---:|---:|
+| `antenna-model` `--profile full`, 504 tests | 848 s | **33.1 s** |
+| dev loop, whole workspace, 1040 tests | 339–931 s | **24.8 s** |
+| `test_heavy_heatmap_times_out_with_504` | 130.9 s | 1.2 s (also §task 3 below) |
+| `legacy_feed_position_key_is_rejected_with_400` | 104.8 s | 0.19 s |
+| `test_health_endpoint` | 12.0 s | 0.18 s |
+
+**This also explains the 2.7× spread** that motivated task 4, and retires the "no figure
+belongs in a doc" position: a contended global system daemon queried 126+ times is exactly the
+kind of shared serialized resource whose cost swings with unrelated machine state. CLAUDE.md
+quotes a figure again, deliberately, as a regression tripwire.
+
+**Why the wrong hypothesis survived, worth keeping:** the *observation* was right — uniformity,
+not magnitude, was the tell, and "all blocked on the same thing" was the right shape of
+inference. The named suspect was wrong: the shared resource was `configd`, not nextest's
+scheduler. Two checks would have killed it faster than the experiment proposed to settle it:
+
+1. **Test the mechanism against the evidence.** nextest is process-per-test and reports each
+   test's *own process lifetime*; queueing for a slot is not in that number. A scheduling
+   reservation therefore *cannot* inflate a per-test figure, so the hypothesis was already
+   inconsistent with the data that suggested it.
+2. **Run one slow test alone before theorising.** `malformed_body_is_400_everywhere` was 14.1 s
+   alone vs 103.7 s in the full run — which immediately splits the problem into a ~12 s
+   intrinsic constant and a ~7× contention multiplier, and points at instrumenting four lines.
+
+The general failure: *"which shared resource?"* was answered by reaching for the most visible
+candidate in the repo's own config instead of measuring. The proposed experiment would have
+cost ~20 min and returned "no change".
+
+**Consequence for task 2:** its premise — "`tests/integration/*` at 4–9 s per test with high
+sys time, suggesting per-test server spin-up / repeated calibration loading" — was *correct
+about the symptom and wrong about the cause*. It is not server spin-up (~1 ms) and not
+calibration loading (2.7 ms). Task 2 as written is now largely moot; the class it wanted to fix
+is sub-second. Re-scope or close it.
+
+**Exit criteria for task 4 — met:** cause identified, fixed, measured before and after on a
+stated machine with the command recorded, and written up in
+`docs/findings-2026-08-15-test-suite-execution-time.md`.
+
+**Evidence base added 2026-08-14/15 (from D27's verification):
+`docs/findings-2026-08-15-test-suite-execution-time.md`.** Per-package measurements, the
+slowest-test table, and the practical guidance for running this suite at all. Three things in
+it change where this unit should start:
+
+1. **The 83–105 s cluster.** Fifteen of the sixteen slowest tests were in
+   `antenna-model::integration`, thirteen in a tight **83–105 s band** —
+   `legacy_feed_position_key_is_rejected_with_400` (104.8 s) posts a wrong JSON key and asserts
+   a 400. The uniformity was the tell. `[RESOLVED 2026-08-15 — this was the `configd` cost of
+   §"TASK 4 RESOLVED" above, not scheduling. The whole band is now sub-second.]`
+2. **`antenna-core` is not implicated at all**: 331 tests in 40 s. The expense is not physics.
+   `[Still true, and untouched by the fix.]`
+3. **Task 3 gains a target this unit had written off.**
+   `test_heavy_heatmap_times_out_with_504` (**130.9 s**, then the single most expensive test in
+   the suite) is expensive by accident, not by necessity. Its own doc comment claims the request
+   costs "hundreds of ms" and finishes "well under a second" — that figure is *release* mode
+   while tests run *debug*, where the same geometry is ~19× dearer, times a 144-point grid. The
+   paused-clock, in-process technique that makes this free is **already implemented in the same
+   file** by `test_heavy_single_gain_times_out_with_504` (S2b), which asserts no wall-clock
+   threshold at all and bounds its own real cost with `integration_budget_ms`.
+   **✅ DONE 2026-08-15: converted, 130.9 s → 1.2 s, and removed from the slow tier** — it now
+   runs in the dev loop. All three assertions unchanged (504, `x-request-id` echoed,
+   `error == "request_timeout"`); `build_in_process_app` and production `create_routes` delegate
+   to the same `build_app`, so the middleware stack is identical, and a new
+   `call_json_with_headers` helper carries the header assertion. Socket-level coverage of a 504
+   with the standard JSON body remains in `budget_tests`, and of `x-request-id` on an error path
+   in `error_tests`; only the *combination* is now in-process only. This was an independent
+   defect from item 1 — it stayed the most expensive test even after the reqwest fix.
+   **Note for the `.config/nextest.toml` entry it replaced**, which read "slow by construction
+   and no speedup will change that": that claim conflated a property of the *mechanism*
+   (timeouts involve wall clock) with a property of one *implementation* of the assertion. The
+   remaining "slow by construction" entry,
+   `mode_path_reports_a_radial_error_even_when_the_density_cap_binds`, is genuine — its subject
+   *is* what happens when the sample cap binds, so it must reach the cap.
 
 ### D19 — Adaptive knot placement lands internal knots on the axis bounds — Effort: S/M — ✅ **DONE 2026-08-02**
 
@@ -5882,6 +5988,53 @@ downgraded to an in-process harness to dodge the problem.
 **Depends on:** nothing. **Coupled to:** D18 (same suite-health charter; D18 owns latency, this
 owns isolation — filed separately for that reason, per D18's own note that it "should not also
 own" adjacent problems).
+
+---
+
+### D29 — Two gaps left by D18's timeout-test conversion — Effort: S
+
+**Filed 2026-08-15**, on review of the D18 branch. Both are consequences of moving
+`test_heavy_heatmap_times_out_with_504` in process (130.9 s → 1.2 s); neither is a regression
+in served behaviour, and the conversion was right — these are the debts it left.
+
+**1. No test asserts an S2 `request_timeout` 504 over a real socket (low).** Both timeout cases
+in `antenna-model/tests/integration/timeout_tests.rs` now run in process through
+`Endpoint::call`. The doc block on the converted test is honest about this and names the two
+partial substitutes, but neither covers the *combination*:
+
+- `budget_tests::test_over_budget_single_gain_returns_504` is a socket-level 504 with the
+  standard JSON body — but from S3's per-integration budget, a different middleware, carrying
+  `computation_budget_exceeded`.
+- `error_tests` asserts the `x-request-id` echo on an error path over a socket — but on a 413.
+
+So a hyper-level serialization regression *specific to the RequestTimeout 504 response* would
+pass in process and ship. **Recommended fix:** one cheap socket test that keeps the real
+deadline but pays a *small* compute — the expensive request only existed to win a race against
+a real 50 ms deadline, and a request need only be slower than the deadline, not dramatically
+slower, once nothing else is being asserted about margin. Do **not** restore the 12x12 grid;
+see the note in `heavy_heatmap_request`. Consider instead a deliberately tiny
+`request_timeout` with a modest request, accepting the flake risk that the paused-clock tests
+exist to avoid — which is the tradeoff to think about, and the reason this is filed rather
+than done: a flaky socket test is worse than the gap.
+
+**2. `call_json_with_headers` swallows bad header pairs (low).** `poem::RequestBuilder::header`
+*appends* and silently drops a pair whose name or value fails `TryInto`. In a helper whose
+entire purpose is header injection this is a sharp edge in two directions: passing
+`("content-type", …)` yields **two** `content-type` headers rather than overriding the one the
+helper already sets, and a typo'd header name vanishes with no panic — so a test asserting that
+a header is *absent*, or that a malformed header is rejected, would pass while asserting
+nothing. **Recommended fix:** validate in the helper — build `HeaderName`/`HeaderValue`
+explicitly and `expect` on failure (test-only code, so a panic is the right response to a
+malformed test input), and either document the append semantics or switch to replace. Both
+current call sites pass a single well-formed `x-request-id`, so nothing is wrong today; this is
+about the next caller.
+
+**Exit criteria:** item 1 — either a socket-level `request_timeout` 504 test exists, or a
+decision is recorded here that the gap is accepted and why. Item 2 — a malformed header pair
+fails loudly, pinned by a test that would have passed under the current helper.
+
+**Depends on:** nothing. **Coupled to:** D18 (which created both), D28 (same suite-health
+charter).
 
 ---
 

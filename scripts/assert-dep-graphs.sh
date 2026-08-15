@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Two dependency-graph invariants, asserted in ONE place:
+# Three dependency-graph invariants, asserted in ONE place:
 #
 #   * the CLI must not compile the web stack (roadmap D4);
-#   * antenna-core must stay a physics/artifact crate (roadmap D27 finding 4).
+#   * antenna-core must stay a physics/artifact crate (roadmap D27 finding 4);
+#   * the test HTTP client must not carry `system-proxy` (roadmap D18).
 #
 # Called by both `scripts/check.sh` and `.github/workflows/ci.yml`. It used to be
 # copy-pasted into both, so the banned-crate list lived in four places with nothing
@@ -168,3 +169,72 @@ if [ "$core_dep_count" -gt "$CORE_MAX_DEPS" ]; then
 fi
 
 echo "    ok: antenna-core carries no config stack ($core_dep_count/$CORE_MAX_DEPS packages)"
+
+# ---------------------------------------------------------------------------
+# The test HTTP client must not carry `system-proxy` (roadmap D18).
+#
+# This is a *latency* invariant, and it is the only one here that no compile can
+# observe: enabling the feature keeps the build green, clippy green and CI green,
+# and silently returns the suite to ~14 minutes on macOS.
+#
+# Why it matters that much: reqwest's `system-proxy` makes constructing ANY client
+# query the macOS system proxy configuration through SCDynamicStore -> configd.
+# Measured 2026-08-15, `reqwest::Client::builder().build()` cost **11.79 s** — against
+# 2.7 ms to load the whole calibration repository — and every test that starts a
+# `TestServer` pays it once. Dropping it took `antenna-model --profile full` from
+# 848 s to 33 s. See docs/findings-2026-08-15-test-suite-execution-time.md.
+#
+# `default-features = false` in antenna-model/Cargo.toml is therefore the single most
+# load-bearing line in the test suite, and prose in a manifest comment is not a gate:
+# someone who needs gzip writes features = ["json", "gzip"], drops the key, and nothing
+# notices. Per P13, a property worth having is a property something asserts.
+#
+# The feature edge is the assertion, NOT the `system-configuration` package, because
+# that package is macOS-only (`[target.'cfg(target_os = "macos")'.dependencies]`) and so
+# a package-name check is **vacuous on the Linux CI runner** — it would pass there
+# whatever the feature set says. The feature edge is platform-independent.
+#
+# Negative control: this detector is known to fire, empirically rather than by
+# construction. Before the fix, `cargo tree -p antenna-model -e features` listed
+# `reqwest feature "system-proxy"` (alongside "default", "default-tls", "rustls",
+# "http2", "charset"); after, it lists exactly `reqwest feature "json"`. The
+# positive control below re-checks the live half of that every run: if reqwest leaves
+# the graph, is renamed, or cargo changes this output format, the "json" edge stops
+# matching and the gate fails loudly instead of reporting a clean graph forever.
+# ---------------------------------------------------------------------------
+echo "--> asserting the test HTTP client resolves without system-proxy (roadmap D18)"
+
+reqwest_features=$(cargo tree -p antenna-model -e features --prefix none 2>&1) || {
+  echo "ERROR: 'cargo tree -p antenna-model -e features' failed; the system-proxy guard" >&2
+  echo "       did NOT run. Fix the command before trusting this gate." >&2
+  printf '%s\n' "$reqwest_features" >&2
+  exit 1
+}
+reqwest_features=$(printf '%s\n' "$reqwest_features" | grep -E '^reqwest feature "' | sort -u || true)
+
+# Positive control, first: reqwest must be in the graph under that name, with the one
+# feature we do want. If this matches nothing, the absence check below proves nothing.
+if ! printf '%s\n' "$reqwest_features" | grep -Fqx 'reqwest feature "json"'; then
+  echo "ERROR: could not find 'reqwest feature \"json\"' in antenna-model's feature graph." >&2
+  echo "       reqwest is a dev-dependency of antenna-model with features = [\"json\"], so" >&2
+  echo "       this cannot be true unless the detector is broken (crate renamed, dependency" >&2
+  echo "       removed, or cargo tree output format changed). The system-proxy check below" >&2
+  echo "       is worthless until this passes. Roadmap D18." >&2
+  echo "       Found instead:" >&2
+  printf '%s\n' "${reqwest_features:-<nothing>}" >&2
+  exit 1
+fi
+
+if printf '%s\n' "$reqwest_features" | grep -Fq 'reqwest feature "system-proxy"'; then
+  echo "ERROR: reqwest resolves with the 'system-proxy' feature (roadmap D18)." >&2
+  echo "       On macOS this makes every reqwest::Client construction query configd," >&2
+  echo "       costing ~11.8 s PER TEST that starts a TestServer — it took the" >&2
+  echo "       antenna-model suite from 33 s to 848 s. The build stays green, so this" >&2
+  echo "       gate is the only thing that can tell you." >&2
+  echo "       Fix: keep 'default-features = false' on reqwest in antenna-model/Cargo.toml" >&2
+  echo "       and add any feature you need BY NAME. Do not restore default-features." >&2
+  printf '%s\n' "$reqwest_features" >&2
+  exit 1
+fi
+
+echo "    ok: reqwest resolves without system-proxy"

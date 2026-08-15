@@ -51,7 +51,24 @@ num-complex = "0.4.6"
 postcard = { version = "1.1.3", default-features = false, features = [
     "use-std",
 ] }
-reqwest = { version = "0.13.4", features = ["json"] }
+# Test-only HTTP client for the integration suite, which talks to an ephemeral
+# **loopback** port over plain HTTP and nothing else.
+#
+# `default-features = false` is load-bearing for test latency, not hygiene. The
+# default set includes `system-proxy`, and on macOS constructing ANY client then
+# queries the system proxy configuration through SCDynamicStore: measured
+# 2026-08-15, `reqwest::Client::builder().build()` cost **11.8 s**, against 2.7 ms
+# to load the whole calibration repository. Every test that builds a client paid
+# it — `test_health_endpoint`, which starts a server and does one GET, took 12.0 s
+# of which 11.8 s was this line. Dropping the feature: 8 ms, and that test is now
+# 0.18 s. See docs/findings-2026-08-15-test-suite-execution-time.md.
+#
+# Also dropped, all unreachable for a loopback plain-HTTP client: `default-tls` /
+# `rustls` (no https), `http2` (poem serves 1.1 here), `charset` (fixture bodies
+# are UTF-8 JSON). If a test ever needs one, add that feature back by name —
+# do NOT restore `default-features`, which would silently reinstate `system-proxy`
+# and put 12 s back on every test in the suite.
+reqwest = { version = "0.13.4", default-features = false, features = ["json"] }
 tempfile = "3.27.0"
 # test-util enables tokio's paused/mocked clock for `#[tokio::test(start_paused = true)]`
 # (roadmap S5 shutdown-delay test). Dev-only: it must never affect production runtime
