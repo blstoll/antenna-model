@@ -4770,6 +4770,32 @@ state, stated command, stated repetitions) and an explanation for the spread. If
 legitimate outcome and worth writing down, because the next person to see 900 s will otherwise
 re-run this investigation.
 
+**Evidence base added 2026-08-14/15 (from D27's verification):
+`docs/findings-2026-08-15-test-suite-execution-time.md`.** Per-package measurements, the
+slowest-test table, and the practical guidance for running this suite at all. Three things in
+it change where this unit should start:
+
+1. **The hypothesis above now has a named cluster attached.** Fifteen of the sixteen slowest
+   tests are in `antenna-model::integration`, and thirteen land in a tight **83–105 s band** —
+   `legacy_feed_position_key_is_rejected_with_400` (104.8 s) posts a wrong JSON key and asserts
+   a 400. The uniformity is the tell: that is queueing, not cost. The findings doc names the
+   cheap experiment that confirms or kills it (run the binary with and without
+   `test_sustained_load`'s `threads-required` override). **Do that before task 2's fixture
+   audit** — if it confirms, no individual test needs to get faster and task 2 is chasing the
+   wrong thing.
+2. **`antenna-core` is not implicated at all**: 331 tests in 40 s. The expense is not physics.
+3. **Task 3 gains a target this unit had written off.**
+   `test_heavy_heatmap_times_out_with_504` (**130.9 s**, the single most expensive test in the
+   suite) is expensive by accident, not by necessity. Its own doc comment claims the request
+   costs "hundreds of ms" and finishes "well under a second" — that figure is *release* mode
+   while tests run *debug*, where the same geometry is ~19× dearer, times a 144-point grid. The
+   paused-clock, in-process technique that makes this free is **already implemented in the same
+   file** by `test_heavy_single_gain_times_out_with_504` (S2b), which asserts no wall-clock
+   threshold at all and bounds its own real cost with `integration_budget_ms`. All three of the
+   heatmap test's assertions survive the conversion — `build_in_process_app` and production
+   `create_routes` share the same `build_app`, so the middleware stack (and the `x-request-id`
+   assertion) is identical. Expected 131 s → <1 s; measure it rather than assuming.
+
 ### D19 — Adaptive knot placement lands internal knots on the axis bounds — Effort: S/M — ✅ **DONE 2026-08-02**
 
 **✅ DONE 2026-08-02**, branch `fix/d19-d20-correction-surface-determinacy`. Fixed as
