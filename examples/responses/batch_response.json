@@ -3,25 +3,30 @@
     {
       "antenna_id": "dsn_34m_uncalibrated",
       "feed_id": "x_band",
-      "gain_db": 67.70242948159164,
+      "gain_db": 31.20314236248626,
       "geometry": {
         "physical_feed_offset_m": {
-          "x": -5.0,
+          "x": 0.15,
           "y": 0.0,
           "z": 0.0
         },
         "emitter_azimuth_deg": 0.0,
-        "emitter_elevation_deg": 45.00000000000001
+        "emitter_elevation_deg": 0.0
       },
       "warnings": [
+        {
+          "code": "spillover_significant",
+          "message": "Estimated spillover 15.3% may reduce aperture efficiency."
+        },
         {
           "code": "uncalibrated",
           "message": "Antenna 'dsn_34m_uncalibrated' is uncalibrated (using design specifications). Absolute gain accuracy: ±3.0 dB, Loss accuracy: ±2.0 dB"
         }
       ],
       "metadata": {
-        "computation_time_ms": 0.007542,
-        "extrapolated": false
+        "computation_time_ms": 0.401292,
+        "extrapolated": false,
+        "spillover_loss_db": -0.7211447631924186
       },
       "calibration_status": {
         "status": "uncalibrated",
@@ -34,25 +39,30 @@
     {
       "antenna_id": "dsn_34m_uncalibrated",
       "feed_id": "s_band",
-      "gain_db": 56.20894566482504,
+      "gain_db": 56.735147166831496,
       "geometry": {
         "physical_feed_offset_m": {
-          "x": -5.0,
+          "x": 0.0,
           "y": 0.0,
           "z": 0.0
         },
         "emitter_azimuth_deg": 0.0,
-        "emitter_elevation_deg": 45.00000000000001
+        "emitter_elevation_deg": 0.0
       },
       "warnings": [
+        {
+          "code": "spillover_significant",
+          "message": "Estimated spillover 17.1% may reduce aperture efficiency."
+        },
         {
           "code": "uncalibrated",
           "message": "Antenna 'dsn_34m_uncalibrated' is uncalibrated (using design specifications). Absolute gain accuracy: ±3.0 dB, Loss accuracy: ±2.0 dB"
         }
       ],
       "metadata": {
-        "computation_time_ms": 0.001042,
-        "extrapolated": false
+        "computation_time_ms": 0.028208,
+        "extrapolated": false,
+        "spillover_loss_db": -0.8148416274315777
       },
       "calibration_status": {
         "status": "uncalibrated",
@@ -65,25 +75,30 @@
     {
       "antenna_id": "gs_3.7m_uncalibrated",
       "feed_id": "x_band_feed",
-      "gain_db": 47.400976710926585,
+      "gain_db": 23.43113498804965,
       "geometry": {
         "physical_feed_offset_m": {
-          "x": -5.0,
+          "x": 0.05,
           "y": 0.0,
           "z": 0.0
         },
         "emitter_azimuth_deg": 0.0,
-        "emitter_elevation_deg": 45.00000000000001
+        "emitter_elevation_deg": 0.0
       },
       "warnings": [
+        {
+          "code": "spillover_significant",
+          "message": "Estimated spillover 17.1% may reduce aperture efficiency."
+        },
         {
           "code": "uncalibrated",
           "message": "Antenna 'gs_3.7m_uncalibrated' is uncalibrated (using design specifications). Absolute gain accuracy: ±3.0 dB, Loss accuracy: ±2.0 dB"
         }
       ],
       "metadata": {
-        "computation_time_ms": 0.0015,
-        "extrapolated": false
+        "computation_time_ms": 0.345042,
+        "extrapolated": false,
+        "spillover_loss_db": -0.8134714045459502
       },
       "calibration_status": {
         "status": "uncalibrated",
@@ -95,7 +110,7 @@
     }
   ],
   "metadata": {
-    "total_computation_time_ms": 0.014834,
+    "total_computation_time_ms": 0.7811250000000001,
     "count": 3,
     "failure_count": 0
   }

@@ -44,20 +44,16 @@ curl http://localhost:3000/api/v1/antennas/dsn_34m_uncalibrated | jq
 
 ### 4. Single Gain Computation
 
-> **KNOWN BROKEN (measured 2026-08-16, roadmap D30):** `gain_request.json` and
-> `batch_request.json` share an ECEF geometry the validator rejects — the vehicle
-> sits at `(R, 0, 0)` with an identity attitude and a boresight along `+X`, so the
-> body X-axis is parallel to boresight and the azimuth reference is degenerate.
-> `gain_request.json` returns **422 `invalid_coordinate`**; `batch_request.json`
-> returns **200 with 3 of 3 items failed**. Both still *deserialize*, which is all
-> the drift tests check. Use `gain_request_geodetic.json` until D30 lands.
-
 ```bash
-# Verified working:
 curl -X POST http://localhost:3000/api/v1/gain \
   -H "Content-Type: application/json" \
-  -d @examples/requests/gain_request_geodetic.json | jq
+  -d @examples/requests/gain_request.json | jq
 ```
+
+Expected: `gain_db` ≈ 74.3 dBi (DSN 70 m, X-band, emitter on boresight), with
+`uncalibrated` and `spillover_significant` warnings. `gain_request_geodetic.json`
+is the separate geodetic-frame example — a different antenna and geometry
+(`gs_3.7m` at 8200 MHz, satellite well off boresight), not this request restated.
 
 ### 5. Batch Computation
 ```bash
@@ -65,6 +61,9 @@ curl -X POST http://localhost:3000/api/v1/gain/batch \
   -H "Content-Type: application/json" \
   -d @examples/requests/batch_request.json | jq '.metadata'
 ```
+
+Expected: `"count": 3, "failure_count": 0`. Check `failure_count`, not the status
+code — batch answers **200 even when every item fails**.
 
 ### 6. Heatmap Generation
 ```bash

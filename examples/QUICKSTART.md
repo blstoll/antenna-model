@@ -42,17 +42,23 @@ curl http://localhost:3000/api/v1/antennas | jq
 curl -X POST http://localhost:3000/api/v1/gain \
   -H "Content-Type: application/json" \
   -d '{
-    "antenna_id": "dsn_34m_uncalibrated",
+    "antenna_id": "dsn_70m_uncalibrated",
     "feed_id": "x_band",
     "vehicle_position": {"x": 6500000.0, "y": 0.0, "z": 0.0, "coordinate_system": "ecef"},
-    "vehicle_attitude": [1.0, 0.0, 0.0, 0.0],
+    "vehicle_attitude": [0.5, 0.5, 0.5, 0.5],
     "reflector_boresight": {"x": 6500010.0, "y": 0.0, "z": 0.0, "coordinate_system": "ecef"},
     "feed_pointing_location": {"x": 6500005.0, "y": 0.0, "z": 0.0, "coordinate_system": "ecef"},
-    "emitter_position": {"x": 7000000.0, "y": 0.0, "z": 500000.0, "coordinate_system": "ecef"},
+    "emitter_position": {"x": 7000000.0, "y": 0.0, "z": 0.0, "coordinate_system": "ecef"},
     "frequency_mhz": 8450.0,
     "include_reference": true
   }' | jq
 ```
+
+Expected `gain_db` ≈ **74.3 dBi**. Note the attitude: `[w, x, y, z] =
+[0.5, 0.5, 0.5, 0.5]` rotates body +Z onto ECEF +X, which is where this request
+points the boresight, and body +X onto ECEF +Y, which becomes the azimuth-zero
+reference. An identity attitude here would leave body +X *parallel* to boresight,
+which is a degenerate azimuth reference and a 422 — see roadmap D30.
 
 ### Using Python:
 
@@ -62,13 +68,13 @@ import requests
 response = requests.post(
     "http://localhost:3000/api/v1/gain",
     json={
-        "antenna_id": "dsn_34m_uncalibrated",
+        "antenna_id": "dsn_70m_uncalibrated",
         "feed_id": "x_band",
         "vehicle_position": {"x": 6500000.0, "y": 0.0, "z": 0.0, "coordinate_system": "ecef"},
-        "vehicle_attitude": [1.0, 0.0, 0.0, 0.0],
+        "vehicle_attitude": [0.5, 0.5, 0.5, 0.5],
         "reflector_boresight": {"x": 6500010.0, "y": 0.0, "z": 0.0, "coordinate_system": "ecef"},
         "feed_pointing_location": {"x": 6500005.0, "y": 0.0, "z": 0.0, "coordinate_system": "ecef"},
-        "emitter_position": {"x": 7000000.0, "y": 0.0, "z": 500000.0, "coordinate_system": "ecef"},
+        "emitter_position": {"x": 7000000.0, "y": 0.0, "z": 0.0, "coordinate_system": "ecef"},
         "frequency_mhz": 8450.0,
         "include_reference": True
     }
@@ -126,6 +132,15 @@ JSON array in `[w, x, y, z]` (w-first) order. The identity rotation is:
 ```json
 "vehicle_attitude": [1.0, 0.0, 0.0, 0.0]
 ```
+
+**The identity is not a safe default.** The quaternion rotates body → ECEF, and
+only body **+X** is read: projected onto the plane perpendicular to boresight, it
+is the azimuth-zero reference. If that projection collapses — i.e. body +X ends
+up parallel to the boresight direction — the azimuth reference is degenerate and
+the request is a **422**, which is exactly what the identity does to a boresight
+pointing along ECEF +X. Either supply an attitude whose body +Z matches your
+boresight (so body +X is perpendicular by construction), or **omit the field**,
+in which case the service derives azimuth-zero from an Earth-Z/East cross product.
 
 ## Common Tasks
 

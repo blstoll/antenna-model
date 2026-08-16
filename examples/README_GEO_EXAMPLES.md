@@ -309,14 +309,38 @@ Expected for 5° (far sidelobes): ~50 dBi (67 - 17 dB)
 
 ---
 
-## Deprecated Examples
+## The non-GEO examples
 
-The following examples in `examples/requests/` have unrealistic coordinates and should **not** be used:
-- `gain_request.json` - Vehicle only 10m from emitter
-- `heatmap_request.json` - Same issue
-- `batch_request.json` - Same issue
+`gain_request.json`, `batch_request.json` and `heatmap_request.json` in
+`examples/requests/` are the plain ECEF/near-Earth examples, as distinct from the
+GEO scenario documented above. All three execute — pinned by
+`tests/integration/example_execution_tests.rs`, which POSTs every committed
+example to its real endpoint.
 
-These will be updated or removed in future versions.
+Where the emitter is, per file: `gain_request.json` and `batch_request.json` put
+it **500 km out, on boresight**. `heatmap_request.json` has **no
+`emitter_position` at all** — the endpoint synthesizes one per grid cell, 400 km
+out along that cell's ENU azimuth/elevation, so what you choose there is the
+*grid*, and `reflector_boresight` must be aimed into it or every cell lands in
+the far sidelobes. All three were repointed by roadmap **D30** (2026-08-16).
+
+This section previously listed all three as deprecated, "unrealistic coordinates
+— vehicle only 10 m from emitter". That was **wrong**, and the way it was wrong
+is worth recording: the 10 m was the distance to `reflector_boresight`, and 5 m
+the distance to `feed_pointing_location`. Both of those are **aim points**, not
+physical positions — only a direction is read from them, so the distance carries
+no meaning at all. Mistaking an aim point for a physical location is the exact
+trap that C8 stage 1 renamed both fields to close (`feed_position` →
+`feed_pointing_location`); this note was an instance of it, written under the old
+names and left standing after the rename.
+
+The files did have a real defect, just not that one. Until D30 the heatmap
+example aimed its boresight at ECEF `+X`, which from a vehicle at
+`(6500000, 0, 0)` — lat 0°, lon 0° — is **straight up**. Its grid of ENU
+elevation 0–5° was therefore sweeping **85–90° off boresight**, and the answer
+was a flat Ruze floor (peak −6.7 dBi for a dish that peaks near 48) rather than a
+pattern. It parsed, it executed, and it meant nothing — which is the class D30
+exists to remove, so it was found by D30's own review rather than by the guard.
 
 ---
 

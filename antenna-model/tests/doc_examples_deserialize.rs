@@ -32,6 +32,23 @@
 //!
 //! An unmarked block that looks like an API example is a hard error rather than a
 //! silent gap: see `every_api_example_block_is_marked`.
+//!
+//! # Blocks that look like payloads but are not
+//!
+//! Some documented blocks legitimately contain a field from the `TELLS` list
+//! without being an API payload — README's structured-logging example carries an
+//! honest `antenna_id`. Exempt those explicitly, with a stated reason:
+//!
+//! ```markdown
+//! <!-- api-example: not-a-payload structured log line, not a request or response -->
+//! ```
+//!
+//! The reason is **required** for this marker and free text after the first
+//! token. The exemption is therefore greppable and self-justifying, and an
+//! *unmarked* payload-shaped block still fails — which is the property worth
+//! keeping. Do not instead narrow `TELLS` to route around one block: every
+//! narrowing is a new silent blind spot, and the strictness is what makes this
+//! guard worth having.
 
 use antenna_model::api::schemas::{
     BatchGainRequest, ErrorResponse, GainRequest, GainResponse, H3LinkBudgetRequest,
@@ -40,6 +57,10 @@ use antenna_model::api::schemas::{
 use std::path::{Path, PathBuf};
 
 const MARKER: &str = "<!-- api-example:";
+
+/// Reserved schema token marking a block that trips a `TELLS` heuristic without
+/// being an API payload. Must carry a free-text reason after the token.
+const NOT_A_PAYLOAD: &str = "not-a-payload";
 
 /// A marked example: which schema it claims, and the payload to check against it.
 struct DocExample {
@@ -50,24 +71,31 @@ struct DocExample {
 }
 
 /// Docs whose examples are part of the published API contract, and are therefore held
-/// to the schemas.
+/// to the schemas. Paths are **workspace-root relative**.
 ///
 /// Deliberately *not* all of `docs/`. The design and workflow documents
 /// (`architecture.md`, `partial-calibration-design.md`, …) also contain JSON blocks, but
 /// they are illustrative and in places knowingly aspirational; auditing them is roadmap
 /// unit D5's job, not this guard's. Adding a file here is one line — do that as D5 makes
 /// each one true, so the guard ratchets forward instead of blocking on a sweep.
-const CONTRACT_DOCS: [&str; 1] = ["api-documentation.md"];
+///
+/// `README.md` was added by roadmap **D30** (2026-08-16). It was the ratchet this
+/// list's own doc comment invited, and D9 could not take it: the guard resolved
+/// every entry under `docs/`, so a repo-root file could not be listed at all.
+const CONTRACT_DOCS: [&str; 2] = ["docs/api-documentation.md", "README.md"];
 
-fn docs_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs")
+/// Workspace root — this crate's manifest dir is `<root>/antenna-model`.
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("..")
 }
 
 fn markdown_files() -> Vec<PathBuf> {
     CONTRACT_DOCS
         .iter()
         .map(|name| {
-            let path = docs_dir().join(name);
+            let path = repo_root().join(name);
+            // Keep this: a mistyped entry must fail loudly rather than silently
+            // pin nothing.
             assert!(path.is_file(), "missing contract doc: {}", path.display());
             path
         })
@@ -124,12 +152,31 @@ fn collect_examples() -> Vec<DocExample> {
             let Some(rest) = line.trim().strip_prefix(MARKER) else {
                 continue;
             };
-            let schema = rest
+            let inner = rest
                 .trim()
                 .strip_suffix("-->")
                 .unwrap_or_else(|| panic!("{name}:{}: malformed marker: {line}", idx + 1))
-                .trim()
-                .to_string();
+                .trim();
+
+            // Free-text after the token is accepted for `not-a-payload` ONLY.
+            // A schema marker must match whole — otherwise
+            // `<!-- api-example: GainRequest v2 -->` would silently validate as
+            // `GainRequest` instead of reaching the unknown-schema panic, which
+            // is a loosening of the very check that makes a typo'd marker loud.
+            if let Some(reason) = inner
+                .strip_prefix(NOT_A_PAYLOAD)
+                .filter(|r| r.is_empty() || r.starts_with(char::is_whitespace))
+            {
+                assert!(
+                    !reason.trim().is_empty(),
+                    "{name}:{}: `{NOT_A_PAYLOAD}` must state why this block is not an \
+                     API payload — an unexplained exemption is the silent gap this \
+                     guard exists to prevent",
+                    idx + 1
+                );
+                continue;
+            }
+            let schema = inner.to_string();
 
             // The fence must open on the next non-blank line.
             let mut cursor = idx + 1;
@@ -205,8 +252,11 @@ fn every_documented_example_deserializes() {
         }
     }
 
+    // Floor, not a count: it exists so wholesale marker deletion cannot quietly
+    // empty this guard. 11 markers in api-documentation.md + 3 in README.md, of
+    // which one is the `not-a-payload` exemption, gives 13 checked today.
     assert!(
-        examples.len() >= 8,
+        examples.len() >= 13,
         "expected the documented examples to still be marked, found only {}",
         examples.len()
     );

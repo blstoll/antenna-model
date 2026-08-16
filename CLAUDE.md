@@ -19,7 +19,7 @@ Sprints 1–7 of 8 are complete (see `docs/implementation-plan.md`): physics eng
 # Build both service and calibration tool
 cargo build --release
 
-# Run all tests — dev inner loop (1040 tests, ~25 s, measured 2026-08-15 on an
+# Run all tests — dev inner loop (1052 tests, ~24 s, measured 2026-08-16 on an
 # idle 8-core machine). The default nextest profile excludes the slow tier: three
 # heavy physics pins + the two calibrate full-mode e2e binaries. See
 # .config/nextest.toml and roadmap D18. (P10-perf returned six pins to this tier

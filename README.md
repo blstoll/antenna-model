@@ -274,6 +274,7 @@ omitting it is a 400 naming the field.
 Endpoints: `POST /api/v1/gain`, `POST /api/v1/gain/batch`, `POST /api/v1/heatmap`,
 `POST /api/v1/h3-heatmap`, plus `GET /api/v1/antennas[/:id[/feeds[/:feed_id]]]`.
 
+<!-- api-example: GainRequest -->
 ```bash
 curl -X POST http://localhost:3000/api/v1/gain \
   -H "Content-Type: application/json" \
@@ -304,6 +305,7 @@ curl -X POST http://localhost:3000/api/v1/gain \
 
 Response (verified against a running service, 2026-08-16 — warning text abridged):
 
+<!-- api-example: GainResponse -->
 ```json
 {
   "antenna_id": "gs_3.7m_uncalibrated",
@@ -340,11 +342,15 @@ on message text. The full vocabulary is in
 
 ### Batch, Heatmap, and H3 Link Budget
 
-These take larger payloads, so run them straight from the checked-in examples. A drift
-test pins each against its schema — though note what that does **not** cover, immediately
-below:
+These take larger payloads, so run them straight from the checked-in examples. Two
+guards cover those files: one pins each against its schema, and one POSTs each to its
+real endpoint and requires a fully-successful response.
 
 ```bash
+curl -X POST http://localhost:3000/api/v1/gain/batch \
+  -H "Content-Type: application/json" \
+  -d @examples/requests/batch_request.json
+
 curl -X POST http://localhost:3000/api/v1/heatmap \
   -H "Content-Type: application/json" \
   -d @examples/requests/heatmap_request.json
@@ -354,18 +360,15 @@ curl -X POST http://localhost:3000/api/v1/h3-heatmap \
   -d @examples/requests/h3_link_budget_request.json
 ```
 
-`/api/v1/gain/batch` is deliberately left out of that list. It returns **HTTP 200
-even when individual items fail** — each result carries either a value or a typed
-`error`, and `metadata.failure_count` summarizes — and the checked-in
-`batch_request.json` is currently one of those failures: all three of its items
-are rejected for a degenerate geometry (roadmap **D30**, measured 2026-08-16), so
-it returns a 200 whose every item failed. Build a batch from the single-gain
-example above until D30 lands, and read `metadata.failure_count` rather than the
-status code.
-
-That is also the limit of what the drift tests promise: they check every example
-**deserializes into its schema**, not that it *computes*. `gain_request.json` has
-the same defect and returns a 422 — see `examples/README.md`.
+One thing to know about batch: it returns **HTTP 200 even when individual items
+fail** — each result carries either a value or a typed `error`, and
+`metadata.failure_count` summarizes. Read `failure_count`, never the status code.
+That is not a hypothetical caveat: `batch_request.json` itself shipped for two
+months with all three of its items failing under a 200 (roadmap **D30**), because
+the drift tests checked only that each example **deserializes into its schema**,
+not that it *computes*. Both are now checked —
+`tests/integration/example_execution_tests.rs` POSTs every committed example to
+its real endpoint and requires a fully-successful response.
 
 `/heatmap` serves rectangular grids only. The H3 grid is the separate
 `/h3-heatmap` endpoint.
@@ -626,6 +629,8 @@ For detailed architecture documentation, see [docs/architecture.md](docs/archite
 ### Structured Logging
 
 All requests are logged with structured fields:
+
+<!-- api-example: not-a-payload a tracing log line, not an API request or response — its antenna_id is a log field -->
 ```json
 {
   "timestamp": "2026-08-16T10:30:45Z",

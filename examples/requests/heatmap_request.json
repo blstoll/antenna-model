@@ -8,29 +8,29 @@
     "coordinate_system": "ecef"
   },
   "reflector_boresight": {
-    "x": 6500010.0,
-    "y": 0.0,
-    "z": 0.0,
+    "x": 6500348.99,
+    "y": 348.78,
+    "z": 9987.82,
     "coordinate_system": "ecef"
   },
   "feed_pointing_location": {
-    "x": 6500005.0,
-    "y": 0.0,
-    "z": 0.0,
+    "x": 6500174.5,
+    "y": 174.39,
+    "z": 4993.91,
     "coordinate_system": "ecef"
   },
   "frequency_mhz": 8250.0,
   "grid_config": {
     "grid_type": "rectangular",
     "azimuth_range_deg": {
-      "min": 0.0,
-      "max": 5.0,
-      "step": 1.0
+      "min": 1.0,
+      "max": 3.0,
+      "step": 0.25
     },
     "elevation_range_deg": {
       "min": 0.0,
-      "max": 5.0,
-      "step": 1.0
+      "max": 2.0,
+      "step": 0.25
     }
   }
 }
