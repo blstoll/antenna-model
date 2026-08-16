@@ -263,7 +263,11 @@ Example antenna configuration:
 
 ## Notes
 
-- Test server runs on port 3001 (different from production 3000) to avoid conflicts
+- Every test server binds **port 0**, so the OS assigns a free port and concurrent runs
+  cannot collide (roadmap D28, 2026-08-15 — `server_test` used to bind the literals
+  3001/3002 "to avoid conflicts", which is precisely what it caused). `TestServer`
+  reports the assigned port through `base_url`; `server_test` reads it back from
+  `BoundServer::local_addr()`
 - All tests use realistic physical antenna models with proper geometry
 - Concurrent tests verify thread safety with up to 50 parallel requests
 - Test data is deterministic and reproducible

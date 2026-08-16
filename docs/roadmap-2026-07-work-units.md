@@ -342,6 +342,41 @@ G1 ─┬─ G2 ── G3
     │      the IDENTICAL signature under      │
     │      load, so both halves must be fixed │
     │      together.                          │
+    │  D28, D29 DONE 2026-08-15 (branch fix/  │
+    │      d28-d29-test-suite-isolation). D28 │
+    │      was fixed by a PRODUCTION change,  │
+    │      not a test change: the bind was    │
+    │      LAZY (poem's TcpListener handed to │
+    │      Server::new), so it happened INSIDE│
+    │      the server future and belonged to  │
+    │      whatever task that was spawned     │
+    │      onto, not to the caller who chose  │
+    │      the port. Split at that seam --    │
+    │      bind_server_with_config -> Bound-  │
+    │      Server{local_addr(), serve()} --   │
+    │      and the diagnostic fixes itself.   │
+    │      Nothing could previously ask what  │
+    │      the server BOUND; under port 0     │
+    │      that differs from what was         │
+    │      configured. Repro first (2 concur- │
+    │      rent runs, exact filed signature); │
+    │      3 concurrent copies pass after.    │
+    │      Startup test 0.529 -> 0.035 s as a │
+    │      side effect: the socket listens    │
+    │      before serve is even scheduled.    │
+    │      D29 item 1: socket-504 gap closed  │
+    │      at 0.194 s vs the 131 s test D18   │
+    │      retired, by INVERTING the sizing   │
+    │      -- a 1 ms deadline against a       │
+    │      measured 91.8 ms compute, not a    │
+    │      heavy request against a 50 ms one. │
+    │      Flake direction is one-sided: load │
+    │      pushes compute further PAST the    │
+    │      deadline, never under it.          │
+    │      Item 2: the header helper now      │
+    │      validates and REPLACES; negative   │
+    │      control (old helper restored)      │
+    │      fails 3 of the 4 new tests.        │
     └─ (Phases 1–3 done) ─ D4 ─ D7
 Superseded by C8 (do not implement): S7, C5, C6
 Phase 5: F1..F9 (F8 done) gated on register rows (P3, P5/F4, F5, D9, F9); P1 + C8 DECIDED 2026-07-08;
@@ -5925,7 +5960,67 @@ decision), then 9 (needs a decision first), then 8 (a sweep, and the least load-
 
 ---
 
-### D28 — `server_test` binds hardcoded ports, and reports the collision as the wrong failure — Effort: S
+### D28 — `server_test` binds hardcoded ports, and reports the collision as the wrong failure — Effort: S — ✅ **DONE 2026-08-15**
+
+> **Closeout 2026-08-15** (branch `fix/d28-d29-test-suite-isolation`, with D29). All five exit
+> criteria met. **Reproduced first, as filed:** two concurrent `cargo nextest run -p
+> antenna-model --test server_test` runs, and one copy failed both tests with exactly the
+> signature the filing describes — the reported failure was `ConnectionRefused` on
+> `/status`, with `AddrInUse` visible only as a separate, unattributed panic from the
+> orphaned spawn. After the fix, **three** concurrent copies pass.
+>
+> **The fix is a production change, not a test change**, and that is the part worth
+> recording. The filing named reporting the bound address as "the only non-trivial part,
+> and worth doing anyway"; it is, and doing it turned out to fix the diagnostic by
+> itself. `start_server_with_config` handed a *lazy* `poem::listener::TcpListener` to
+> `Server::new`, so the bind happened inside the server future — which is why the failure
+> belonged to whatever task that future was spawned onto rather than to the caller who
+> chose the port. It is now split at that seam: `bind_server_with_config` does everything
+> through the bind and returns a `BoundServer` exposing `local_addr()`, and
+> `BoundServer::serve` runs the accept loop. `start_server_with_config` is the two
+> composed, so `main.rs` is unchanged. Nothing could previously ask what the server bound
+> — with `port = 0` the configured address and the address in use are different things,
+> and only the first was observable, including in the startup log line (which now reports
+> both).
+>
+> With that seam in place all three test-side fixes are one-liners: the tests bind in
+> their own body (so `AddrInUse` is *their* `Err`), on port 0 (so there is nothing to
+> collide on), and poll `/ready` instead of sleeping 500 ms. The bind-before-spawn
+> ordering also means the socket is listening before `serve` is even scheduled, so the
+> readiness poll almost always succeeds on its first attempt:
+> `test_server_startup_and_status` went **0.529 s → 0.035 s**. `test_status_uptime_increases`
+> keeps its ~1 s cost, which is irreducible — `uptime_seconds` has one-second granularity —
+> but polls for the tick rather than sleeping 1100 ms for it.
+>
+> **New guard:** `bind_failure_is_reported_as_a_bind_failure` manufactures the collision
+> (binds a squatter socket on an OS-assigned port, then points the config at it) and
+> asserts `ErrorKind::AddrInUse` at the caller. This is the assertion the old arrangement
+> could not host at all — there was no `Result` to inspect, only a later
+> `ConnectionRefused` from a request to a server that never started.
+>
+> **Deliberately kept:** the `test_config` doc comment's fixture-path reasoning
+> (crate-root-relative `data_directory`, `fail_fast` at its shipped default), per the
+> unit's gotcha. This is still the only test that drives the real production startup path,
+> and it still does — `bind_server_with_config` + `serve` *is* `start_server_with_config`.
+>
+> **Review pass, same day — four fixes, and two of them are the unit's own defect class
+> reappearing one step further out.** (i) The readiness poll and the uptime reads used a
+> client with **no per-request timeout**, and the loop deadlines are only consulted
+> *between* attempts — so an alive-but-wedged server would hang forever rather than fail
+> at 30 s with its diagnostic. Binding before spawning `serve` is what made that
+> reachable: the socket listens from the moment it is bound, so the TCP connect now
+> succeeds where it would previously have been refused. Every request in the file is now
+> bounded by a shared `ATTEMPT_TIMEOUT`. (ii) `assert!(uptime2 > uptime1)` could not fail,
+> because the loop only broke on that condition — the P13 rot, freshly introduced. The
+> loop now breaks on the deadline as well, so the assertion decides the test.
+> (iii) **An unflagged behaviour change:** the bind used to fail *inside*
+> `run_with_graceful_shutdown`, so its `Err` fell through to `shutdown_cleanup` — the
+> invariant that call site states in as many words. An early `?` out of
+> `bind_server_with_config` quietly made that false for the one error this split
+> introduced; cleanup now runs on the failed-bind path, with the reason recorded there.
+> (iv) Two docs still asserted the old world in the present tense — `tests/README.md`
+> ("test server runs on port 3001 … to avoid conflicts", the exact claim this unit
+> disproves) and the D18 findings doc's "do not run two suites at once".
 
 **Filed 2026-08-14**, found while verifying D27. Not introduced by it — pre-existing, and it
 survives because it only fires when something else holds the port, which on a single-run CI
@@ -5991,7 +6086,55 @@ own" adjacent problems).
 
 ---
 
-### D29 — Two gaps left by D18's timeout-test conversion — Effort: S
+### D29 — Two gaps left by D18's timeout-test conversion — Effort: S — ✅ **DONE 2026-08-15**
+
+> **Closeout 2026-08-15** (branch `fix/d28-d29-test-suite-isolation`, with D28). Both items
+> fixed rather than accepted.
+>
+> **Item 1 — the socket-level `request_timeout` 504 now exists**, as
+> `timeout_tests::test_request_timeout_504_over_a_real_socket`, and it costs **0.194 s**
+> against the 131 s of the socket test D18 retired. The unit worried this was a tradeoff
+> against flake risk; it is not, because the sizing inverts. The retired test won its race
+> by making the *request* expensive enough to outlast a real 50 ms deadline — which coupled
+> its cost to the physics' cost, in debug, where the physics is ~19× dearer. This one
+> shrinks the **deadline** to 1 ms (tokio's timer granularity) and sends the cheapest
+> request in the fixtures, whose compute is **91.8 ms** — measured, not assumed, off the
+> control test's own `computation_time_ms`. The margin is ~92× and, more importantly,
+> **one-sided**: the only way a real deadline flakes is by *not* being crossed, and every
+> force that could disturb the timing (load, contention, slower hardware) pushes the compute
+> further past it. There is no mechanism by which load makes this test pass a request it
+> should have timed out — which is the opposite of the heatmap case's margin and is why a
+> real deadline is acceptable here.
+>
+> One property makes the 1 ms deadline safe for the harness, and it is worth knowing before
+> anyone "fixes" it: `TestServer` polls `/health` during startup, and `/health` is a
+> synchronous handler. `RequestTimeout` is a `tokio::time::timeout` around the endpoint
+> future, and a future that is `Ready` on its first poll is never preempted whatever the
+> deadline — the same property, read the other way round, that S2b exists to *guarantee*
+> for `/gain`. The test asserts the full combination the gap was about: 504, standard JSON
+> `ErrorResponse` with `request_timeout` (not S3's `computation_budget_exceeded`), and the
+> `x-request-id` echo, all over real TCP. Its control is
+> `test_single_gain_under_timeout_still_succeeds` — same request, same harness, generous
+> deadline, 200.
+>
+> **Item 2 — `call_json_with_headers` now validates and replaces.** Header pairs are built
+> into `HeaderName`/`HeaderValue` explicitly and `insert`ed (replace), instead of being
+> passed to `RequestBuilder::header` (append, silently dropping what it cannot parse). A
+> malformed name or value panics, which is right for test-only code: the malformed input is
+> the *test's*, and a test that cannot construct the request it means to send has no result
+> worth reporting. Pinned by four tests in a new
+> `antenna-model/tests/integration/helper_contract_tests.rs`, driving a local echo endpoint
+> rather than the service — what is under test is the helper's construction of the request,
+> and involving the real app would only add ways for the assertion to be satisfied by
+> something else.
+>
+> **Negative control run, per P13** (a guard nothing has falsified is not known to have
+> power): with the old append-and-drop helper restored and nothing else changed, **3 of the
+> 4 fail** — the two malformed-pair tests (no panic raised) and the override test, which
+> reports `["application/json", "text/plain"]` against the expected `["text/plain"]`, i.e.
+> the duplicate-`content-type` defect exactly as filed. The fourth
+> (`a_supplied_header_arrives_once`) passes under both, correctly: it describes behaviour
+> that never broke.
 
 **Filed 2026-08-15**, on review of the D18 branch. Both are consequences of moving
 `test_heavy_heatmap_times_out_with_504` in process (130.9 s → 1.2 s); neither is a regression

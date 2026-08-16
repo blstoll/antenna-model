@@ -160,10 +160,16 @@ run is 33 s, but the rest still apply.
   a zero-byte log does *not* mean the run is stuck.
 - **Do not read a summary line while the run is still writing.** A partial log shows passes and
   no failures and looks green; failures land at the end. Wait for the `Summary` line.
-- **Killing a run leaks bound sockets.** `server_test` binds literal ports 3001/3002 (see
+- ~~**Killing a run leaks bound sockets.** `server_test` binds literal ports 3001/3002 (see
   **D28**), and aborted server tasks can keep holding them, so the *next* run fails with
   `AddrInUse` — surfaced misleadingly as `ConnectionRefused` against `/status`. Check for
-  orphaned processes before believing you broke something, and do not run two suites at once.
+  orphaned processes before believing you broke something, and do not run two suites at
+  once.~~ **Fixed by D28, 2026-08-15.** `server_test` binds port 0 like everything else, so
+  an orphaned server holds a port nothing else asks for, and two suites can run at once
+  (verified with two concurrent `antenna-model` runs). The misleading-signature half is
+  fixed too: the bind now happens before the server task is spawned, so a collision is
+  returned to the caller as `AddrInUse` instead of being panicked on an orphaned task and
+  read as `ConnectionRefused`.
 - `pkill -f "cargo-nextest run …"` does **not** match; the real argv is
   `cargo-nextest nextest run …`.
 - `calibrate` (~535 s full profile) is now the workspace's dominant cost and is *not* affected

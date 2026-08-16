@@ -10,17 +10,25 @@
 //! limitation): the timeout bounds the *response*, not the background compute —
 //! the rayon work is not cancelled and runs to completion (see S3).
 //!
-//! **Both timeout cases here are pinned on a paused clock, in process, and assert
-//! no wall-clock threshold at all.** The single-gain case (roadmap S2b) was
-//! written that way; the heatmap case was converted to it 2026-08-15 under D18,
+//! **The two headline timeout cases here are pinned on a paused clock, in process,
+//! and assert no wall-clock threshold at all.** The single-gain case (roadmap S2b)
+//! was written that way; the heatmap case was converted to it 2026-08-15 under D18,
 //! having cost 131 s as a socket test that won a race against a *real* 50 ms
 //! deadline by being expensive. See `test_heavy_single_gain_times_out_with_504`
 //! for why the mocked clock works here and why it cannot be used over a socket.
 //!
-//! If you add a third timeout case, start from that pattern rather than from a
+//! If you add another timeout case, start from that pattern rather than from a
 //! real deadline plus a heavy request: sizing a request to outlast a real
 //! deadline couples the test's cost to the physics' cost, and the physics here is
 //! ~19x dearer in debug — which is exactly how the heatmap case reached 131 s.
+//!
+//! The one deliberate exception is
+//! [`test_request_timeout_504_over_a_real_socket`] (roadmap D29 item 1), which
+//! keeps a real deadline precisely because hyper's serialization of *this* 504 is
+//! what it exists to cover. It inverts the sizing rather than repeating it: the
+//! deadline shrinks to 1 ms instead of the request growing, so the margin is won
+//! by making the deadline small rather than the compute large. Read its docs
+//! before adding a second real-deadline test.
 
 use crate::integration::helpers::*;
 use antenna_model::api::schemas::*;
@@ -250,6 +258,103 @@ async fn test_single_gain_under_timeout_still_succeeds() {
     server.shutdown().await;
 }
 
+/// Roadmap D29 item 1: an S2 `request_timeout` 504 must survive **real TCP and real
+/// hyper**, carrying the standard JSON `ErrorResponse` and the `x-request-id` echo.
+///
+/// # Why this exists as a socket test when the other two do not
+///
+/// Both paused-clock tests above run in process, through `Endpoint::call`. That
+/// covers the middleware stack faithfully but stops short of the wire: a regression
+/// in how *this particular* 504 response is serialized by hyper would pass there and
+/// ship. The two partial substitutes each cover half of the combination and neither
+/// covers it whole — `budget_tests::test_over_budget_single_gain_returns_504` is a
+/// socket-level 504 with the standard body, but from S3's per-integration budget
+/// (`computation_budget_exceeded`, a different middleware); `error_tests` asserts the
+/// `x-request-id` echo over a socket, but on a 413.
+///
+/// # Why this is not the 131 s test coming back
+///
+/// The retired socket heatmap test won its race by making the *request* expensive
+/// enough to outlast a real 50 ms deadline — which coupled its cost to the physics'
+/// cost, in debug, where the physics is ~19x dearer. This inverts that: the request
+/// is the ordinary single-gain one the other socket tests use, and the **deadline**
+/// is 1 ms, tokio's timer granularity. A request only has to be slower than the
+/// deadline, not dramatically slower, once nothing is being asserted about the margin.
+///
+/// # The flake direction is one-sided, which is the point
+///
+/// A real deadline can only flake by the deadline *not* being crossed — i.e. by the
+/// gain compute finishing inside 1 ms. Measured on this harness (the control test's
+/// own `computation_time_ms`, same request, debug profile): **91.8 ms**, a ~92x
+/// margin. Every force that could disturb the timing (machine load, a contended
+/// nextest run, a slower CPU) pushes the compute *up*, further past the deadline.
+/// There is no mechanism by which load makes this test pass a request it should have
+/// timed out. That asymmetry is why a real deadline is acceptable here and was not
+/// acceptable for the heatmap case, whose margin ran the other way. The margin is not
+/// asserted on and must not become a threshold — if the physics ever gets 90x
+/// cheaper, shrink the deadline, do not grow the request.
+///
+/// Note what the 1 ms deadline does *not* break: `/health`, which `TestServer` polls
+/// during startup, is a synchronous handler. `RequestTimeout` is a
+/// `tokio::time::timeout` around the endpoint future, and a future that is `Ready` on
+/// its first poll is never preempted whatever the deadline — the same property, read
+/// in the other direction, that S2b exists to guarantee for `/gain`.
+///
+/// **Control:** [`test_single_gain_under_timeout_still_succeeds`] issues the *same*
+/// request over the *same* socket harness under a generous deadline and asserts 200,
+/// so the 504 below is attributable to the deadline rather than to anything about the
+/// request or the transport.
+#[tokio::test]
+async fn test_request_timeout_504_over_a_real_socket() {
+    // 1 ms: tokio's timer granularity, ~92x below the request's measured debug-profile
+    // compute. Not a threshold — nothing asserts on either figure.
+    let timeout = Duration::from_millis(1);
+    let server = TestServer::start_with_config_and_timeout(fixture_config(), timeout)
+        .await
+        .expect("Failed to start test server");
+
+    let custom_id = "socket-timeout-correlation-id";
+    let response = server
+        .client
+        .post(format!("{}/api/v1/gain", server.base_url))
+        .header("content-type", "application/json")
+        .header("x-request-id", custom_id)
+        .json(&builders::simple_gain_request_ecef())
+        .send()
+        .await
+        .expect("the 504 must arrive as an HTTP response, not a transport error");
+
+    let status = response.status();
+    let echoed_id = response
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let body = response.bytes().await.expect("readable response body");
+
+    assert_eq!(
+        status,
+        504,
+        "a request exceeding the deadline must return 504 over a socket — body: {}",
+        String::from_utf8_lossy(&body)
+    );
+
+    let err: ErrorResponse = serde_json::from_slice(&body)
+        .expect("the 504 must serialize as the standard JSON ErrorResponse over the wire");
+    assert_eq!(
+        err.error, "request_timeout",
+        "the 504 must come from the request-timeout middleware, not S3's per-integration budget"
+    );
+
+    assert_eq!(
+        echoed_id.as_deref(),
+        Some(custom_id),
+        "the 504 response must carry the x-request-id correlation header over the wire"
+    );
+
+    server.shutdown().await;
+}
+
 /// The compute-heavy heatmap endpoint must honor the request timeout: when
 /// compute exceeds the deadline the client gets 504 Gateway Timeout with the
 /// standard JSON body, and the 504 is correlatable (carries `x-request-id`,
@@ -284,16 +389,16 @@ async fn test_single_gain_under_timeout_still_succeeds() {
 /// `RequestId` included, is the one the server binds to a port.
 ///
 /// What is *not* covered here is real TCP and hyper's serialization of a 504.
-/// That is still held over a socket by
-/// `budget_tests::test_over_budget_single_gain_returns_504`, which binds a real
-/// server and asserts a 504 with the standard JSON body — though on S3's
-/// `computation_budget_exceeded` rather than S2's `request_timeout`, and without
-/// the `x-request-id` assertion. The header echo on an error path is covered
-/// over a socket by `error_tests`, so no socket-level assertion is lost by this
-/// test moving in process; only this particular *combination* is now in-process
-/// only — meaning a hyper-level serialization regression specific to the
-/// RequestTimeout 504 response would pass here. Filed as roadmap **D29** item 1
-/// rather than fixed by restoring a heavy socket test.
+/// When this test moved in process that combination — a `request_timeout` 504,
+/// standard JSON body, `x-request-id` echo, over a socket — was left uncovered and
+/// filed as roadmap **D29** item 1, since the two socket-level substitutes each
+/// hold only half of it (`budget_tests::test_over_budget_single_gain_returns_504`
+/// is a socket 504 with the standard body but on S3's
+/// `computation_budget_exceeded`; `error_tests` asserts the header echo over a
+/// socket but on a 413). **Closed 2026-08-15 by
+/// [`test_request_timeout_504_over_a_real_socket`]**, which covers it without
+/// restoring a heavy request: it shrinks the *deadline* to 1 ms rather than growing
+/// the compute, so the gap is closed at ~0.2 s instead of the 131 s this test cost.
 #[tokio::test(start_paused = true)]
 async fn test_heavy_heatmap_times_out_with_504() {
     let timeout = Duration::from_secs(30);
