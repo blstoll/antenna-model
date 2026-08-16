@@ -3578,7 +3578,98 @@ troubleshooting now distinguishes the two rejection messages and adds the CRC on
 - **Gotchas:** docs-only. Standing rule 2 applies doubly here.
 - **Depends on:** P6, G2 (after physics docs settle); after D4 if D4 happens (module map).
 
-### D6 — Repo hygiene: tarpaulin artifact, S3 dependency gating — Effort: S
+### D6 — Repo hygiene: tarpaulin artifact, S3 dependency gating — Effort: S — ✅ **DONE 2026-08-16**
+
+> **Closeout 2026-08-16.** All four exit criteria met, but only one of them was work:
+> two were already satisfied and this unit's premise was stale on both.
+>
+> **Already done, premise stale (1) — the tarpaulin artifact was never committed.** The
+> roadmap has said since 2026-07-09 that "a 3.1 MB `tarpaulin-report.html` is committed at
+> the repo root". It is not, and `git log --all -- tarpaulin-report.html` is **empty** —
+> it has never been tracked in this history, and `.gitignore:27` already carries the
+> pattern. What existed was an untracked local file on the working machine, which
+> `git status` never showed because it is ignored. Removed locally; nothing to commit.
+> The roadmap narrative's claim is corrected in place.
+>
+> **Already done (2) — `calibrate/src/mod.rs` is gone**, deleted on some earlier touch of
+> the crate as D1's finding 3 allowed. Verified absent.
+>
+> **The actual work — the AWS subtree is now behind an off-by-default feature.**
+> `aws-config` and `aws-sdk-s3` are `optional = true`, reachable only through
+> `s3-input`. Measured with the dep-graph script's own pipeline (`--prefix none`, strip the
+> ` (*)` elision marker, `sort -u`):
+>
+> | | unique packages in calibrate's normal graph | `aws-*` |
+> |---|---|---|
+> | default | **80** | **0** |
+> | `--features s3-input` | **240** | 25 |
+>
+> **160 packages, two thirds of the graph, for a source no test, script or documented
+> workflow uses** — every one of them passes a local path.
+>
+> **Corrected on review (2026-08-16), and both corrections matter more than the numbers:**
+>
+> 1. **This does not reduce `cargo audit`'s advisory surface, and the first version of this
+>    closeout claimed it did.** `cargo audit` scans `Cargo.lock`; an optional dependency
+>    stays in the lockfile, so all 25 `aws-*` entries are still there and the audit result
+>    is byte-identical before and after. `Cargo.lock` is untouched by this change. The win
+>    is build weight and compiled surface — which is real, and enough on its own. The unit's
+>    original headline rationale ("the primary lever on the advisory count") was already
+>    marked stale in 2026-07-29's priority note; this closeout briefly resurrected it.
+> 2. **The first figures quoted here — "319 → 95, 224 packages, 119 of them `aws-*`" — were
+>    not reproducible by any invocation in this repo.** They came from counting raw
+>    `cargo tree` lines, which repeat a shared subtree once per path that reaches it. The
+>    gate now *computes* the number it prints rather than carrying it in a string, because
+>    a guard that exists so figures cannot rot should not itself ship a figure its own
+>    command contradicts.
+>
+> A side effect worth recording: `lru`,
+> the single survivor of D4's banned-crate list and the reason that script carried a
+> carve-out comment, arrived *through* aws-sdk-s3 and is now absent from the default graph
+> entirely. The carve-out is deleted, not amended.
+>
+> **The gate, because `optional = true` is not an assertion.** Nothing about marking a
+> dependency optional stops a later edit from putting it in `default`, and the build stays
+> green either way — the same shape as D18's `system-proxy` invariant, a property no
+> compile can observe. `scripts/assert-dep-graphs.sh` gained a **fourth** invariant with
+> the negative control the other three carry: the detector must fire with
+> `--features s3-input` on (else the pattern has stopped matching), and the default graph
+> must be clean. **Falsified deliberately, per P13:** with `default = ["s3-input"]` the
+> gate exits 1 with *"the AWS SDK is in calibrate's DEFAULT normal graph"*; reverted, it
+> exits 0. A guard nothing has failed is not known to work.
+>
+> **Both feature states are checked.** Every other check in the gate compiles only the
+> stub side of `fetch_from_s3`, so `cargo clippy -p calibrate --features s3-input` was
+> added to `scripts/check.sh` and `.github/workflows/ci.yml` — package-scoped and without
+> `--all-targets`, since `--all-targets` re-unifies features through the dev-dependency
+> `antenna-model` (the trap D4 documents). Both states clippy-clean.
+>
+> **The CLI error names the fix**, which is the difference between gating a feature and
+> removing one. `fetch_from_s3` has a `#[cfg(not(feature = "s3-input"))]` twin, so the
+> `s3://` branch is still taken and still reports through `Result`:
+>
+> ```
+> cannot read 's3://bucket/measurements.csv': this `calibrate` was built without S3 support.
+> Either rebuild with the feature — `cargo build --release -p calibrate --features s3-input`
+> — or download the file and pass a local path.
+> ```
+>
+> Gating the branch itself would have let an `s3://` path fall through to
+> `std::fs::read_to_string` and fail with *"No such file or directory"*, naming neither
+> cause nor fix. Verified against the built binary.
+>
+> **Not done, and it should not be:** the unit's closing instruction to "add explicit
+> `cargo audit --ignore RUSTSEC-…` entries for accepted residual advisories" is moot, and
+> note it would have been moot *whatever this unit did* — see correction 1 above, gating an
+> optional dependency does not change what audit reads. Its own 2026-07-29 priority note
+> had already recorded the 17-vulnerability premise as stale. Measured on this branch:
+> **0 vulnerabilities**, and 3 informational warnings (`paste` unmaintained; `lru` unsound,
+> twice) that cargo-audit does not fail on under its default policy. Nothing is failing, so
+> an `--ignore` list would have no entries. If an advisory returns, add it then — with the
+> reason, which is the part that matters.
+>
+> Worth noting for whoever *does* want the advisory count down: `lru` is reachable from
+> **antenna-model**, not from the CLI, so it is untouched by this unit either way.
 
 - **Exit criteria:** the committed `tarpaulin-report.html` (3.1 MB, repo root) deleted and
   the pattern gitignored; `aws-sdk-s3` + `aws-config` in `calibrate` (used in exactly one
@@ -3628,7 +3719,25 @@ troubleshooting now distinguishes the two rejection messages and adds the CRC on
   inline.**
 - **Depends on:** Phase 1 complete (physics stable); D4 optional.
 
-### D8 — Remove dead `MeshParameters::transparency_at_wavelength` — Effort: S
+### D8 — Remove dead `MeshParameters::transparency_at_wavelength` — Effort: S — ✅ **DONE 2026-08-16**
+
+> **Closeout 2026-08-16.** Removed as specified: the function and its single test
+> (`test_mesh_transparency`) are gone, grep-verified to zero hits across every `.rs` file.
+> No live-path value moved — P1's staged-spillover decision had deliberately never wired
+> this path, and `mesh::mesh_reflection_efficiency` (called from
+> `pattern.rs::overall_efficiency`) remains the tree's only mesh implementation.
+>
+> `docs/domain-contract.md` updated in both places the unit named: the open item became a
+> dated **Resolved** entry beside the other two removals of duplicate implementations
+> (`phase_center_offset_phase`, `surface.rs::ruze_efficiency`), and the `mesh_spacing`
+> glossary row now states plainly that there is one mesh model rather than describing the
+> dead one.
+>
+> **Worth keeping from this one:** the deleted tests asserted the function against *itself*
+> — long wavelength → high transparency, short → low. Both passed, forever, while nothing
+> in the codebase called it. A test that exercises a function proves the function runs; it
+> says nothing about whether anything needs it. That is the same blind spot D30 records for
+> the example requests, one layer down.
 
 - **Entrance:** `model/geometry.rs:437`; only callers are its own unit tests
   (`geometry.rs:752,756`).
@@ -3638,7 +3747,95 @@ troubleshooting now distinguishes the two rejection messages and adds the CRC on
   cross-reference).
 - **Depends on:** P6.
 
-### D9 `[DECISION]` — Calibration-artifact shipping story — Effort: S
+### D9 `[DECISION]` — Calibration-artifact shipping story — Effort: S — ✅ **DONE 2026-08-16**
+
+> **Closeout 2026-08-16.** Decided at the recommended default: **docs-only, no
+> binaries.** All three exit criteria met. The decision was the cheap half; the
+> expensive half was that this unit's own statement of the current state had gone
+> stale twice, and that the README it was chartered to fix was wrong about far more
+> than calibration.
+>
+> **The rationale, now recorded where it is actionable.** A calibration artifact is a
+> *build output*: `calibrate` subtracts this codebase's own physics-model predictions
+> from the measurements and fits a correction surface to the residual, so the artifact
+> is a function of the engine at the moment it was made. That engine moves —
+> `PHYSICS_MODEL_VERSION` went **4 → 9 in one month** of hardening. A committed
+> artifact would keep loading and keep serving numbers describing a model the service
+> no longer runs, and nothing in the build could notice. Generate-in-CI was rejected as
+> cost without a consumer: `calibrate`'s tier is ~535 s, and no test needs a CI-built
+> artifact a local run cannot produce. This reasoning now lives in
+> `calibration_data/antennas.yaml`'s header, `docs/calibration-workflow-guide.md` §12,
+> README, and CLAUDE.md — not only in this register.
+>
+> **Exit criterion 2 (worked generation path): met by D14, re-verified here.**
+> `scripts/generate-cr159703-artifact.sh` was run end to end from a clean checkout.
+> Every documented reference figure still reproduces **exactly**: corrected RMSE
+> **0.0272 dB** against model-only **11.0266**; strided CV folds
+> **0.029 / 0.031 / 0.031 / 0.060 / 0.046 dB** (D22's post-fix values, against the
+> pre-fix 0.12–10.86 the script records as its regression tripwire); main lobe max
+> error 0.011 dB and first sidelobe 0.019 dB, both PASS against 1.0 dB; and D21's
+> angular-resolution warning firing at **cone 0.58 / clock 0.12** knots per lobe
+> period. Five outputs, all outside the repo tree, `git status` clean afterwards.
+>
+> **Exit criterion 3 (README + `/health` + `/status`): this was the work.**
+>
+> - **The premise had gone stale twice.** The row was corrected on 2026-07-09 from
+>   "all entries disabled" to "4 of 8"; that was then overtaken when
+>   `dsn_70m_uncalibrated` and `gbt_100m_uncalibrated` were added by the
+>   reference-validation work, and nothing updated it. Measured at close, against a
+>   **running service** rather than by reading YAML: **10 entries, 5 enabled, 11
+>   feeds.**
+> - **`/health` and `/status` needed no change.** S5 had already made the copy correct
+>   (`degraded` iff `antenna_count() == 0`, and the utoipa description says so). The
+>   unit verified and pinned it rather than rewriting it — the row's instruction to
+>   make that copy describe the default state was already satisfied.
+> - **`test_simple` disabled in the shipped config.** A 5 m development fixture was
+>   `enabled: true` and so appeared in every operator's `/status` antenna_ids. Checked
+>   before changing: **no test depends on it** — the integration suite loads its own
+>   `antenna-model/tests/fixtures/test_antennas.yaml`, which carries its own copy — but
+>   three `examples/` files referenced it and would have started pointing at an antenna
+>   the default service does not serve, so they were retargeted to
+>   `gs_3.7m_uncalibrated`/`x_band_feed` (8250 MHz sits inside its 7100–8500 range).
+> - **The four disabled entries kept as templates**, each comment retargeted from the
+>   uninformative "Enable when calibration file exists" to the command that produces
+>   the file it names.
+>
+> **The README sweep found rot well past this unit's charter.** Taken here per the
+> maintainer's scope call, because the file is the first thing a new user reads:
+>
+> | Claim | Reality |
+> |---|---|
+> | "Auto-detection of ECEF vs Geodetic coordinates" | Deleted by **C8 stage 2**; an untagged position is a 400 |
+> | `POST /api/v1/evaluate` with `azimuth_deg`/`elevation_deg` | `POST /api/v1/gain`, 3D positions + attitude quaternion |
+> | Response field `g_over_t_db` | The field is `gain_db` |
+> | `config/service.toml`, `antennas.toml` | `config/service.yaml`, `calibration_data/antennas.yaml` — **CLAUDE.md repeated the `.toml` error**; both fixed |
+> | Uncalibrated example in TOML with `antenna_id`/`design_specs_path` | YAML with `id` and inline `design_specs` |
+> | `calibrate/src/fitter.rs`, `model/` under `antenna-model` | No such file; `model/` moved to `antenna-core` by **D4** |
+> | Readiness probe is `GET /health` | `GET /ready` |
+>
+> Every replacement payload is either copied from a drift-tested
+> `examples/requests/*.json` or captured from a live service — nothing in the new
+> README is invented.
+>
+> **Filed D30, and it is the finding worth carrying forward:** the ECEF request
+> examples are *geometrically invalid* and both existing guards are blind to it.
+> See that unit.
+>
+> **Deliberately not done:** README.md was **not** added to C11's `CONTRACT_DOCS`,
+> though the guard's own doc comment invites exactly that one-line ratchet. The
+> blocker is real and belongs to D30: the README's structured-logging example
+> honestly contains an `antenna_id` field, which trips
+> `every_api_example_block_is_marked`, and every way to silence that (rename the
+> field, mislabel the fence, add a skip arm) either lies or weakens a guard whose
+> strictness is the point. Recorded rather than worked around.
+>
+> **Corrected on review (2026-08-16).** This unit first left `<!-- api-example: … -->`
+> markers in README so D30 would find the work half-done. That was wrong, and the review
+> was right to call it: `collect_examples` only ever reads `CONTRACT_DOCS` under `docs/`,
+> so a marker in README is **inert** — it announces that a block is schema-pinned while
+> nothing pins it, which is precisely the false assurance C11 was written to eliminate.
+> A guard's *notation* carries the same promise as the guard. The markers are removed;
+> D30 adds them back in the same change that makes them mean something.
 
 - **Question:** `calibration_data/antennas.yaml` has four `enabled: false` entries (each
   references an absent `.bin` calibration file) and four `enabled: true` uncalibrated
@@ -5468,7 +5665,58 @@ real fixture the counts bind at the same point.)
 
 ---
 
-### D25 — The JSON sidecar cannot represent a non-finite `f64` that the artifact can — Effort: S
+### D25 — The JSON sidecar cannot represent a non-finite `f64` that the artifact can — Effort: S — ✅ **DONE 2026-08-16**
+
+> **Closeout 2026-08-16. Option 1 (make the sidecar say what the value is), and the unit's
+> own ordering was wrong** — it listed option 2 first as "cheapest, and consistent with 'a
+> measurement with no defined value must say so'". That reasoning does not survive contact
+> with what the value actually means.
+>
+> **Why option 2 (refuse to write) is the wrong answer.** The only reachable non-finite
+> figure is `AngularResolution::clock_lobe_period_deg = f64::INFINITY`, and D26 established
+> that it is **meaningful and deliberate**: it says there is no clock structure to resolve
+> — the `sin θ → 0` case — which is the *best* case, chosen over `0.0` precisely so a
+> degenerate axis cannot read as infinitely well resolved. Refusing to write is the right
+> response to a value with no defined meaning; this value has one. Option 2 would make
+> `--metadata` fail on a perfectly good artifact. Option 3 (make it unreachable) directly
+> contradicts D26's design.
+>
+> **Why not `Option<f64>`, which the sibling type already uses.** `ValidationReport`'s
+> cross-validation aggregates are `Option<f64>` (D22) and that is correct *there*, because
+> there the meaning is **absence** — no fold scored, so there is no mean. Mapping INFINITY
+> to `null` would collapse "no clock structure to resolve" into "not present", erasing the
+> distinction D26 exists to protect. **Absence is `null`; a defined but non-finite value is
+> a name.** That rule is now stated in `sidecar.rs`'s module docs, which is the "state the
+> artifact-vs-sidecar domain difference" exit criterion.
+>
+> **What shipped.** A `json_f64` serde helper writes a finite value as a JSON number and a
+> non-finite one as `"Infinity"` / `"-Infinity"` / `"NaN"` — the spelling JavaScript's
+> `Number()` and Python's `float()` both accept, so the value is recoverable outside Rust —
+> and reads back either form, plus Rust's own `inf` / `-inf`. An unrecognised name is an
+> error, not a silent `NaN`.
+>
+> **The artifact's wire format is untouched.** `AngularResolution` gains no serde
+> attribute; the helper is applied through a private mirror struct in `sidecar.rs`, because
+> an attribute on the real type would corrupt the positional postcard encoding (the note
+> atop `data/types.rs`). The mirror destructures `AngularResolution` exhaustively, so a new
+> field there is a compile error here rather than a silently dropped one. `ArtifactMetadata`
+> is JSON-only — it is not the artifact's `CalibrationMetadata` — so this changes no
+> published binary format and needed no version bump on either axis.
+>
+> **Four tests, one of which is a negative control.**
+> `a_metadata_sidecar_with_a_non_finite_figure_round_trips` is the exit criterion (the
+> pre-existing round-trip fixture set `angular_resolution: None`, which is exactly why the
+> gap survived D21's review). `serde_json_still_cannot_encode_a_non_finite_f64_directly`
+> asserts the defect still exists on the **unwrapped** type — serialization succeeds,
+> writes `null`, and then fails to parse with *invalid type: null* — so if serde_json ever
+> changes, the helper's justification fails loudly instead of the guard quietly testing
+> nothing. Per P13.
+>
+> **Note on D9's NaN sentinel, which this unit sits opposite:** it is unaffected and did
+> not need to be, because `CalibrationMetadata.rmse_db` / `r_squared` live in the
+> **artifact**, not in this sidecar — `ArtifactMetadata` has no such fields. The two
+> encodings' domains still differ; they are now documented rather than silently
+> incompatible.
 
 **Filed 2026-08-04**, from the code review of D21. Latent, not live: no shipped run produces a
 non-finite figure today. It is filed because the *value* is deliberate and the *encoding*
@@ -6178,6 +6426,103 @@ fails loudly, pinned by a test that would have passed under the current helper.
 
 **Depends on:** nothing. **Coupled to:** D18 (which created both), D28 (same suite-health
 charter).
+
+---
+
+### D30 — The shipped ECEF request examples are geometrically invalid, and both guards are blind to it — Effort: S/M
+
+**Filed 2026-08-16 by D9**, which needed a working first-curl for the README quickstart
+and discovered the flagship example does not work. Measured against a running service,
+not inferred.
+
+**The defect.** `examples/requests/gain_request.json` — the example README,
+`examples/README.md` and `examples/TESTING.md` all tell a new user to run first —
+returns **HTTP 422 `invalid_coordinate`**:
+
+> invalid coordinate for 'vehicle_attitude': attitude body X-axis is parallel to
+> boresight; azimuth reference is degenerate
+
+The geometry is the cause and it is shared: the vehicle sits at `(6500000, 0, 0)` ECEF
+with an **identity attitude** `[1, 0, 0, 0]`, and `reflector_boresight` is
+`(6500010, 0, 0)` — i.e. boresight points along `+X`, which the identity attitude makes
+the body X-axis. The validator is right to reject it; the azimuth reference genuinely is
+degenerate, the same class of pole degeneracy D13 hit with boresight azimuth. **The
+example is wrong, not the code.**
+
+`examples/requests/batch_request.json` carries the same geometry in all three items and
+is worse to detect: `/api/v1/gain/batch` returns **HTTP 200 with `failure_count: 3`**,
+every item bearing that typed `error` and a `null` gain. A status-code check calls it
+healthy.
+
+Full measured state of `examples/requests/` (10 files, each POSTed to its real endpoint
+on 2026-08-16): **8 genuinely fine** — `gain_request_geodetic.json`, all five `geo_*.json`,
+`heatmap_request.json`, `h3_link_budget_request.json`; **1 hard failure** —
+`gain_request.json` (422); **1 silent failure** — `batch_request.json` (200, 3/3 items
+failed).
+
+**Why nothing caught it, which is the part worth fixing.** Two guards cover these files
+and neither can see this:
+
+- `tests/example_requests_deserialize.rs` (G3) checks the JSON **deserializes into the
+  schema type**. A degenerate quaternion/boresight pair deserializes perfectly.
+- `tests/doc_examples_deserialize.rs` (C11) does the same for payloads embedded in prose,
+  and only for `docs/api-documentation.md`.
+
+So the guards pin *shape* and nothing pins *semantics*. G3 was created because four
+examples failed to deserialize; the same examples then failed to **compute** for two
+months underneath a green suite. An example that 422s is broken in exactly the way G3
+exists to prevent, one layer in.
+
+**Scope.**
+
+1. Fix the geometry in `gain_request.json` and `batch_request.json` — non-degenerate,
+   still ECEF (the geodetic file already covers geodetic), preserving each file's
+   documented intent (`examples/README_GEO_EXAMPLES.md` describes `gain_request.json` as
+   "vehicle only 10 m from emitter"; check that still holds or update the prose with it).
+2. Add a guard that **executes** every `examples/requests/*.json` against a real
+   `TestServer` and asserts a 200 — and, for batch, asserts `metadata.failure_count == 0`
+   rather than trusting the status code. The batch case is the whole point: a 200 with
+   every item failed must fail the test.
+3. Remove the KNOWN BROKEN admonitions D9 added to `examples/README.md` and
+   `examples/TESTING.md`, and restore `gain_request.json` as the first-curl example in
+   README, `examples/README.md` and `examples/TESTING.md`.
+4. **Then** add `README.md` to C11's `CONTRACT_DOCS` — a one-line ratchet the guard's own
+   doc comment invites, which D9 could not take. The README's gain request and gain
+   response are already correct payloads (the request is the geodetic example verbatim; the
+   response was captured from a running service), so they should pass the moment the file
+   is listed — **add the `<!-- api-example: … -->` markers as part of that change, not
+   before**. D9 initially left the markers in place to pre-do the work and removed them on
+   review: `collect_examples` reads only `CONTRACT_DOCS` under `docs/`, so a marker in
+   README pins nothing while looking like it does, which is the false assurance this guard
+   exists to remove. Notation that implies a check must arrive with the check.
+
+   Two mechanics for whoever takes it. `markdown_files()` resolves against `docs/`, so a
+   repo-root file means either `"../README.md"` or a small change to resolve from the
+   workspace root — prefer the latter, and keep the `path.is_file()` assertion that makes a
+   mistyped entry fail loudly. And `every_api_example_block_is_marked` will flag README's
+   structured-logging block, which honestly contains `"antenna_id"`: that is the design
+   question above, not an oversight. It is blocked on a real design question:
+   README's structured-logging example honestly contains an `antenna_id` field, so
+   `every_api_example_block_is_marked` flags it, and each available escape (rename the
+   field, mislabel the fence as non-JSON, add a skip arm to
+   `every_documented_example_deserializes`) either states something untrue or weakens a
+   guard whose strictness is precisely its value. Decide it deliberately — the cleanest
+   candidate is an explicit, greppable "this block is not an API payload" marker that
+   still fails on an *unmarked* block, so the exemption is visible rather than silent.
+
+**Cost note for task 2.** Since D18/D29 a `TestServer` is cheap (the reqwest
+`system-proxy` fix took client construction from 11.8 s to ~0), so executing ten examples
+in one test binary is affordable — this would not have been true a week ago, and that is
+part of why the gap survived.
+
+**Gotchas.** Do **not** relax the validator to make the examples pass — the degeneracy is
+real and rejecting it is correct (standing rule 5: never fix code to match a doc). Do not
+"fix" the batch example by dropping items. Keep the ECEF/geodetic split: losing the ECEF
+worked example would remove the only committed demonstration of the frame most callers
+use.
+
+**Depends on:** nothing. **Coupled to:** G3 and C11 (whose blind spot this is), D9 (which
+filed it).
 
 ---
 

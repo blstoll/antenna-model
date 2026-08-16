@@ -22,6 +22,7 @@
 9. [Boresight Optimization Algorithm](#9-boresight-optimization-algorithm)
 10. [API Integration](#10-api-integration)
 11. [Appendix: Design Specs Reference](#11-appendix-design-specs-reference)
+12. [Artifact Generation and the Shipping Story](#12-artifact-generation-and-the-shipping-story)
 
 ---
 
@@ -2077,6 +2078,115 @@ See provided example files:
 - `design_specs/small_groundstation.yaml` - 3.7m, X/S-band, mesh
 - `design_specs/medium_groundstation.yaml` - 7.3m, X/Ka-band, mesh
 - `design_specs/solid_reflector.yaml` - 13m, DSN-class, solid, multi-feed
+
+---
+
+## 12. Artifact Generation and the Shipping Story
+
+**Decided by roadmap unit D9 (2026-08-16): no `.bin` calibration artifacts are
+committed to this repository.**
+
+### 12.1 Why not commit them
+
+A calibration artifact is a **build output**, not source. It is derived from
+measurements *plus* this codebase's own physics model: `calibrate` computes model
+predictions, subtracts them from the measurements, and fits a correction surface
+to the residual. That makes the artifact a function of the physics engine at the
+moment it was generated.
+
+The physics engine moves. `PHYSICS_MODEL_VERSION` has gone 4 → 9 in a single
+month of hardening. A committed artifact would keep loading and keep serving
+numbers after the model underneath it changed, and **nothing in the build could
+notice** — the residuals would silently be describing a model the service no
+longer runs. The artifact carries a physics-model stamp precisely so that
+mismatch is detectable, but the cheapest way not to ship a stale artifact is not
+to ship one.
+
+The two rejected alternatives, for the record:
+
+- **Commit binaries.** Fails as above, and puts a generated binary in review diffs.
+- **Generate in CI.** Solves staleness but adds a job whose cost is real physics
+  (`calibrate`'s own test tier runs ~535 s) for an artifact no test consumes that
+  a local run cannot produce.
+
+### 12.2 What this means in practice
+
+A clean checkout starts **healthy**, because the five enabled antennas in
+`calibration_data/antennas.yaml` are uncalibrated and carry `design_specs` inline
+— they need no artifact. See §2.
+
+The four disabled entries in that file are **templates**. Each names a
+`calibration_file` the checkout does not contain, which is why each is
+`enabled: false`. To make one real: generate the artifact, put it in the
+directory named by `calibration.data_directory`, and flip `enabled`.
+
+### 12.3 The worked example
+
+`scripts/generate-cr159703-artifact.sh` is a complete, runnable generation path
+that needs no external data. Every input is committed:
+
+```bash
+./scripts/generate-cr159703-artifact.sh /tmp/my-calibration
+```
+
+It runs the two real binaries in sequence:
+
+1. `cr159703_grid` synthesizes a measurement grid anchored to digitized NASA
+   CR-159703 (Collin & Gabel, 1979) pattern peaks.
+2. `calibrate --calibration-mode full … --validate` fits the correction surface
+   and writes the ANTC-framed artifact.
+
+Outputs (written **outside** the repository tree):
+
+| File | Contents |
+|---|---|
+| `cr159703_122m.bin` | the calibration artifact the service loads |
+| `cr159703_grid.csv` | the synthesized measurement grid |
+| `cr159703_grid_summary.json` | fabrications, anchor table, injected residual RMS |
+| `cr159703_report.json` | validation report (RMSE, per-fold CV, outliers) |
+| `cr159703_metadata.json` | artifact metadata sidecar |
+
+**The grid is model-filled, not measured.** Only the residual, at 19 digitized
+peak angles, comes from published measurements. Never present this dataset — or a
+gain computed from it — as measured data. The generator prints its full list of
+fabrications on every run and writes it into the summary JSON.
+
+Re-verified end to end on 2026-08-16; the figures below are what a clean run
+produces, and are the reference points for spotting a regression:
+
+- model-only RMSE **11.0266 dB** → corrected **0.0272 dB**
+- 5-fold strided cross-validation: **0.029 / 0.031 / 0.031 / 0.060 / 0.046 dB**
+  (a fold climbing back toward 10 dB means the fold assignment regressed — see D22)
+- main lobe max error 0.011 dB, first sidelobe 0.019 dB, both PASS against 1.0 dB
+- an expected `angular_resolution` warning: cone 2.00° knots vs a 1.15° lobe
+  period (0.58 knots/period), clock 40.00° vs 4.77° (0.12). The artifact carries
+  the residual's **envelope trend, not its lobe structure**, and says so in its
+  own metadata. In-sample RMSE structurally cannot show this, because the grid is
+  sampled no finer than the knots. See D21/D24.
+
+### 12.4 Generating an artifact for your own antenna
+
+The same two steps, with your measurements in place of the synthesized grid:
+
+```bash
+calibrate --calibration-mode full \
+  --input   your_measurements.csv \
+  --output  /path/outside/the/repo/your_antenna.bin \
+  --antenna-id your_antenna \
+  --feed-id    x_band \
+  --antenna-class YourClass \
+  --classes-file  path/to/antenna_classes.yaml \
+  --validate --report report.json --metadata metadata.json
+```
+
+Then add or enable the `antennas.yaml` entry whose `calibration_file` matches,
+and restart the service. Hot reload is not implemented (roadmap F1).
+
+Before you start, check the sizing: a full-mode fit must determine the
+coefficients its knots declare — the shipped 4/6/8 knot counts declare up to
+**960**, and each cross-validation fold trains on `(1 − 1/folds)` of the data, so
+plan on **≥1440 points**. Too few is a hard `UnderdeterminedFit` error, not a
+quietly bad fit (§4, roadmap D20).
 
 ---
 

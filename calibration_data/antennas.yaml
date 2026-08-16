@@ -8,6 +8,37 @@
 #
 # Antennas can be upgraded from uncalibrated -> partial -> full by updating
 # this file and restarting the service (or using hot-reload in future).
+#
+# ============================================================================
+# NO .bin CALIBRATION ARTIFACTS SHIP IN THIS REPOSITORY (roadmap D9)
+# ============================================================================
+#
+# A calibration artifact is a *build output*, not source: it is derived from
+# measurements plus this codebase's own physics model, so a committed .bin goes
+# stale the moment either changes, and nothing in the build can notice. The
+# decision (roadmap D9, decided 2026-08-16) is therefore docs-only: every input
+# is committed, the artifact is not, and the generation path is documented and
+# tested.
+#
+# What that means for this file:
+#
+#   * The five `enabled: true` entries below are UNCALIBRATED. They carry
+#     `design_specs` and load with no .bin, so a clean checkout starts healthy
+#     and serves all five immediately. This is the default state, and it is the
+#     state README.md's quickstart and /health both describe.
+#
+#   * The four `enabled: false` entries are TEMPLATES. Each names a
+#     `calibration_file` that a clean checkout does not contain, which is why
+#     each is disabled. They document the YAML shape of the fully-calibrated and
+#     partially-calibrated levels; to make one real, generate its artifact and
+#     flip `enabled`.
+#
+# To generate an artifact, see:
+#   scripts/generate-cr159703-artifact.sh   a complete worked example, runnable
+#                                           from a clean checkout
+#   docs/calibration-workflow-guide.md §12  the general path
+#
+# Do not commit the artifacts those produce.
 
 antennas:
   # ============================================================================
@@ -20,7 +51,11 @@ antennas:
     name: "DSN 34m - Fully Calibrated"
     calibration_status: "fully_calibrated"
     calibration_file: "dsn_34m_full.bin"
-    enabled: false  # Enable when calibration file exists
+    # TEMPLATE — disabled because no .bin ships (see the file header, roadmap D9).
+    # To make it real: produce dsn_34m_full.bin with `calibrate --calibration-mode
+    # full` (worked example: scripts/generate-cr159703-artifact.sh), drop it in
+    # this directory, and flip this to true.
+    enabled: false
 
     # Metadata (informational)
     description: "Large deep space antenna with complete calibration"
@@ -38,7 +73,11 @@ antennas:
     name: "Ground Station 3.7m - Boresight Calibration"
     calibration_status: "partially_calibrated"
     calibration_file: "gs_3.7m_boresight.bin"
-    enabled: false  # Enable when boresight calibration complete
+    # TEMPLATE — disabled because no .bin ships (see the file header, roadmap D9).
+    # To make it real: produce gs_3.7m_boresight.bin with `calibrate
+    # --calibration-mode boresight` from an X-band frequency sweep at boresight
+    # (docs/calibration-workflow-guide.md §3), then flip this to true.
+    enabled: false
 
     # Calibration coverage metadata
     calibration_coverage:
@@ -58,7 +97,10 @@ antennas:
     name: "DSN 13m - Multi-Band Boresight Calibration"
     calibration_status: "partially_calibrated"
     calibration_file: "dsn_13m_boresight.bin"
-    enabled: false  # Enable when calibration complete
+    # TEMPLATE — disabled because no .bin ships (see the file header, roadmap D9).
+    # To make it real: produce dsn_13m_boresight.bin with `calibrate
+    # --calibration-mode boresight`, once per feed, then flip this to true.
+    enabled: false
 
     calibration_coverage:
       azimuth_range: [0.0, 0.0]
@@ -79,7 +121,12 @@ antennas:
     name: "Ground Station 3.7m - Limited Coverage"
     calibration_status: "partially_calibrated"
     calibration_file: "gs_3.7m_limited.bin"
-    enabled: false  # Enable when calibration complete
+    # TEMPLATE — disabled because no .bin ships (see the file header, roadmap D9).
+    # To make it real: produce gs_3.7m_limited.bin with `calibrate
+    # --calibration-mode full` over the sparse S-band grid described below, then
+    # flip this to true. A partial grid still has to clear the coefficient count
+    # its knots declare (roadmap D20), not merely be non-empty.
+    enabled: false
 
     calibration_coverage:
       azimuth_range: [0.0, 360.0]     # Full azimuth
@@ -322,7 +369,15 @@ antennas:
   - id: "test_simple"
     name: "Simple Test Antenna"
     calibration_status: "uncalibrated"
-    enabled: true
+    # Disabled in the SHIPPED config (roadmap D9, 2026-08-16): this is a
+    # development fixture, not a real antenna, and an operator's /status
+    # antenna_ids should not carry one. It is kept here as the minimal
+    # design-spec example — a solid reflector, one feed, no mesh.
+    #
+    # The test suite does NOT depend on this entry: the integration tests load
+    # their own `antenna-model/tests/fixtures/test_antennas.yaml`, which carries
+    # its own `test_simple`. Enable this only for local hand-testing.
+    enabled: false
 
     design_specs:
       diameter_m: 5.0

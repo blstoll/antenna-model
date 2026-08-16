@@ -23,6 +23,25 @@
       ]
     },
     {
+      "id": "dsn_70m_uncalibrated",
+      "name": "DSN 70m - Uncalibrated (reference) - X-Band Feed",
+      "enabled": true,
+      "feed_count": 1,
+      "feed_ids": [
+        "x_band"
+      ]
+    },
+    {
+      "id": "gbt_100m_uncalibrated",
+      "name": "GBT 100m - Uncalibrated (axisymmetric approx of offset Gregorian) - L-Band Feed",
+      "enabled": true,
+      "feed_count": 2,
+      "feed_ids": [
+        "l_band",
+        "q_band"
+      ]
+    },
+    {
       "id": "gs_3.7m_uncalibrated",
       "name": "Ground Station 3.7m - Uncalibrated - S-Band Primary Feed",
       "enabled": true,
@@ -30,15 +49,6 @@
       "feed_ids": [
         "s_band_feed",
         "x_band_feed"
-      ]
-    },
-    {
-      "id": "test_simple",
-      "name": "Simple Test Antenna - Primary Feed",
-      "enabled": true,
-      "feed_count": 1,
-      "feed_ids": [
-        "primary"
       ]
     }
   ]

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Three dependency-graph invariants, asserted in ONE place:
+# Four dependency-graph invariants, asserted in ONE place:
 #
 #   * the CLI must not compile the web stack (roadmap D4);
 #   * antenna-core must stay a physics/artifact crate (roadmap D27 finding 4);
-#   * the test HTTP client must not carry `system-proxy` (roadmap D18).
+#   * the test HTTP client must not carry `system-proxy` (roadmap D18);
+#   * the CLI must not compile the AWS SDK by default (roadmap D6).
 #
 # Called by both `scripts/check.sh` and `.github/workflows/ci.yml`. It used to be
 # copy-pasted into both, so the banned-crate list lived in four places with nothing
@@ -18,7 +19,11 @@
 #   2. The dep-graph assertion below is what fails if antenna-model (or anything dragging
 #      the web stack) returns to calibrate's normal graph.
 #
-# The surviving `lru` is calibrate's own, via aws-sdk-s3 — same carve-out as tokio.
+# Historical note: D4 closed with one survivor from the banned list, `lru`, arriving
+# through calibrate's own aws-sdk-s3 rather than through the web stack — hence the
+# carve-out that used to sit here. **D6 (2026-08-16) removed it**: aws-sdk-s3 is now
+# behind the off-by-default `s3-input` feature, so `lru` is not in calibrate's default
+# normal graph at all (verified: 0 by default, 1 with the feature on). No carve-out.
 set -euo pipefail
 
 # Crates that must never be reachable from calibrate's normal graph. This is a
@@ -238,3 +243,63 @@ if printf '%s\n' "$reqwest_features" | grep -Fq 'reqwest feature "system-proxy"'
 fi
 
 echo "    ok: reqwest resolves without system-proxy"
+
+# ---------------------------------------------------------------------------
+# The CLI must not compile the AWS SDK by default (roadmap D6).
+#
+# `s3://` measurement input is the AWS SDK's only user in this workspace, and it is a
+# source almost no run uses: every test, script and documented workflow passes a local
+# path. Gating it behind the off-by-default `s3-input` feature took calibrate's normal
+# graph from **240 unique packages to 80** — 160 fewer, 25 of them `aws-*`.
+#
+# Those figures are the ones THIS script's own pipeline produces (`--prefix none`, strip
+# the ` (*)` elision marker, `sort -u`). Counting raw lines instead gives 119 for `aws-*`,
+# because `cargo tree` repeats a shared subtree once per path that reaches it — an earlier
+# version of this comment quoted that number, and a gate that exists so figures cannot rot
+# should not itself carry a figure its own command contradicts.
+#
+# This does NOT reduce what `cargo audit` reports: audit reads `Cargo.lock`, and an
+# optional dependency stays in the lockfile. The win is what gets compiled.
+#
+# Why this needs a gate and not just an `optional = true`: nothing about `optional` stops
+# a later edit from adding `aws-*` to the default feature set, or from making some other
+# dependency pull it in transitively. The build stays green either way — this is the same
+# shape as the system-proxy invariant above, a property no compile can observe.
+#
+# The negative control is a POSITIVE build of the feature, not a second crate: with
+# `--features s3-input` the detector MUST fire. If it does not, the pattern has stopped
+# matching (crate rename, cargo output change) and the default-graph verdict below is
+# worthless.
+# ---------------------------------------------------------------------------
+echo "--> asserting the CLI carries no AWS SDK by default (roadmap D6)"
+
+AWS_RE='^aws-'
+
+s3_tree=$(cargo tree -p calibrate -e normal --features s3-input --prefix none 2>&1) || {
+  echo "ERROR: 'cargo tree -p calibrate --features s3-input' failed; the AWS gate did NOT" >&2
+  echo "       run. Fix the command before trusting this gate." >&2
+  printf '%s\n' "$s3_tree" >&2
+  exit 1
+}
+
+echo "--> negative control: the AWS detector must fire with --features s3-input"
+if ! printf '%s\n' "$s3_tree" | grep -Eq "$AWS_RE"; then
+  echo "ERROR: the AWS detector matched NOTHING in calibrate's graph WITH s3-input on." >&2
+  echo "       That feature enables aws-config and aws-sdk-s3, so this cannot be true:" >&2
+  echo "       the detector is broken (crate rename, or cargo tree output format), and" >&2
+  echo "       its 'clean by default' verdict below would be worthless. Roadmap D6." >&2
+  exit 1
+fi
+
+if printf '%s\n' "$calibrate_tree" | grep -Eq "$AWS_RE"; then
+  echo "ERROR: the AWS SDK is in calibrate's DEFAULT normal graph (roadmap D6)." >&2
+  echo "       S3 input must stay behind the off-by-default 's3-input' feature: it is" >&2
+  echo "       160 extra packages to compile for a source almost no run uses. Mark the" >&2
+  echo "       dependency 'optional = true' and reach it only through the feature." >&2
+  printf '%s\n' "$calibrate_tree" | grep -E "$AWS_RE" >&2
+  exit 1
+fi
+
+default_dep_count=$(printf '%s\n' "$calibrate_tree" | sed -e 's/ (\*)$//' -e '/^$/d' | sort -u | wc -l | tr -d ' ')
+s3_dep_count=$(printf '%s\n' "$s3_tree" | sed -e 's/ (\*)$//' -e '/^$/d' | sort -u | wc -l | tr -d ' ')
+echo "    ok: no AWS SDK in the default CLI graph ($default_dep_count packages; s3-input: $s3_dep_count)"
