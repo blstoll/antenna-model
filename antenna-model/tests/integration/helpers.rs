@@ -265,28 +265,42 @@ pub async fn call_json<E: poem::Endpoint, B: serde::Serialize>(
 /// property of the outermost middleware and so is exactly what an in-process call
 /// through the shared `build_app` stack is able to observe.
 ///
-/// **Sharp edge, roadmap D29 item 2:** `poem::RequestBuilder::header` *appends*,
-/// and silently drops a pair whose name or value fails `TryInto`. So passing
-/// `("content-type", …)` here yields two `content-type` headers rather than
-/// overriding the one set above, and a typo'd header name vanishes without a
-/// panic — a test asserting a header's *absence* would pass while asserting
-/// nothing. Both current callers pass a single well-formed `x-request-id`.
+/// # Header semantics (roadmap D29 item 2)
+///
+/// `headers` **replaces**, and a malformed pair **panics**. Both are deliberate, and
+/// both are the opposite of what this helper used to do: it passed each pair to
+/// `poem::RequestBuilder::header`, which *appends* and silently drops a pair whose
+/// name or value fails `TryInto`. That was a sharp edge in two directions for a
+/// helper whose entire purpose is header injection — passing `("content-type", …)`
+/// yielded **two** `content-type` headers rather than overriding the one the helper
+/// itself sets, and a typo'd header name vanished with no panic, so a test asserting
+/// that a header is *absent*, or that a malformed header is rejected, passed while
+/// asserting nothing.
+///
+/// A panic is the right response here because the malformed input is the *test's*,
+/// not the service's: this is test-only code, and a test that cannot construct the
+/// request it means to send has no result worth reporting. Pinned by
+/// `helper_contract_tests`.
 pub async fn call_json_with_headers<E: poem::Endpoint, B: serde::Serialize>(
     app: &E,
     path: &str,
     body: &B,
     headers: &[(&str, &str)],
 ) -> (poem::http::StatusCode, poem::http::HeaderMap, Vec<u8>) {
-    let mut builder = poem::Request::builder()
+    let builder = poem::Request::builder()
         .method(poem::http::Method::POST)
         .uri(path.parse().expect("valid test URI"))
         .header("content-type", "application/json");
 
-    for (name, value) in headers {
-        builder = builder.header(*name, *value);
-    }
+    let mut request = builder.body(serde_json::to_vec(body).expect("serializable request body"));
 
-    let request = builder.body(serde_json::to_vec(body).expect("serializable request body"));
+    for (name, value) in headers {
+        let name = poem::http::HeaderName::from_bytes(name.as_bytes())
+            .unwrap_or_else(|e| panic!("test supplied a malformed header name {name:?}: {e}"));
+        let value = poem::http::HeaderValue::from_str(value)
+            .unwrap_or_else(|e| panic!("test supplied a malformed header value {value:?}: {e}"));
+        request.headers_mut().insert(name, value);
+    }
 
     let response = app.get_response(request).await;
 

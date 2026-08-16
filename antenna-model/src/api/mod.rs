@@ -20,7 +20,8 @@ pub mod schemas;
 use crate::config::ServiceConfig;
 use crate::data::repository::CalibrationRepository;
 use crate::service::GainCache;
-use poem::{listener::TcpListener, Server};
+use poem::{listener::TcpAcceptor, Server};
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -155,21 +156,105 @@ impl Default for AppState {
     }
 }
 
-/// Start the API server with configuration
+/// A fully initialized service that has **bound its listening socket** but is not yet
+/// accepting connections (roadmap D28).
 ///
-/// This function initializes the web server with:
-/// - Production-grade middleware stack
-/// - Configuration-driven settings
-/// - Graceful shutdown handling
-/// - Structured logging
+/// This is the seam between the two halves of startup that used to be one indivisible
+/// `await`: everything that can fail *before* traffic (calibration load, rayon pool,
+/// socket bind) has already happened and been reported, and [`serve`](Self::serve)
+/// only runs the accept loop until shutdown.
+///
+/// Splitting them buys two things:
+///
+/// 1. **A bind failure is returned, not raised inside the server future.** `AddrInUse`
+///    arrives as an `Err` from [`bind_server_with_config`] at the call site that asked
+///    for the port, instead of surfacing from whatever task the server future was
+///    spawned onto. That is what makes the failure attributable — see D28.
+/// 2. **The bound address is observable.** With `server.port = 0` the OS assigns the
+///    port, and until this split nothing could ask what it assigned; the configured
+///    address was all any caller (or log line) could report, which is a different
+///    thing from the address in use.
+pub struct BoundServer {
+    state: Arc<AppState>,
+    acceptor: TcpAcceptor,
+    local_addr: SocketAddr,
+}
+
+impl BoundServer {
+    /// The address the listening socket is **actually** bound to.
+    ///
+    /// With a configured port of `0` this is the OS-assigned port, which is not
+    /// derivable from the configuration.
+    pub fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+
+    /// Run the accept loop until a shutdown signal arrives, then drain and clean up.
+    ///
+    /// # Returns
+    /// * `Ok(())` - Server ran and shut down gracefully
+    /// * `Err(std::io::Error)` - The server loop failed
+    pub async fn serve(self) -> Result<(), std::io::Error> {
+        let BoundServer {
+            state,
+            acceptor,
+            local_addr,
+        } = self;
+
+        // Create routes with middleware
+        let app = routes::create_routes(state.clone());
+
+        info!("Server ready to accept connections on {}", local_addr);
+
+        // Graceful shutdown (roadmap S5): flip readiness false and pause so load balancers
+        // stop sending new work, then drain in-flight requests under a bounded timeout, then
+        // run cleanup. Before S5 this future only logged, the drain was unbounded (`None`),
+        // and `shutdown_cleanup` had no caller at all.
+        let readiness_delay =
+            Duration::from_secs(state.config.server.shutdown_readiness_delay_secs);
+        let drain_timeout = Duration::from_secs(state.config.server.shutdown_timeout_secs);
+        let shutdown_state = state.clone();
+
+        info!(
+            readiness_delay_secs = readiness_delay.as_secs(),
+            drain_timeout_secs = drain_timeout.as_secs(),
+            "Graceful shutdown configured"
+        );
+
+        let result = Server::new_with_acceptor(acceptor)
+            .run_with_graceful_shutdown(
+                app,
+                async move {
+                    shutdown_signal().await;
+                    info!("Graceful shutdown initiated");
+                    begin_shutdown(&shutdown_state, readiness_delay).await;
+                },
+                Some(drain_timeout),
+            )
+            .await;
+
+        // Runs on both the clean and the errored path — cleanup is exactly what must not be
+        // skipped when the server came down badly.
+        shutdown_cleanup(&state).await;
+
+        result
+    }
+}
+
+/// Initialize the service and bind its listening socket, without serving (roadmap D28).
+///
+/// This is [`start_server_with_config`] minus the accept loop: it loads calibration,
+/// applies the rayon pool sizing, decides readiness, and binds the socket — so every
+/// startup failure mode except a mid-serve one is reported through this function's
+/// `Err`, at the caller.
 ///
 /// # Arguments
 /// * `config` - Service configuration loaded from file or defaults
 ///
 /// # Returns
-/// * `Ok(())` - Server ran successfully and shut down gracefully
-/// * `Err(std::io::Error)` - Failed to start or run the server
-pub async fn start_server_with_config(config: ServiceConfig) -> Result<(), std::io::Error> {
+/// * `Ok(BoundServer)` - Socket bound; call [`BoundServer::serve`] to accept connections
+/// * `Err(std::io::Error)` - Calibration load failed with `fail_fast` set, or the bind failed
+pub async fn bind_server_with_config(config: ServiceConfig) -> Result<BoundServer, std::io::Error> {
     // Load calibration repository
     info!(
         calibration_dir = ?config.calibration.data_directory,
@@ -235,44 +320,77 @@ pub async fn start_server_with_config(config: ServiceConfig) -> Result<(), std::
         "Performance configuration"
     );
 
-    // Create routes with middleware
-    let app = routes::create_routes(state.clone());
-
+    // Bind eagerly, here, rather than handing a lazy `poem::listener::TcpListener` to
+    // `Server::new` (roadmap D28). The bind is the last startup step that can fail, and
+    // a lazy listener defers that failure into the server future — where, for anything
+    // that spawns the server, it stops being the caller's error. `AddrInUse` is now this
+    // function's return value.
+    //
+    // The bind itself is what `poem::listener::TcpListener::into_acceptor` does verbatim
+    // (`TokioTcpListener::bind(addr).await?` -> `TcpAcceptor::from_tokio`), so nothing
+    // about the accept path changes — only *when* it happens and who hears about it
+    // failing.
     let addr = state.bind_address();
+    let bound = async {
+        let listener = tokio::net::TcpListener::bind(&addr).await?;
+        let local_addr = listener.local_addr()?;
+        Ok::<_, std::io::Error>((TcpAcceptor::from_tokio(listener)?, local_addr))
+    }
+    .await;
 
-    info!("Server ready to accept connections on {}", addr);
-
-    // Graceful shutdown (roadmap S5): flip readiness false and pause so load balancers
-    // stop sending new work, then drain in-flight requests under a bounded timeout, then
-    // run cleanup. Before S5 this future only logged, the drain was unbounded (`None`),
-    // and `shutdown_cleanup` had no caller at all.
-    let readiness_delay = Duration::from_secs(state.config.server.shutdown_readiness_delay_secs);
-    let drain_timeout = Duration::from_secs(state.config.server.shutdown_timeout_secs);
-    let shutdown_state = state.clone();
+    // Cleanup runs on the failed-bind path too, and deliberately so. Before D28 the bind
+    // lived inside `run_with_graceful_shutdown`, so a bind failure came back as its `Err`
+    // and fell through to the `shutdown_cleanup` below it — the invariant that function's
+    // call site states ("runs on both the clean and the errored path"). Returning `?`
+    // straight out of here would have quietly made that false for the one error the split
+    // introduced. Cleanup only logs today, but it carries TODOs (flush metrics, close
+    // connections) that a partially-initialized service is exactly the case for.
+    let (acceptor, local_addr) = match bound {
+        Ok(bound) => bound,
+        Err(e) => {
+            tracing::error!(
+                configured_address = %addr,
+                error = %e,
+                "Failed to bind the listening socket; refusing to start"
+            );
+            shutdown_cleanup(&state).await;
+            return Err(e);
+        }
+    };
 
     info!(
-        readiness_delay_secs = readiness_delay.as_secs(),
-        drain_timeout_secs = drain_timeout.as_secs(),
-        "Graceful shutdown configured"
+        configured_address = %addr,
+        bound_address = %local_addr,
+        "Listening socket bound"
     );
 
-    let result = Server::new(TcpListener::bind(&addr))
-        .run_with_graceful_shutdown(
-            app,
-            async move {
-                shutdown_signal().await;
-                info!("Graceful shutdown initiated");
-                begin_shutdown(&shutdown_state, readiness_delay).await;
-            },
-            Some(drain_timeout),
-        )
-        .await;
+    Ok(BoundServer {
+        state,
+        acceptor,
+        local_addr,
+    })
+}
 
-    // Runs on both the clean and the errored path — cleanup is exactly what must not be
-    // skipped when the server came down badly.
-    shutdown_cleanup(&state).await;
-
-    result
+/// Start the API server with configuration
+///
+/// This function initializes the web server with:
+/// - Production-grade middleware stack
+/// - Configuration-driven settings
+/// - Graceful shutdown handling
+/// - Structured logging
+///
+/// It is [`bind_server_with_config`] followed by [`BoundServer::serve`]; use those two
+/// directly when the bound address has to be observed or the bind failure has to be
+/// handled separately from the serve failure.
+///
+/// # Arguments
+/// * `config` - Service configuration loaded from file or defaults
+///
+/// # Returns
+/// * `Ok(())` - Server ran successfully and shut down gracefully
+/// * `Err(std::io::Error)` - Failed to start or run the server
+pub async fn start_server_with_config(config: ServiceConfig) -> Result<(), std::io::Error> {
+    bind_server_with_config(config).await?.serve().await
 }
 
 /// Start the API server (legacy interface for backward compatibility)

@@ -94,6 +94,7 @@ pub mod concurrent_tests;
 pub mod error_content_type_tests;
 pub mod error_tests;
 pub mod h3_link_budget_tests;
+pub mod helper_contract_tests;
 pub mod off_axis_warning_tests;
 pub mod partial_calibration_tests;
 pub mod ray_trace_stub_warning_tests;
