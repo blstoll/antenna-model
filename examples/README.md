@@ -59,10 +59,17 @@ curl http://localhost:3000/status
 ### Gain Computation Endpoints
 
 #### 4. POST /api/v1/gain - Single Gain Computation
+
+> **KNOWN BROKEN (measured 2026-08-16, roadmap D30):** `gain_request.json` returns
+> **422 `invalid_coordinate`** — its ECEF geometry puts the body X-axis parallel
+> to boresight, making the azimuth reference degenerate. It deserializes, which is
+> all the drift tests check. `batch_request.json` shares the geometry and returns
+> **200 with every item failed**. Use the geodetic example below until D30 lands.
+
 ```bash
 curl -X POST http://localhost:3000/api/v1/gain \
   -H "Content-Type: application/json" \
-  -d @examples/requests/gain_request.json
+  -d @examples/requests/gain_request_geodetic.json
 ```
 
 #### 5. POST /api/v1/gain/batch - Batch Gain Computation

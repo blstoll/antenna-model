@@ -8,12 +8,16 @@ authors.workspace = true
 anyhow = "1.0.103"
 argmin = "0.11.0"
 argmin-math = { version = "0.5.0", features = ["ndarray_v0_16-nolinalg"] }
-aws-config = "1.9.0"
+# The AWS subtree is OPTIONAL and off by default (roadmap D6). It backs exactly one
+# feature — reading a measurement CSV from an `s3://` URL in `parser.rs` — and it is by
+# far the heaviest thing this CLI could link. Enable with `--features s3-input`.
+# Without it, an `s3://` source fails with an actionable error naming the flag.
+aws-config = { version = "1.9.0", optional = true }
 # default-features disabled to drop the legacy rustls 0.21 TLS connector (the
 # `rustls` default feature = aws-smithy-runtime/tls-rustls), which pulls the
 # vulnerable rustls-webpki 0.101.7 (RUSTSEC-2026-0098/0099/0104). The actual
 # HTTPS client is `default-https-client` (rustls-aws-lc → rustls 0.23), kept below.
-aws-sdk-s3 = { version = "1.138.1", default-features = false, features = [
+aws-sdk-s3 = { version = "1.138.1", optional = true, default-features = false, features = [
     "sigv4a",
     "http-1x",
     "default-https-client",
@@ -42,6 +46,24 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 # Physics engine + artifact types. Deliberately antenna-core, not
 # antenna-model: the CLI build must not compile the web stack (roadmap D4).
 antenna-core = { path = "../antenna-core" }
+
+[features]
+# Off by default (roadmap D6). Reading measurements from `s3://` pulls the whole AWS SDK
+# subtree — 160 of the 240 packages calibrate would otherwise compile, 25 of them `aws-*`
+# — for a source almost every run does not use. What is COMPILED drops from 240 to 80.
+#
+# This does NOT change what `cargo audit` reports, and an earlier version of this comment
+# wrongly claimed it did. `cargo audit` scans `Cargo.lock`, and an optional dependency
+# stays in the lockfile: all 25 `aws-*` entries are still there, so the advisory surface
+# is byte-identical either way. The win here is build weight and compiled dependency
+# surface. To act on advisories, resolve them or allowlist them with a reason.
+#
+# The gate is asserted, not just declared: `scripts/assert-dep-graphs.sh` checks that a
+# default `cargo build -p calibrate` resolves NO aws-* package, with a negative control
+# proving the detector fires when the feature is on. A dependency that only *documents*
+# itself as optional is the kind of guard roadmap P13 records rotting.
+default = []
+s3-input = ["dep:aws-config", "dep:aws-sdk-s3"]
 
 [dev-dependencies]
 tempfile = "3.27.0"

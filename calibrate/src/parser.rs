@@ -1,9 +1,22 @@
-/// Measurement data parser and validation
-///
-/// This module provides functionality to parse antenna measurement data from CSV files
-/// (local or S3), validate the data quality, and generate coverage statistics.
+//! Measurement data parser and validation
+//!
+//! This module provides functionality to parse antenna measurement data from CSV files
+//! (local, or S3 when built with the optional `s3-input` feature), validate the data
+//! quality, and generate coverage statistics.
+//!
+//! **S3 input is behind the off-by-default `s3-input` cargo feature** (roadmap D6): it is
+//! the only user of the AWS SDK — 160 of the 240 packages this crate would otherwise
+//! compile. Local paths, which every test, script and documented workflow uses, are
+//! unaffected. Built without the feature, an `s3://` source fails with an error naming the
+//! flag rather than being silently unsupported.
+//!
+//! (These were `///` until roadmap D6: attached to the `use` below rather than to the
+//! module, so `cargo doc` rendered none of it.)
+
 use anyhow::{Context, Result};
+#[cfg(feature = "s3-input")]
 use aws_config::BehaviorVersion;
+#[cfg(feature = "s3-input")]
 use aws_sdk_s3::Client as S3Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -530,7 +543,10 @@ fn parse_csv_content(content: &str, source: &str) -> Result<MeasurementData> {
     Ok(MeasurementData::new(points, source.to_string()))
 }
 
-/// Fetch content from S3
+/// Fetch content from S3.
+///
+/// Only compiled with the `s3-input` feature; see the stub below for the other side.
+#[cfg(feature = "s3-input")]
 async fn fetch_from_s3(s3_url: &str) -> Result<String> {
     // Parse S3 URL: s3://bucket/key
     let url_parts: Vec<&str> = s3_url
@@ -569,6 +585,23 @@ async fn fetch_from_s3(s3_url: &str) -> Result<String> {
     let content = String::from_utf8(body.to_vec()).context("S3 object is not valid UTF-8")?;
 
     Ok(content)
+}
+
+/// Stand-in for [`fetch_from_s3`] when the `s3-input` feature is off (roadmap D6).
+///
+/// This exists so the *shape* of `parse_measurements` is identical in both builds — the
+/// `s3://` branch is still taken and still reports through `Result`, so the difference is
+/// one actionable error rather than a different control flow. The alternative, gating the
+/// branch itself, would make an `s3://` path fall through to `std::fs::read_to_string` and
+/// fail with "No such file or directory", which names neither the cause nor the fix.
+#[cfg(not(feature = "s3-input"))]
+async fn fetch_from_s3(s3_url: &str) -> Result<String> {
+    anyhow::bail!(
+        "cannot read '{s3_url}': this `calibrate` was built without S3 support.\n\
+         Either rebuild with the feature — `cargo build --release -p calibrate --features \
+         s3-input` — or download the file and pass a local path.\n\
+         S3 input is off by default because it links the whole AWS SDK (roadmap D6)."
+    )
 }
 
 /// Create a sample CSV file for testing

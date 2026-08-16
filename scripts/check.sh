@@ -33,6 +33,15 @@ echo "==> scripts/assert-dep-graphs.sh (CLI graph + antenna-core weight)"
 echo "==> cargo clippy --workspace --all-targets -- -D warnings"
 cargo clippy --workspace --all-targets -- -D warnings
 
+echo "==> cargo clippy -p calibrate --features s3-input -- -D warnings (S3 path ON)"
+# The `s3-input` feature is OFF by default (roadmap D6), so every check above compiles
+# only the stub side of `parser::fetch_from_s3`. This is the one check that compiles the
+# real S3 client — without it, the feature could stop building and nothing would notice
+# until someone needed it. Kept package-scoped and without --all-targets deliberately:
+# --all-targets would pull the dev-dependency antenna-model back in and re-unify
+# features, which is the same trap D4 documents for the dep-graph assertions.
+cargo clippy -p calibrate --features s3-input -- -D warnings
+
 echo "==> cargo nextest run --workspace --profile full"
 # full profile = both test tiers (see .config/nextest.toml, roadmap unit D18).
 # The bare default profile is the dev inner loop and excludes the slow tier;

@@ -35,9 +35,17 @@ in the flat `DesignSpecs` schema (`calibrate/src/design_specs_loader.rs`):
 
 **Location:** `calibration_data/antennas.yaml`
 
-Comprehensive antenna registry with **4 enabled uncalibrated antennas** ready for immediate testing:
+Comprehensive antenna registry with **5 enabled uncalibrated antennas** ready for immediate testing.
 
-#### Test Antennas (Currently Enabled):
+> **Updated 2026-08-16 (roadmap D9).** This section described the registry as it
+> stood when partial-calibration support was built. Two reference antennas
+> (`dsn_70m_uncalibrated`, `gbt_100m_uncalibrated`) were added later by the
+> reference-validation work, and `test_simple` was disabled as a development
+> fixture, so the enabled set is the five below rather than the four originally
+> listed. The rest of this document is a historical setup summary and has not
+> been re-verified — `calibration_data/antennas.yaml` is authoritative.
+
+#### Uncalibrated Antennas (Currently Enabled):
 
 1. **`gs_3.7m_uncalibrated`**
    - Small ground station (3.7m mesh)
@@ -60,19 +68,29 @@ Comprehensive antenna registry with **4 enabled uncalibrated antennas** ready fo
    - **Use:** High-precision loss modeling
    - **Accuracy:** Absolute ±3 dB, Loss ±2 dB
 
-4. **`test_simple`**
-   - Simple 5m test antenna
+4. **`dsn_70m_uncalibrated`**
+   - DSN 70m reference antenna
    - Single-feed: X-band
    - **Status:** Uncalibrated
-   - **Use:** Development and testing
+   - **Use:** Reference validation against published gain
+
+5. **`gbt_100m_uncalibrated`**
+   - GBT 100m reference antenna (axisymmetric approximation of an offset Gregorian)
+   - Dual-feed: L-band, Q-band
+   - **Status:** Uncalibrated
+   - **Use:** Reference validation against published gain
 
 #### Placeholder Antennas (Currently Disabled):
 
 - **Fully calibrated:** `dsn_34m_full` (requires `.bin` file)
 - **Partially calibrated (boresight):** `gs_3.7m_boresight`, `dsn_13m_boresight`
 - **Partially calibrated (limited):** `gs_3.7m_limited`
+- **Development fixture:** `test_simple` (disabled 2026-08-16, roadmap D9)
 
-**Total Feeds Available:** 10 feeds across 4 enabled antennas
+No `.bin` artifact ships in this repository; the four placeholders are templates.
+See the header of `calibration_data/antennas.yaml`.
+
+**Total Feeds Available:** 11 feeds across 5 enabled antennas
 
 ---
 
@@ -324,15 +342,16 @@ yq eval '.' calibration_data/antennas.yaml > /dev/null && echo "✅ Valid YAML" 
 # Count enabled antennas
 yq eval '.antennas[] | select(.enabled == true) | .id' calibration_data/antennas.yaml
 
-# Expected output:
+# Expected output (verified 2026-08-16):
 # gs_3.7m_uncalibrated
 # dsn_13m_uncalibrated
 # dsn_34m_uncalibrated
-# test_simple
+# dsn_70m_uncalibrated
+# gbt_100m_uncalibrated
 
 # Count total feeds
 yq eval '.antennas[] | select(.enabled == true) | .design_specs.feeds[].id' calibration_data/antennas.yaml | wc -l
-# Expected: 10 feeds
+# Expected: 11 feeds
 ```
 
 ### Review Antenna Details

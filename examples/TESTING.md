@@ -4,14 +4,24 @@ All examples have been updated to use the actual antennas from `calibration_data
 
 ## Available Antennas
 
-The service currently has these antennas loaded:
+A default `cargo run --release --bin antenna-model` loads these five (verified
+2026-08-16 against `/api/v1/antennas`):
 
-- **dsn_34m_uncalibrated** - Large DSN antenna (34m) with 3 feeds: s_band, x_band, ka_band
-- **dsn_13m_uncalibrated** - Medium DSN antenna (13m) with 3 feeds: x_band_downlink, x_band_uplink, ka_band_downlink  
 - **gs_3.7m_uncalibrated** - Ground station (3.7m) with 2 feeds: s_band_feed, x_band_feed
-- **test_simple** - Simple test antenna (5m) with 1 feed: primary
+- **dsn_13m_uncalibrated** - Medium DSN antenna (13m) with 3 feeds: x_band_downlink, x_band_uplink, ka_band_downlink
+- **dsn_34m_uncalibrated** - Large DSN antenna (34m) with 3 feeds: s_band, x_band, ka_band
+- **dsn_70m_uncalibrated** - DSN 70m reference antenna with 1 feed: x_band
+- **gbt_100m_uncalibrated** - GBT 100m reference antenna with 2 feeds: l_band, q_band
 
-All antennas are uncalibrated (using design specifications).
+All five are uncalibrated (design specifications only), which is why the service
+starts `healthy` with no `.bin` artifact present — see roadmap D9 and the header
+of `calibration_data/antennas.yaml`. The other four entries in that file are
+disabled templates that name a `.bin` a clean checkout does not contain.
+
+`test_simple`, a 5 m development fixture, was **disabled in the shipped config on
+2026-08-16** (roadmap D9) so it no longer appears in an operator's antenna list.
+The integration tests are unaffected — they load their own
+`antenna-model/tests/fixtures/test_antennas.yaml`, which carries its own copy.
 
 ## Quick Tests
 
@@ -33,10 +43,20 @@ curl http://localhost:3000/api/v1/antennas/dsn_34m_uncalibrated | jq
 ```
 
 ### 4. Single Gain Computation
+
+> **KNOWN BROKEN (measured 2026-08-16, roadmap D30):** `gain_request.json` and
+> `batch_request.json` share an ECEF geometry the validator rejects — the vehicle
+> sits at `(R, 0, 0)` with an identity attitude and a boresight along `+X`, so the
+> body X-axis is parallel to boresight and the azimuth reference is degenerate.
+> `gain_request.json` returns **422 `invalid_coordinate`**; `batch_request.json`
+> returns **200 with 3 of 3 items failed**. Both still *deserialize*, which is all
+> the drift tests check. Use `gain_request_geodetic.json` until D30 lands.
+
 ```bash
+# Verified working:
 curl -X POST http://localhost:3000/api/v1/gain \
   -H "Content-Type: application/json" \
-  -d @examples/requests/gain_request.json | jq
+  -d @examples/requests/gain_request_geodetic.json | jq
 ```
 
 ### 5. Batch Computation

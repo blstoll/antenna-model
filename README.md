@@ -16,7 +16,7 @@ The hybrid approach enables graceful degradation from fully calibrated antennas 
 - **High Accuracy**: ±1 dB for fully calibrated antennas, graceful degradation for partial/uncalibrated
 - **Low Latency**: 50-100ms p95 response time for single queries
 - **REST API**: Comprehensive endpoints with batch processing and heatmap generation
-- **3D Coordinate Support**: Auto-detection of ECEF vs Geodetic coordinates
+- **3D Coordinate Support**: ECEF and Geodetic positions, each tagged with a required `coordinate_system` field (never inferred — see below)
 - **Kubernetes-native**: Production-ready with health probes and structured logging
 - **Multi-feed Support**: Multiple feeds per antenna with independent calibrations
 
@@ -38,30 +38,43 @@ The service supports three calibration levels with graceful accuracy degradation
 
 ## Project Structure
 
+A three-crate Cargo workspace. The physics engine lives in `antenna-core` so the
+CLI does not compile the web stack:
+
 ```
 antenna-model/
-├── antenna-model/           # Main service (REST API)
+├── antenna-core/           # Physics engine + calibration-artifact layer (no web stack)
 │   └── src/
-│       ├── api/            # REST API layer (routes, handlers, middleware)
-│       ├── service/        # Business logic (evaluator, validator, batch)
-│       ├── model/          # Computation engine (interpolation, B-spline)
-│       ├── data/           # Data management (repository, loader, types)
+│       ├── model/          # bessel, coordinates, coordinates_3d, correction_interpolator,
+│       │                   #   edge_cases, fft, geometry, illumination, integration, mesh,
+│       │                   #   pattern, phase, ray_trace
+│       ├── data/           # Artifact layer: types.rs + loader.rs (ANTC container)
+│       ├── error.rs        # Shared error vocabulary
+│       └── warnings.rs     # Shared WarningCode / ApiWarning vocabulary
+│
+├── antenna-model/          # REST API service binary — depends on antenna-core
+│   └── src/
+│       ├── api/            # REST layer (poem framework: routes, handlers, middleware)
+│       ├── service/        # Business logic (evaluator, batch, cache, heatmap,
+│       │                   #   h3_link_budget, validator)
+│       ├── data/           # repository.rs (types/loader re-exported from antenna-core)
 │       ├── config/         # Configuration system
 │       └── main.rs         # Service entry point
 │
-├── calibrate/              # Calibration CLI tool
+├── calibrate/              # Calibration CLI tool — depends on antenna-core
 │   └── src/
-│       ├── parser.rs       # CSV measurement parser
-│       ├── fitter.rs       # B-spline fitting
-│       ├── validator.rs    # Validation logic
-│       └── main.rs         # CLI entry point
+│       ├── parser.rs             # CSV measurement parser
+│       ├── parameter_tuner.rs    # Nelder-Mead simplex optimizer
+│       ├── correction_surface.rs # B-spline/RBF fitting
+│       ├── validator.rs          # Cross-validation
+│       ├── artifact_export.rs    # Service-loadable artifact (3D→4D bridge)
+│       └── main.rs               # CLI entry point
 │
-├── calibration_data/       # Pre-computed calibration artifacts
-│   └── antennas.toml      # Antenna configuration
-│
-├── config/                 # Runtime configuration
+├── calibration_data/       # antennas.yaml + design_specs/ (no .bin ships — see below)
+├── config/                 # Runtime configuration (service.yaml)
 ├── docs/                   # Documentation
-└── tests/                  # Integration and performance tests
+├── examples/               # Request/response examples, pinned by drift tests
+└── scripts/                # check.sh and the worked artifact-generation path
 ```
 
 ## Quick Start
@@ -93,10 +106,84 @@ cargo bench
 cargo run --release --bin antenna-model
 
 # Or run with custom configuration
-CONFIG_PATH=/path/to/config.toml cargo run --release --bin antenna-model
+CONFIG_PATH=/path/to/service.yaml cargo run --release --bin antenna-model
 
 # Service will start on http://localhost:3000 by default
 ```
+
+### What You Get on a Clean Checkout
+
+**No `.bin` calibration artifacts ship in this repository.** A calibration
+artifact is a build output — derived from measurements *plus* this codebase's own
+physics model — so a committed one goes stale the moment either changes and
+nothing in the build can notice. Every input is committed; the artifact is not.
+
+The service still starts **healthy and useful**, because five antennas are
+configured from design specifications alone and need no artifact:
+
+```bash
+curl -s http://localhost:3000/health   # {"status":"healthy"}
+curl -s http://localhost:3000/status | jq '{antenna_count, antenna_ids}'
+```
+
+```json
+{
+  "antenna_count": 5,
+  "antenna_ids": [
+    "dsn_13m_uncalibrated",
+    "dsn_34m_uncalibrated",
+    "dsn_70m_uncalibrated",
+    "gbt_100m_uncalibrated",
+    "gs_3.7m_uncalibrated"
+  ]
+}
+```
+
+Those five are **uncalibrated**: absolute gain is accurate to ±3–5 dB, loss to
+±2 dB, and every response says so in a `uncalibrated` warning and its
+`calibration_status` block. That is the intended default, not a broken install.
+
+`calibration_data/antennas.yaml` also holds four **disabled templates** naming
+`.bin` files a clean checkout does not contain. They document the YAML shape of
+the fully- and partially-calibrated levels; generate the artifact and flip
+`enabled` to make one real.
+
+`/health` reports `degraded` only when **no** antenna loads at all, and a
+degraded instance never becomes ready (`/ready` stays 503), so it receives no
+traffic.
+
+### Generating a Calibration Artifact
+
+`scripts/generate-cr159703-artifact.sh` is a complete worked example that runs
+from a clean checkout with no external data:
+
+```bash
+./scripts/generate-cr159703-artifact.sh /tmp/my-calibration
+```
+
+It builds both binaries, synthesizes a real-anchored measurement grid from
+digitized NASA CR-159703 data committed under
+`antenna-model/tests/fixtures/`, fits the correction surface with the real
+`calibrate` binary, and writes the artifact **outside the repository tree**:
+
+```
+cr159703_122m.bin            the calibration artifact the service loads
+cr159703_grid.csv            the synthesized measurement grid
+cr159703_grid_summary.json   fabrications, anchor table, injected residual RMS
+cr159703_report.json         validation report (RMSE, cross-validation, outliers)
+cr159703_metadata.json       artifact metadata sidecar
+```
+
+Do not commit what it produces. The measurement grid is **model-filled, not
+measured** — only the residual at 19 digitized peak angles comes from published
+measurements — and the script prints that on every run.
+
+To serve the result, point `calibration.data_directory` at the output directory
+and add an entry to `antennas.yaml` with a matching `calibration_file`.
+
+For the general path — measurement CSV format, mode selection, and how to read
+the fit quality — see
+[docs/calibration-workflow-guide.md](docs/calibration-workflow-guide.md) §12.
 
 ### Using the Calibration Tool
 
@@ -110,7 +197,7 @@ cargo run --release --bin calibrate -- \
   --calibration-mode boresight \
   --input measurements/boresight_xband.csv \
   --design-specs design_specs/antenna_1.yaml \
-  --output calibration_data/antenna_1_xband_boresight.bin \
+  --output /var/lib/antenna-model/antenna_1_xband_boresight.bin \
   --antenna-id antenna_1 \
   --feed-id x_band \
   --verbose
@@ -127,7 +214,7 @@ For production-grade accuracy with ~8 hour test time:
 cargo run --release --bin calibrate -- \
   --calibration-mode full \
   --input measurements/antenna_1_full_grid.csv \
-  --output calibration_data/antenna_1.bin \
+  --output /var/lib/antenna-model/antenna_1.bin \
   --antenna-id antenna_1 \
   --feed-id x_band \
   --validate
@@ -135,106 +222,160 @@ cargo run --release --bin calibrate -- \
 
 #### Uncalibrated Antenna (Design Specs Only)
 
-No calibration tool needed - configure directly in `calibration_data/antennas.yaml`:
+No calibration tool needed — the design specifications live inline in
+`calibration_data/antennas.yaml`, and the antenna is usable on the next restart:
 
 ```yaml
-[[antennas]]
-antenna_id = "antenna_3"
-calibration_status = "uncalibrated"
-design_specs_path = "design_specs/antenna_3.yaml"
+antennas:
+  - id: "my_antenna"
+    name: "My Ground Station"
+    calibration_status: "uncalibrated"
+    enabled: true
+
+    design_specs:
+      diameter_m: 3.7
+      focal_length_m: 1.85
+      f_over_d_ratio: 0.5
+      surface_rms_mm: 1.5
+
+      feeds:
+        - id: "x_band_feed"
+          name: "X-Band Feed"
+          position: [0.0, 0.0, 0.0]   # offset FROM THE FOCAL POINT; on-axis = zeros
+          q_factor: 2.04              # ~-11 dB edge taper at f/D 0.5
+          phase_center_offset_m: 0.0
+          frequency_range: [7100.0, 8500.0]
+
+      mesh: null                      # or mesh_spacing_mm / wire_diameter_mm
+
+    validity_ranges:
+      azimuth_range: [0.0, 360.0]
+      elevation_range: [0.0, 90.0]
+      frequency_range: [7100.0, 8500.0]
+      temperature_k: 290.0
 ```
+
+Note `feeds[].position` is the feed's design offset **from the focal point**, not
+a vertex-origin position — an on-axis feed is `[0, 0, 0]`. Reading it the other
+way puts the feed at `z ≈ 2f` and costs ~27 dB of boresight gain; see the field's
+doc comment in `antenna-core/src/data/types.rs`.
 
 ## API Usage
 
 ### Single Evaluation
 
+The gain endpoints take **3D geometry**, not angles: you supply the vehicle's
+position and attitude, where the reflector and feed are pointed, and where the
+emitter is. The service derives the off-boresight angle itself. Every position
+carries a **required** `coordinate_system` tag of `"ecef"` (x, y, z metres from
+Earth's centre) or `"geodetic"` (lon°, lat°, alt m) — it is never inferred, and
+omitting it is a 400 naming the field.
+
+Endpoints: `POST /api/v1/gain`, `POST /api/v1/gain/batch`, `POST /api/v1/heatmap`,
+`POST /api/v1/h3-heatmap`, plus `GET /api/v1/antennas[/:id[/feeds[/:feed_id]]]`.
+
 ```bash
-curl -X POST http://localhost:3000/api/v1/evaluate \
+curl -X POST http://localhost:3000/api/v1/gain \
   -H "Content-Type: application/json" \
   -d '{
-    "antenna_id": "antenna_1",
-    "azimuth_deg": 45.0,
-    "elevation_deg": 30.0,
-    "frequency_mhz": 8400.0
+    "antenna_id": "gs_3.7m_uncalibrated",
+    "feed_id": "x_band_feed",
+    "vehicle_position": {
+      "x": -118.0, "y": 34.0, "z": 500.0,
+      "coordinate_system": "geodetic"
+    },
+    "vehicle_attitude": [1.0, 0.0, 0.0, 0.0],
+    "reflector_boresight": {
+      "x": -118.0, "y": 34.0, "z": 510.0,
+      "coordinate_system": "geodetic"
+    },
+    "feed_pointing_location": {
+      "x": -118.0, "y": 34.0, "z": 505.0,
+      "coordinate_system": "geodetic"
+    },
+    "emitter_position": {
+      "x": -100.0, "y": 35.0, "z": 500000.0,
+      "coordinate_system": "geodetic"
+    },
+    "frequency_mhz": 8200.0,
+    "include_reference": false
   }'
 ```
 
-Response:
+Response (verified against a running service, 2026-08-16 — warning text abridged):
+
 ```json
 {
-  "antenna_id": "antenna_1",
-  "feed_id": "x_band",
-  "g_over_t_db": 41.2,
-  "calibration_status": {
-    "status": "fully_calibrated",
-    "accuracy_estimate_db": 1.0,
-    "correction_applied": true,
-    "parameters_source": "measurement_tuned"
+  "antenna_id": "gs_3.7m_uncalibrated",
+  "feed_id": "x_band_feed",
+  "gain_db": -6.7320729605282175,
+  "geometry": {
+    "physical_feed_offset_m": { "x": 0.05, "y": 0.0, "z": 0.0 },
+    "emitter_azimuth_deg": 352.37622385040544,
+    "emitter_elevation_deg": 81.31153325033851
   },
-  "warnings": [],
+  "warnings": [
+    { "code": "spillover_significant", "message": "Estimated spillover 17.1% may reduce aperture efficiency." },
+    { "code": "uncalibrated", "message": "Antenna is uncalibrated (using design specifications)." },
+    { "code": "off_axis_unvalidated", "message": "Query is beyond the validated main-beam region." }
+  ],
   "metadata": {
-    "computation_time_ms": 1.2,
-    "extrapolated": false
+    "computation_time_ms": 7.109958,
+    "extrapolated": false,
+    "spillover_loss_db": -0.8134714045459502
+  },
+  "calibration_status": {
+    "status": "uncalibrated",
+    "accuracy_estimate_db": 3.0,
+    "loss_accuracy_estimate_db": 2.0,
+    "correction_applied": false,
+    "parameters_source": "design_specifications"
   }
 }
 ```
 
-**Note:** For partially calibrated or uncalibrated antennas, the response includes additional calibration status information. See [examples/README.md](examples/README.md) for complete examples of all calibration statuses.
+Warnings are **typed**: `code` is the contract, `message` is not — never branch
+on message text. The full vocabulary is in
+[docs/api-documentation.md](docs/api-documentation.md).
 
-### Batch Evaluation
+### Batch, Heatmap, and H3 Link Budget
 
-```bash
-curl -X POST http://localhost:3000/api/v1/evaluate/batch \
-  -H "Content-Type: application/json" \
-  -d '{
-    "evaluations": [
-      {
-        "antenna_id": "antenna_1",
-        "azimuth_deg": 45.0,
-        "elevation_deg": 30.0,
-        "frequency_mhz": 8400.0
-      },
-      {
-        "antenna_id": "antenna_1",
-        "azimuth_deg": 180.0,
-        "elevation_deg": 15.0,
-        "frequency_mhz": 2200.0
-      }
-    ]
-  }'
-```
-
-### Heatmap Generation
+These take larger payloads, so run them straight from the checked-in examples. A drift
+test pins each against its schema — though note what that does **not** cover, immediately
+below:
 
 ```bash
 curl -X POST http://localhost:3000/api/v1/heatmap \
   -H "Content-Type: application/json" \
-  -d '{
-    "antenna_id": "antenna_1",
-    "frequency_mhz": 8400.0,
-    "azimuth_range": {
-      "min": 0.0,
-      "max": 360.0,
-      "step": 5.0
-    },
-    "elevation_range": {
-      "min": 0.0,
-      "max": 90.0,
-      "step": 2.0
-    }
-  }'
+  -d @examples/requests/heatmap_request.json
+
+curl -X POST http://localhost:3000/api/v1/h3-heatmap \
+  -H "Content-Type: application/json" \
+  -d @examples/requests/h3_link_budget_request.json
 ```
 
-### Health Check
+`/api/v1/gain/batch` is deliberately left out of that list. It returns **HTTP 200
+even when individual items fail** — each result carries either a value or a typed
+`error`, and `metadata.failure_count` summarizes — and the checked-in
+`batch_request.json` is currently one of those failures: all three of its items
+are rejected for a degenerate geometry (roadmap **D30**, measured 2026-08-16), so
+it returns a 200 whose every item failed. Build a batch from the single-gain
+example above until D30 lands, and read `metadata.failure_count` rather than the
+status code.
+
+That is also the limit of what the drift tests promise: they check every example
+**deserializes into its schema**, not that it *computes*. `gain_request.json` has
+the same defect and returns a 422 — see `examples/README.md`.
+
+`/heatmap` serves rectangular grids only. The H3 grid is the separate
+`/h3-heatmap` endpoint.
+
+### Health, Readiness, and Status
 
 ```bash
-curl http://localhost:3000/health
-```
-
-### Service Status
-
-```bash
-curl http://localhost:3000/status
+curl http://localhost:3000/health   # liveness — always 200; "healthy" or "degraded"
+curl -i http://localhost:3000/ready # readiness — 200 when serving, 503 otherwise
+curl http://localhost:3000/status   # version, uptime, loaded antennas
 ```
 
 ## Docker Deployment
@@ -299,39 +440,61 @@ helm uninstall antenna-model --namespace antenna-model
 
 ### Service Configuration
 
-Configuration is loaded from `config/service.toml`:
+Configuration is loaded from `config/service.yaml` (override the path with
+`CONFIG_PATH`). Abridged — see the file for the full commentary:
 
-```toml
-[server]
-host = "0.0.0.0"
-port = 3000
+```yaml
+server:
+  host: "127.0.0.1"
+  port: 3000
+  request_timeout_secs: 30
+  max_body_size_bytes: 10485760   # 10 MB
+  shutdown_readiness_delay_secs: 0
+  shutdown_timeout_secs: 25
 
-[calibration]
-data_dir = "/app/calibration_data"
-config_file = "antennas.toml"
+calibration:
+  data_directory: "calibration_data"
+  antenna_config_file: "calibration_data/antennas.yaml"
+  fail_fast: true
 
-[logging]
-level = "info"
-format = "json"
+logging:
+  level: "info"
+  format: "text"        # use "json" in production
+  include_location: false
+
+performance:
+  worker_threads: 0     # 0 = auto-detect
+  max_batch_size: 1000
+  enable_parallel_processing: true
 ```
 
 ### Antenna Configuration
 
-Antennas are configured in `calibration_data/antennas.toml`:
+Antennas are configured in `calibration_data/antennas.yaml`. A calibrated entry
+references an artifact by filename, resolved against `data_directory`:
 
-```toml
-[[antennas.configs]]
-id = "antenna_1"
-name = "Deep Space Network 34m"
-calibration_file = "antenna_1.bin"
-enabled = true
-
-[[antennas.configs]]
-id = "antenna_2"
-name = "Ground Station Array Element"
-calibration_file = "antenna_2.bin"
-enabled = true
+```yaml
+antennas:
+  - id: "my_calibrated_antenna"
+    name: "My Antenna - Fully Calibrated"
+    calibration_status: "fully_calibrated"
+    # Must exist under `calibration.data_directory` before you enable this.
+    calibration_file: "my_calibrated_antenna.bin"
+    enabled: true
 ```
+
+**Enable such an entry only once the `.bin` exists.** No artifact ships in this
+repository (see above), and the default `config/service.yaml` sets
+`fail_fast: true`, so an enabled entry pointing at a missing file stops the
+service from starting. That is why the four calibrated entries in the shipped
+`antennas.yaml` — `dsn_34m_full` and the three partially-calibrated ones — are
+`enabled: false`: they are templates, and flipping one without generating its
+artifact first is exactly the failure this note exists to prevent.
+
+An uncalibrated entry carries `design_specs` inline instead and needs no
+artifact — see the design-spec example above. The shipped file contains five
+enabled uncalibrated antennas and four disabled templates; read its header
+before editing.
 
 ## Development
 
@@ -425,26 +588,38 @@ For detailed architecture documentation, see [docs/architecture.md](docs/archite
 ## Calibration Workflow
 
 1. **Obtain Measurement Data**
-   - G/T measurements across azimuth, elevation, and frequency
-   - CSV format: `azimuth_deg,elevation_deg,frequency_mhz,temperature_k,g_over_t_db`
+   - G/T measurements across the pattern, in spherical coordinates about boresight
+   - Full-mode CSV columns: `e_clock_deg,e_cone_deg,frequency_mhz,g_over_t_db,temperature_k`
+   - Boresight-mode CSV columns: `frequency_mhz,g_over_t_db,temperature_k`
+   - A full-mode fit needs enough points to determine its coefficients — the
+     shipped knot counts declare up to 960, and cross-validation trains on a
+     subset, so plan on ≥1440 points. Too few is a hard `UnderdeterminedFit`
+     error, not a quietly bad fit.
 
 2. **Run Calibration Tool**
    ```bash
-   calibrate --input measurements.csv \
-             --output calibration.bin \
+   calibrate --calibration-mode full \
+             --input measurements.csv \
+             --output my_antenna.bin \
              --antenna-id my_antenna \
-             --validate
+             --feed-id x_band \
+             --antenna-class GroundStation_13m \
+             --validate --report report.json --metadata metadata.json
    ```
 
 3. **Validate Calibration**
-   - Review fit quality metrics (RMSE, R²)
-   - Check interpolation accuracy
-   - Verify extrapolation behavior
+   - Review fit quality metrics (RMSE, R²) in the report
+   - Read the **per-fold** cross-validation RMSEs, not just the mean — a mean
+     alone has hidden a 100× spread between folds
+   - Check the angular-resolution assessment: if the knots cannot resolve the
+     antenna's lobe period, `calibrate` warns and records it in the metadata.
+     In-sample RMSE structurally cannot see that limitation.
 
 4. **Deploy Calibration**
-   - Copy `.bin` file to `calibration_data/`
-   - Update `antennas.toml` configuration
-   - Rebuild and deploy service
+   - Copy the `.bin` file into the directory named by `calibration.data_directory`
+   - Add or enable the entry in `calibration_data/antennas.yaml` with a matching
+     `calibration_file`
+   - Restart the service (hot reload is not implemented)
 
 ## Monitoring and Observability
 
@@ -453,32 +628,35 @@ For detailed architecture documentation, see [docs/architecture.md](docs/archite
 All requests are logged with structured fields:
 ```json
 {
-  "timestamp": "2025-01-15T10:30:45Z",
+  "timestamp": "2026-08-16T10:30:45Z",
   "level": "INFO",
   "target": "antenna_model::api",
   "message": "Evaluation completed",
-  "antenna_id": "antenna_1",
-  "azimuth_deg": 45.0,
-  "elevation_deg": 30.0,
-  "frequency_mhz": 8400.0,
-  "g_over_t_db": 41.2,
-  "computation_time_ms": 1.2,
-  "extrapolated": false,
+  "antenna_id": "gs_3.7m_uncalibrated",
+  "feed_id": "x_band_feed",
+  "gain_db": -6.73,
+  "computation_time_ms": 7.11,
+  "warnings_count": 3,
   "request_id": "uuid-1234"
 }
 ```
 
 ### Health Probes
 
-- **Liveness**: `GET /health` - Service is running
-- **Readiness**: `GET /health` - Service is ready (calibration data loaded)
-- **Status**: `GET /status` - Detailed service information
+- **Liveness**: `GET /health` — always 200 while responsive; body reports
+  `healthy`, or `degraded` when no calibration data loaded. It deliberately never
+  fails, because restarting a pod cannot fix missing calibration data.
+- **Readiness**: `GET /ready` — 200 when serving; 503 during startup, after a
+  failed calibration load, and for the whole graceful-shutdown drain window.
+- **Status**: `GET /status` — version, uptime, loaded antenna count and IDs
 
 ## Troubleshooting
 
 ### Service won't start
-- Check calibration data files exist in configured directory
-- Verify `antennas.toml` configuration is valid
+- Check that any `.bin` files referenced by **enabled** entries exist in
+  `calibration.data_directory`. With `fail_fast: true` a missing or corrupt
+  artifact stops startup; the five default antennas need no artifact at all.
+- Verify `calibration_data/antennas.yaml` is valid
 - Review startup logs for detailed error messages
 - Ensure port 3000 is available
 
@@ -529,4 +707,4 @@ For questions, issues, or feature requests, please open an issue on the project 
 
 ---
 
-**Status**: Active Development | **Version**: 0.1.0 | **Last Updated**: 2025-10-22
+**Status**: Active Development | **Version**: 0.1.0 | **Last Updated**: 2026-08-16

@@ -463,17 +463,6 @@ impl MeshParameters {
     pub fn builder() -> MeshParametersBuilder {
         MeshParametersBuilder::default()
     }
-
-    /// Calculate mesh transparency at given wavelength
-    ///
-    /// Low-frequency approximation: T = 1/(1 + (λ₀/λ)²)
-    /// where λ₀ is the cutoff wavelength related to mesh spacing
-    ///
-    /// This is a simplified model; full analysis requires Floquet mode analysis
-    pub fn transparency_at_wavelength(&self, wavelength: f64) -> f64 {
-        let lambda_0 = 10.0 * self.spacing; // Cutoff wavelength approximation
-        1.0 / (1.0 + (lambda_0 / wavelength).powi(2))
-    }
 }
 
 /// Mesh pattern types
@@ -808,18 +797,11 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[test]
-    fn test_mesh_transparency() {
-        let mesh = MeshParameters::new(0.005, 0.0005, MeshPattern::Square).unwrap();
-
-        // At very long wavelengths, transparency should be high
-        let transparency_long = mesh.transparency_at_wavelength(1.0);
-        assert!(transparency_long > 0.9);
-
-        // At short wavelengths, transparency should be low
-        let transparency_short = mesh.transparency_at_wavelength(0.01);
-        assert!(transparency_short < 0.5);
-    }
+    // `test_mesh_transparency` was removed with `MeshParameters::transparency_at_wavelength`
+    // (roadmap D8, 2026-08-16). The live mesh path is `model::mesh::mesh_reflection_efficiency`,
+    // which is what `pattern.rs` calls; the deleted function was a separate simplified
+    // approximation reachable only from that one test. Its tests asserted it against itself,
+    // so they could not have told anyone it was unused.
 
     #[test]
     fn test_antenna_configuration_valid() {

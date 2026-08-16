@@ -1,6 +1,6 @@
 {
-  "antenna_id": "test_simple",
-  "feed_id": "primary",
+  "antenna_id": "gs_3.7m_uncalibrated",
+  "feed_id": "x_band_feed",
   "vehicle_position": {
     "x": 6500000.0,
     "y": 0.0,

@@ -56,6 +56,13 @@ jobs:
         run: ./scripts/assert-dep-graphs.sh
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Clippy (calibrate, s3-input feature ON)
+        # `s3-input` is OFF by default (roadmap D6), so every check above compiles only
+        # the stub side of parser::fetch_from_s3. This is the one check that compiles the
+        # real AWS client, so the optional path cannot rot unnoticed. Package-scoped and
+        # without --all-targets on purpose: --all-targets re-unifies features via the
+        # dev-dependency antenna-model (same trap as the D4 dep-graph note above).
+        run: cargo clippy -p calibrate --features s3-input -- -D warnings
       - name: Test
         # full profile = both test tiers (see .config/nextest.toml, roadmap
         # unit D18). The default profile is the dev inner loop and excludes
