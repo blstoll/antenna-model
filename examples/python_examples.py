@@ -190,6 +190,27 @@ class AntennaModelClient:
         return response.json()
 
 
+def format_gain(result: dict) -> str:
+    """Render one evaluation's gain, including the failed case.
+
+    `gain_db` is serialized as JSON **null** when the evaluation failed (the
+    service's `nan_as_null` convention), so formatting it with `:.2f`
+    unconditionally raises `TypeError: unsupported format string passed to
+    NoneType.__format__`. That is not a hypothetical: `/api/v1/gain/batch`
+    returns HTTP 200 with failed items, so `raise_for_status()` does not catch
+    it and the traceback comes from the print, not the request.
+
+    A failed item carries a typed `error` instead; report that.
+    """
+    gain = result.get("gain_db")
+    if gain is None:
+        error = result.get("error") or {}
+        code = error.get("code", "unknown")
+        message = error.get("message", "no gain returned")
+        return f"FAILED [{code}] {message}"
+    return f"{gain:.2f} dB"
+
+
 def main():
     """Run example API calls."""
     client = AntennaModelClient()
@@ -239,16 +260,17 @@ def main():
                     antenna_id=antenna_id,
                     feed_id=feed_id,
                     vehicle_position={"x": 6500000.0, "y": 0.0, "z": 0.0, "coordinate_system": "ecef"},
-                    vehicle_attitude=[1.0, 0.0, 0.0, 0.0],
+                    vehicle_attitude=[0.5, 0.5, 0.5, 0.5],  # body +Z -> ECEF +X (the boresight); identity would be degenerate here
                     reflector_boresight={"x": 6500010.0, "y": 0.0, "z": 0.0, "coordinate_system": "ecef"},
                     feed_pointing_location={"x": 6500005.0, "y": 0.0, "z": 0.0, "coordinate_system": "ecef"},
                     emitter_position={"x": 7000000.0, "y": 0.0, "z": 500000.0, "coordinate_system": "ecef"},
                     frequency_mhz=8450.0,
                     include_reference=True,
                 )
-                print(f"   Gain: {result['gain_db']:.2f} dB")
-                if result.get("reference_gain_db"):
+                print(f"   Gain: {format_gain(result)}")
+                if result.get("reference_gain_db") is not None:
                     print(f"   Reference Gain: {result['reference_gain_db']:.2f} dB")
+                if result.get("loss_db") is not None:
                     print(f"   Loss: {result['loss_db']:.2f} dB")
                 print(f"   Computation time: {result['metadata']['computation_time_ms']:.1f} ms")
             except requests.exceptions.HTTPError as e:
@@ -263,7 +285,7 @@ def main():
                             "antenna_id": antenna_id,
                             "feed_id": feed_id,
                             "vehicle_position": {"x": 6500000.0, "y": 0.0, "z": 0.0, "coordinate_system": "ecef"},
-                            "vehicle_attitude": [1.0, 0.0, 0.0, 0.0],
+                            "vehicle_attitude": [0.5, 0.5, 0.5, 0.5],
                             "reflector_boresight": {"x": 6500010.0, "y": 0.0, "z": 0.0, "coordinate_system": "ecef"},
                             "feed_pointing_location": {"x": 6500005.0, "y": 0.0, "z": 0.0, "coordinate_system": "ecef"},
                             "emitter_position": {"x": 7000000.0, "y": y, "z": 500000.0, "coordinate_system": "ecef"},
@@ -273,11 +295,17 @@ def main():
                         for y in [0.0, 250000.0, 500000.0]
                     ]
                 )
-                total_evals = batch_result['metadata'].get('count', len(batch_result['results']))
+                meta = batch_result["metadata"]
+                total_evals = meta.get("count", len(batch_result["results"]))
                 print(f"   Total evaluations: {total_evals}")
-                print(f"   Total time: {batch_result['metadata']['total_computation_time_ms']:.1f} ms")
+                print(f"   Total time: {meta['total_computation_time_ms']:.1f} ms")
+                # /gain/batch answers HTTP 200 even when items fail, so the status
+                # code raise_for_status() checks is NOT the success signal —
+                # failure_count is. A failed item carries gain_db: null (the
+                # nan_as_null convention) plus a typed `error`.
+                print(f"   Failures: {meta.get('failure_count', 0)}")
                 for i, result in enumerate(batch_result["results"]):
-                    print(f"   Result {i+1}: {result['gain_db']:.2f} dB")
+                    print(f"   Result {i+1}: {format_gain(result)}")
             except requests.exceptions.HTTPError as e:
                 print(f"   Error: {e}")
 

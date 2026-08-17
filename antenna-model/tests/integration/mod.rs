@@ -93,6 +93,7 @@ pub mod budget_tests;
 pub mod concurrent_tests;
 pub mod error_content_type_tests;
 pub mod error_tests;
+pub mod example_execution_tests;
 pub mod h3_link_budget_tests;
 pub mod helper_contract_tests;
 pub mod off_axis_warning_tests;

@@ -60,17 +60,17 @@ curl http://localhost:3000/status
 
 #### 4. POST /api/v1/gain - Single Gain Computation
 
-> **KNOWN BROKEN (measured 2026-08-16, roadmap D30):** `gain_request.json` returns
-> **422 `invalid_coordinate`** — its ECEF geometry puts the body X-axis parallel
-> to boresight, making the azimuth reference degenerate. It deserializes, which is
-> all the drift tests check. `batch_request.json` shares the geometry and returns
-> **200 with every item failed**. Use the geodetic example below until D30 lands.
-
 ```bash
 curl -X POST http://localhost:3000/api/v1/gain \
   -H "Content-Type: application/json" \
-  -d @examples/requests/gain_request_geodetic.json
+  -d @examples/requests/gain_request.json
 ```
+
+DSN 70 m, X-band, emitter on boresight: `gain_db` ≈ **74.3 dBi**, which you can
+check against the aperture directly — `10·log₁₀(0.65·(πD/λ)²)` = 74.0 dBi for
+D = 70 m at 8450 MHz. For the same endpoint in the geodetic frame use
+`gain_request_geodetic.json`, which is a different antenna and geometry
+(`gs_3.7m` at 8200 MHz, emitter well off boresight), not this request restated.
 
 #### 5. POST /api/v1/gain/batch - Batch Gain Computation
 ```bash
@@ -78,6 +78,17 @@ curl -X POST http://localhost:3000/api/v1/gain/batch \
   -H "Content-Type: application/json" \
   -d @examples/requests/batch_request.json
 ```
+
+The three items share one aim point and differ only in antenna/feed/frequency, so
+the gain spread between them (≈ 31 / 57 / 23 dBi) is a property of the **feeds**,
+not an error: `dsn_34m` `s_band` sits at the focal point and returns its peak,
+while `dsn_34m` `x_band` and `gs_3.7m` `x_band_feed` are laterally offset by
+design (0.15 m and 0.05 m), which squints each beam off the mechanical boresight
+the request aims at. `loss_db` on each item reports exactly that.
+
+`/api/v1/gain/batch` returns **HTTP 200 even when items fail** — read
+`metadata.failure_count`, not the status code. (That is not hypothetical: this
+file's every item failed under a 200 for two months. See roadmap D30.)
 
 ### Heatmap Endpoint
 
@@ -150,6 +161,16 @@ rotation:
 "vehicle_attitude": [1.0, 0.0, 0.0, 0.0]
 ```
 
+Only body **+X** is read from it: projected onto the plane perpendicular to
+boresight, it becomes the azimuth-zero reference. So the identity is **not** a
+safe default — against a boresight along ECEF +X it leaves body +X parallel to
+boresight, the azimuth reference degenerate, and the request a **422**. That is
+not hypothetical: it is what `gain_request.json` did for two months (roadmap
+D30), and why that file now carries `[0.5, 0.5, 0.5, 0.5]`, which puts body +Z on
+ECEF +X — its boresight — and body +X on ECEF +Y. Supply an attitude whose body
++Z matches your boresight, or **omit the field** and let the service derive
+azimuth-zero from an Earth-Z/East cross product.
+
 ## Response Examples
 
 All responses include:
@@ -158,6 +179,26 @@ All responses include:
 - Structured error responses on failure
 
 See `responses/` directory for full example responses.
+
+`gain_response.json`, `batch_response.json` and `heatmap_response.json` are
+**captured verbatim from a running service** on the request file of the same
+name — regenerate them the same way rather than hand-editing:
+
+```bash
+curl -s -X POST http://localhost:3000/api/v1/gain \
+  -H 'Content-Type: application/json' \
+  -d @examples/requests/gain_request.json | jq . > examples/responses/gain_response.json
+```
+
+They were hand-written until 2026-08-16, and it showed: `gain_response.json`
+carried a gain of **−3,370,985 dB** and `heatmap_response.json` a smooth analytic
+grid for an antenna that does not exist. Both parsed cleanly, which was all the
+guard checked (roadmap D30). Two guards now cover them —
+`example_responses_deserialize.rs` for shape, and
+`example_execution_tests::every_response_example_matches_its_request_and_is_physically_possible`
+for whether the response describes its own request and could have come from an
+antenna. Neither pins exact values, so these do not need updating on every
+physics change — only when they drift far enough to mislead.
 
 ## Calibration Status in API Responses
 

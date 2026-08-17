@@ -6429,7 +6429,160 @@ charter).
 
 ---
 
-### D30 — The shipped ECEF request examples are geometrically invalid, and both guards are blind to it — Effort: S/M
+### D30 — The shipped ECEF request examples are geometrically invalid, and both guards are blind to it — Effort: S/M — ✅ **DONE 2026-08-16**
+
+> **Closed 2026-08-16.** All four scoped tasks landed, and the unit found the same defect
+> in **four more example surfaces it did not name** plus a worse instance one layer over.
+> Summary of what moved, with the parts worth remembering first.
+>
+> **The defect was one copy-paste, in six places.** The filing named
+> `examples/requests/{gain,batch}_request.json`. The identical geometry — vehicle at
+> `(R, y, z)`, boresight along ECEF **+X**, identity attitude — also sits in
+> `examples/QUICKSTART.md` (twice: curl and Python), `examples/python_examples.py`
+> (twice), and `examples/postman_collection.json` (verbatim copies of both JSON files).
+> The QUICKSTART payload was measured at **422** exactly like the file it was copied
+> from. Fixing only the two files the filing named would have left a new user following
+> the quickstart hitting the same rejection, so all six were fixed. `examples/api_requests.json`
+> was checked and is **fine** — its boresight is near +Z, so the identity attitude is not
+> degenerate there; it also names placeholder `antenna_1`/`antenna_2` ids, so it is a schema
+> illustration rather than a runnable example.
+>
+> **The fix is an attitude that means something, not an attitude that passes.**
+> `[0.5, 0.5, 0.5, 0.5]` rotates body **+Z onto ECEF +X** — which is where these requests
+> point the boresight — and body **+X onto ECEF +Y**, giving a perpendicular, perfectly
+> conditioned azimuth reference (`x_mag` = 1.0 against a hard-error threshold of 1e-6).
+> So the example now *demonstrates* the field's contract instead of accidentally satisfying
+> it. The alternative — deleting `vehicle_attitude` — was rejected: these two files are the
+> only committed examples that exercise the field at all, and the `None` path is a different
+> code path (the Earth-Z/East cross-product heuristic).
+>
+> **Aiming at boresight is not aiming at the beam, and that decided the antenna.** With the
+> attitude fixed, the maintainer chose to also put the emitter on boresight so the flagship
+> returns a checkable main-lobe number. The first attempt did **not** produce one:
+> `dsn_34m`/`x_band` returned **31.20 dBi** with `loss_db` **37.03**, because that feed is
+> laterally offset **0.15 m by design**, squinting its beam ≈0.5° off the mechanical
+> boresight against a ≈0.06° HPBW. That is correct physics and a confusing first curl. The
+> flagship therefore moved to **`dsn_70m_uncalibrated`/`x_band`**, whose feed sits at
+> `[0, 0, 0]` — one field changed, X-band and 8450 MHz kept, and the served **74.287 dBi**
+> is checkable against the aperture by hand: `10·log₁₀(0.65·(πD/λ)²)` = **74.0 dBi**.
+> Encoding the *squinted* beam direction into the example instead was rejected as brittle:
+> it depends on the beam deviation factor, so a model change would silently walk the example
+> off peak with no test able to see it. `batch_request.json` keeps its offset feeds and now
+> documents the 31/57/23 dBi spread as the feed property it is.
+>
+> **The guard's blind spot, stated exactly.** `tests/integration/example_execution_tests.rs`
+> POSTs every `examples/requests/*.json` to its real endpoint against the **shipped**
+> `calibration_data/antennas.yaml` — not `tests/fixtures/test_antennas.yaml`, whose antennas
+> the examples do not name, which makes this also a standing check that every id an example
+> uses is still present and `enabled` in the config we ship. It carries a **negative control**
+> (`a_degenerate_batch_returns_200_and_the_guard_still_rejects_it`) that re-injects D30's exact
+> defect into the committed batch example and requires the checker to catch it, because the
+> batch half of this unit is precisely a case where a passing status code proves nothing.
+> Cost: **4.8 s** debug for all ten examples, under D18's 10 s marker — and affordable only
+> since D18 removed reqwest's `system-proxy` feature, which is part of why the gap survived.
+>
+> **Scope extension, and it was the worse defect.** `examples/responses/` is pinned by
+> `example_responses_deserialize.rs`, which checks shape — the same blind spot, one layer
+> over. `gain_response.json` shipped **`"gain_db": -3370985.117`** — three and a half million
+> dB — beside a `physical_feed_offset_m.x` of **−5.0 m** on a 34 m dish, ten times the
+> ray-tracing scope boundary; `batch_response.json` paired that same impossible offset with a
+> peak-gain value; `heatmap_response.json` described a nonexistent `antenna_1`. All three
+> predate P10. They are regenerated from a running service, and
+> `every_response_example_matches_its_request_and_is_physically_possible` now asserts each
+> response names the **same antenna and feed as the request beside it** and carries a gain
+> that could exist. Deliberately **not** a physics pin — the envelope is ±100 dBi, so a
+> `PHYSICS_MODEL_VERSION` bump does not turn documentation into a mechanical edit; it catches
+> the two ways these files were actually wrong (wrong antenna, impossible number), which is
+> what a docs guard should do.
+>
+> **Task 4's design question was decided, not routed around.** README joined C11's
+> `CONTRACT_DOCS` (paths are now workspace-root relative, keeping the `is_file()` assertion),
+> and its structured-logging block — which honestly contains an `antenna_id` — is exempted by
+> an explicit `<!-- api-example: not-a-payload <reason> -->` marker whose **reason is
+> required**. Narrowing `TELLS` was rejected: every narrowing is a new silent blind spot, and
+> the log line also carries `feed_id` and `gain_db`, so the narrowing needed would have been
+> severe. Three falsifications were run and all fired: deleting the exemption marker fails
+> `every_api_example_block_is_marked` at `README.md:635`; an exemption with no reason fails;
+> and a type violation in README's request block fails `every_documented_example_deserializes`
+> at `README.md:278`. The example floor moved 8 → 13.
+>
+> **One limitation found and NOT fixed, filed here.** The C11 guard cannot catch a *renamed
+> optional* field: changing README's `vehicle_attitude` to `vehicle_attitude_TYPO` still
+> passes, because `GainRequest` carries no `deny_unknown_fields` and the field is `Option`,
+> so the payload deserializes with the attitude silently absent. That is the API contract's
+> behaviour, not this guard's bug — the *service* accepts such a body too — but it means a
+> typo'd optional field is invisible to both. Whether unknown fields should be rejected is a
+> wire-contract question frozen behind C7 and out of this unit's charter.
+>
+> ---
+>
+> **Review pass (same day). Six findings, all fixed. Two of them mattered, and both were
+> this unit committing its own defect class.**
+>
+> **1 — the `/heatmap` arm of the new guard was vacuous.** It rejected only
+> `points_evaluated == 0`, but `heatmap.rs` sets `points_evaluated: grid_points.len()`
+> **unconditionally** — it is the grid size, not an outcome. An all-failed grid reports
+> `failed_points == points_evaluated`, both nonzero (pinned by that module's own unit test),
+> so a grid of nothing but `FAILED_POINT_LOSS_DB` sentinels passed. That is precisely the
+> "a 200 is not the assertion" hazard this file's own module doc spells out for batch,
+> reproduced one arm over, and it made README's claim of "a fully-successful response"
+> untrue for `/heatmap`. Now checks `failed_points == 0`. **Its negative control had to be
+> built differently from batch's and the reason is worth keeping:** an all-failed grid is
+> *not reachable over HTTP*, because C2 makes an unknown `antenna_id`/`feed_id` a **404** at
+> the validator before `generate_heatmap` runs (measured: 404, not a 200 full of sentinels),
+> and the only other route is per-point budget exhaustion, which is a timing race. So the
+> control feeds the checker the all-failed *body* directly, exactly as `heatmap.rs`'s own
+> unit test calls `generate_heatmap` directly, and it explicitly asserts the trap —
+> `points_evaluated > 0` on a fully failed grid — because a control that only asserted
+> "the guard rejects this" would have passed against the broken arm too.
+>
+> **2 — the heatmap example documented a meaningless query, and this unit had just made it
+> canonical.** `/heatmap`'s grid is **ENU** azimuth/elevation with `0° = horizon`, and the
+> emitter is synthesized 400 km out along each cell's direction. `heatmap_request.json`
+> aimed `reflector_boresight` at ECEF `+X`, which from a vehicle at `(6500000, 0, 0)` —
+> lat 0°, lon 0° — is **straight up**, so its `el` 0–5° grid swept **85–90° off boresight**.
+> The evidence was in the file I had just committed: `peak_gain_db` **−6.68 dBi** for a
+> 3.7 m X-band dish that peaks near 48, over a loss grid spanning 0.0–0.0047 dB — a flat
+> Ruze floor, not a pattern. Same "parses, executes, means nothing" class D30 exists to
+> remove. **Fixed by repointing the boresight into the grid, not by moving the grid:** the
+> grid axes are absolute ENU, so pushing it to `el` 85–90° would park it on the ENU pole
+> where azimuth degenerates — strictly worse. The boresight and `feed_pointing_location` now
+> aim at ENU az 2°/el 2°. **The grid also had to be tightened, for a reason this codebase
+> treats as first-class:** at 8250 MHz a 3.7 m dish has a **0.574°** HPBW, so the original
+> 1° step was *aliasing* an oscillatory pattern — adjacent cells swung 0 → 46 dB. The grid
+> is now az 1–3° / el 0–2° at 0.25°, ~2.3 samples per HPBW, and the result is a smooth main
+> lobe with a resolved first null (0 → 1.8 → 7.9 → 23.6 dB) and `peak_gain_db` **46.69 dBi**
+> against a ~48.2 dBi aperture figure. Side benefit: the guard got *faster*, 4.7 s → 1.8 s,
+> because 36 wide-angle mode-path points cost more than 81 near-boresight ones.
+>
+> **3 — the replacement prose in `README_GEO_EXAMPLES.md` was wrong about one of the three
+> files it named.** It said the emitters "sit 500 km out, on boresight";
+> `heatmap_request.json` has **no `emitter_position` at all`**. Rewritten per-file, and it
+> now records what the deleted "unrealistic coordinates" note got wrong *and* the real
+> defect that note had missed.
+>
+> **4 — the marker parser was quietly loosened.** Splitting `inner` on whitespace for
+> *every* marker meant `<!-- api-example: GainRequest v2 -->` silently validated as
+> `GainRequest` instead of reaching the unknown-schema panic — a loosening of the check that
+> makes a typo'd marker loud, introduced by the change that added the exemption. Free text
+> is now accepted after the `not-a-payload` token only, with a whitespace-boundary check so
+> `not-a-payloadX` is not treated as the exemption. Both falsified.
+>
+> **5 — `python_examples.py` crashed on the failure mode this very change documents
+> everywhere else.** `result['gain_db']:.2f` raises `TypeError` on a failed item, because
+> `gain_db` uses `nan_as_null`; the enclosing `except` catches only `HTTPError`, so the
+> script aborted with a traceback on exactly the batch-200-with-failures case that three
+> other docs in this change call the only correct signal. It now has a `format_gain` helper
+> that reports the typed `error`, and prints `failure_count`. Pre-existing, but the diff was
+> already editing those lines.
+>
+> **6 — the guard leaked its listener on failure** (`shutdown()` sat after the assertion).
+> Shutdown moved before it; diagnostics are collected first.
+>
+> `examples/postman_collection.json` carried the zenith heatmap geometry too and was
+> re-synced; all four of its payloads were then executed against a running service.
+> The reviewer separately re-derived and **cleared** the `[0.5, 0.5, 0.5, 0.5]` → body
+> +Z = ECEF +X mapping, the 74.3 dBi aperture cross-check, and the `>= 13` marker floor.
 
 **Filed 2026-08-16 by D9**, which needed a working first-curl for the README quickstart
 and discovered the flagship example does not work. Measured against a running service,
