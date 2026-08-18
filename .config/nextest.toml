@@ -90,6 +90,13 @@ slow-timeout = { period = "10s" }
 #    fitted constant with nothing asserting its margin, which is what P13 retired one for, and
 #    the runner with the hard budget is the one where the overhead is ~2%.
 #
+#    **Confirmed on the real runner** (PR #49, 2026-08-18): the `clippy + test` job came in at
+#    11m01s against 15m13s and 18m26s for the two preceding main runs, so a 2-4 core runner
+#    gains wall time here rather than losing it — which is what the curve above predicts and
+#    what the +47% figure would have contradicted had it applied there. Treat that as a
+#    direction, not a speedup figure: the two baseline runs differ from each other by three
+#    minutes, so job-level noise is wide and these times include build and cache variance.
+#
 # **Asked and answered: does this threaten the wall-clock assertions elsewhere in the suite?**
 # Raised on review — under `--profile full` these binaries are scheduled alongside
 # `resilience_tests::test_no_resource_leaks_after_errors` and
