@@ -282,11 +282,25 @@ impl CalibrateRun {
 /// The fixture CSV text, computed once per test binary run and shared across every
 /// `run_calibrate` call.
 ///
-/// `generate_rows()` runs the real physics model over the fixture grid and costs ~1.4s in
-/// a debug build — a large fraction of each `run_calibrate` call (~3.2s, subprocess
-/// included). Every call writes an identical file (the generator is deterministic — see
-/// `generator_is_deterministic`), so recomputing it per call buys nothing but wall-clock
-/// time. This cache lives here, not in `support/mod.rs`: `generate_rows` and
+/// `generate_rows()` runs the real physics model over the fixture grid. **~4.8 s in a debug
+/// build**, measured 2026-08-17 running one test at a time on an idle 8-core machine (it was
+/// ~21.7 s before D18 task 3 parallelised `support::generate_grid`). Every call writes an
+/// identical file (the generator is deterministic — see `generator_is_deterministic`), so
+/// recomputing it per call buys nothing but wall-clock time.
+///
+/// Quote standalone figures here, not figures from a full-binary run: the same generation
+/// reports ~18 s inside one, because thirteen test processes are competing for eight cores.
+/// The figure this line used to carry, ~1.4 s, was neither — it was measured on the 288-row
+/// grid D20 replaced with 1728 rows on 2026-08-02, and sat stale for a fortnight.
+///
+/// **The cache is per process, and nextest is process-per-test**, so this shares the cost
+/// within a test and not across them: every test here that touches the fixture pays those
+/// ~4.8 s once, ~43 s of CPU across the binary. That is small enough that D18 task 3 made
+/// the generation faster rather than reaching for a cross-process cache, which would have
+/// had to key on `PHYSICS_MODEL_VERSION` to avoid serving a stale grid after a model change
+/// — a staleness hazard out of all proportion to 43 s.
+///
+/// This cache lives here, not in `support/mod.rs`: `generate_rows` and
 /// `write_fixture_csv` themselves stay unmemoized and behaviorally unchanged, since
 /// `generator_is_deterministic` depends on calling `generate_rows()` twice for real to
 /// prove reproducibility.
@@ -700,10 +714,19 @@ fn cli_without_validate_does_not_cross_validate() {
 /// under `IntegrationParams::fast()` while the pipeline computed residuals under
 /// `default()` — a mismatch reaching 0.088 dB at 24° cone, 26× the signal being fitted.
 ///
-/// Iterations are held low: each Nelder-Mead evaluation runs the physics model over all
-/// 288 fixture points, and the objective now uses the denser `default()` integrator, so
-/// this run costs ~20 s in a debug build. Four iterations suffice — measured 2026-07-31,
-/// the tuner lands on 2.6000 mm from its 2.0 mm start.
+/// Iterations are held low: each Nelder-Mead evaluation runs the physics model over every
+/// fixture point (1728 since D20), and the objective uses the denser `default()` integrator.
+/// Four iterations suffice — measured 2026-07-31, the tuner lands on 2.6000 mm from its
+/// 2.0 mm start.
+///
+/// **Cost, re-measured 2026-08-17 under D18 task 3 (parallel per-point sweep, plus D31's memo
+/// of the initial evaluation): 330 s → 186 s in a full-binary run, and 57 s standalone.** Both
+/// pairs are like-for-like; do not compare the standalone figure against the contended one, as
+/// an earlier draft of this line did. The tuned value is unchanged — 2.6000 mm before and
+/// after — because the parallel sweep collects in index order and reduces serially, and D31
+/// memoizes rather than deletes; see the bit-identity notes in `parameter_tuner.rs`. The old
+/// figure this line carried, "~20 s", was measured on the 288-row grid and was already
+/// optimistic by an order of magnitude before any of this.
 #[test]
 fn cli_tuned_run_recovers_the_surface_rms_perturbation() {
     let start = std::time::Instant::now();
@@ -753,14 +776,36 @@ fn cli_tuned_run_recovers_the_surface_rms_perturbation() {
 /// crash was independent of tuning mode, so the fix has to be proven across all three. The
 /// cheap library-level equivalent lives in `parameter_tuner.rs`
 /// (`tune_parameters_completes_for_every_tuning_mode`, 5 measurement points); this one adds
-/// the arg-parsing and artifact-writing layers on the real 288-point fixture.
+/// the arg-parsing and artifact-writing layers on the real 1728-point fixture.
 ///
 /// Deliberately asserts *completion*, not recovery. Recovery is what
-/// `cli_tuned_run_recovers_the_surface_rms_perturbation` above is for, and it remains
-/// `#[ignore]`d for reasons this test does not touch.
+/// `cli_tuned_run_recovers_the_surface_rms_perturbation` above is for. (Until 2026-08-17 this
+/// line added "and it remains `#[ignore]`d" — stale since D16 un-ignored that test on
+/// 2026-07-31.)
 ///
 /// One iteration each — enough for argmin to build and step the simplex, which is where the
 /// crash was.
+///
+/// **This test owns roadmap D18 task 3, and the two levers the task proposed are both dead.**
+/// Measured 2026-08-17, before any change: 504 s, of which ~29 s is fixture generation and the
+/// rest is ~20 sweeps of the 1728-point grid — 6–7 per mode (one for the tuner's initial-RMSE
+/// log, ~4–5 for the simplex, one for `compute_model_predictions`).
+///   * *Reduced iteration caps*: already at the floor. `--max-tuning-iterations 1` is what this
+///     test passes, and argmin still evaluates all N+1 simplex vertices before stepping — which
+///     is the point, since the crash was in simplex construction.
+///   * *A smaller fixture grid*: blocked by D20. The shipped 4/6/8 knot request at order 4
+///     declares 8·10·12 = 960 coefficients, an underdetermined fit is a hard error, and a
+///     *saturated* grid is always underdetermined (rows = ∏(kₐ+2) < ∏(kₐ+4) = coefficients), so
+///     slack values are mandatory and ~960 rows is a hard floor. Verified against the binary,
+///     not just by algebra: a 6×8×10 = 480-row sub-grid is refused with "960 B-spline
+///     coefficients against 480 data points". The grid is shared with
+///     `cli_cv_folds_controls_the_reported_fold_count`, whose 3-fold training split must clear
+///     960 as well, so 1728 cannot come down at all without breaking that test.
+///
+/// It was right-sized the way the unit's own policy prefers — by making the top offender
+/// faster rather than by asserting less. Parallelising the two per-point physics sweeps, and
+/// then D31 removing the duplicated initial evaluation, took it to **217 s in a full-binary
+/// run (86 s standalone) with every assertion intact**. It stays in the slow tier.
 #[test]
 fn cli_tuned_run_completes_for_every_tuning_mode() {
     for mode in ["surface-only", "surface-and-mesh", "all"] {

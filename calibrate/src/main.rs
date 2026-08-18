@@ -5,8 +5,9 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use rayon::prelude::*;
 use std::path::PathBuf;
-use tracing::{debug, error, info, warn};
+use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, EnvFilter};
 
 use calibrate::artifact_export::{
@@ -314,37 +315,57 @@ fn compute_model_predictions(
     // the way `calibrate_boresight` already is.
     let integration_params = IntegrationParams::default().with_uncorrected_physics_gates(false);
 
-    // Compute predictions for all measurement points
-    let mut predictions = Vec::with_capacity(measurements.len());
+    // Compute predictions for all measurement points.
+    //
+    // Parallel over points (roadmap D18 task 3). Each point is an independent
+    // `compute_g_over_t` call and this sweep is the pipeline's dominant cost outside the
+    // tuner — ~1728 points at ~12 ms each in a debug build on the full-mode e2e fixture.
+    //
+    // `collect()` into a `Result<Vec<_>>` preserves index order, so `predictions[i]` is the
+    // same value the serial loop produced for `measurements[i]`, bit for bit — which matters
+    // because the residuals computed from it feed the correction-surface fit, whose output
+    // this crate's tests pin to four decimals.
+    //
+    // On failure rayon short-circuits and abandons the remaining points, which is the cheap
+    // behaviour and matches the serial loop's `?`. What does NOT match is *which* failing
+    // point surfaces: it is whichever worker lost the race, not the lowest index, so a CSV
+    // with a whole bad frequency band names a different row from run to run. The message
+    // therefore says so rather than implying it found the first — the same wording the
+    // tuner's penalty path uses, so the two agree on policy. Making it deterministic would
+    // mean evaluating every point before reporting, i.e. a full sweep on every bad input.
+    //
+    // The former `debug!("Computed {idx}/{n} predictions")` progress line is gone: emitted
+    // from worker threads it would report indices out of order, which is worse than no
+    // progress log. The bracketing `info!`s remain.
     let temperature_k = antenna_class.system_noise_temperature_k;
 
-    for (idx, point) in measurements.iter().enumerate() {
-        if idx % 100 == 0 && idx > 0 {
-            debug!("  Computed {}/{} predictions", idx, measurements.len());
-        }
+    let predictions: Vec<f64> = measurements
+        .par_iter()
+        .enumerate()
+        .map(|(idx, point)| {
+            // Convert E-clock/E-cone to far-field coordinates (in radians)
+            // E-cone is the polar angle (theta) and E-clock is the azimuthal angle (phi)
+            let theta = point.e_cone_deg.to_radians();
+            let phi = point.e_clock_deg.to_radians();
 
-        // Convert E-clock/E-cone to far-field coordinates (in radians)
-        // E-cone is the polar angle (theta) and E-clock is the azimuthal angle (phi)
-        let theta = point.e_cone_deg.to_radians();
-        let phi = point.e_clock_deg.to_radians();
-
-        // Compute G/T from physics model
-        let frequency_hz = point.frequency_mhz * 1e6;
-        let predicted_g_over_t = compute_g_over_t(
-            theta,
-            phi,
-            &physics_config,
-            frequency_hz,
-            temperature_k,
-            &integration_params,
-        )
-        .context(format!(
-            "Failed to compute G/T for point {}: freq={} MHz, e_cone={}, e_clock={}",
-            idx, point.frequency_mhz, point.e_cone_deg, point.e_clock_deg
-        ))?;
-
-        predictions.push(predicted_g_over_t);
-    }
+            // Compute G/T from physics model
+            let frequency_hz = point.frequency_mhz * 1e6;
+            compute_g_over_t(
+                theta,
+                phi,
+                &physics_config,
+                frequency_hz,
+                temperature_k,
+                &integration_params,
+            )
+            .context(format!(
+                "Failed to compute G/T for point {} (freq={} MHz, e_cone={}, e_clock={}); \
+                 other points may also fail — this is the first failure observed, not \
+                 necessarily the lowest-numbered",
+                idx, point.frequency_mhz, point.e_cone_deg, point.e_clock_deg
+            ))
+        })
+        .collect::<Result<Vec<f64>>>()?;
 
     info!("  ✓ Computed {} predictions", predictions.len());
 

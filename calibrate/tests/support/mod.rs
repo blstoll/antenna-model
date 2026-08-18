@@ -15,6 +15,7 @@ use antenna_model::model::{
     compute_g_over_t, AntennaConfiguration, AntennaConfigurationBuilder, FeedParametersBuilder,
     IntegrationParams, MeshParametersBuilder, ReflectorGeometryBuilder,
 };
+use rayon::prelude::*;
 use std::path::Path;
 
 // ============================================================================
@@ -216,41 +217,63 @@ pub fn generate_rows_without_bias() -> Vec<FixtureRow> {
 }
 
 /// Shared grid walk. `bias` is `(frequency_mhz, e_cone_deg, e_clock_deg) -> dB`.
-fn generate_grid(bias: impl Fn(f64, f64, f64) -> f64) -> Vec<FixtureRow> {
+///
+/// Parallel over grid points (roadmap D18 task 3). **~4.8 s** in a debug build, measured
+/// 2026-08-17 running one test at a time on an idle 8-core machine; it was ~21.7 s serial
+/// under the same conditions. Both figures are standalone — under a full-binary run the same
+/// generation reports ~18 s, because thirteen test processes are competing, so a figure from
+/// a contended run measures the scheduler as much as this function.
+///
+/// nextest runs process-per-test, so the `OnceLock` in `cli_full_mode_e2e.rs` shares this
+/// within a test and not across them: **every** test in that binary that touches the fixture
+/// pays it once.
+///
+/// The grid is flattened first so the parallel iterator is indexed, and `collect()` fills the
+/// result in that index order — the emitted CSV is byte-identical to the serial nest's, which
+/// `generator_is_deterministic` and every measured constant downstream depend on. `bias` must
+/// stay `Sync` for the same reason it is already pure: it is called from worker threads.
+fn generate_grid(bias: impl Fn(f64, f64, f64) -> f64 + Sync) -> Vec<FixtureRow> {
     let config = fixture_config(PERTURBED_SURFACE_RMS_MM);
     let params = IntegrationParams::default();
-    let mut rows = Vec::with_capacity(FIXTURE_ROW_COUNT);
 
-    for &frequency_mhz in &FIXTURE_FREQUENCIES_MHZ {
-        for &e_cone_deg in &FIXTURE_CONE_DEG {
-            for &e_clock_deg in &FIXTURE_CLOCK_DEG {
-                let truth = compute_g_over_t(
-                    e_cone_deg.to_radians(),
-                    e_clock_deg.to_radians(),
-                    &config,
-                    frequency_mhz * 1e6,
-                    FIXTURE_TEMPERATURE_K,
-                    &params,
+    let grid: Vec<(f64, f64, f64)> = FIXTURE_FREQUENCIES_MHZ
+        .iter()
+        .flat_map(|&frequency_mhz| {
+            FIXTURE_CONE_DEG.iter().flat_map(move |&e_cone_deg| {
+                FIXTURE_CLOCK_DEG
+                    .iter()
+                    .map(move |&e_clock_deg| (frequency_mhz, e_cone_deg, e_clock_deg))
+            })
+        })
+        .collect();
+    assert_eq!(grid.len(), FIXTURE_ROW_COUNT);
+
+    grid.par_iter()
+        .map(|&(frequency_mhz, e_cone_deg, e_clock_deg)| {
+            let truth = compute_g_over_t(
+                e_cone_deg.to_radians(),
+                e_clock_deg.to_radians(),
+                &config,
+                frequency_mhz * 1e6,
+                FIXTURE_TEMPERATURE_K,
+                &params,
+            )
+            .unwrap_or_else(|e| {
+                panic!(
+                    "fixture G/T evaluation failed at f={frequency_mhz} MHz \
+                     cone={e_cone_deg} deg clock={e_clock_deg} deg: {e}"
                 )
-                .unwrap_or_else(|e| {
-                    panic!(
-                        "fixture G/T evaluation failed at f={frequency_mhz} MHz \
-                         cone={e_cone_deg} deg clock={e_clock_deg} deg: {e}"
-                    )
-                });
+            });
 
-                rows.push(FixtureRow {
-                    e_clock_deg,
-                    e_cone_deg,
-                    frequency_mhz,
-                    g_over_t_db: truth + bias(frequency_mhz, e_cone_deg, e_clock_deg),
-                    temperature_k: FIXTURE_TEMPERATURE_K,
-                });
+            FixtureRow {
+                e_clock_deg,
+                e_cone_deg,
+                frequency_mhz,
+                g_over_t_db: truth + bias(frequency_mhz, e_cone_deg, e_clock_deg),
+                temperature_k: FIXTURE_TEMPERATURE_K,
             }
-        }
-    }
-
-    rows
+        })
+        .collect()
 }
 
 /// Render rows as CSV text in the full-mode column order.

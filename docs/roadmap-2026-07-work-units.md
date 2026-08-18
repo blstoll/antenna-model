@@ -421,7 +421,16 @@ which is seed-limited at ~3e-9 by the |x|>=8 rational fit, deliberately not repl
 Hankel asymptotic's own smallest term at x=8 is ~2e-8, so only a Chebyshev minimax could
 beat it). Carries P13's margin test: 3x-the-offset invariance plus a negative control
 proving the check can still fail;
-D18 filed 2026-08-01 (test-suite latency budget + tiers); P2 DECIDED 2026-07-16 (REMOVE the Seidel mode; Stage-1
+D18 filed 2026-08-01 (test-suite latency budget + tiers), DONE 2026-08-17: last piece was task
+3's calibrate half, and BOTH levers it proposed were dead -- the iteration cap was already at
+its floor, and the grid cannot shrink at all under D20's 960-coefficient floor (verified by
+running the binary on a 480-row sub-grid, which it refuses). Closed by speeding the top
+offender instead: calibrate had NO rayon, and its two per-point physics sweeps were serial.
+504s -> 243s on the named test, 510.6s -> 253.8s on the package, bit-for-bit identical
+(artifacts differ in 16 of 39,436 bytes: the CRC and the run timestamp). Filed D31 (the tuner
+burns an extra sweep to log a number argmin recomputes -- ~15%, but it is user-facing output
+and so a product decision);
+P2 DECIDED 2026-07-16 (REMOVE the Seidel mode; Stage-1
 gate tripped and removal re-affirmed same day — the terms are wrong-sign/wrong-scale additions
 on top of complete exact physics, not duplicates); P3 DECIDED + EXECUTED 2026-07-16 (document +
 flag; warning pinned on all four endpoints, H3 cache-hit gap fixed)
@@ -4857,7 +4866,95 @@ are meaningful rather than dominated by a topology gap.
   the pipeline or the fill*, not a reason to widen the budget") is unanswerable while a known
   pipeline defect is outstanding. Feeds D9.
 
-### D18 — Test-suite latency budget + tiering — Effort: S/M (tiering ✅ 2026-08-01; task 4 ✅ 2026-08-15 + task 3's heatmap half; task 2 moot, task 3's calibrate half open)
+### D18 — Test-suite latency budget + tiering — Effort: S/M — ✅ **DONE 2026-08-17** (tiering ✅ 2026-08-01; task 4 ✅ 2026-08-15 + task 3's heatmap half; task 2 moot; task 3's calibrate half ✅ 2026-08-17)
+
+> **Closeout 2026-08-17 — task 3's calibrate half, the last open piece.**
+>
+> **Both levers the task named were dead, and measuring that was most of the work.**
+> *Reduced iteration caps*: already at the floor — the test passes
+> `--max-tuning-iterations 1`, and argmin still evaluates all N+1 simplex vertices before it
+> steps, which is the point, since the crash D12 filed was in simplex construction. The
+> filing's "runs a full Nelder-Mead per tuning mode" was simply wrong. *A smaller fixture
+> grid*: blocked by D20. The shipped 4/6/8 knot request at order 4 declares 8·10·12 = **960
+> coefficients**, an underdetermined fit is a hard error, and a *saturated* grid is always
+> underdetermined — rows = ∏(kₐ+2) against coefficients = ∏(kₐ+4) — so slack values are
+> mandatory and ~960 rows is a floor. Checked against the binary rather than by algebra: a
+> 6×8×10 = 480-row sub-grid is refused with "960 B-spline coefficients (8x10x12) against 480
+> data points", and the axes still saturate their knot requests, so the coefficient count does
+> not fall with the grid. The grid is also shared with
+> `cli_cv_folds_controls_the_reported_fold_count`, whose 3-fold training split must clear 960
+> too, so 1728 cannot come down **at all** without breaking that test.
+>
+> **So it was right-sized the way this unit's own policy prefers — "prefer speeding the top
+> offender" — and no assertion was touched.** Measured first: the cost is ~20 sweeps of the
+> 1728-point grid, 6–7 per mode (one for the tuner's initial-RMSE log, ~4–5 for the simplex,
+> one for `compute_model_predictions`), each sweep ~21.7 s in a debug build. `calibrate`
+> carried **no rayon at all** — both per-point sweeps were serial, in a crate whose entire job
+> is evaluating a physics model at thousands of points. They are now parallel over points:
+>
+> All figures below are from a **full-binary run** unless the row says standalone; the two
+> differ by up to 4x here and mixing them is how the first draft of this table reported a 3x
+> improvement that was really 1.8x (caught on review). "after" includes D31, closed in the
+> same pass — see below.
+>
+> | | before | after |
+> |---|---|---|
+> | `cli_tuned_run_completes_for_every_tuning_mode` | 504 s | **217 s** |
+> | &nbsp;&nbsp;— the same test, standalone | — | 86 s |
+> | `cli_tuned_run_recovers_the_surface_rms_perturbation` | 330 s | 186 s |
+> | &nbsp;&nbsp;— the same test, standalone | — | 57 s |
+> | `cli_full_mode_e2e` binary | 504 s | **217 s** |
+> | `calibrate` package, full profile | 510.6 s | **235.7 s** |
+> | fixture generation, standalone | 21.7 s | 4.8 s |
+> | one tuned run, standalone | 152 s | 29 s |
+>
+> **Bit-for-bit preserved, and verified as such rather than asserted.** Every parallel site
+> collects into an index-ordered `Vec` and reduces serially, so the summation order is the
+> serial order. Two full-mode artifacts written before and after differ in **16 of 39,436
+> bytes**: the 4-byte CRC32 and 12 digits of the ISO calibration timestamp — which differ
+> between any two runs, serial or not. All 39,412 remaining bytes, the entire correction
+> surface included, are identical, as are all 62 report fields, all 14 metadata fields, and the
+> tuner's recovered 2.6000 mm. **Do not replace these with parallel `sum()`/`reduce()`**: f64
+> addition is not associative, and this crate pins measured constants to four decimals.
+>
+> **The CPU/wall trade is core-count dependent, which is the part worth carrying forward.**
+> One tuned run, real/user: 1 thread 152.3/151.9 s, 2 threads 77.6/154.3, 4 threads 42.5/162.9,
+> 8 threads 36.4/223.5. The refactor costs **nothing** at 1 thread (151.9 s against the serial
+> build's 152 s), +1.6% CPU at 2 and +7.3% at 4 — the range CI's `ubuntu-latest` runners live
+> in — and only inflates to +47% at 8, which is the reference laptop's 4 performance + 4
+> efficiency cores, where the last four rayon workers are stragglers the pool waits on. Rayon's
+> pool is deliberately **not** capped: a cap would be a fitted constant with nothing asserting
+> its margin (P13's rule), and the runner with the hard budget is the one where the overhead is
+> ~2%.
+>
+> **Beneficiary beyond the suite:** these are the CLI's two dominant loops, so a real
+> calibration run — and D9's `scripts/generate-cr159703-artifact.sh` — gets the same 4×.
+>
+> **Three stale doc figures found and corrected in passing**, all in
+> `cli_full_mode_e2e.rs`: the fixture generator was documented at "~1.4 s" and a
+> `run_calibrate` call at "~3.2 s" (both measured on the 288-row grid D20 replaced on
+> 2026-08-02, so stale for a fortnight — actually ~19 s and ~81 s); the tuned recovery test at
+> "~20 s" (16× optimistic before this change); "the real 288-point fixture" (1728 since D20);
+> and a claim that the recovery test "remains `#[ignore]`d", stale since D16 un-ignored it on
+> 2026-07-31.
+>
+> **Filed as D31 and then closed the same day**, once the maintainer took the decision it was
+> waiting on: the tuner evaluated a full extra sweep purely to report `Initial RMSE`,
+> duplicating simplex vertex 0. See D31's own entry for what it turned out to be.
+>
+> **A review pass filed five findings, all addressed; the one that mattered was this unit
+> committing a regression on the path it exists to speed up.** The tuner's penalty path had
+> been *inverted*, cheapest to most expensive: the serial loop returned at the first failing
+> point, and collecting into `Vec<Result<_>>` evaluated all 1728 before noticing. Nelder-Mead
+> probes that 1e10 plateau repeatedly, so a reachable `NumericalInstability` would have made
+> `--tuning-mode all` dramatically *slower*. Measured on a 2000-item proxy: `Result<Vec<_>>`
+> short-circuits at 48 items / 7.8 ms, `Vec<Result<_>>` runs all 2000 / 317 ms — **41x**. Now
+> short-circuiting in both files, with the message naming its index and stating that it is the
+> first failure *observed*, not the lowest-numbered — which is the honest description of a
+> parallel short-circuit, and makes the two files agree on policy rather than diverge. The
+> other four were documentation: three freshly-stale or condition-free timing figures **in the
+> unit whose deliverable includes fixing stale figures**, and the standalone-vs-contended
+> mixing now called out at the head of the table above.
 
 > **2026-08-15 — the budget is met with room to spare.** Task 4 found the suite's dominant
 > cost (reqwest's `system-proxy` feature costing **11.8 s per client construction** on macOS)
@@ -4922,14 +5019,17 @@ changes *how often tests get run*, which is a correctness input, not a comfort.
      this test).~~ **✅ Half done 2026-08-01 by P10-perf: `p12_phi_cap_removed...` went
      125 s → 15.7 s** (2.9× even under a contended full run) with no assertion weakened — the
      test still sweeps all four angles against the same converged reference, the geometry just
-     costs 7.4× less. It remains in the slow tier. The calibrate-side test is untouched and is
-     what is left of this task.
+     costs 7.4× less. It remains in the slow tier. ~~The calibrate-side test is untouched and
+     is what is left of this task.~~ **✅ Closed 2026-08-17 — 504 s → 243 s, by parallelising
+     `calibrate`'s two per-point physics sweeps rather than by asserting less. Both levers this
+     task proposed turned out to be dead; see the closeout at the head of this unit.**
 - **Exit criteria:** tiering config committed (✅); check.sh + CI on the `full` profile (✅);
   CLAUDE.md documents both tiers (✅); dev loop measured < 90 s and re-measured after tasks
-  2–3 (✅ **24.8 s / 1040 tests, 2026-08-15**); the slow-tier list justified test-by-test or
+  2–3 (✅ **24.8 s / 1040 tests, 2026-08-15**; unmoved by task 3, whose changes land only in
+  binaries the default profile excludes); the slow-tier list justified test-by-test or
   shrunk by the audits (✅ shrunk — `test_heavy_heatmap_times_out_with_504` removed as not
   belonging to the class it was filed under; the three remaining entries carry their
-  justification in `.config/nextest.toml`).
+  justification in `.config/nextest.toml`). **All exit criteria met 2026-08-17.**
 - **Slow-tier list shrunk 2026-08-01 (P10-perf).** Nine physics tests → three. Six were returned
   to the dev inner loop because the mode-path speedup put them back under the 10 s line
   (`test_feed_steering_large_offset` 22.3 → 4.0 s; `azimuthal_modes_match_2d_small_dish_with_offset`
@@ -6676,6 +6776,94 @@ use.
 
 **Depends on:** nothing. **Coupled to:** G3 and C11 (whose blind spot this is), D9 (which
 filed it).
+
+---
+
+### D31 — The tuner pays a whole extra physics sweep to log a number the optimizer recomputes — Effort: S — ✅ **DONE 2026-08-17**
+
+**Filed 2026-08-17 by D18 task 3**, which measured it and deliberately did not fix it: the
+change is small, but it alters what the CLI *reports*, and that is a product decision rather
+than a test-latency one. **Maintainer took it the same day** ("I'm all for removing the two
+`info!` lines if it saves us 15%").
+
+> **Closeout 2026-08-17 — and the decision the filing framed was the wrong one.**
+>
+> The filing offered three options, all of which either move a reported number or delete
+> information. Checking the code made a fourth one obvious and strictly better. Two facts the
+> filing did not have:
+>
+> 1. **`initial_rmse` is not just a log line.** It also feeds `improvement_db`, which boresight
+>    writes into the artifact as `CalibrationMetadata.correction_improvement_db`. So "remove the
+>    two `info!` lines" would not by itself have removed the sweep — the value is still needed.
+> 2. **Option 1 as filed is not available.** It proposed taking the initial cost from argmin's
+>    own state. argmin exposes the *best cost over the initial simplex*, which is `min` over
+>    N+1 vertices — a different, smaller quantity than the cost at vertex 0. Adopting it would
+>    have silently changed a number in a shipped artifact, which is exactly what the filing was
+>    trying to avoid.
+>
+> **What shipped instead: memoize, don't delete.** `build_initial_simplex` makes vertex 0 the
+> initial vector *itself*, so the objective now caches that one result and argmin's evaluation
+> of vertex 0 is a hit. The duplicate sweep is gone and **every reported number is bit-for-bit
+> identical** — verified against the pre-parallelisation serial baseline, not merely against
+> the previous commit: 55 report fields, 14 metadata fields, and the artifact identical outside
+> its CRC and timestamp. `function_evaluations` is deliberately incremented *before* the cache
+> lookup, so even that count is unchanged; a hit is still a cost request from argmin's side.
+>
+> **Measured:** one tuned run 34.6 s → 28.7 s, **17%**, at the top of the 15% the filing
+> predicted. The memo fires exactly once per run, confirmed in the debug log.
+>
+> **Fail-safe by construction:** the memo is keyed on the exact parameter bits. argmin passes
+> vertex 0 through without arithmetic so it matches today, and if that ever stops being true
+> the miss costs what this code cost before the memo existed. There is no correctness exposure
+> in a miss, only a lost optimisation.
+>
+> **Applied to full mode only.** The boresight tuner has the identical redundancy, but its
+> measurement sets are frequency sweeps of 5–6 points by construction
+> (`MeasurementDensity::BoresightOnly`), so its "sweep" is ~6 physics evaluations against full
+> mode's 1728 — three orders of magnitude apart, and not worth the mechanism. Left deliberately,
+> recorded here so it is not mistaken for an oversight.
+
+- **Finding:** `parameter_tuner::tune_parameters` evaluates the objective once at the initial
+  parameter vector purely to log `Initial RMSE: … dB`, and then hands the same vector to
+  argmin as simplex vertex 0, which evaluates it again. One objective evaluation is one sweep
+  of every measurement point — the pipeline's unit of cost — so on the full-mode e2e fixture
+  (1728 points) this is **~1 sweep in 6, ~15% of every tuned run**, paid by real users as well
+  as by the suite. Parallelisation (D18 task 3) made every sweep ~4× cheaper but did not make
+  this one less redundant.
+- **The same redundancy exists twice, and the two copies have very different blast radii —
+  which is the whole reason this is a decision.** Traced 2026-08-17:
+  * **Full mode** (`parameter_tuner.rs:480-483`, surfaced again at `main.rs:616,621`): the
+    value is **log-only**. Two `info!` lines and an improvement percentage. It reaches no
+    artifact, no sidecar and no API — `--metadata` carries `parameters_tuned` as a bare bool,
+    and the full-mode artifact's `CalibrationMetadata.physics_only_rmse_db` is a *different*
+    quantity, `model_only_rmse` at `main.rs:646`, computed from the prediction sweep rather
+    than from the tuner. Here removing the extra evaluation is a cleanup.
+  * **Boresight mode** (`boresight_calibration.rs:609-612`): the same pattern, but the value is
+    kept as `initial_rmse_db` and **written into the artifact** at line 816 as
+    `CalibrationMetadata.physics_only_rmse_db` — which
+    `cli_boresight_real_data_e2e::andrew_43998_tuning_fits_the_published_gains` reads and
+    asserts against genuinely published gains (0.1402 dB measured, bounded < 1.0). Here
+    removing it moves a number in a shipped artifact.
+  Nothing in either path reaches the REST API: `physics_only_rmse_db` occurs in the service
+  exactly once, at `repository.rs:277`, as `None`, and `CalibrationInfo` exposes `rmse_db` /
+  `r_squared` only.
+- **Why that makes it a decision:** the cheap fix is to take the initial cost from argmin's own
+  initial state instead of computing it separately — but that is only identical if argmin
+  reports the cost at vertex 0 unchanged, which must be checked against the version in the
+  tree rather than assumed, and in boresight mode "not identical" means an artifact field
+  moves. Deleting the log line instead removes information an operator may rely on.
+- **Options as filed:** (1) read the initial cost out of argmin's state and delete the extra
+  evaluation, keeping the reported numbers identical; (2) keep the extra evaluation and accept
+  the 15%; (3) drop the `Initial RMSE` log and report only the final. **Option 1 turned out not
+  to exist** — argmin carries the best cost over the initial simplex, not the cost at vertex 0
+  — and the unit shipped a fourth option, memoization, which is what option 1 was reaching for.
+  Recorded because the lesson generalises: "read it from the library's state" is a claim to
+  check against the library, not a design.
+- **Gotchas:** the tuner runs in **two passes** for boresight mode (D17's gates circularity),
+  so "one extra sweep" is two there. Do not assume the two modes can take the same fix: the
+  full-mode value is log-only, the boresight one is persisted and asserted (see above).
+- **Depends on:** nothing. **Coupled to:** D17 (the two-pass structure), D18 (which measured
+  it).
 
 ---
 

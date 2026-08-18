@@ -20,6 +20,7 @@ use anyhow::{Context, Result};
 use argmin::core::{CostFunction, Executor, State};
 use argmin::solver::neldermead::NelderMead;
 use ndarray::Array1;
+use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -86,6 +87,15 @@ impl TuningResult {
     }
 }
 
+/// A measurement point whose physics evaluation failed, and which one it was.
+///
+/// Carries the index so the warning can name the point even though rayon's short-circuit
+/// makes *which* failing point surfaces nondeterministic (see `compute_rmse`).
+struct PointFailure {
+    index: usize,
+    reason: String,
+}
+
 /// Objective function for parameter optimization
 ///
 /// Computes weighted RMSE between measured and predicted G/T values.
@@ -104,6 +114,21 @@ struct ObjectiveFunction {
     integration_params: IntegrationParams,
     /// Evaluation counter
     eval_counter: Arc<AtomicUsize>,
+    /// Memo of the cost at the initial parameter vector (roadmap D31).
+    ///
+    /// `build_initial_simplex` makes vertex 0 of the simplex the initial vector *itself*, so
+    /// argmin re-evaluates a point `tune_parameters` has already evaluated to report
+    /// `Initial RMSE` — and one evaluation is one sweep of every measurement point, ~1 in 6
+    /// of a tuned run. Caching that one result removes the duplicate sweep while leaving
+    /// every reported number identical, which deleting the pre-computation could not do:
+    /// `initial_rmse` also feeds `improvement_db`, and boresight's twin of this code writes
+    /// its copy into the artifact as `CalibrationMetadata.correction_improvement_db`.
+    ///
+    /// Keyed on the exact parameter bits, and **fail-safe in the cheap direction**: argmin
+    /// passes vertex 0 through without arithmetic so the bits match today, and if that ever
+    /// stops being true the miss simply costs what this code cost before the memo existed.
+    /// Shared across clones because `Executor` takes the objective by value.
+    initial_eval: Arc<std::sync::OnceLock<(Vec<f64>, f64)>>,
 }
 
 impl ObjectiveFunction {
@@ -122,6 +147,7 @@ impl ObjectiveFunction {
             bounds,
             integration_params,
             eval_counter: Arc::new(AtomicUsize::new(0)),
+            initial_eval: Arc::new(std::sync::OnceLock::new()),
         }
     }
 
@@ -193,6 +219,21 @@ impl ObjectiveFunction {
         // Increment evaluation counter
         let eval_count = self.eval_counter.fetch_add(1, Ordering::SeqCst) + 1;
 
+        // Roadmap D31: return the memoized cost at the initial vector rather than sweeping
+        // every measurement point again. See the `initial_eval` field for why this is a memo
+        // and not a deletion. The counter above is incremented FIRST, deliberately: a hit is
+        // still a cost request from argmin's point of view, so `function_evaluations` reports
+        // exactly what it reported before the memo existed.
+        if let Some((cached_params, cached_rmse)) = self.initial_eval.get() {
+            if cached_params.as_slice() == params {
+                debug!(
+                    "Evaluation {}: served from the initial-vector memo",
+                    eval_count
+                );
+                return Ok(*cached_rmse);
+            }
+        }
+
         // Extract parameters
         let (surface_rms_mm, mesh_spacing_mm, wire_diameter_mm) = self.params_to_physical(params);
 
@@ -219,65 +260,101 @@ impl ObjectiveFunction {
         let physics_config =
             self.build_physics_config(surface_rms_mm, mesh_spacing_mm, wire_diameter_mm)?;
 
-        // Compute predictions and errors
-        let mut squared_errors = Vec::new();
-        let mut weights = Vec::new();
+        // Compute predictions and errors.
+        //
+        // Parallel over measurement points (roadmap D18 task 3). This sweep *is* the
+        // objective's cost — one `compute_g_over_t` per point, ~1728 points on the full-mode
+        // e2e fixture at ~12 ms each in a debug build — and Nelder-Mead pays it once per
+        // simplex vertex, so it is what made a 1-iteration tuned run cost ~110 s.
+        //
+        // **Bit-for-bit preserved, deliberately.** `collect()` fills an index-ordered Vec, so
+        // the serial reduction below adds exactly the values the serial loop added, in exactly
+        // its order. Do NOT turn the reduction into a parallel `sum()`/`reduce()`: f64 addition
+        // is not associative, and both this crate's known-answer tests and D13's real-data
+        // tolerances pin measured constants to four decimals.
+        let temperature_k = self.antenna_class.system_noise_temperature_k;
+        let per_point: std::result::Result<Vec<(f64, f64)>, PointFailure> = self
+            .measurements
+            .points
+            .par_iter()
+            .enumerate()
+            .map(|(idx, point)| {
+                // Convert E-clock/E-cone to physics coordinates (radians)
+                let coords = EClockConeCoordinates {
+                    e_clock: point.e_clock_deg.to_radians(),
+                    e_cone: point.e_cone_deg.to_radians(),
+                };
 
-        for point in &self.measurements.points {
-            // Convert E-clock/E-cone to physics coordinates (radians)
-            let coords = EClockConeCoordinates {
-                e_clock: point.e_clock_deg.to_radians(),
-                e_cone: point.e_cone_deg.to_radians(),
-            };
+                // Convert to far-field angles (θ, φ)
+                let far_field = coords.to_far_field();
 
-            // Convert to far-field angles (θ, φ)
-            let far_field = coords.to_far_field();
+                // Compute predicted G/T from physics model
+                let frequency_hz = point.frequency_mhz * 1e6;
 
-            // Compute predicted G/T from physics model
-            let frequency_hz = point.frequency_mhz * 1e6;
-            let temperature_k = self.antenna_class.system_noise_temperature_k;
+                let predicted = compute_g_over_t(
+                    far_field.theta,
+                    far_field.phi,
+                    &physics_config,
+                    frequency_hz,
+                    temperature_k,
+                    &self.integration_params,
+                )
+                .map_err(|e| PointFailure {
+                    index: idx,
+                    reason: e.to_string(),
+                })?;
 
-            let predicted_g_over_t = compute_g_over_t(
-                far_field.theta,
-                far_field.phi,
-                &physics_config,
-                frequency_hz,
-                temperature_k,
-                &self.integration_params,
-            );
+                // Compute error
+                let error = point.g_over_t_db - predicted;
 
-            // Handle computation errors gracefully
-            let predicted = match predicted_g_over_t {
-                Ok(val) => val,
-                Err(e) => {
-                    warn!("Physics computation failed for eval {}: {}", eval_count, e);
-                    return Ok(1e10); // Penalty for failed computation
-                }
-            };
+                // Weight: higher for main lobe (within 3 beamwidths)
+                // Rough beamwidth estimate: 70*λ/D degrees
+                let wavelength_m = 3e8 / frequency_hz;
+                let beamwidth_deg = 70.0 * wavelength_m / self.antenna_class.geometry.diameter_m;
+                let weight = if point.is_main_lobe(beamwidth_deg) {
+                    3.0 // 3x weight for main lobe
+                } else {
+                    1.0
+                };
 
-            // Compute error
-            let error = point.g_over_t_db - predicted;
-            squared_errors.push(error * error);
+                Ok((error * error, weight))
+            })
+            .collect();
 
-            // Weight: higher for main lobe (within 3 beamwidths)
-            // Rough beamwidth estimate: 70*λ/D degrees
-            let wavelength_m = 3e8 / frequency_hz;
-            let beamwidth_deg = 70.0 * wavelength_m / self.antenna_class.geometry.diameter_m;
-            let weight = if point.is_main_lobe(beamwidth_deg) {
-                3.0 // 3x weight for main lobe
-            } else {
-                1.0
-            };
-            weights.push(weight);
-        }
+        // Handle computation errors gracefully.
+        //
+        // Collecting into `Result<Vec<_>, _>` rather than `Vec<Result<_, _>>` is load-bearing:
+        // rayon short-circuits the former and abandons the remaining points, and the latter
+        // evaluates every one of them. This path is HOT — the penalty is a flat 1e10 plateau
+        // that Nelder-Mead will probe repeatedly — so making a failure cost a full sweep would
+        // slow a tuning run by orders of magnitude on exactly the geometries that trip it.
+        // Measured on a 2000-item proxy where one item fails: 48 items evaluated in 7.8 ms
+        // against 2000 in 317 ms.
+        //
+        // The cost of short-circuiting is that *which* failing point gets reported is
+        // whichever worker lost the race, not the lowest index. The message therefore names
+        // its index and says so, rather than implying it found the first — `compute_model_
+        // predictions` in main.rs makes the same trade and says the same thing.
+        let per_point = match per_point {
+            Ok(values) => values,
+            Err(failure) => {
+                warn!(
+                    "Physics computation failed for eval {} at measurement point {} ({}); \
+                     other points may also fail — this is the first failure observed, not \
+                     necessarily the lowest-numbered",
+                    eval_count, failure.index, failure.reason
+                );
+                return Ok(1e10); // Penalty for failed computation
+            }
+        };
 
         // Compute weighted RMSE
-        let weighted_sum: f64 = squared_errors
-            .iter()
-            .zip(weights.iter())
-            .map(|(err, w)| err * w)
-            .sum();
-        let total_weight: f64 = weights.iter().sum();
+        let mut weighted_sum = 0.0_f64;
+        let mut total_weight = 0.0_f64;
+        for (squared_error, weight) in &per_point {
+            weighted_sum += squared_error * weight;
+            total_weight += weight;
+        }
         let rmse = (weighted_sum / total_weight).sqrt();
 
         if eval_count.is_multiple_of(10) {
@@ -456,6 +533,16 @@ pub fn tune_parameters(
         .compute_rmse(&initial_params_vec)
         .context("Failed to compute initial RMSE")?;
     info!("Initial RMSE: {:.3} dB", initial_rmse);
+
+    // Roadmap D31: hand that result to the memo, because `build_initial_simplex` below makes
+    // vertex 0 the very same vector and argmin would otherwise sweep every measurement point
+    // again to learn what we just computed. Worth ~1 sweep in 6 of a tuned run. `set` returns
+    // the value back on a second call, which cannot happen here — one objective, one seeding —
+    // and is ignored rather than unwrapped because a failure to memoize is a performance
+    // matter, not a correctness one.
+    let _ = objective
+        .initial_eval
+        .set((initial_params_vec.clone(), initial_rmse));
 
     // Set up Nelder-Mead optimizer over a full N+1 vertex simplex seeded inside the bounds
     let simplex = build_initial_simplex(
