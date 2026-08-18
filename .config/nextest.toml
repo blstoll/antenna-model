@@ -63,6 +63,47 @@ slow-timeout = { period = "10s" }
 #     class and turned out not to belong to it (see above), the cost here IS the thing asserted:
 #     the test's subject is what happens when the sample cap binds, so it must reach the cap.
 #     Shrinking the dish does not help, because the cost is set by the cap, not by D/λ.
+# Re-measured 2026-08-17 by roadmap D18 task 3 — both full-mode e2e binaries stay excluded,
+# but they cost well under half what they did. `calibrate`'s two per-measurement-point physics
+# sweeps (the tuner's Nelder-Mead objective and `main.rs::compute_model_predictions`) were
+# serial; they are now parallel over points, and D31 stopped the tuner re-sweeping the initial
+# vector that argmin evaluates anyway as simplex vertex 0. `cli_full_mode_e2e` went
+# **504 s -> 217 s**, the whole package 510.6 s -> 235.7 s, with no assertion touched and every
+# artifact byte unchanged bar its timestamp and CRC.
+#
+# Two things to know before quoting or re-measuring any figure in this file.
+#
+# 1. **Say whether a figure is standalone or from a full run.** They differ by ~4x here and
+#    the difference is the scheduler, not the code: the fixture generation is ~4.8 s running
+#    one test at a time and ~18 s inside the binary; `cli_tuned_run_completes_for_every_
+#    tuning_mode` is 86 s standalone and 217 s in the binary. An earlier draft of the D18
+#    closeout compared a standalone "after" against a contended "before" and reported a 3x
+#    improvement that was really 1.8x.
+#
+# 2. **The change trades CPU for wall, by an amount that depends on the core count.** One
+#    tuned run (`--tuning-mode all`, 1 iteration), real/user: 1 thread 152.3/151.9 s, 2
+#    threads 77.6/154.3, 4 threads 42.5/162.9, 8 threads 36.4/223.5. The overhead is ~0 at 1
+#    thread (the refactor itself costs nothing), +1.6% at 2 and +7.3% at 4 — the range CI's
+#    `ubuntu-latest` runners live in — and only blows out to +47% at 8, which is the reference
+#    laptop's 4 performance + 4 efficiency cores, where rayon's last four workers are
+#    stragglers the pool waits on. Rayon's pool is deliberately NOT capped: a cap would be a
+#    fitted constant with nothing asserting its margin, which is what P13 retired one for, and
+#    the runner with the hard budget is the one where the overhead is ~2%.
+#
+# **Asked and answered: does this threaten the wall-clock assertions elsewhere in the suite?**
+# Raised on review — under `--profile full` these binaries are scheduled alongside
+# `resilience_tests::test_no_resource_leaks_after_errors` and
+# `test_health_endpoint_always_responsive`, which assert a `/health` round trip under 100 ms
+# with no `threads-required` reservation, and each calibrate test now saturates from two places
+# at once (in-process `generate_grid`, plus the `calibrate` subprocess it spawns). Measured
+# 2026-08-17 rather than argued: both tests were run four times *while* the full
+# `cli_full_mode_e2e` binary was loading all eight cores, and passed every time with the entire
+# test taking 0.19-0.21 s and 0.76-0.90 s — the round trip being a small fraction of that,
+# against a 100 ms budget. `/health` does no compute, so it is scheduler-latency bound, not
+# CPU bound. No reservation was added: there is no measurement supporting one, and reserving
+# the machine for a 217 s test would cost far more than it could buy. If these ever do flake,
+# start here — the measurement above is the baseline to compare against.
+#
 # Added 2026-08-02 by roadmap unit D14, on review:
 #   binary_id(calibrate::cli_full_mode_real_data_e2e) — the real-anchored full-mode e2e. No
 #     single test crosses the 10 s marker (measured 2.6–5.4 s, 7.6 s for the binary), so the
