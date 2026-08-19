@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 71e4e162b0a056ea25f824895288c5852884c451bbaaa262f5e56bd380f91a7e # shrinks to surface_rms = 0.05125797912975012, wavelength = 0.001

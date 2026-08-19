@@ -3713,7 +3713,35 @@ troubleshooting now distinguishes the two rejection messages and adds the CRC on
   residual advisories, turning the tracked-allowlist mechanism on.
 - **Depends on:** G1.
 
-### D7 — Property-based tests (make CLAUDE.md's claim true) — Effort: M
+### D7 — Property-based tests (make CLAUDE.md's claim true) — Effort: M — ✅ **DONE 2026-08-18**
+
+> **Closeout 2026-08-18.** Implemented on branch `d7-property-tests`. `proptest` is a
+> dev-dependency of `antenna-core`; the properties live in
+> `antenna-core/tests/property_tests.rs` (11 `proptest!` tests, suite runs in ~0.19 s).
+>
+> Every generator is constrained to the *validated physical domain*: reflectors are built
+> through `ReflectorGeometry::builder()` (f/D ∈ [0.25, 0.9]), frequency stays inside
+> [100 MHz, 8.4 GHz] on the gain property, and the Ruze generators bound rms relative to
+> the wavelength so the argument stays within f64's representable `exp` range. The Ruze
+> strict `∈ (0,1]` claim is scoped to that representable physical regime; a separate
+> broad test asserts `[0,1]` over the whole domain, recording that extreme rms/λ
+> legitimately underflows to exactly `0.0`.
+>
+> Properties: ECEF↔Geodetic, aperture-Cartesian, far-field-direction and EClock/E-cone
+> feed round-trips within tolerance; ENU rotation orthogonality; `normalize_angle` /
+> `normalize_angle_symmetric` range + congruence; gain finite, positive and ≤ the
+> ideal-aperture bound (Cauchy–Schwarz guarantee, 0.5 dB slack); Ruze ∈ (0,1] and
+> monotone-non-increasing in surface RMS.
+>
+> Two early failures were both **test-authoring** bugs, not model findings — the model
+> output was correct in both cases: (1) a `rem_euclid` congruence check that wrapped a
+> tiny negative offset to ≈2π (fixed by comparing in turn units `(angle−n)/(2π)`); (2) a
+> Ruze generator that ranged into an out-of-band frequency where `exp(-arg²)` underflows.
+> Both are recorded here rather than papered over, per the "property failures are findings"
+> rule.
+>
+> CLAUDE.md's Testing Philosophy annotation updated `"planned — see roadmap unit D7"` →
+> **implemented**, naming the file and the validated-domain-generator rule.
 
 - **Entrance / read first:** `model/coordinates.rs`, `model/coordinates_3d.rs` (transform
   pairs), `model/pattern.rs` (bounds candidates), existing test style. Knowledge: proptest.

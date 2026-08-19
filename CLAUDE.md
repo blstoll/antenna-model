@@ -336,7 +336,12 @@ The `calibrate` tool processes measurement data:
 
 - Unit tests for all physics functions (with known reference values)
 - Integration tests with realistic calibration data
-- Property-based tests for coordinate transforms (round-trip accuracy) — *planned; not yet implemented, see roadmap unit D7*
+- Property-based tests for coordinate transforms (round-trip accuracy) and physics
+  bounds — **implemented** (roadmap D7): `proptest` is a dev-dependency of `antenna-core`
+  and the properties live in `antenna-core/tests/property_tests.rs`. Generators are
+  constrained to the *validated physical domain* (they build reflectors through the
+  `ReflectorGeometry` builder, keep frequency inside [100, 50,000] MHz, etc.) so they
+  exercise the physics rather than rediscovering inputs upstream validation rejects.
 - Benchmarks for performance-critical paths (aperture integration is hottest)
 - Target: >80% test coverage
 
