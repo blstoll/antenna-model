@@ -30,6 +30,11 @@
 //!   `+ 2π` rounds back up to exactly 2π, violating the documented [0, 2π)
 //!   contract. Filed, not fixed (per the charter); the strict bound is kept as
 //!   the contract a gross regression would violate.
+//! - **Aiming at boresight on a steered feed makes a bound property vacuous**
+//!   — a lateral feed offset δ steers the beam ≈`0.9·δ/f` rad off-axis, so θ≈0
+//!   samples deep sidelobes 60–108 dB under the ideal-aperture bound. The
+//!   coma property aims into the steered beam instead, which brings its
+//!   measured detection threshold from ~60 dB down to +6 dB.
 //! - **The −60 dBi sidelobe nulls are real** — electrically large dishes have
 //!   genuine nulls that reach the floor (measured at θ = 21°/32°/42° for a
 //!   2.64 m @ 3.29 GHz dish), so the NaN-catching `> MIN_GAIN_FLOOR` assertion
@@ -41,7 +46,7 @@ use antenna_core::model::{
 use antenna_core::model::{
     ecef_to_enu_rotation, ecef_to_geodetic, geodetic_to_ecef, theoretical_max_gain,
     wavelength_from_frequency, AntennaConfiguration, ApertureCoordinates, EClockConeCoordinates,
-    FarFieldCoordinates, FeedParameters, FeedParametersBuilder, IntegrationParams,
+    FarFieldCoordinates, FeedParameters, FeedParametersBuilder, FeedPosition, IntegrationParams,
     ReflectorGeometry, MIN_GAIN_FLOOR,
 };
 use proptest::prelude::*;
@@ -103,13 +108,18 @@ fn gain_config() -> impl Strategy<Value = (AntennaConfiguration, f64)> {
 }
 
 /// A physically-valid antenna whose non-unity `asymmetry_factor` routes the
-/// integrator to the **azimuthal-mode (Jₘ) branch** — the branch that carried
-/// every historical aliasing/overshoot defect D7 screens for (P12's 7.08 dB,
-/// P10-perf's +82 dB φ' aliasing; a reintroduced `MODE_PHI_STEERED_MAX`-style
-/// cap would leave a symmetric-only suite green). Feed kept at focus and sizes
-/// kept small so the wider φ' bandwidth stays cheap; `asymmetry_factor` is a
-/// declared design property (horn geometry), so it is drawn directly rather
-/// than tuned.
+/// integrator to the **azimuthal-mode (Jₘ) branch**, where P12's radial-budget
+/// defect lived (worst measured 7.08 dB): the answer is a residue of mode
+/// integrals that cancel 59–111×, so ~1% per-mode error becomes ~10% of the
+/// result. Feed kept at focus and sizes kept small so this stays cheap;
+/// `asymmetry_factor` is a declared design property (horn geometry), so it is
+/// drawn directly rather than tuned.
+///
+/// This reaches the branch but **not** its φ' sizing path — δ = 0 here, so the
+/// bandwidth is the constant `asym_bandwidth = 6.0` and `n_phi` sits at
+/// `MODE_PHI_MIN`. See [`steered_config`] for the generator that drives
+/// `spread = k·δ·(R/f)`. (Neither screens P10-perf's +82 dB φ' aliasing — that
+/// needs the differential check in `integration.rs`; see [`steered_case`].)
 fn asymmetric_config() -> impl Strategy<Value = (AntennaConfiguration, f64)> {
     (
         0.5f64..1.5,
@@ -123,6 +133,50 @@ fn asymmetric_config() -> impl Strategy<Value = (AntennaConfiguration, f64)> {
                 b.asymmetry_factor(asymmetry)
             })
         })
+}
+
+/// A **laterally offset (comaed) feed**, aimed at its own steered beam peak.
+/// Yields `(config, frequency, theta)` because the aim point is derived from
+/// the drawn `δ/f` — it cannot be an independent component.
+///
+/// **Why the aim point matters.** A lateral offset δ steers the beam off
+/// boresight by ≈ `0.9·δ/f` radians, *away* from the offset, so the peak sits
+/// at φ = π when the feed is displaced along +x. Sampling θ near 0 on such a
+/// geometry lands in the deep sidelobes — measured 60–108 dB below the
+/// ideal-aperture bound, which would make a bound assertion there effectively
+/// vacuous. Aiming into the steered beam instead leaves a measured worst-case
+/// headroom of **2.87 dB** across this generator's box (corners probed:
+/// D ∈ {2.5, 3.0} m × f/D ∈ {0.35, 0.55} × {6.0, 8.4} GHz × δ/f ∈ {0.08, 0.15},
+/// tightest at f/D = 0.55).
+///
+/// f/D is capped at 0.55 because a longer focal length means less coma loss and
+/// a higher peak: past that the headroom closes on the assertion's own 0.49 dB
+/// slack and the property starts failing on correct physics.
+fn steered_case() -> impl Strategy<Value = (AntennaConfiguration, f64, f64)> {
+    (
+        2.5f64..3.0,
+        0.35f64..0.55,
+        6.0e9f64..8.4e9,
+        0.08f64..0.15,
+        0.001f64..0.02,
+        0.75f64..1.05,
+    )
+        .prop_map(
+            |(diameter, f_over_d, freq, delta_ratio, rms_frac, beam_factor)| {
+                let focal_length = diameter * f_over_d;
+                let (config, freq) =
+                    build_gain_case(diameter, f_over_d, freq, rms_frac, move |b| {
+                        // Vertex-origin position: lateral x = δ, axially at the focus.
+                        b.position(FeedPosition::new(
+                            delta_ratio * focal_length,
+                            0.0,
+                            focal_length,
+                        ))
+                    });
+                // Bracket the steered peak (measured at ≈0.9·δ/f rad).
+                (config, freq, beam_factor * delta_ratio)
+            },
+        )
 }
 
 /// A small, low-frequency antenna (feed at focus or asymmetric) whose main
@@ -255,13 +309,16 @@ proptest! {
 
     #[test]
     fn ecef_geodetic_roundtrip_at_poles(
-        lat_deg in prop_oneof![89.99f64..=90.0, -90.0f64..=-89.99],
+        lat_deg in prop_oneof![89.995f64..=90.0, -90.0f64..=-89.995],
         alt_m in -1000.0f64..400_000_000.0,
     ) {
-        // The polar cap (< ~0.006° from the axis) is where `ecef_to_geodetic`
-        // switches to the z-based altitude branch (`cos_lat ≤ 1e-4`); uniform
-        // latitude draws hit it with probability ~3e-5, so this test samples it
-        // directly. Longitude is degenerate at the exact pole and is not asserted.
+        // The polar cap is where `ecef_to_geodetic` switches to the z-based
+        // altitude branch (`cos_lat ≤ 1e-4`, i.e. |lat| ≥ 89.99427°); uniform
+        // latitude draws hit it with probability ~6e-5, so this test samples it
+        // directly. The ±89.995° bound sits inside the threshold — cos(89.995°)
+        // = 8.7e-5 — so *every* draw takes the branch, rather than the ~57% a
+        // range of ±89.99° would have given.
+        // Longitude is degenerate at the exact pole and is not asserted.
         let (x, y, z) = geodetic_to_ecef(123.456, lat_deg, alt_m).unwrap();
         let (_, lat2, alt2) = ecef_to_geodetic(x, y, z).unwrap();
         prop_assert!((lat2 - lat_deg).abs() < ANGLE_TOL, "latitude drifted {lat_deg} -> {lat2}");
@@ -385,6 +442,24 @@ proptest! {
     /// while still catching the class of aliasing/overshoot bugs (the historic
     /// +20 to +82 dB) D7 is chartered to screen for.
     ///
+    /// **This is the suite's tightest bound, and its power sits in one corner.**
+    /// Measured detection threshold is +1.0 dB (it misses +0.5 dB), which is
+    /// better than the other three bound properties by 1–5 dB — but only because
+    /// `f_over_d` reaches 1.0. Boresight headroom against the bound, measured at
+    /// D = 0.5 m / 100 MHz with the shipped q = 8 feed:
+    ///
+    /// | f/D | 0.2 | 0.4 | 0.6 | 0.8 | 1.0 |
+    /// |---|---|---|---|---|---|
+    /// | margin | −11.26 | −5.25 | −2.15 | −0.86 | **−0.38** dB |
+    ///
+    /// A long focal length with a fixed feed taper approaches uniform
+    /// illumination, so aperture efficiency approaches 1 and the Cauchy–Schwarz
+    /// bound becomes nearly exact. It is scale-invariant — the same −4.83 dB at
+    /// f/D = 0.42 for every D/λ from 0.17 to 26.7 — so **narrowing `f_over_d`
+    /// away from 1.0 would silently cost this property most of its power**
+    /// without failing anything. Do not narrow it without re-measuring the
+    /// table above.
+    ///
     /// **Why this test cannot also assert `gain > MIN_GAIN_FLOOR`:** the
     /// electrically large dishes here (up to 28.9λ) have genuine sidelobe nulls
     /// below −60 dBi — measured dips to exactly the floor at θ = 21°/32°/42°
@@ -420,15 +495,23 @@ proptest! {
 
     /// The same physics bounds on the **azimuthal-mode (Jₘ) branch**: an
     /// asymmetric-illumination feed (`asymmetry_factor != 1.0`) routes
-    /// `integrate_aperture` off the symmetric J₀ path and into the mode
-    /// expansion whose per-mode errors used to cancel into silently wrong
-    /// totals (P12) and whose φ' aliasing was +82 dB wrong with
-    /// `converged = true` (P10). A symmetric-only gain suite would go green
-    /// even with a `MODE_PHI_STEERED_MAX`-style cap reintroduced; this test is
-    /// that guard's tripwire. The bound proof is unchanged — the same
-    /// Cauchy–Schwarz argument holds on any branch — and, as in the symmetric
-    /// test, the floor-clearance claim is left to the main-lobe test because
-    /// this angular range reaches genuine nulls below the floor.
+    /// `integrate_aperture` off the symmetric J₀ path (`is_symmetric` requires
+    /// `asymmetry_factor == 1.0`) and into the mode expansion, whose per-mode
+    /// errors cancel 59–111× and so used to turn ~1% per-mode error into
+    /// silently wrong totals — P12's radial-budget defect, worst measured
+    /// 7.08 dB. This test screens **that** defect class.
+    ///
+    /// It does **not** screen the φ' sizing path: with the feed at focus δ = 0,
+    /// so `coma_bandwidth = 0` and `mode_count_for` uses the constant
+    /// `asym_bandwidth = 6.0`, pinning `n_phi` at `MODE_PHI_MIN`. P10-perf's
+    /// +82 dB aliasing lived in `spread = k·δ·(R/f)`, which is identically zero
+    /// here — and [`steered_beam_gain_is_bounded_by_ideal_aperture`] does not
+    /// cover it either; see its docs for the measured reason and the real guard.
+    ///
+    /// The bound proof is unchanged — the same Cauchy–Schwarz argument holds on
+    /// any branch — and, as in the symmetric test, the floor-clearance claim is
+    /// left to the main-lobe test because this angular range reaches genuine
+    /// nulls below the floor.
     #[test]
     fn mode_branch_gain_is_finite_and_bounded_by_ideal_aperture(
         (config, freq) in asymmetric_config(),
@@ -462,7 +545,7 @@ proptest! {
     /// public API where a floored value is unambiguous evidence of a non-finite
     /// computation is where genuine physics provably clears the floor: the
     /// broad-beamed small dishes of [`main_lobe_case`] at θ ≤ 15° (gain ≥
-    /// ~−20 dBi, three orders above the floor). NaN/−Inf collapse lands at
+    /// ~−20 dBi, four orders above the floor). NaN/−Inf collapse lands at
     /// exactly 1e-6 and fails the strict `>`. This domain also covers both
     /// integrator branches via `prop_oneof!`.
     #[test]
@@ -489,6 +572,70 @@ proptest! {
             "gain {gain} exceeds ideal-aperture bound {bound} (D={}m, f={}Hz, θ={theta} rad)",
             config.reflector.diameter,
             freq
+        );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 24, ..ProptestConfig::default() })]
+
+    /// The ideal-aperture bound on a **comaed** geometry (δ ≠ 0), evaluated at
+    /// the geometry's own steered beam peak. Its reason to exist is coverage,
+    /// not tightness: it is the only property here that exercises the
+    /// lateral-offset phase path at all (`gain_config` and `asymmetric_config`
+    /// both sit the feed at focus, so `phase_feed_displacement` sees δ = 0).
+    ///
+    /// **Measured power.** Injecting a uniform gain multiplier into
+    /// `apply_gain_floor` and re-running the suite gives each bound property's
+    /// detection threshold:
+    ///
+    /// | property | catches | misses |
+    /// |---|---|---|
+    /// | `gain_is_finite_and_bounded_by_ideal_aperture` | +1.0 dB | — |
+    /// | `main_lobe_gain_clears_the_numerical_floor` | +2.0 dB | +1.0 dB |
+    /// | `mode_branch_gain_is_finite_and_bounded_by_ideal_aperture` | +3.0 dB | +2.0 dB |
+    /// | this one | +6.0 dB | +4.0 dB |
+    ///
+    /// So this is the **loosest** of the four — 2.87 dB of physical headroom
+    /// plus 0.49 dB of assertion slack sets the floor, and only the worst corner
+    /// of the box is that tight. Do not cite it as a tight bound; cite it as the
+    /// coma-path one. All four remain comfortably inside the `+20…+82 dB`
+    /// aliasing class D7 is chartered against.
+    ///
+    /// **What this does NOT screen — measured, not assumed.** It is not a guard
+    /// on the φ' sampling axis. Reintroducing the retired `MODE_PHI_STEERED_MAX`
+    /// (clamp `n_phi ≤ 64` when `δ/f > 0.05`) as a negative control moved these
+    /// geometries by **≤ 0.09 dB**, nowhere near the bound. Two reasons, and the
+    /// second is structural: the documented +28.67 dB error needed `δ/f = 0.4`
+    /// (bandwidth ≈ 106, `n_phi ≥ 256`), far past the 0.15 this generator can
+    /// reach before coma loss opens the headroom back up; and φ' aliasing
+    /// inflates *sidelobes*, which start 40–100 dB below the ideal-aperture
+    /// bound, so Cauchy–Schwarz structurally cannot see it. That axis is guarded
+    /// by `integration::…::served_n_phi_sizing_is_sufficient_on_every_asymmetric_geometry`,
+    /// which compares the served `n_phi` against a 2× denser grid with the
+    /// radial density held fixed — a differential check that needs crate-private
+    /// `mode_count_for`, and so cannot be reproduced from an integration test.
+    #[test]
+    fn steered_beam_gain_is_bounded_by_ideal_aperture(
+        (config, freq, theta) in steered_case(),
+    ) {
+        // The beam steers *opposite* the +x feed offset, so its peak is at φ = π.
+        let result = compute_gain(theta, PI, &config, freq, &IntegrationParams::default());
+        prop_assert!(result.is_ok(), "compute_gain failed: {:?}", result.err());
+        let gain = result.unwrap().gain;
+        prop_assert!(gain.is_finite(), "gain is not finite: {gain}");
+        let wavelength = wavelength_from_frequency(freq);
+        let bound = theoretical_max_gain(config.reflector.diameter, wavelength, 1.0);
+        prop_assert!(
+            gain <= bound * 1.12 + 1e-9,
+            "gain {:.2} dBi exceeds ideal-aperture bound {:.2} dBi (D={} m, f={} Hz, \
+             δ/f={:.3}, θ={:.3}°)",
+            10.0 * gain.log10(),
+            10.0 * bound.log10(),
+            config.reflector.diameter,
+            freq,
+            config.feed.position.radial_displacement() / config.reflector.focal_length,
+            theta.to_degrees()
         );
     }
 }
