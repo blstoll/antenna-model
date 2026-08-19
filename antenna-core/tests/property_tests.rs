@@ -19,7 +19,21 @@
 //!
 //! Per the D7 charter, **a property failure is a finding to file in the
 //! roadmap, not something to weaken the property or generator around.** If one
-//! of these ever fails, investigate before loosening a tolerance.
+//! of these ever fails, investigate before loosening a tolerance. Findings
+//! this suite has produced and how they are handled:
+//!
+//! - **Ruze underflow** — at extreme rms/λ, `exp(-(4πrms/λ)²)` legitimately
+//!   underflows to exactly 0.0, so the strict (0, 1] claim is scoped to the
+//!   representable regime and a broad [0, 1] test covers the rest.
+//! - **`normalize_angle` 2π boundary rounding** — for inputs within ~1 ulp of a
+//!   negative-multiple-of-2π wrap, `%` leaves a tiny negative remainder and
+//!   `+ 2π` rounds back up to exactly 2π, violating the documented [0, 2π)
+//!   contract. Filed, not fixed (per the charter); the strict bound is kept as
+//!   the contract a gross regression would violate.
+//! - **The −60 dBi sidelobe nulls are real** — electrically large dishes have
+//!   genuine nulls that reach the floor (measured at θ = 21°/32°/42° for a
+//!   2.64 m @ 3.29 GHz dish), so the NaN-catching `> MIN_GAIN_FLOOR` assertion
+//!   lives only in the main-lobe test whose domain provably clears it.
 
 use antenna_core::model::{
     compute_gain, normalize_angle, normalize_angle_symmetric, ruze_efficiency,
@@ -27,50 +41,119 @@ use antenna_core::model::{
 use antenna_core::model::{
     ecef_to_enu_rotation, ecef_to_geodetic, geodetic_to_ecef, theoretical_max_gain,
     wavelength_from_frequency, AntennaConfiguration, ApertureCoordinates, EClockConeCoordinates,
-    FarFieldCoordinates, FeedParameters, IntegrationParams, ReflectorGeometry,
+    FarFieldCoordinates, FeedParameters, FeedParametersBuilder, IntegrationParams,
+    ReflectorGeometry, MIN_GAIN_FLOOR,
 };
 use proptest::prelude::*;
 use std::f64::consts::PI;
 
-/// Tight relative slack for coordinate round-trips (radians / meters).
+/// Tolerance for coordinate round-trip angle drift. Used for both degree
+/// (lon/lat in the ECEF↔Geodetic round-trip) and radian (E-clock/E-cone)
+/// comparisons: 1e-6 degrees ≈ 1.7e-8 rad, 1e-6 rad ≈ 0.2 arcsec. It is far
+/// looser than the transform errors (Bowring's iteration converges below float
+/// noise) and exists to absorb two-way float rounding, not model error.
 const ANGLE_TOL: f64 = 1e-6;
 
-/// A physically-valid reflector, generated inside the validated f/D and RMS
-/// domains so `ReflectorGeometry::validate` always accepts it.
-fn reflector() -> impl Strategy<Value = ReflectorGeometry> {
-    // f/D must stay within [F_OVER_D_MIN, F_OVER_D_MAX] = [0.2, 1.0]; the
-    // builder derives focal_length from diameter so the ratio is exact.
-    (0.5f64..8.0, 0.25f64..0.9, 0.0f64..0.03).prop_map(|(diameter, f_over_d, surface_rms)| {
-        ReflectorGeometry::builder()
-            .diameter(diameter)
-            .focal_length(diameter * f_over_d)
-            .surface_rms(surface_rms)
-            .build()
-            .expect("reflector generated inside its validated domain")
-    })
+/// Builds the antenna half of a gain-case generator: a physically-valid
+/// reflector (`surface_rms` derived *as a fraction of λ* so Ruze loss is
+/// representable) plus a feed with the given builder tweaks. Returns the
+/// config and the frequency that fixes λ.
+fn build_gain_case(
+    diameter: f64,
+    f_over_d: f64,
+    freq: f64,
+    rms_frac: f64,
+    feed_tweak: impl Fn(FeedParametersBuilder) -> FeedParametersBuilder,
+) -> (AntennaConfiguration, f64) {
+    let wavelength = wavelength_from_frequency(freq);
+    let refl = ReflectorGeometry::builder()
+        .diameter(diameter)
+        .focal_length(diameter * f_over_d)
+        .surface_rms(rms_frac * wavelength)
+        .build()
+        .expect("reflector generated inside its validated domain");
+    let feed = feed_tweak(
+        FeedParameters::builder()
+            .at_focus(refl.focal_length)
+            .q_factor(8.0),
+    )
+    .build()
+    .expect("feed generated inside its validated domain");
+    let config = AntennaConfiguration::builder()
+        .id("prop")
+        .name("property-test")
+        .reflector(refl)
+        .feed(feed)
+        .build()
+        .expect("config within validated domain");
+    (config, freq)
 }
 
-/// A valid antenna (feed at focus → cheap symmetric integrator branch) paired
-/// with a frequency within the model's validated band [100, 50,000] MHz.
-///
-/// Diameter and frequency are jointly capped so `D/λ` stays modest (
-/// ≤ ~180), keeping the on-axis physical-optics sweep fast enough for CI.
-fn on_axis_config() -> impl Strategy<Value = (AntennaConfiguration, f64)> {
-    (reflector(), 100.0e6f64..8.4e9).prop_map(|(refl, freq)| {
-        let feed = FeedParameters::builder()
-            .at_focus(refl.focal_length)
-            .q_factor(8.0)
-            .build()
-            .expect("feed at focus is always valid");
-        let config = AntennaConfiguration::builder()
-            .id("prop")
-            .name("property-test")
-            .reflector(refl)
-            .feed(feed)
-            .build()
-            .expect("config within validated domain");
-        (config, freq)
-    })
+/// A physically-valid antenna with the feed at focus (routes the cheap
+/// symmetric integrator branch). Frequency is inside the model's validated
+/// band [100, 50,000] MHz and diameter is capped so the D/λ-driven aperture
+/// sweep stays bounded. The tuple components are drawn independently, so the
+/// *joint* worst case is 4 m × 8.4 GHz → D/λ ≈ 112.
+fn gain_config() -> impl Strategy<Value = (AntennaConfiguration, f64)> {
+    (0.5f64..4.0, 0.2f64..1.0, 100.0e6f64..8.4e9, 0.001f64..0.1).prop_map(
+        |(diameter, f_over_d, freq, rms_frac)| {
+            build_gain_case(diameter, f_over_d, freq, rms_frac, |b| b)
+        },
+    )
+}
+
+/// A physically-valid antenna whose non-unity `asymmetry_factor` routes the
+/// integrator to the **azimuthal-mode (Jₘ) branch** — the branch that carried
+/// every historical aliasing/overshoot defect D7 screens for (P12's 7.08 dB,
+/// P10-perf's +82 dB φ' aliasing; a reintroduced `MODE_PHI_STEERED_MAX`-style
+/// cap would leave a symmetric-only suite green). Feed kept at focus and sizes
+/// kept small so the wider φ' bandwidth stays cheap; `asymmetry_factor` is a
+/// declared design property (horn geometry), so it is drawn directly rather
+/// than tuned.
+fn asymmetric_config() -> impl Strategy<Value = (AntennaConfiguration, f64)> {
+    (
+        0.5f64..1.5,
+        0.2f64..1.0,
+        300.0e6f64..2.0e9,
+        1.2f64..2.5,
+        0.001f64..0.05,
+    )
+        .prop_map(|(diameter, f_over_d, freq, asymmetry, rms_frac)| {
+            build_gain_case(diameter, f_over_d, freq, rms_frac, |b| {
+                b.asymmetry_factor(asymmetry)
+            })
+        })
+}
+
+/// A small, low-frequency antenna (feed at focus or asymmetric) whose main
+/// lobe is broad enough that *every* drawn angle provably clears
+/// [`MIN_GAIN_FLOOR`]: D ∈ [0.5, 1.0] m and f ∈ [100, 800] MHz put the first
+/// null beyond ~26° even at the top of the band, so θ ≤ 15° stays inside the
+/// main lobe where the gain is ≥ ~−20 dBi — four orders above the −60 dBi
+/// floor. This is the only domain where the *floor-clearance* assertion is
+/// honest: at deep sidelobe nulls a genuine −60 dBi value and a NaN collapsed
+/// by `apply_gain_floor` are numerically identical, so finiteness is only
+/// detectable where the physics cannot legitimately sit at the floor.
+fn main_lobe_case() -> impl Strategy<Value = (AntennaConfiguration, f64)> {
+    prop_oneof![
+        (0.5f64..1.0, 0.2f64..1.0, 100.0e6f64..800.0e6, 0.001f64..0.1).prop_map(
+            |(diameter, f_over_d, freq, rms_frac)| {
+                build_gain_case(diameter, f_over_d, freq, rms_frac, |b| b)
+            }
+        ),
+        (
+            0.5f64..1.0,
+            0.2f64..1.0,
+            300.0e6f64..800.0e6,
+            1.2f64..2.5,
+            0.001f64..0.1
+        )
+            .prop_map(|(diameter, f_over_d, freq, asymmetry, rms_frac)| {
+                build_gain_case(diameter, f_over_d, freq, rms_frac, |b| {
+                    b.asymmetry_factor(asymmetry)
+                })
+            })
+    ]
 }
 
 /// A surface-rms / wavelength pair where Ruze gain loss is *representable* in f64:
@@ -91,11 +174,12 @@ proptest! {
     fn ecef_geodetic_roundtrip(
         lon_deg in -180.0f64..180.0,
         lat_deg in -90.0f64..90.0,
-        alt_m in -1000.0f64..100_000_000.0,
+        alt_m in -1000.0f64..400_000_000.0,
     ) {
         let (x, y, z) = geodetic_to_ecef(lon_deg, lat_deg, alt_m).unwrap();
         let (lon2, lat2, alt2) = ecef_to_geodetic(x, y, z).unwrap();
-        // Longitude/latitude are exact angles; Bowring's method converges to <1e-12 rad.
+        // Bowring's iteration converges below float noise; the tolerance absorbs
+        // two-way float rounding of the degree values.
         prop_assert!((lon2 - lon_deg).abs() < ANGLE_TOL, "longitude drifted {lon_deg} -> {lon2}");
         prop_assert!((lat2 - lat_deg).abs() < ANGLE_TOL, "latitude drifted {lat_deg} -> {lat2}");
         // Altitude is a length; allow a relative term so km-scale altitudes hold ~1mm abs.
@@ -170,15 +254,33 @@ proptest! {
     }
 
     #[test]
-    fn enu_rotation_is_orthogonal(
+    fn ecef_geodetic_roundtrip_at_poles(
+        lat_deg in prop_oneof![89.99f64..=90.0, -90.0f64..=-89.99],
+        alt_m in -1000.0f64..400_000_000.0,
+    ) {
+        // The polar cap (< ~0.006° from the axis) is where `ecef_to_geodetic`
+        // switches to the z-based altitude branch (`cos_lat ≤ 1e-4`); uniform
+        // latitude draws hit it with probability ~3e-5, so this test samples it
+        // directly. Longitude is degenerate at the exact pole and is not asserted.
+        let (x, y, z) = geodetic_to_ecef(123.456, lat_deg, alt_m).unwrap();
+        let (_, lat2, alt2) = ecef_to_geodetic(x, y, z).unwrap();
+        prop_assert!((lat2 - lat_deg).abs() < ANGLE_TOL, "latitude drifted {lat_deg} -> {lat2}");
+        prop_assert!(
+            (alt2 - alt_m).abs() < 1e-3 + 1e-9 * alt_m.abs(),
+            "altitude drifted {alt_m} -> {alt2}"
+        );
+    }
+
+    #[test]
+    fn enu_rotation_is_orthogonal_and_right_handed(
         lat_rad in -PI / 2.0f64..PI / 2.0,
         lon_rad in -PI..PI,
     ) {
-        // R·Rᵀ must be the identity for every lat/lon.
+        // R·Rᵀ must be the identity for every lat/lon ...
         let r = ecef_to_enu_rotation(lat_rad, lon_rad);
-        for i in 0..3 {
-            for j in 0..3 {
-                let dot: f64 = r[i].iter().zip(r[j].iter()).map(|(a, b)| a * b).sum();
+        for (i, row) in r.iter().enumerate() {
+            for (j, col) in r.iter().enumerate() {
+                let dot: f64 = row.iter().zip(col.iter()).map(|(a, b)| a * b).sum();
                 let expected = if i == j { 1.0 } else { 0.0 };
                 prop_assert!(
                     (dot - expected).abs() < 1e-9,
@@ -186,11 +288,26 @@ proptest! {
                 );
             }
         }
+        // ... and it must be a *proper* rotation: det(R) = +1. Orthogonality
+        // alone admits a sign-flipped ENU basis (det = −1), the "ENU axis
+        // direction" gotcha the domain contract warns about. (A cyclic row
+        // permutation keeps det = +1 and is pinned by the anchored test below.)
+        let det = r[0][0] * (r[1][1] * r[2][2] - r[1][2] * r[2][1])
+            - r[0][1] * (r[1][0] * r[2][2] - r[1][2] * r[2][0])
+            + r[0][2] * (r[1][0] * r[2][1] - r[1][1] * r[2][0]);
+        prop_assert!((det - 1.0).abs() < 1e-9, "det(R) = {det}, expected +1 (lat={lat_rad})");
     }
 
     #[test]
     fn normalize_angle_lands_in_bounds(angle in -1000.0f64..1000.0) {
         let n = normalize_angle(angle);
+        // Documented contract is [0, 2π). Known 1-ulp corner (filed in the D7
+        // closeout, not fixed here per the charter): for inputs within ~4.4e-16
+        // of a multiple of 2π from *below*, `%` leaves a tiny negative
+        // remainder and `+ 2π` rounds back up to exactly 2π, e.g.
+        // `normalize_angle(-1e-17) == 2π`. Uniform draws hit that window with
+        // probability ~1e-14 per draw, so the strict bound below is what the
+        // function is contracted to and what a gross regression would violate.
         prop_assert!((0.0..2.0 * PI).contains(&n), "normalize_angle({angle}) = {n} out of [0,2π)");
         // It differs from the input by an integral number of full turns. Checked in
         // *turn* units: `fmod`-style rounding leaves `angle - n` a hair below an exact
@@ -202,45 +319,12 @@ proptest! {
     #[test]
     fn normalize_angle_symmetric_lands_in_bounds(angle in -1000.0f64..1000.0) {
         let n = normalize_angle_symmetric(angle);
-        prop_assert!((-PI..PI).contains(&n), "normalize_angle_symmetric({angle}) = {n} out of [-π,π)");
+        prop_assert!(
+            (-PI..PI).contains(&n),
+            "normalize_angle_symmetric({angle}) = {n} out of [-π,π)"
+        );
         let turns = (angle - n) / (2.0 * PI);
         prop_assert!((turns - turns.round()).abs() < 1e-6, "{angle} not congruent to {n} mod 2π");
-    }
-
-    // ==== Physics bounds =================================================
-    // The aperture integral is O(D/λ) and the hot off-axis branch is the
-    // expensive one, so the gain property runs a smaller batch (32 cases) with
-    // the feed at focus and θ ≤ 45°.
-
-    /// Gain is finite, positive, and never exceeds the ideal-aperture bound
-    /// (uniform illumination, 100% aperture efficiency) for any valid input.
-    ///
-    /// The bound is guaranteed by Cauchy–Schwarz: `|∫A e^{jψ} dA|² ≤ ∫|A|² dA ·
-    /// area`, so `D(θ,φ) = (4π/λ²)·|I|²/∫|A|² ≤ (4π/λ²)·area = G_ideal`, and
-    /// taper (≤ 1), obliquity (≤ 1) and Ruze/mesh efficiency (≤ 1) only lower
-    /// it further. A 0.5 dB slack absorbs floating-point and quadrature slop
-    /// while still catching the class of aliasing/overshoot bugs (the historic
-    /// +20 to +82 dB) D7 is chartered to screen for.
-    #[test]
-    fn gain_is_finite_and_bounded_by_ideal_aperture(
-        (config, freq) in on_axis_config(),
-        theta_deg in 0.0f64..45.0,
-        phi in 0.0f64..(2.0 * PI),
-    ) {
-        let theta = theta_deg.to_radians();
-        let result = compute_gain(theta, phi, &config, freq, &IntegrationParams::default());
-        prop_assert!(result.is_ok(), "compute_gain failed: {:?}", result.err());
-        let gain = result.unwrap().gain;
-        prop_assert!(gain.is_finite(), "gain is not finite: {gain}");
-        prop_assert!(gain > 0.0, "gain is not positive: {gain}");
-        let wavelength = wavelength_from_frequency(freq);
-        let bound = theoretical_max_gain(config.reflector.diameter, wavelength, 1.0);
-        prop_assert!(
-            gain <= bound * 1.12 + 1e-9,
-            "gain {gain} exceeds ideal-aperture bound {bound} (D={}m, f={}Hz, θ={theta} rad)",
-            config.reflector.diameter,
-            freq
-        );
     }
 
     // ==== Ruze efficiency ================================================
@@ -279,6 +363,155 @@ proptest! {
         prop_assert!(
             eta_lo >= eta_hi,
             "ruze not monotone: rms {rms_lo} -> {eta_lo} but rms {rms_hi} -> {eta_hi} (λ={wavelength})"
+        );
+    }
+}
+
+// ==== Physics bounds =====================================================
+// The aperture integral is O(D/λ) and the hot off-axis branch is the
+// expensive one, so the two gain properties run their own capped batches.
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 64, ..ProptestConfig::default() })]
+
+    /// Gain is finite and never exceeds the ideal-aperture bound (uniform
+    /// illumination, 100% aperture efficiency) for any valid input on the
+    /// symmetric branch.
+    ///
+    /// The bound is guaranteed by Cauchy–Schwarz: `|∫A e^{jψ} dA|² ≤ ∫|A|² dA ·
+    /// area`, so `D(θ,φ) = (4π/λ²)·|I|²/∫|A|² ≤ (4π/λ²)·area = G_ideal`, and
+    /// taper (≤ 1), obliquity (≤ 1) and Ruze/mesh efficiency (≤ 1) only lower
+    /// it further. A 0.5 dB slack absorbs floating-point and quadrature slop
+    /// while still catching the class of aliasing/overshoot bugs (the historic
+    /// +20 to +82 dB) D7 is chartered to screen for.
+    ///
+    /// **Why this test cannot also assert `gain > MIN_GAIN_FLOOR`:** the
+    /// electrically large dishes here (up to 28.9λ) have genuine sidelobe nulls
+    /// below −60 dBi — measured dips to exactly the floor at θ = 21°/32°/42°
+    /// for a 2.64 m @ 3.29 GHz dish, with a smooth continuous pattern — so a
+    /// value pinned at `MIN_GAIN_FLOOR` is *not* proof of a NaN there.
+    /// `gain.is_finite()` still catches +Inf, the one non-finite value the
+    /// floor lets through; the NaN/−Inf signature is asserted in the
+    /// main-lobe test, whose domain provably clears the floor.
+    #[test]
+    fn gain_is_finite_and_bounded_by_ideal_aperture(
+        (config, freq) in gain_config(),
+        theta_deg in 0.0f64..45.0,
+        phi in 0.0f64..(2.0 * PI),
+    ) {
+        let theta = theta_deg.to_radians();
+        let result = compute_gain(theta, phi, &config, freq, &IntegrationParams::default());
+        prop_assert!(result.is_ok(), "compute_gain failed: {:?}", result.err());
+        let gain = result.unwrap().gain;
+        prop_assert!(gain.is_finite(), "gain is not finite: {gain}");
+        let wavelength = wavelength_from_frequency(freq);
+        let bound = theoretical_max_gain(config.reflector.diameter, wavelength, 1.0);
+        prop_assert!(
+            gain <= bound * 1.12 + 1e-9,
+            "gain {gain} exceeds ideal-aperture bound {bound} (D={}m, f={}Hz, θ={theta} rad)",
+            config.reflector.diameter,
+            freq
+        );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 32, ..ProptestConfig::default() })]
+
+    /// The same physics bounds on the **azimuthal-mode (Jₘ) branch**: an
+    /// asymmetric-illumination feed (`asymmetry_factor != 1.0`) routes
+    /// `integrate_aperture` off the symmetric J₀ path and into the mode
+    /// expansion whose per-mode errors used to cancel into silently wrong
+    /// totals (P12) and whose φ' aliasing was +82 dB wrong with
+    /// `converged = true` (P10). A symmetric-only gain suite would go green
+    /// even with a `MODE_PHI_STEERED_MAX`-style cap reintroduced; this test is
+    /// that guard's tripwire. The bound proof is unchanged — the same
+    /// Cauchy–Schwarz argument holds on any branch — and, as in the symmetric
+    /// test, the floor-clearance claim is left to the main-lobe test because
+    /// this angular range reaches genuine nulls below the floor.
+    #[test]
+    fn mode_branch_gain_is_finite_and_bounded_by_ideal_aperture(
+        (config, freq) in asymmetric_config(),
+        theta_deg in 0.0f64..30.0,
+        phi in 0.0f64..(2.0 * PI),
+    ) {
+        let theta = theta_deg.to_radians();
+        let result = compute_gain(theta, phi, &config, freq, &IntegrationParams::default());
+        prop_assert!(result.is_ok(), "compute_gain failed: {:?}", result.err());
+        let gain = result.unwrap().gain;
+        prop_assert!(gain.is_finite(), "gain is not finite: {gain}");
+        let wavelength = wavelength_from_frequency(freq);
+        let bound = theoretical_max_gain(config.reflector.diameter, wavelength, 1.0);
+        prop_assert!(
+            gain <= bound * 1.12 + 1e-9,
+            "gain {gain} exceeds ideal-aperture bound {bound} (D={}m, f={}Hz, θ={theta} rad)",
+            config.reflector.diameter,
+            freq
+        );
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 64, ..ProptestConfig::default() })]
+
+    /// The NaN/−Inf catcher. `compute_gain` unconditionally ends in
+    /// `apply_gain_floor` (edge_cases.rs), which clamps to
+    /// `MIN_GAIN_FLOOR = 1e-6` via `f64::max` — and `f64::max` ignores NaN, so
+    /// a NaN or −Inf out of the integrator comes back as *exactly* 1e-6, while
+    /// only +Inf survives to fail `is_finite`. The only place through the
+    /// public API where a floored value is unambiguous evidence of a non-finite
+    /// computation is where genuine physics provably clears the floor: the
+    /// broad-beamed small dishes of [`main_lobe_case`] at θ ≤ 15° (gain ≥
+    /// ~−20 dBi, three orders above the floor). NaN/−Inf collapse lands at
+    /// exactly 1e-6 and fails the strict `>`. This domain also covers both
+    /// integrator branches via `prop_oneof!`.
+    #[test]
+    fn main_lobe_gain_clears_the_numerical_floor(
+        (config, freq) in main_lobe_case(),
+        theta_deg in 0.0f64..15.0,
+        phi in 0.0f64..(2.0 * PI),
+    ) {
+        let theta = theta_deg.to_radians();
+        let result = compute_gain(theta, phi, &config, freq, &IntegrationParams::default());
+        prop_assert!(result.is_ok(), "compute_gain failed: {:?}", result.err());
+        let gain = result.unwrap().gain;
+        prop_assert!(gain.is_finite(), "gain is not finite: {gain}");
+        prop_assert!(
+            gain > MIN_GAIN_FLOOR,
+            "gain pinned at the numerical floor ({MIN_GAIN_FLOOR}): NaN/−Inf collapse lands here"
+        );
+        // The bound must hold here too — the main lobe still obeys it, and a
+        // mode-branch overshoot at a moderate angle is caught even at small size.
+        let wavelength = wavelength_from_frequency(freq);
+        let bound = theoretical_max_gain(config.reflector.diameter, wavelength, 1.0);
+        prop_assert!(
+            gain <= bound * 1.12 + 1e-9,
+            "gain {gain} exceeds ideal-aperture bound {bound} (D={}m, f={}Hz, θ={theta} rad)",
+            config.reflector.diameter,
+            freq
+        );
+    }
+}
+
+/// At the equator on the prime meridian, ECEF +X points through the observer,
+/// so the ENU basis must be East=+Y, North=+Z, Up=+X. This pins the *cyclic
+/// orientation* of the basis, which `R·Rᵀ = I` and `det(R) = +1` cannot: a
+/// cyclic row permutation (East/North/Up relabelled) satisfies both while
+/// pointing the wrong way — the "ENU axis direction" gotcha the domain
+/// contract warns about.
+#[test]
+fn enu_basis_orientation_is_anchored() {
+    let r = ecef_to_enu_rotation(0.0, 0.0);
+    assert_row_near(&r[0], [0.0, 1.0, 0.0], "East");
+    assert_row_near(&r[1], [0.0, 0.0, 1.0], "North");
+    assert_row_near(&r[2], [1.0, 0.0, 0.0], "Up");
+}
+
+fn assert_row_near(row: &[f64; 3], expected: [f64; 3], name: &str) {
+    for (a, b) in row.iter().zip(expected.iter()) {
+        assert!(
+            (a - b).abs() < 1e-12,
+            "ENU {name} row {row:?} != expected {expected:?} at lat=0, lon=0"
         );
     }
 }

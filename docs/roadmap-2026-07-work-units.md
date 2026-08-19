@@ -3717,28 +3717,53 @@ troubleshooting now distinguishes the two rejection messages and adds the CRC on
 
 > **Closeout 2026-08-18.** Implemented on branch `d7-property-tests`. `proptest` is a
 > dev-dependency of `antenna-core`; the properties live in
-> `antenna-core/tests/property_tests.rs` (11 `proptest!` tests, suite runs in ~0.19 s).
+> `antenna-core/tests/property_tests.rs` (14 `proptest!` tests + 1 deterministic
+> anchor test, suite runs in ~0.5 s).
 >
 > Every generator is constrained to the *validated physical domain*: reflectors are built
-> through `ReflectorGeometry::builder()` (f/D ∈ [0.25, 0.9]), frequency stays inside
-> [100 MHz, 8.4 GHz] on the gain property, and the Ruze generators bound rms relative to
-> the wavelength so the argument stays within f64's representable `exp` range. The Ruze
-> strict `∈ (0,1]` claim is scoped to that representable physical regime; a separate
-> broad test asserts `[0,1]` over the whole domain, recording that extreme rms/λ
+> through `ReflectorGeometry::builder()` (f/D inside [0.2, 1.0]), frequency stays inside
+> the model band, and the gain/Ruze generators derive surface-rms **as a fraction of λ**
+> so Ruze loss stays representable and the returned gain provably clears `MIN_GAIN_FLOOR`.
+> The Ruze strict `∈ (0,1]` claim is scoped to that representable physical regime; a
+> separate broad test asserts `[0,1]` over the whole domain, recording that extreme rms/λ
 > legitimately underflows to exactly `0.0`.
 >
-> Properties: ECEF↔Geodetic, aperture-Cartesian, far-field-direction and EClock/E-cone
-> feed round-trips within tolerance; ENU rotation orthogonality; `normalize_angle` /
-> `normalize_angle_symmetric` range + congruence; gain finite, positive and ≤ the
-> ideal-aperture bound (Cauchy–Schwarz guarantee, 0.5 dB slack); Ruze ∈ (0,1] and
-> monotone-non-increasing in surface RMS.
+> Properties: ECEF↔Geodetic, aperture-Cartesian, far-field-direction and EClock/E-cone feed
+> round-trips within tolerance; a dedicated polar-cap round-trip (exercises
+> `ecef_to_geodetic`'s z-based altitude branch, which uniform latitude draws hit with
+> probability ~3e-5); ENU rotation orthogonality **plus det(R) = +1 and an anchored
+> East=+Y/North=+Z/Up=+X check at the equator** (catches sign-flipped or cyclically
+> permuted bases — the domain-contract ENU gotcha); `normalize_angle` /
+> `normalize_angle_symmetric` range + congruence; **three** gain properties; Ruze ∈ (0,1]
+> and monotone-non-increasing in surface RMS.
 >
-> Two early failures were both **test-authoring** bugs, not model findings — the model
-> output was correct in both cases: (1) a `rem_euclid` congruence check that wrapped a
-> tiny negative offset to ≈2π (fixed by comparing in turn units `(angle−n)/(2π)`); (2) a
-> Ruze generator that ranged into an out-of-band frequency where `exp(-arg²)` underflows.
-> Both are recorded here rather than papered over, per the "property failures are findings"
-> rule.
+> **The gain suite is tripartite on purpose.** (1) `gain_is_finite_and_bounded*` on the
+> symmetric branch and (2) a same-bounds test on the **azimuthal-mode (Jₘ) branch** (via
+> `asymmetry_factor != 1.0`) assert finiteness (`+Inf` is the only non-finite that
+> `apply_gain_floor` lets through) and the ideal-aperture bound (Cauchy–Schwarz, 0.5 dB
+> slack). The mode-branch test exists because a symmetric-only suite would go green even
+> with a `MODE_PHI_STEERED_MAX`-style cap reintroduced — every historic overshoot defect
+> (P12 7.08 dB, P10 +82 dB φ' aliasing) was on that branch, and it is the one five enabled
+> feeds run. (3) `main_lobe_gain_clears_the_numerical_floor` is the NaN catcher: it asserts
+> `gain > MIN_GAIN_FLOOR` on small low-frequency dishes at θ ≤ 15° where genuine physics
+> clears the floor by three orders, because `gain.is_finite()` cannot see NaN/−Inf — the
+> unconditional `apply_gain_floor` collapses both to *exactly* 1e-6 via `f64::max`.
+>
+> Three property-authoring findings, all recorded rather than papered over: (1) a
+> `rem_euclid` congruence check that wrapped a tiny negative offset to ≈2π (fixed by
+> comparing in turn units); (2) Ruze underflow from an out-of-band frequency; and (3), the
+> one that surfaced on the first draw, **electrically large dishes have genuine sidelobe
+> nulls at −60 dBi** (measured θ = 21°/32°/42° for a 2.64 m @ 3.29 GHz dish, a smooth
+> continuous pattern), so the NaN-catching `> MIN_GAIN_FLOOR` assertion *cannot* live on
+> the full-angle tests — a real null and a NaN are numerically identical at the floor. This
+> also de-confirmed the earlier claim that the first-pass `gain > 0.0 && is_finite` check
+> was meaningful: after the floor both are trivially true for every input.
+>
+> The duplicate `normalize_angle` boundary finding stands: for inputs within ~1 ulp of a
+> negative-multiple-of-2π wrap, `normalize_angle` returns exactly 2π (violating its [0, 2π)
+> docstring) via `%` rounding — a harmless, un-callbacked edge, filed rather than fixed per
+> the charter. Per-test `ProptestConfig { cases }` caps keep the suite ~0.5 s: 64 / 32 / 64
+> for the three gain batches, full 256 for the cheap transforms.
 >
 > CLAUDE.md's Testing Philosophy annotation updated `"planned — see roadmap unit D7"` →
 > **implemented**, naming the file and the validated-domain-generator rule.
