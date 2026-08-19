@@ -19,7 +19,7 @@ Sprints 1–7 of 8 are complete (see `docs/implementation-plan.md`): physics eng
 # Build both service and calibration tool
 cargo build --release
 
-# Run all tests — dev inner loop (1052 tests, ~24 s, measured 2026-08-16 on an
+# Run all tests — dev inner loop (1068 tests, ~24 s, measured 2026-08-18 on an
 # idle 8-core machine). The default nextest profile excludes the slow tier: three
 # heavy physics pins + the two calibrate full-mode e2e binaries. See
 # .config/nextest.toml and roadmap D18. (P10-perf returned six pins to this tier
@@ -42,7 +42,7 @@ cargo build --release
 cargo nextest run --workspace
 
 # Run BOTH tiers — what scripts/check.sh and CI run.
-# 1082 tests, ~302 s, measured 2026-08-17 on the same idle 8-core machine. `calibrate`
+# 1098 tests, ~283 s, measured 2026-08-18 on the same idle 8-core machine. `calibrate`
 # is the dominant member and its own tail (`cli_full_mode_e2e`) sets this figure;
 # D18 task 3 halved it on 2026-08-17 by parallelising calibrate's two per-point
 # physics sweeps, 510.6 s -> 253.8 s for that package, with no assertion changed and
@@ -336,7 +336,12 @@ The `calibrate` tool processes measurement data:
 
 - Unit tests for all physics functions (with known reference values)
 - Integration tests with realistic calibration data
-- Property-based tests for coordinate transforms (round-trip accuracy) — *planned; not yet implemented, see roadmap unit D7*
+- Property-based tests for coordinate transforms (round-trip accuracy) and physics
+  bounds — **implemented** (roadmap D7): `proptest` is a dev-dependency of `antenna-core`
+  and the properties live in `antenna-core/tests/property_tests.rs`. Generators are
+  constrained to the *validated physical domain* (they build reflectors through the
+  `ReflectorGeometry` builder, keep frequency inside [100, 50,000] MHz, etc.) so they
+  exercise the physics rather than rediscovering inputs upstream validation rejects.
 - Benchmarks for performance-critical paths (aperture integration is hottest)
 - Target: >80% test coverage
 
