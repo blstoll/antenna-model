@@ -19,7 +19,7 @@ Sprints 1–7 of 8 are complete (see `docs/implementation-plan.md`): physics eng
 # Build both service and calibration tool
 cargo build --release
 
-# Run all tests — dev inner loop (1068 tests, ~24 s, measured 2026-08-18 on an
+# Run all tests — dev inner loop (1071 tests, ~24 s, measured 2026-08-20 on an
 # idle 8-core machine). The default nextest profile excludes the slow tier: three
 # heavy physics pins + the two calibrate full-mode e2e binaries. See
 # .config/nextest.toml and roadmap D18. (P10-perf returned six pins to this tier
@@ -42,7 +42,7 @@ cargo build --release
 cargo nextest run --workspace
 
 # Run BOTH tiers — what scripts/check.sh and CI run.
-# 1098 tests, ~283 s, measured 2026-08-18 on the same idle 8-core machine. `calibrate`
+# 1101 tests, ~280 s, measured 2026-08-20 on the same idle 8-core machine. `calibrate`
 # is the dominant member and its own tail (`cli_full_mode_e2e`) sets this figure;
 # D18 task 3 halved it on 2026-08-17 by parallelising calibrate's two per-point
 # physics sweeps, 510.6 s -> 253.8 s for that package, with no assertion changed and
@@ -97,8 +97,14 @@ cargo doc --open
 
 # Run all checks exactly as CI does (fmt --check, clippy --workspace
 # --all-targets -D warnings, full workspace tests, doctests, cargo audit) —
-# single entrypoint. Sets RUST_MIN_STACK to match CI; the ad-hoc one-liners
-# above do not, and calibrate's 3D→4D round-trip overflows the default stack.
+# single entrypoint. It no longer sets RUST_MIN_STACK, and neither does CI:
+# roadmap D3 retired that 16 MiB workaround on 2026-08-20 after measuring the path
+# it was blamed on at 24 KiB. The Linux overflow it was added for was real, but the
+# cause it named is disproven (that evaluator was already iterative when the
+# workaround was written); the replacement explanation — the fit's OpenBLAS solve,
+# dropped five days later — is a hypothesis nobody has reproduced. The property is
+# now pinned on every platform by `the_round_trip_fits_in_a_small_thread_stack`,
+# which sets its own 512 KiB stack.
 #
 # It also runs two PACKAGE-scoped checks that no workspace-scoped command can
 # perform, because a workspace build unifies features ON across members and so

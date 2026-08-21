@@ -3437,7 +3437,118 @@ troubleshooting now distinguishes the two rejection messages and adds the CRC on
   `docs/domain-contract.md`, "Resolved by design 2026-07-28 (C12)".
 - **Depends on:** D1.
 
-### D3 — Round-trip test for the 3D→4D correction-surface bridge — Effort: M
+### D3 — Round-trip test for the 3D→4D correction-surface bridge — Effort: M — ✅ **DONE 2026-08-20**
+
+> **Closeout 2026-08-20. Test-only, per the unit's gotcha: no production `.rs` file changed.**
+> Both halves came out differently from how the unit describes them, and the second one was
+> a wrong diagnosis rather than an unfinished job.
+>
+> **Half 1 — the test.** More of the exit criterion already existed than the unit's 2026-07-09
+> follow-up note says. That note points at the *in-crate* unit test
+> (`artifact_export::tests::test_round_trip_matches_3d_evaluation`), which never crosses the
+> writer or the loader; but `calibrate/tests/artifact_export_integration_test.rs` has since
+> carried the whole served leg — fit → export → `write_calibration_artifact` → service
+> `load_calibration_artifact` → `evaluate_correction` — in
+> `test_full_export_correction_evaluates_against_3d`. So "fits → exports → loads via the
+> loader → evaluates" was done. **The real gap was the combination**: that test samples
+> interior points *by design*, and the in-crate test samples the domain bounds but stays
+> in-process, so "a domain edge, evaluated by the service's own interpolator, on an artifact
+> that came off disk" was covered by neither. That combination is the one with history —
+> **D15** was an upper-edge collapse at a domain maximum, and the 3D and 4D evaluators are
+> different code whose endpoint conventions can diverge with no interior sample noticing.
+> Three tests added:
+> 1. `the_round_trip_agrees_at_every_axis_boundary_after_a_service_load` — the probe grid is
+>    **derived from the served knot vectors**, not hand-listed: every distinct knot on each
+>    axis plus a midpoint per span, crossed over all four axes (1225 points). That reaches the
+>    clamped ends *and* the interior knots, which matter on their own account — the two
+>    implementations guard a vanishing Cox-de Boor denominator at **different thresholds**
+>    (`1e-10` in `bspline_basis`, `1e-14` in the interpolator), and a knot is exactly where
+>    that denominator gets small. Deriving it also means the grid follows the fixture instead
+>    of going stale when the knot counts change; the probe counts are asserted so a collapsed
+>    axis cannot shrink the test's reach unnoticed.
+>    Max error **1.8e-15** over 1225 samples. It also asserts `!extrapolated` at the bounds (a point *on* a
+>    bound is in the domain; a spurious `Extrapolated` warning is a served-output defect an
+>    agreement check alone cannot see) and carries a vacuity guard, because an agreement
+>    between two zeros — the exact shape of D15's collapse — passes just as happily.
+> 2. `a_minimal_frequency_axis_round_trips_and_a_degenerate_one_is_refused` — see the
+>    **exit-criterion amendment** below; this is the single-frequency case, and it resolves
+>    to a pair of refusals rather than a round trip. What full mode *can* express is the
+>    minimum coefficient count — zero interior knots, 4·6·6 = 144 rather than 180 — which
+>    exercises the `to_bspline_4d` reindex at a stride no other test uses. Sizing that fixture
+>    found its own trap: the obvious single-frequency slice (48 rows) is refused by the
+>    125-point pre-check *first*, a refusal that says nothing about degenerate axes, so the
+>    grid is densified to 192 points to make the intended check the one under test.
+> 3. `the_round_trip_fits_in_a_small_thread_stack` — half 2's replacement guard.
+>
+> **Exit-criterion amendment — "single-frequency" names a case no producer can emit.**
+> **[RATIFIED — maintainer, 2026-08-20:** *"Agreed on the single-frequency amendment, there's
+> no need to build a synthetic artifact if we can't produce one."]* It narrows a stated
+> criterion, which is why it was put up for a decision rather than absorbed. **Neither**
+> producer can build a correction surface over one frequency: full mode's
+> `generate_knot_vector` refuses zero range on an axis, and boresight mode's
+> `fit_frequency_correction` requires **≥ 4** frequencies for its cubic B-spline and returns
+> `InsufficientData` below that, writing an artifact with no correction surface at all. The
+> criterion is therefore met by pinning **both refusals** — the full-mode one and, added
+> after review, the boresight one with a positive control at its 4-point minimum — rather
+> than by a round trip that cannot be constructed from any producer.
+>
+> **A first pass at this got the reason wrong and is worth recording**, because the misreading
+> is easy: it claimed boresight mode *is* the single-frequency artifact, "collapsing the
+> frequency axis with `flat_axis`", and pointed at `cli_boresight_mode_e2e.rs` as existing
+> coverage. Boresight collapses **azimuth, elevation and temperature** with `flat_axis`; it
+> *fits* frequency like any other axis, from at least four points. The claim was checked and
+> corrected during review, and the boresight refusal — a different mechanism in different code,
+> so not covered by the full-mode assertion — is now asserted instead of assumed.
+>
+> **What the two refusals protect** is the part worth carrying forward. A degenerate axis
+> (`order` equal knots) **passes `BSplineModel4D::validate`**, which checks knot-vector *length*
+> and never span width, and then evaluates to a **zero correction at every frequency**: the
+> evaluable span `[knots[order-1], knots[len-order]]` is empty, every Cox-de Boor denominator
+> vanishes, and every basis value with it. An artifact that loads clean, validates, reports
+> healthy and silently applies nothing is the **D13/D26 signature**. This is not filed as a
+> defect because nothing can produce it — the two refusals above are precisely what keep it
+> unreachable, which is also why `flat_axis` exists rather than the obvious degenerate
+> construction (see its doc comment). It is filed here so that anyone relaxing either refusal
+> knows what is on the other side of it.
+>
+> **Half 2 — the `RUST_MIN_STACK=16777216` workaround is retired, and the diagnosis behind it
+> was wrong.** The unit says to "investigate the recursion depth in the evaluation path and
+> make it iterative / bounded". That work cannot be done, because **there is no such
+> recursion**: `correction_interpolator::evaluate_basis_functions` was already an iterative
+> Cox-de Boor loop *at `4b439c0` itself* — checked against that commit, not inferred — and the
+> one genuine recursion, `correction_surface::bspline_basis`, is depth-bounded by
+> `spline_order`, so its worst case is 2⁴ tiny frames.
+>
+> **What the measurements say (2026-08-20, macOS aarch64, debug).** The complete round trip
+> runs in a **24 KiB** thread stack. The whole `calibrate` lib suite passes at
+> `RUST_MIN_STACK=65536` — 32× below libtest's default and 256× below the workaround. The
+> variable is not vestigial for lack of reach: both harnesses run a test on a worker thread
+> named after it (verified for `cargo test` and for `cargo nextest`, which matters because
+> D18 moved the gate onto nextest after the workaround was written), so it does still apply.
+>
+> **The mechanism, as far as the evidence goes.** The test that crashed on Linux *fits* a
+> surface, and at `4b439c0` the fit solved its normal equations through
+> `ndarray-linalg`'s `solve_into` — LAPACK via the `openblas-system` backend. That dependency
+> was deleted five days later in `62fc3e5` ("Remove OpenBLAS dependency: sparse normal
+> equations + Cholesky"), replaced by the in-house Cholesky on heap-allocated `ndarray`
+> storage. A Linux-only overflow inside a system LAPACK solve, in the one test that calls it,
+> disappearing when the solve is replaced, fits every fact; it is **not proven**, since
+> proving it needs a Linux run of the July tree, and the July tree does not build here without
+> system OpenBLAS. What *is* proven is the narrower and sufficient claim: the named cause is
+> false, and the path costs 24 KiB today. If the hypothesis is right the workaround has been
+> vestigial since 2026-07-14; what is certain without it is only that it is vestigial **now**.
+> Either way it was carried for weeks by green runs that could not distinguish "needed" from
+> "harmless" — which is the durable lesson here, and the reason the replacement is a test that
+> can fail rather than a variable that cannot.
+>
+> **What replaces it.** The guard test sets its **own** 512 KiB stack — 21× the measured floor
+> — rather than inheriting the harness's, so it holds whatever `RUST_MIN_STACK` is or is not
+> set to, and a regression fails on every platform locally instead of surfacing as an abort in
+> Linux CI. It deliberately has **no negative control**: a stack overflow aborts the process
+> and cannot be caught, so there is no way to ask a process to survive one. The thread is
+> named `d3-stack-guard` so the runtime's `thread '<name>' has overflowed its stack` line
+> points at the guard — the misattribution that sent this unit hunting a recursion that never
+> existed is precisely what an unnamed thread buys you.
 
 - **Entrance / read first:** `calibrate/src/artifact_export.rs` (`to_bspline_4d` —
   dimension remap + coefficient reindex + synthetic flat temperature axis),
@@ -3446,6 +3557,13 @@ troubleshooting now distinguishes the two rejection messages and adds the CRC on
 - **Exit criteria:** a test that fits a small synthetic surface in calibrate → exports →
   loads via the antenna-model loader → evaluates at sample points → asserts agreement with
   the pre-export surface within tolerance; edge tests (single-frequency, boundary knots).
+  - ✅ Round trip through the loader — pre-existing
+    (`test_full_export_correction_evaluates_against_3d`), interior points.
+  - ✅ **Boundary knots** — `the_round_trip_agrees_at_every_axis_boundary_after_a_service_load`
+    (2026-08-20), the combination neither existing test had.
+  - ✅ **Single-frequency** — **amended and ratified** (maintainer, 2026-08-20): unreachable by
+    construction, so the criterion is met by pinning both producers' refusals rather than by a
+    synthetic artifact no producer emits. See the amendment in the closeout above.
 - **Gotchas:** **test-only unit.** If a bug falls out, STOP and file it as a new
   correctness item — no drive-by fixes.
 - **Follow-up flagged 2026-07-09 (Phase 0 / G1):** this test already exists as
@@ -3459,6 +3577,14 @@ troubleshooting now distinguishes the two rejection messages and adds the CRC on
   evaluator) and make it iterative / bounded so the workaround can be removed.** This is a
   robustness item, not a correctness bug (the numeric result is right: max round-trip error
   ~4e-15).
+
+  *(Amended by the closeout above, 2026-08-20. The bolded instruction cannot be carried out
+  and should not be attempted by a future reader: there is no recursion to make iterative.
+  The 4D evaluator was already an iterative Cox-de Boor loop at `4b439c0`, and
+  `bspline_basis`'s recursion is depth-bounded by `spline_order`. The crashing test's fit went
+  through `ndarray-linalg`/OpenBLAS, which left the tree five days later in `62fc3e5`. Kept
+  rather than deleted because the **symptom** was real — a Linux-only SIGABRT — and only its
+  attribution was wrong.)*
 - **Depends on:** D1, D2.
 
 ### D4 `[DECISION]` — Crate split: extract `antenna-core` — Effort: L

@@ -12,11 +12,26 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # libtest runs each test on a worker thread with a ~2 MiB default stack. The
-  # calibrate 3D→4D correction-surface round-trip evaluation is stack-hungry and
-  # overflows that on the Linux debug build (it passes on macOS). Give test
-  # threads more headroom. (Making the evaluation iterative is roadmap unit D3.)
-  RUST_MIN_STACK: "16777216"
+  # RUST_MIN_STACK=16777216 lived here from 2026-07-09 (4b439c0) until roadmap D3
+  # retired it. It was added because the calibrate lib suite aborted with a stack
+  # overflow on the Linux debug build, attributed to "the 3D→4D correction-surface
+  # round-trip evaluation" being stack-hungry. That attribution was wrong: the 4D
+  # evaluator was already an iterative Cox-de Boor loop at 4b439c0 itself, and the
+  # only recursion on the path is depth-bounded by spline_order.
+  #
+  # What replaced that attribution is a hypothesis, not a proof, and is recorded as one:
+  # the crashing test fitted a surface, and at that commit the fit solved its normal
+  # equations through ndarray-linalg/OpenBLAS (`solve_into`), a dependency deleted five
+  # days later in 62fc3e5. That fits every known fact but was never reproduced — doing so
+  # needs a Linux build of the July tree, which requires system OpenBLAS. The removal here
+  # does not rest on it; it rests on the measurement below.
+  #
+  # The path now runs in a 24 KiB thread stack (measured 2026-08-20), and
+  # `the_round_trip_fits_in_a_small_thread_stack` in
+  # calibrate/tests/artifact_export_integration_test.rs pins it at 512 KiB on every
+  # platform, so a regression fails locally instead of only here. Do not restore this
+  # variable without first checking what that test reports — a green run with it set
+  # proves nothing, which is how it stayed for a month after it stopped mattering.
 
 jobs:
   fmt:
