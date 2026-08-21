@@ -2559,6 +2559,15 @@ beforehand catches C8's misses, while one added afterwards only ratifies whateve
   `partial-calibration-setup-summary.md`, `kubernetes-deployment.md`) but they are
   illustrative and knowingly aspirational in places — auditing them is **D5**'s job. Adding
   a file to `CONTRACT_DOCS` is one line, so D5 should ratchet them in as it makes each true.
+  **Outcome (D5, 2026-08-19): none ratcheted, and the condition is why.** D5 audited
+  `partial-calibration-design.md`'s two payloads and did *not* make them true — they
+  diverge from the shipped schema in ways only a rewrite closes (`warnings` as strings vs
+  typed `ApiWarning`; `feed_id`/`name`/`position` vs `id`/`design_feed_offset_m`/
+  `frequency_range_mhz`), and rewriting a design doc's illustrations into exact schema
+  instances would create a second, unowned copy of `api-documentation.md` — this table's
+  own failure mode. Both blocks are now **marked illustrative**, naming those divergences
+  and pointing at `api-documentation.md` / the generated `openapi.yaml`. The ratchet stays
+  available for any file a later unit genuinely makes true.
 - **Verified by injection:** re-introducing the historical `{"w": …}` form fails
   `every_documented_example_deserializes` at the exact line; adding an unmarked
   `antenna_id` block fails `every_api_example_block_is_marked`. Both were confirmed to fail
@@ -3547,7 +3556,176 @@ troubleshooting now distinguishes the two rejection messages and adds the CRC on
   restoring `antenna-model` as a normal dependency makes it fail, listing
   `utoipa`/`dashmap`/`h3o`/`poem`; reverting makes it pass.
 
-### D5 — Design-docs truth sweep — Effort: M
+### D5 — Design-docs truth sweep — Effort: M — ✅ **DONE 2026-08-19**
+
+> **Closeout 2026-08-19.** Docs-only, as specified: no `.rs` file changed. All four exit
+> criteria met, plus the inherited D16 correction.
+>
+> **Criterion 2 — the design doc is now marked section by section.** Two labels, applied
+> from a banner at the top of `docs/antenna-model-design-doc.md`: **Corrected** (text
+> rewritten to describe the code, with the superseded design kept and the reason it
+> changed) and **Historical — not implemented** (never built, or built and removed; kept
+> for provenance with an explicit do-not-implement-from-this note). **17 corrections and
+> 10 historical markers**, spanning every one of the document's five sections. **The two
+> worth knowing are the ones a reader could have implemented from:**
+>
+> 1. **§2.2 feed-displacement phase.** The doc gave the truncated series
+>    `k·δ·[ρ/2f]·[2cosα − (ρ/2f)cos(2α−φ')]`. The code computes the **exact** path-length
+>    difference between the displaced and ideal feed positions. This is not a cosmetic
+>    difference: the exactness is precisely why **P2** could delete the
+>    `HigherOrderAberrations` mode, because layering heuristic Seidel terms on an already
+>    exact phase double-counts. A reader implementing from the old text would have
+>    reintroduced P2's defect from the design doc.
+> 2. **§3.1 near-boresight / far-feed.** Described a `DirectPathInterference` mode deleted
+>    as physically unsound in `c850165`. Now struck through with the reason it was unsound
+>    (an incoherent sum with no defensible amplitude for either term), not merely marked
+>    absent.
+>
+> The per-point **Zernike surface** claim is marked in both places it appears — §2.2
+> (the integrand passes `surface_error = 0.0`; error is statistical via Ruze) and §4.4
+> (no artifact carries aberration coefficients; the last Zernike code went in `a6dac0c`).
+> Also corrected, all against the code: the removed coordinate auto-detection (§1.3), the
+> heatmap/H3 endpoint split (§1.3), the GPU requirement that was never built (§1.1), the
+> mesh model (§2.4 — the design's `T = 1/(1+(λ₀/λ)²)` cutoff form is the *inverted,
+> discontinuous* one that finding 4 was about; the shipped model is Wait/Marcuvitz with no
+> cutoff), the illumination edge taper (§2.3 — the `(1+cosψ)/2` space-loss factor is
+> missing from the design formula, and "q ≈ 6-10 for 10 dB edge taper" is wrong in both
+> halves: q=8 at f/D=0.5 gives ≈ −37.4 dB), the 0.3f→0.5f mode threshold (§3.1), Kaiser
+> windowing which does not exist (§3.2), the full-calibration workflow (§4.3, replaced with
+> the six shipped steps), the correction surface being 4D not a 3D lookup table (§4.4), and
+> Sprint 7's status, still marked "📋 PLANNED" (§5.4).
+>
+> **Criterion 3 came out the good way — the feed-steering sign section agrees with the
+> code, sign for sign**, so a "verified 2026-08-19 vs code" note was added rather than a
+> new decision item. Checked against
+> `coordinates.rs::EClockConeCoordinates::to_feed_displacement_with_bdf`: magnitude
+> `2f·tan(cone/2)/bdf`, negated `cos`/`sin` of the clock angle (the +180° flip), axial term
+> `−displacement²/(4f)`, and the inverse `from_feed_position` consistent at
+> `atan2(−y, −x)`. The note records the history that makes the flip load-bearing (before
+> `83193a0` a beam aimed at az=0°/el=2° peaked at az=180°, leaving −17.5 dBi in the
+> requested direction) and two clarifications that are **not** disagreements: `z_feed` is
+> applied unconditionally rather than "for large displacements" — it is `O(δ²)`, which is
+> what the hedge meant — and `bdf` is a parameter, `1.0` on the geometric path.
+>
+> **Criterion 4 — the 2026-06-10 review is fully closed**, and the ledger says so with
+> evidence. All 15 numbered findings plus all 8 medium bullets are mapped to a resolving
+> commit or roadmap unit. The medium bullets **had no numbers**; this unit assigned M1–M8
+> and said so in the doc, so the ledger's rows are addressable. Verified by reading the
+> cited code, not the commit messages — which is how the two non-trivial rows were found:
+>
+> - **Finding 5** (azimuth conventions) is resolved *with a residual that is now a declared
+>   contract*: normalization landed in `43a74af` and the attitude-driven azimuth zero in
+>   `24e384b`, but with no attitude supplied the zero still comes from the Earth-Z/East
+>   cross-product heuristic and is still discontinuous near boresight ∥ Earth-Z. The
+>   difference from 2026-06 is that `docs/domain-contract.md` now states it.
+> - **M5** (cache staleness) has **no live premise**. The service loads calibration at
+>   startup and has no runtime reload path at all; `GainCache::invalidate` exists with zero
+>   production callers. The *other* half of that bullet — H3 cache hits dropping warnings —
+>   is genuinely fixed, and structurally: `h3_link_budget` pushes convergence, correction
+>   and large-offset warnings **outside** the cache closure.
+>
+> The ledger also carries the warning that the finding bodies' file:line references are
+> from 2026-06-10 and mostly no longer resolve, D4 having moved the physics engine to
+> `antenna-core/`. They are a record of what was wrong, not a map of the tree.
+>
+> **The inherited "differential evolution" correction was wider than filed.** The filing
+> named eight occurrences in five files and was right about all eight — but missed
+> `docs/implementation-plan.md`, which carries eight more. Four of those are claims about
+> the shipped tool (the Sprint 4 status-table row, the Sprint 4 scope list, the module map,
+> and the delivered-functionality checklist) and are corrected; the other four are left as
+> written and the reasoning is recorded in a footnote on that file: one is already the
+> *correct* deviation note ("uses Nelder-Mead … instead of differential evolution"), and
+> the remaining three are a risk-register row, a "Before Sprint 4" prerequisite and a
+> reading list — records of what was expected, not claims about what was built. Thirteen
+> claim-occurrences across seven files, corrected (the seventh found on review — see
+> below).
+>
+> **Two adjacent falsehoods fell out of the same sweep**, because checking the optimizer
+> meant reading `parameter_tuner.rs`:
+>
+> - **The tuner does not tune `q_factor`.** `TuningMode` covers surface RMS, mesh spacing
+>   and wire diameter — at most three parameters. `q_factor`, `phase_center_offset` and
+>   `asymmetry_factor` are **declared** design properties, which is D23's whole point:
+>   boresight data carries no information about horn geometry. Four documents said
+>   otherwise, including the boresight workflow's explicit `Optimize:` list.
+> - **The shipped q-factors are 1.14–3.15, not "6-10".** Three places in the design doc
+>   quoted a 6–10 band (§2.3's rule of thumb, §4.4's "Q-factor: 6-10 range (optimized)",
+>   and the uncalibrated artifact's "e.g. 8.0 for horn feed"). Every `q_factor` in
+>   `calibration_data/antennas.yaml` is 1.14, 1.39, 2.04 or 3.15 — derived per antenna
+>   from `q_factor_from_taper` for a ~−11 dB edge taper at *that antenna's* f/D. They were
+>   8–11 until the illumination model gained its `(1+cosψ)/2` space-loss factor, which is
+>   the same correction (finding 13) that makes §2.3's "10 dB edge taper" wrong. One
+>   defect, quoted in four places, three of them stale in the same direction.
+> - **The objective is single-valued.** It is a weighted RMSE with a 3× weight on points
+>   inside 3 beamwidths, not the "multi-objective: minimize main lobe + first sidelobe
+>   errors" the sprints-1-4 summary described, and a simplex has no "population size: 50,
+>   generations: 100-500" either.
+>
+> **Two stale module maps marked, not rewritten** (`implementation-plan.md` and
+> `implementation-plan-sprints-1-4-summary.md`): both predate D4's crate split, both list
+> `model/numerical_stability.rs` which `a6dac0c` deleted, and both name
+> `calibrate/src/serializer.rs` (renamed by D1) or `main.rs::write_antc_artifact` (moved
+> into the library by D2/D27). They are historical sprint records, so each got a banner
+> naming every stale entry and pointing at `architecture.md` §11, which is the one module
+> map checked against `ls`.
+>
+> **Not done, and the condition is the reason — C14's `CONTRACT_DOCS` ratchet.** C14 says
+> D5 should ratchet doc files into `doc_examples_deserialize.rs` *"as it makes each true"*.
+> These files were not made true. `partial-calibration-design.md`'s two API payloads
+> diverge from the shipped schema in ways only a rewrite closes: `warnings` is an array of
+> strings where the API returns typed `ApiWarning` objects (C8 stage 3), and feed entries
+> use `feed_id`/`name`/`position` where `FeedInfo` spells them
+> `id`/`design_feed_offset_m`/`frequency_range_mhz` (C8 stage 1). Rewriting a *design*
+> document's illustrations into exact schema instances would make it a second, unowned copy
+> of `api-documentation.md` — the C14 table's own failure mode. Both blocks are instead
+> **marked illustrative**, with those two divergences named and the reader pointed at
+> `api-documentation.md` / the generated `openapi.yaml`. `CONTRACT_DOCS` is unchanged at
+> `["docs/api-documentation.md", "README.md"]`.
+>
+> **Review pass, 2026-08-20 — three findings, all upheld, one of them a wrong number.**
+> The reviewer re-derived the sweep's claims from the code and history rather than from the
+> commit messages; the optimizer, physics formulas, constants, all 32 cited commit hashes,
+> the marker counts and the ledger's mappings all held. What did not:
+>
+> 1. **A dB band quoted instead of computed — and quoted from the wrong place.** The §2.3
+>    correction ended "the useful q = 6–12 band spans roughly −25 to −45 dB". At the
+>    f/D = 0.5 anchored two sentences earlier it is **−28.6 to −55.2 dB** — out by 17 dB at
+>    the low end. The span is strongly f/D-dependent (−45.9…−88.9 at f/D 0.4; −19.7…−38.0
+>    at 0.6), so no single band is quotable without naming the f/D, and §2.3 now carries a
+>    computed three-row table instead. The failure is worth naming precisely: the band was
+>    lifted verbatim from `edge_taper_db`'s own doc comment
+>    (`illumination.rs:321`, "typically -25 to -45 dB for q=6-12"), in a paragraph whose
+>    entire point is that the *previous* generation of this number was inherited rather
+>    than recomputed. **That doc comment carries the same unqualified band and was left
+>    alone** — this unit is docs-only by charter and editing `.rs` would have cost the
+>    "no source file changed" property a reviewer relies on. Filed here instead: whoever
+>    next touches `illumination.rs` should either name an f/D in that line or delete the
+>    band.
+> 2. **The "six documents" scope was not exhaustive.**
+>    `docs/superpowers/plans/2026-07-29-d12-calibrate-cli-e2e.md` still sized the tuning
+>    budget as "differential evolution runs `max_iterations` generations over a population …
+>    100 iterations × a population of ~15". Plan documents under `docs/superpowers/plans/`
+>    are frozen execution records and are normally out of scope — but that sentence is a
+>    **mechanism claim about live code**, used to size `--max-tuning-iterations`, which
+>    still exists. A Nelder-Mead simplex is `n+1` vertices, i.e. **2–4** here, so the cost
+>    model it supplies is wrong by 4–7×. Corrected in place; the distinction (frozen
+>    *expectation* left alone, live *mechanism* corrected) is now stated in the footnote.
+> 3. **A uniqueness claim falsified by the act of writing it down.** Both this unit and the
+>    D16 entrance text above asserted that "the only commit ever to contain the string
+>    `DE/rand`" was `b2aaaf5`. `git log --all -S 'DE/rand'` returns **three** — `b2aaaf5`
+>    plus D16's own `e13a1e3`/`b908d1a`, which added that very sentence to this file. The
+>    claim was false the moment it was committed, and its "checked 2026-07-31" stamp was
+>    stale on arrival. All three touch documentation only, so the substance holds; both
+>    sites now state *what the matches are* rather than that there is one. **The general
+>    form is worth keeping: a `git log -S` uniqueness claim about a string is self-
+>    falsifying, because writing the claim adds an occurrence.**
+>
+> **What a reader should take from this unit:** the design doc's wrong sections were not
+> random rot. Every one of them was a place where the *physics was re-derived after the
+> document was written* — the coma phase, the mesh model, the illumination taper, the
+> surface-error treatment — and the document kept the pre-derivation form. That is why
+> marking them "historical" matters more than deleting them: the superseded form is exactly
+> what someone re-deriving from first principles would arrive at again.
 
 - **Entrance / read first:** ~~`docs/architecture.md:~1350-1372` (lists nonexistent
   `interpolation.rs`/`bspline.rs`/`extrapolation.rs`; calibrate `fitter.rs`)~~ —
@@ -3561,13 +3739,16 @@ troubleshooting now distinguishes the two rejection messages and adds the CRC on
 - **Exit criteria:**
   1. ✅ architecture.md module lists match `ls` reality for all three crates (done by D4,
      2026-08-13 — the workspace grew a third member, `antenna-core`).
-  2. Design-doc sections either corrected or marked "historical — not implemented".
-  3. The feed-steering sign section **verified against `model/coordinates.rs` code**
+  2. ✅ Design-doc sections either corrected or marked "historical — not implemented"
+     (done 2026-08-19 — six corrected, five marked historical).
+  3. ✅ The feed-steering sign section **verified against `model/coordinates.rs` code**
      (post-`aee11f9` it may already match): add a "verified 2026-07 vs code" note if it
      agrees, or file a NEW decision item if it genuinely disagrees — do not edit that
-     section's math without verification.
-  4. review-findings-2026-06-10.md gets a status column mapping each finding to
-     resolved-commit or roadmap unit ID.
+     section's math without verification. — **It agrees, sign for sign** (2026-08-19); the
+     verification note is in §2.5 and no decision item was needed.
+  4. ✅ review-findings-2026-06-10.md gets a status column mapping each finding to
+     resolved-commit or roadmap unit ID (done 2026-08-19 — 15 findings + 8 medium bullets,
+     the latter numbered M1–M8 by this unit; nothing open).
 - **Inherited 2026-07-31 from D16 — "differential evolution" is wrong everywhere.**
   `parameter_tuner.rs` uses **Nelder-Mead** (`argmin::solver::neldermead::NelderMead`), and
   its own module doc says so, but six docs describe the tuner as a differential-evolution
@@ -3581,9 +3762,18 @@ troubleshooting now distinguishes the two rejection messages and adds the CRC on
   drifting a bugfix into a six-file docs sweep. **These were never true, so they are plain
   corrections, not "historical" markers** — checked 2026-07-31:
   `git log --all -S` for `DifferentialEvolution` and `differential_evolution` over
-  `calibrate/` returns nothing, and the only commit ever to contain the string `DE/rand` is
-  `b2aaaf5`, which introduced it into `implementation-plan-sprints-1-4-summary.md` — a doc,
-  not code. No DE optimizer was ever implemented under any name.
+  `calibrate/` returns nothing, and no commit has ever put the string `DE/rand` in code.
+  No DE optimizer was ever implemented under any name.
+
+  *(Amended by D5, 2026-08-20. This read "the only commit ever to contain the string
+  `DE/rand` is `b2aaaf5`". `git log --all -S 'DE/rand'` now returns **three** commits —
+  `b2aaaf5`, which put the line in `implementation-plan-sprints-1-4-summary.md`, and D16's
+  own `e13a1e3`/`b908d1a`, which added this very paragraph to this file. The claim was
+  therefore falsified by the commit that wrote it, and its "checked 2026-07-31" stamp was
+  already stale on arrival. All three touch documentation only, so the **substance** —
+  never in code — is intact, which is the part to keep. The lesson is the narrower one:
+  a uniqueness claim about `git log -S` over a string is falsified by writing the string
+  down, so state what the matches *are* rather than that there is one.)*
 - **Gotchas:** docs-only. Standing rule 2 applies doubly here.
 - **Depends on:** P6, G2 (after physics docs settle); after D4 if D4 happens (module map).
 

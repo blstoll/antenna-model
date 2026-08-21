@@ -763,8 +763,9 @@ cargo run --release --bin calibrate -- \
 The full calibration tool performs:
 
 1. **Parse measurements** (CSV → data structures)
-2. **Tune physical parameters** (differential evolution optimizer)
-   - Optimizes surface RMS, q-factor, mesh properties
+2. **Tune physical parameters** (Nelder-Mead simplex optimizer) *(corrected 2026-08-19, roadmap D5: the optimizer is **Nelder-Mead** — `argmin::solver::neldermead` in `calibrate/src/parameter_tuner.rs`. No differential-evolution optimizer was ever implemented under any name.)*
+   - Optimizes surface RMS, mesh spacing, wire diameter
+     *(corrected: the feed q-factor is declared, not tuned)*
    - Uses same physics model as boresight calibration
 3. **Compute residuals**: `residual = measured - physics_model`
 4. **Fit correction surface** (4D B-spline to residuals)

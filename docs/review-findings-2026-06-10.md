@@ -3,6 +3,49 @@
 **Date:** 2026-06-10
 **Scope:** Full-application review for implementation errors, incorrect or incomplete modeling, and anything degrading consistency or accuracy of results. Covers the physics engine (`antenna-model/src/model/`), service layer (`antenna-model/src/service/`), coordinate pipeline, data loading, and the `calibrate` tool.
 
+---
+
+## Status ledger (audited 2026-08-19, roadmap unit D5)
+
+Every finding below is mapped to the commit that resolved it or to the roadmap unit that
+owns it. Verified against the tree at `dc2a4b3`, by reading the cited code rather than the
+commit messages. **File:line references in the finding bodies are as of 2026-06-10 and
+most no longer resolve** — the physics engine and artifact layer moved from
+`antenna-model/src/` to `antenna-core/src/` in the three-crate split (roadmap D4,
+2026-08-13). Read the bodies as a record of what was wrong, not as a map of the tree.
+
+| # | Finding | Status | Resolved by |
+|---|---------|--------|-------------|
+| 1 | Spurious quadratic phase in `phase_path` | ✅ Resolved | `bee7fcb` — `(1−cosθ)` factor added; design doc §2.2 re-derived to match |
+| 2 | `full` mode emits artifacts the service cannot read | ✅ Resolved | `ad751fe` (full mode emits `AntennaCalibration`; 3D→4D bridge in `artifact_export.rs`) + `81b2352` (ANTC header accepted and CRC verified on load). Hardened since by **D2** (both version axes enforced; one writer), **D27** (one definition of the framing, `loader::encode_calibration_artifact`; headerless fallback deleted) |
+| 3 | ECEF auto-detection mangles geodetic satellite positions | ✅ Resolved | `744e24c` raised the threshold to 6400 km as a stopgap; **C8 stage 2** (`5c99ef2`, 2026-07-27) deleted the heuristic outright — `coordinate_system` is now required per position. Do not reintroduce a fallback |
+| 4 | Mesh "transparency" model inverted and discontinuous | ✅ Resolved | `ad25817` — replaced with the Wait/Marcuvitz inductive-grid reflectivity from `model/mesh.rs`, now the only mesh term `pattern::overall_efficiency` consumes |
+| 5 | Azimuth conventions inconsistent end-to-end | ✅ Resolved (with a documented residual) | `43a74af` (normalize azimuth to [0, 360) at the boundary) + `24e384b` (optional `vehicle_attitude` quaternion defines a stable antenna-frame azimuth zero). **Residual, by design:** with no attitude supplied the azimuth zero still comes from the Earth-Z/East cross-product heuristic and is still discontinuous near boresight ∥ Earth-Z. That is now a *declared* contract, not a silent one — see `docs/domain-contract.md`'s frame table and the `vehicle_attitude` row |
+| 6 | `is_in_coverage` contradicts its contract, disabling corrections | ✅ Resolved | `43a74af` — `None` coverage now returns `true` (fully-calibrated artifacts apply everywhere they have data), matching the doc comment |
+| 7 | Absolute gain pinned to a hardcoded 0.55 aperture efficiency | ✅ Resolved | `887cd65` — absolute gain now comes from the aperture integral itself (`absolute_gain_from_integral`); the 0.55 constant and the reference-gain efficiency mismatch are both gone. F7 later added the Huygens obliquity factor on the same conversion |
+| 8 | H3 link budget never applies the correction surface but reports it did | ✅ Resolved | `184becb` — the surface is applied post-cache and `correction_applied` reflects what actually happened |
+| 9 | Beam squint applied to the wrong axis | ✅ Resolved | `bfb0f08` (F9 — squint applied along the feed-displacement clock angle in (u,v) space) + `fab0127` (non-negative polar angle enforced in release builds) |
+| 10 | `EClockConeCoordinates::to_degrees` converts the wrong way | ✅ Resolved | `72e16ce` |
+| 11 | Defocus from feed axial offset computed, then discarded | ✅ Resolved | `0800808` (axial `δz` enters `phase_feed_displacement`) + `e72bca1` (`phase_center_offset` contributes defocus), then **P7** (`ba87160`, `a31c512`) made per-band auto-refocus explicit via `axial_defocus` |
+| 12 | Pole singularity in `ecef_to_geodetic` | ✅ Resolved | `72e16ce` — altitude uses the `z/sin(lat)` form when `|cos lat| ≤ 1e-4` |
+| 13 | Illumination omits space attenuation; edge-taper docs self-contradictory | ✅ Resolved | `77c908f` (added `(1+cosψ)/2`) + `e898c9a` (`edge_taper_db`/`q_factor_from_taper` made consistent with it). The design doc §2.3 carried the same wrong "10 dB edge taper" rule of thumb until D5 corrected it 2026-08-19 |
+| 14 | Duplicate, divergent surface-error implementations | ✅ Resolved | `77c908f` (single Zernike implementation), then `a6dac0c` removed the whole dead subsystem — `ZernikeSurface`, `GaussianSurface` and `model/surface.rs` are gone. Surface error remains statistical-only (Ruze), as the finding observed; that is now stated in the design doc §2.2 |
+| 15 | `feed_offset_meters` contains degrees | ✅ Resolved | `61900b0` (reports metres), renamed to `physical_feed_offset_m` by **C8 stage 1** (`95a2c2e`) |
+| M1 | Reference field recomputed every request | ✅ Resolved | `887cd65` — same change as finding 7: the ideal on-axis reference integration was removed, not cached, because absolute gain no longer needs it |
+| M2 | Silent integration non-convergence | ✅ Resolved | `b53139c` + `c65d7f8` — non-convergence is a typed response warning with an honest error estimate. **P12** later made both integrator branches verify both axes, which is what makes the flag mean something on asymmetric feeds |
+| M3 | Knot-vector panics; artifact loading never validates knots | ✅ Resolved | `81b2352` (knot vectors validated at load against shape and order) + `d4a03d9` (malformed vectors error instead of panicking) + `17552ad` (`find_knot_span` basis-count off-by-one) |
+| M4 | `compute_beamwidth` can lock onto a sidelobe | ✅ Resolved | `4530d72` (march outward to bracket the first crossing, then bisect) + `acb9dc6` (regression test; non-positive gain drop rejected) |
+| M5 | Cache staleness on reload; H3 cache hits drop warnings | ✅ Resolved / premise moot | The warning half is fixed: `h3_link_budget` emits convergence, correction and large-offset warnings *outside* the cache closure, so they surface on hits (see its module comments). The staleness half has no live premise — the service loads calibration at startup and has **no runtime reload path**; `GainCache::invalidate` exists and has no production caller. If reload is ever added, wire it to `invalidate` |
+| M6 | Ray-tracing and direct-path modes are stubs | ✅ Resolved as a disposition | The direct-path interference mode was **removed** as physically unsound (`c850165`). Ray tracing is still a stub and that was the decided outcome of roadmap **P3** (`91f96fe`): document it and flag it on every endpoint, rather than ship an unvalidated model |
+| M7 | `MAX_ALTITUDE_M` comment says "4000000 km" | ✅ Resolved | `72e16ce` |
+| M8 | H3 `loss_db` referenced to the centre cell, not the beam peak | ✅ Resolved | **C9** (`0c8bcb2`, 2026-07-26) — `loss_db` is referenced to the peak gain over the cells actually evaluated, matching `/heatmap`, and the endpoint now runs one *fewer* gain evaluation per request |
+
+**Nothing from this review is open.** The two entries that are not simple fixes (5 and M5)
+are recorded above with the reason: finding 5's residual is a declared contract with a
+stated discontinuity, and M5's staleness half describes a code path that does not exist.
+
+---
+
 **Summary:** The numerical machinery (integration, splines, WGS84 round-trips) is mostly well built, but several errors materially break accuracy and consistency: a spurious quadratic phase term that corrupts every off-axis pattern, a physically inverted (and discontinuous) mesh-loss model, a calibration artifact format the service cannot load, an ECEF auto-detection threshold that silently misclassifies satellite positions, and azimuth-convention mismatches that silently disable or misapply correction surfaces.
 
 ---
@@ -99,14 +142,17 @@ Altitude is computed as `p/cos(lat) − N` (`coordinates_3d.rs:237`) — 0/0 at 
 
 ## Medium — robustness, consistency, performance
 
-- **Reference field recomputed every request:** `compute_gain_standard` re-runs the full ideal on-axis integration per call (`pattern.rs:341`), doubling the cost of the hottest path against a <100 ms p95 budget. It depends only on (config, frequency) and is trivially cacheable.
-- **Silent integration non-convergence:** `integrate_aperture` returns the last iterate without any warning when it exhausts iterations (`integration.rs:317-325`), and the fallback `error_estimate = |result|·tol` is meaningless.
-- **Knot-vector panics:** `find_knot_span` (`correction_interpolator.rs:194-199`) indexes `knots[order−1]` and `knots[len−order]` with no length validation — a malformed or short knot vector (like the 2-element ones used in the service's own tests) panics instead of erroring. Artifact loading never validates knots vs. `spline_order`.
-- **`compute_beamwidth`** accepts the first point within 0.1 dB of target during binary search and assumes monotonicity — it can lock onto a sidelobe (acknowledged in its docs, but nothing guards against it).
-- **Cache staleness:** `GainCacheKey` quantization is fine, but nothing invalidates per-feed caches if calibration data is reloaded; H3 cache hits also drop warnings (documented, but it means warning output is request-order dependent).
-- **Ray-tracing and direct-path modes are stubs** (`pattern.rs:282-288` warns for ray tracing; spillover/geometric intersection unimplemented), so feed offsets >0.5f produce results of unknown quality. It warns, which is fine, but worth tracking.
-- **Doc/constant mismatch:** `MAX_ALTITUDE_M` comment says "4000000 km" for a 400,000 km constant (`coordinates_3d.rs:62`).
-- **`loss_db` in H3 cells** is referenced to the grid's center cell (the feed's ground target), not the actual beam peak — a reasonable approximation, but it is labeled as if it were peak-referenced.
+*The `M`-numbers below were assigned by the 2026-08-19 status ledger; the original text
+numbered these bullets not at all.*
+
+- **M1 — Reference field recomputed every request:** `compute_gain_standard` re-runs the full ideal on-axis integration per call (`pattern.rs:341`), doubling the cost of the hottest path against a <100 ms p95 budget. It depends only on (config, frequency) and is trivially cacheable.
+- **M2 — Silent integration non-convergence:** `integrate_aperture` returns the last iterate without any warning when it exhausts iterations (`integration.rs:317-325`), and the fallback `error_estimate = |result|·tol` is meaningless.
+- **M3 — Knot-vector panics:** `find_knot_span` (`correction_interpolator.rs:194-199`) indexes `knots[order−1]` and `knots[len−order]` with no length validation — a malformed or short knot vector (like the 2-element ones used in the service's own tests) panics instead of erroring. Artifact loading never validates knots vs. `spline_order`.
+- **M4 — `compute_beamwidth`** accepts the first point within 0.1 dB of target during binary search and assumes monotonicity — it can lock onto a sidelobe (acknowledged in its docs, but nothing guards against it).
+- **M5 — Cache staleness:** `GainCacheKey` quantization is fine, but nothing invalidates per-feed caches if calibration data is reloaded; H3 cache hits also drop warnings (documented, but it means warning output is request-order dependent).
+- **M6 — Ray-tracing and direct-path modes are stubs** (`pattern.rs:282-288` warns for ray tracing; spillover/geometric intersection unimplemented), so feed offsets >0.5f produce results of unknown quality. It warns, which is fine, but worth tracking.
+- **M7 — Doc/constant mismatch:** `MAX_ALTITUDE_M` comment says "4000000 km" for a 400,000 km constant (`coordinates_3d.rs:62`).
+- **M8 — `loss_db` in H3 cells** is referenced to the grid's center cell (the feed's ground target), not the actual beam peak — a reasonable approximation, but it is labeled as if it were peak-referenced.
 
 ---
 

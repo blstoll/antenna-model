@@ -310,8 +310,10 @@ cargo run --release --bin calibrate -- \
 
 **Process:**
 1. **Load design specs** as initial parameter estimates
-2. **Tune physical parameters** using differential evolution:
-   - Optimize: `surface_rms_mm`, `q_factor`, `mesh_spacing_mm`, `wire_diameter_mm`
+2. **Tune physical parameters** using a Nelder-Mead simplex *(corrected 2026-08-19, roadmap D5: the optimizer is **Nelder-Mead** — `argmin::solver::neldermead` in `calibrate/src/parameter_tuner.rs`. No differential-evolution optimizer was ever implemented under any name.)*:
+   - Optimize: `surface_rms_mm`, `mesh_spacing_mm`, `wire_diameter_mm`
+     *(corrected: `q_factor` is a declared design property, not a tuned one — see
+     `parameter_tuner.rs`'s `TuningMode`)*
    - Objective: Minimize `|measured_G/T - physics_model_G/T|` at boresight
    - Constraints: Keep parameters within physically reasonable ranges
 3. **Optional correction surface:**
@@ -701,6 +703,17 @@ impl From<&CalibrationStatus> for CalibrationStatusInfo {
 
 ### 6.2 Example API Response
 
+> **Illustrative, not a contract (audited 2026-08-19, roadmap D5).** The payload below
+> is a design sketch and is **not** kept in sync with the shipped schema — it is
+> deliberately outside the coverage of `antenna-model/tests/doc_examples_deserialize.rs`,
+> which pins only `docs/api-documentation.md` and `README.md`. Two divergences are known
+> and left in place rather than half-fixed: `warnings` is shown as an array of strings,
+> where the API returns typed `ApiWarning` objects (`{code, message}`, roadmap C8 stage 3),
+> and the feed entries use `feed_id`/`name`/`position`, where `FeedInfo` spells them
+> `id`/`design_feed_offset_m`/`frequency_range_mhz` (roadmap C8 stage 1). **For a payload
+> you can copy, use `docs/api-documentation.md` or the generated `openapi.yaml`** — never
+> this file.
+
 ```json
 {
   "antenna_id": "antenna_2",
@@ -745,6 +758,17 @@ impl From<&CalibrationStatus> for CalibrationStatusInfo {
 ## 7. Antenna Details Endpoint Enhancement
 
 ### 7.1 Enhanced `GET /api/v1/antennas/{id}` Response
+
+> **Illustrative, not a contract (audited 2026-08-19, roadmap D5).** The payload below
+> is a design sketch and is **not** kept in sync with the shipped schema — it is
+> deliberately outside the coverage of `antenna-model/tests/doc_examples_deserialize.rs`,
+> which pins only `docs/api-documentation.md` and `README.md`. Two divergences are known
+> and left in place rather than half-fixed: `warnings` is shown as an array of strings,
+> where the API returns typed `ApiWarning` objects (`{code, message}`, roadmap C8 stage 3),
+> and the feed entries use `feed_id`/`name`/`position`, where `FeedInfo` spells them
+> `id`/`design_feed_offset_m`/`frequency_range_mhz` (roadmap C8 stage 1). **For a payload
+> you can copy, use `docs/api-documentation.md` or the generated `openapi.yaml`** — never
+> this file.
 
 ```json
 {
@@ -918,7 +942,7 @@ curl -X POST http://service/api/v1/admin/reload
 - Load design specs as initial parameters
 - Implement parameter optimization for boresight-only data:
   - Optimize `surface_rms_mm`, `q_factor`, mesh parameters
-  - Use differential evolution (existing optimizer)
+  - Use the existing Nelder-Mead optimizer *(corrected 2026-08-19, roadmap D5: the optimizer is **Nelder-Mead** — `argmin::solver::neldermead` in `calibrate/src/parameter_tuner.rs`. No differential-evolution optimizer was ever implemented under any name.)*
   - Objective: minimize error at boresight across frequencies
 - Generate `PartiallyCalibrated` status with coverage metadata
 
