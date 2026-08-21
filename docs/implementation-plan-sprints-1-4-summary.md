@@ -98,10 +98,21 @@
 
 **Deliverables:**
 - **Parameter Tuning** (`calibrate/src/parameter_tuner.rs`):
-  - Differential evolution optimizer (DE/rand/1/bin strategy)
-  - Tunes: surface RMS, mesh spacing/diameter, q-factor, phase center offset
-  - Multi-objective: minimize main lobe + first sidelobe errors
-  - Population size: 50, generations: 100-500
+  - Nelder-Mead simplex optimizer (`argmin::solver::neldermead`) *(corrected 2026-08-19, roadmap D5: the optimizer is **Nelder-Mead** — `argmin::solver::neldermead` in `calibrate/src/parameter_tuner.rs`. No differential-evolution optimizer was ever implemented under any name.)*
+    The named "DE/rand/1/bin" strategy appears nowhere in the code and never did:
+    `git log --all -S 'DE/rand'` returns three commits and **all three touch only
+    documentation** — `b2aaaf5`, which added this line to this file, and D16's
+    `e13a1e3`/`b908d1a`, which added the discussion of it to
+    `docs/roadmap-2026-07-work-units.md`. No commit has ever put the string in code.
+  - Tunes: surface RMS, mesh spacing, wire diameter
+    *(corrected: q-factor and phase-center offset are declared design properties, not
+    tuned — see `TuningMode` in `calibrate/src/parameter_tuner.rs`)*
+  - Objective: a single scalar — the **weighted RMSE** of `measured_G/T − model_G/T`
+    over the measurement set, with points inside 3 beamwidths of boresight weighted 3×
+    *(corrected: it is not multi-objective; the main lobe is emphasised by a weight, and
+    there is no separate first-sidelobe term)*
+  - Convergence: `--max-tuning-iterations` (CLI default 100) with `sd_tolerance = 1e-6`
+    *(corrected: a simplex has no population or generations)*
 - **Correction Surface Fitting** (`calibrate/src/correction_surface.rs`):
   - Residual-based approach: measured - physics_model = correction
   - B-spline fitting: 3D (E-clock, E-cone, frequency) → correction_dB
@@ -140,6 +151,22 @@ Raw G/T Measurements (CSV)
 
 ## Available Modules for Sprint 5+
 
+> **Module map audited 2026-08-19 (roadmap D5): this listing is historical.** It
+> predates the three-crate split (roadmap **D4**, 2026-08-13), so the physics engine and
+> artifact data layer now live in **`antenna-core/src/`**, not `antenna-model/src/`, and
+> `antenna-model` keeps only the web/service layers (`antenna-model` re-exports the moved
+> paths, so the names below still resolve in Rust). `model/numerical_stability.rs`,
+> listed below, does not exist at all any more — it and `model/surface.rs` were deleted as
+> dead code in `a6dac0c`. For the current layout see `docs/architecture.md` §11, which is
+> checked against `ls`. Three more entries below are stale in the same way:
+> `calibrate/src/serializer.rs` was renamed to `sidecar.rs` when the legacy JSON
+> serializer was retired (roadmap **D1**, 2026-07-29) and the binary writer moved to
+> `artifact_export.rs`; `integration.rs` is no longer "adaptive Simpson's" on the served
+> path but the Hankel / azimuthal-mode (Jₘ) integrator (roadmap **P10**, 2026-07-15), the
+> 2D Simpson quadrature surviving only as a `#[cfg(test)]` reference oracle; and
+> `phase.rs`'s surface-error function is present but unused by the aperture integrand
+> (see the design doc §2.2).
+
 **Antenna Model Service (`antenna-model/`):**
 - `src/api/` - REST API (poem), handlers, routes, middleware, schemas
 - `src/config/` - Configuration system (YAML + env vars)
@@ -157,7 +184,7 @@ Raw G/T Measurements (CSV)
 
 **Calibration Tool (`calibrate/`):**
 - `src/parser.rs` - CSV measurement parsing
-- `src/parameter_tuner.rs` - Differential evolution optimizer
+- `src/parameter_tuner.rs` - Nelder-Mead simplex optimizer *(corrected 2026-08-19)*
 - `src/correction_surface.rs` - B-spline/RBF fitting
 - `src/antenna_config.rs` - Config extraction
 - `src/validator.rs` - Cross-validation, error metrics

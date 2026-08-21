@@ -731,7 +731,9 @@ This plan integrates partial/uncalibrated antenna support into the existing Spri
            bounds: &design_specs.tuning_bounds,
        };
 
-       // 3. Run differential evolution optimizer (reuse existing)
+       // 3. Run the Nelder-Mead parameter optimizer (reuse existing).
+       //    (Corrected 2026-08-19, roadmap D5: this sketch said "differential
+       //    evolution"; the shipped optimizer is argmin's Nelder-Mead simplex.)
        let tuned_params = optimize_parameters(&tuning_problem)?;
 
        // 4. Compute residuals with tuned parameters

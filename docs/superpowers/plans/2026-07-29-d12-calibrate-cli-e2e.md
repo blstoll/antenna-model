@@ -953,7 +953,21 @@ Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
 
 **Goal:** Determine empirically whether an end-to-end run with `--tune-parameters` is affordable in CI, and either include it or mark it `#[ignore]` with the measured justification.
 
-**Background:** The D12 spec defers this to measurement. The risk is real: differential evolution runs `max_iterations` generations over a population, and **each** candidate evaluation computes the model at every measurement point. At ~1.3 ms/point debug and 288 points, one candidate evaluation is ~0.4 s; 100 iterations × a population of ~15 would be ~10 minutes. `--max-tuning-iterations` is the lever.
+**Background:** The D12 spec defers this to measurement. The risk is real: the tuner
+evaluates the model at every measurement point for **each** candidate parameter vector. At
+~1.3 ms/point debug and 288 points, one candidate evaluation is ~0.4 s;
+`--max-tuning-iterations` is the lever.
+
+> **Corrected 2026-08-20 (roadmap unit D5).** This paragraph originally sized the cost as
+> "differential evolution runs `max_iterations` generations over a population … 100
+> iterations × a population of ~15 would be ~10 minutes". The optimizer is **Nelder-Mead**
+> (`argmin::solver::neldermead`), which has no generations and no population — its simplex
+> is `n+1` vertices for `n` tuned parameters, so **2 to 4** here, not ~15. The cost model
+> that sentence supplied is therefore wrong by roughly 4–7×, and it was being used to size
+> a lever that still exists. Corrected in place rather than left as a frozen record,
+> because it is a *mechanism* claim about live code, not a statement of what was expected
+> at the time. The measured figure this task went on to produce is unaffected — it was
+> measured, not derived from this estimate.
 
 This task is deliberately last: everything before it is valuable whatever the answer here turns out to be.
 

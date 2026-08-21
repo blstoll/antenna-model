@@ -21,7 +21,7 @@ This implementation plan breaks down the Antenna Model Service into manageable s
 | Sprint 1 | Project Foundation & Core Data Types | 2 weeks | ✅ Complete | Repository structure, basic REST API with /status endpoint, core data types, basic tests |
 | Sprint 2 | Physical Optics Computation Engine | 2 weeks | ✅ Complete | Aperture integration, phase functions (path, coma, surface, mesh), far-field pattern computation |
 | Sprint 3 | Surface Error & Mesh Reflector Models | 2 weeks | ✅ Complete | Ruze equation, mesh transparency, coordinate transformations, edge case handling |
-| Sprint 4 | Calibration via Parameter Optimization | 2 weeks | ✅ Complete | Physical parameter fitting, differential evolution optimizer, Zernike polynomials, correction surfaces, CLI tool |
+| Sprint 4 | Calibration via Parameter Optimization | 2 weeks | ✅ Complete | Physical parameter fitting, Nelder-Mead simplex optimizer, correction surfaces, CLI tool [^s4] |
 | Sprint 5 | REST API - Core Endpoints | 2 weeks | ✅ Complete | Production middleware, enhanced health checks, single evaluation endpoints |
 | Sprint 6 | REST API - Advanced Endpoints & Partial Calibration Phase 1 | 2 weeks | ✅ Complete (100%) | Batch processing, heatmap generation, antenna/feed endpoints, partial calibration data model & service support, OpenAPI spec |
 | Sprint 7 | Boresight Calibration Tool & Integration Testing | 2 weeks | ✅ Complete (100%) | Boresight calibration (Phase 2), end-to-end tests, performance benchmarks, load testing infrastructure, error/resilience testing, comprehensive documentation, code quality review |
@@ -53,17 +53,28 @@ This implementation plan breaks down the Antenna Model Service into manageable s
 
 **Sprint 3 - Coordinate Systems & Edge Cases:**
 - Coordinate transforms: ECEF ↔ Geodetic ↔ Antenna Frame ↔ Spherical
-- Auto-detection: |x,y,z| > 6400km → ECEF, else Geodetic
-- Edge case handling (large feed offsets, ray tracing, direct paths)
+- ~~Auto-detection: |x,y,z| > 6400km → ECEF, else Geodetic~~ *(removed 2026-07-27,
+  roadmap C8 stage 2: the coordinate frame is declared per position, never inferred)*
+- Edge case handling (large feed offsets, ray tracing, ~~direct paths~~ *(the direct-path
+  interference mode was removed as physically unsound in `c850165`)*)
 - Numerical stability improvements
 
 **Sprint 4 - Calibration Tool:**
-- Parameter optimization via differential evolution
+- Parameter optimization via a Nelder-Mead simplex [^s4]
 - Correction surface fitting (B-spline/RBF): residual = measured - physics_model
 - CLI tool: measurements CSV → parameter tuning → correction surface → binary artifact
 - Validation: <1 dB max error in main lobe and first sidelobe
 
 ### Available Modules
+
+> **Audited 2026-08-19 (roadmap D5): this listing is historical.** The tree is now three
+> crates (roadmap **D4**, 2026-08-13) — the physics engine and artifact data layer live in
+> `antenna-core/src/`, and `antenna-model` re-exports them so the paths below still
+> resolve. `model/numerical_stability.rs` no longer exists (deleted as dead code in
+> `a6dac0c`), and the ANTC framing named below moved out of `main.rs` into the library:
+> it now has exactly one definition, `antenna_core::data::loader::encode_calibration_artifact`,
+> which `artifact_export::write_calibration_artifact` wraps (roadmap **D2**, **D27**).
+> `docs/architecture.md` §11 carries the current layout and is checked against `ls`.
 
 **Complete physics pipeline** in `antenna-model/src/model/`:
 - `coordinates.rs` - All coordinate transformations
@@ -77,7 +88,7 @@ This implementation plan breaks down the Antenna Model Service into manageable s
 
 **Calibration pipeline** in `calibrate/src/`:
 - `parser.rs` - CSV measurement parsing
-- `parameter_tuner.rs` - Differential evolution
+- `parameter_tuner.rs` - Nelder-Mead simplex optimizer *(corrected 2026-08-19)*
 - `correction_surface.rs` - B-spline/RBF fitting
 - `antenna_config.rs` - Config extraction
 - `validator.rs` - Cross-validation
@@ -1597,7 +1608,7 @@ The project is considered successfully completed when:
    - ✅ REST API with all specified endpoints operational
    - ✅ **Physical optics computation engine** (aperture integration, phase functions, Ruze, mesh effects)
    - ✅ **Coma lobe modeling** for off-axis feed positions
-   - ✅ Calibration CLI tool with **parameter optimization** (differential evolution)
+   - ✅ Calibration CLI tool with **parameter optimization** (Nelder-Mead simplex) [^s4]
    - ✅ Support for multiple antenna configurations
    - ✅ **Partial calibration support** (uncalibrated, boresight-calibrated, fully-calibrated antennas)
    - ✅ **Boresight calibration mode** for parameter tuning from design specs
@@ -1807,3 +1818,25 @@ Each sprint includes ~15-20% buffer time for:
 **End of Implementation Plan**
 
 This plan provides a roadmap for implementing the Antenna Model Service over 16 weeks (8 two-week sprints). Each sprint contains well-scoped tasks appropriate for a mid-level engineer, with clear acceptance criteria, deliverables, and success metrics. The plan balances feature development with testing, documentation, and operational readiness to ensure a production-quality system at the end of Sprint 8.
+
+[^s4]: **Corrected 2026-08-19 (roadmap unit D5).** Seven documents in this tree still
+    described the calibration tuner as a *differential evolution* optimizer — an eighth,
+    CLAUDE.md, was corrected by roadmap D16 in 2026-07 — and one of the seven named a
+    specific DE strategy ("DE/rand/1/bin"). The seventh,
+    `docs/superpowers/plans/2026-07-29-d12-calibrate-cli-e2e.md`, was found on review after
+    this footnote first claimed six; plan documents under `docs/superpowers/plans/` are
+    frozen execution records and are normally left alone, but that one used the DE
+    *mechanism* ("generations over a population of ~15") to size `--max-tuning-iterations`,
+    a lever that still exists, so it was corrected in place. It has always been **Nelder-Mead**
+    (`argmin::solver::neldermead`, `calibrate/src/parameter_tuner.rs`, whose own module
+    doc says so). This is a plain correction, not a design change: checked 2026-07-31,
+    `git log --all -S` finds no `DifferentialEvolution` or `differential_evolution`
+    anywhere under `calibrate/`, and every commit that has ever contained `DE/rand`
+    (three, as of 2026-08-20) touches documentation only. No DE optimizer was ever
+    implemented under any name. Two
+    planning-time mentions elsewhere in this file — the Sprint 4 risk-register row and
+    the "Before Sprint 4" prerequisite list — are left as written, being records of what
+    was expected rather than claims about what was built. Sprint 4's "Zernike
+    polynomials" deliverable is struck from the status table for the same reason: no
+    Zernike machinery was ever wired into the gain path, and the last of it was deleted
+    in `a6dac0c` (see the design doc §4.3/§4.4).
