@@ -1671,6 +1671,9 @@ report.
 ./scripts/check.sh
 ```
 Expected: exits 0. (Use this, not the ad-hoc one-liners — it sets `RUST_MIN_STACK` to match CI.)
+*(Amended 2026-08-20 by roadmap D3: `check.sh` no longer sets `RUST_MIN_STACK`, and neither
+does CI — the workaround was retired. Use `check.sh` anyway; it is still the gate, for the
+package-scoped clippy and dep-graph checks no workspace command performs.)*
 
 - [ ] **Step 7: Commit any fixes and open the PR**
 

@@ -981,5 +981,9 @@ EOF
    the key appears as `\"feed_position\"`, so a plain `"feed_position"` sed misses it.
 5. **`RUST_MIN_STACK`.** Run tests via `./scripts/check.sh` or export
    `RUST_MIN_STACK=16777216`; the calibrate 3D→4D round-trip overflows the default stack.
+   *(No longer true, amended 2026-08-20 by roadmap D3: the round trip runs in a 24 KiB
+   thread stack, the overflow this describes was mis-attributed, and neither `check.sh` nor
+   CI sets the variable any more. The command lines above are left as the record of what was
+   actually run at the time; do not copy the instruction.)*
 6. **Do not add a serde alias "just for the transition."** The decision explicitly rejected
    shims; Task 1's 400 test exists to make reintroducing one a test failure.

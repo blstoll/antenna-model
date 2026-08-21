@@ -3,9 +3,13 @@
 # Exits nonzero on the first failing check.
 set -euo pipefail
 
-# Match CI: give libtest worker threads a larger stack. The calibrate 3D→4D
-# round-trip evaluation overflows the ~2 MiB default on Linux debug builds.
-export RUST_MIN_STACK="${RUST_MIN_STACK:-16777216}"
+# No RUST_MIN_STACK here, and none in ci.yml either — roadmap D3 retired the
+# 16 MiB workaround on 2026-08-20. See the comment in .github/workflows/ci.yml for
+# why it was never about the B-spline evaluation, and
+# `the_round_trip_fits_in_a_small_thread_stack`
+# (calibrate/tests/artifact_export_integration_test.rs) for the guard that replaced
+# it: it sets its own 512 KiB stack, so it holds regardless of what the harness
+# hands the other tests.
 
 if ! cargo nextest --version >/dev/null 2>&1; then
   echo "ERROR: cargo-nextest is not installed. Install it with:" >&2
