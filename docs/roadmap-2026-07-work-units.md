@@ -2895,6 +2895,13 @@ preserved as C7's post-generation acceptance checklist (see the C7 section below
 
 ### C15 — Client-visible surfaces that no drift guard covers — Effort: S/M
 
+**✅ OPTIONS 1 AND 3 LANDED** — option 1 with C8 stage 4 (2026-07-28,
+`example_api_requests_deserialize.rs`); **option 3 on 2026-08-22**
+(`antenna-model/tests/openapi_examples_validate.rs`), which also closes C7's stretch goal.
+Option 2 (ratcheting `CONTRACT_DOCS` as D5 makes each `docs/` file true) remains open, as do
+`examples/python_examples.py` and the `examples/*.md` prose files. See "Option 3, as landed"
+below.
+
 **The gap.** Four guards exist, and between them they cover less of the published contract than
 their presence suggests:
 
@@ -2946,6 +2953,104 @@ types it is generated from the way a hand-maintained one can. Stage 4 also **edi
 `examples/api_requests.json` (removing the two H3 examples Task 1's removal obsoleted), and
 that file remains covered by no guard — option 1 above is now the largest concrete item left
 in this unit's gap list, and the last content change to that file before C7's freeze.
+
+**Option 3, as landed (2026-08-22, `antenna-model/tests/openapi_examples_validate.rs`).**
+Every JSON example this repo publishes is now validated against the **published**
+`openapi.yaml` component schemas — **76 bodies from five sources**:
+`examples/requests/*.json` (10), `examples/responses/*.json` (8),
+`examples/api_requests.json` (16), `examples/postman_collection.json` (4) and
+**`openapi.yaml`'s own inline `content.application/json.examples` bodies (38)** — the last
+two under no guard before this. The inline set matters most of the five: those are what
+Swagger UI and Redoc render, so they are the closest thing this repo has to what a client is
+actually shown, and they sit at exactly the `(method, path[, status])` positions the guard
+already resolves schemas for. All 76 passed on arrival; the only findings were the five
+`geo_*.json` files' `_comment` / `_description` / `_geodetic_satellite` / `_geodetic_ground`
+/ `_notes` keys, which are the format's stand-in for JSON comments and are exempted at the
+root of an example only (not nested, not past the prefix — both pinned).
+
+The postman collection contributes 4 *bodies* but 11 *requests*. Its seven GETs
+(`/health`, `/ready`, `/status`, the four antenna paths) have no body to validate, so for
+them the assertion is that the URL still resolves — segment-wise, concrete ids against
+`{param}` templates — to a documented `(method, path)`. Without that, a C8-stage-4-style
+endpoint removal would leave a collection entry shipping a 404 with every guard green, and
+no body count could notice because those requests were never counted.
+
+Four things about it are load-bearing rather than incidental.
+
+1. **It is not redundant with the three deserialize guards.** Those check an example against
+   a **Rust type**; this checks it against the **spec**. Since C7 the spec is generated from
+   the types, so the two agree *only where utoipa saw the truth* — a `#[schema(value_type =
+   …)]` override that lies, a field the derive cannot see, or a custom serializer whose wire
+   shape it cannot know (C7's own `nan_as_null` hazard, hazard 1 in this doc's C7 section)
+   are exactly the cases where type and published contract diverge, and a serde round-trip
+   is structurally blind to them. It also asserts what serde has no concept of: `enum`
+   membership, `minimum`, tuple arity (`prefixItems` + `items: false`), and whether `null`
+   is an allowed type at a given position.
+2. **Each example is validated against the endpoint it claims**, not against a hand-picked
+   component name: the case table maps a file (or postman URL, or `api_requests.json` key) to
+   a `(method, path)` request body or `(method, path, status)` response, and the schema comes
+   out of the spec's own `paths`. A body that is valid `GainRequest`-shaped JSON but filed
+   under the batch endpoint fails; a name→type map would not notice.
+3. **An unimplemented schema keyword is a hard failure, not a silent skip.** A JSON Schema
+   validator that ignores what it does not know gets weaker every time the spec grows a
+   construct — it keeps passing while checking less, which is the exact rot P13 records.
+   `the_spec_uses_no_schema_keyword_this_validator_understands_nothing_of` walks every schema
+   position in the file (not just the ones an example reaches) and fails on the first unknown
+   keyword; the vocabulary is split into `ENFORCED_KEYWORDS` (11, each implemented) and
+   `ANNOTATION_KEYWORDS` (`description`, `format` — annotations that constrain nothing in
+   2020-12), so a new *assertive* keyword cannot be waved through by filing it under
+   "documentation". This is why the guard is in-house rather than a `jsonschema` dependency:
+   a general validator's defaults are the two behaviours this unit must not have — ignore
+   unknown keywords, and allow undeclared properties.
+4. **A keyword that is present but malformed panics too**, not just an unimplemented one.
+   `minimum`, `minItems` and `maxItems` originally read their bound through
+   `as_f64()`/`as_u64()` and skipped on `None`, so a bound arriving as a string or a
+   fraction would have deleted the assertion with the suite still green — (3)'s failure
+   mode one level down. Every keyword position now fails loudly on a shape it cannot read.
+5. **Every negative control is paired with a positive one.** The validator accepts all 76
+   bodies as they stand, so a green suite is by itself no evidence it can reject anything.
+   Twelve controls mutate a real example one way each — drop a required field, wrong scalar
+   type, undeclared property, a **nested** `_` key, a non-`_` key (the two together proving
+   the exemption stops at both the prefix and the root), value outside a closed `enum`
+   (`coordinate_system: "eci"`), `null` in a non-nullable position (with the converse half
+   asserting `gain_db: null` still validates, since that is the documented sentinel), below
+   `minimum`, an over-long `(min, max)` tuple, `grid_type: "h3"` matching no `oneOf` branch,
+   an unimplemented keyword, a malformed `minimum`/`minItems`, and a postman URL the spec
+   documents no route for — and each must be caught. The whole pipeline was mutation-tested
+   twice: renaming one `antenna_id` property in `openapi.yaml` fails the guard on 9 examples
+   across all four `examples/` surfaces, and retagging one inline example's
+   `coordinate_system` to `eci` fails it on that example, confirming the spec's own bodies
+   are genuinely read.
+
+`every_component_schema_is_either_exercised_by_an_example_or_declared_uncovered` records the
+coverage rather than leaving it implicit: 33 of the 37 published components are reached by an
+example, and the four that are not are listed with reasons in `UNEXERCISED_COMPONENTS`
+(`H3LinkBudgetResponse`, `H3CellResult`, `FeedListResponse`, `GainError`). It fails three
+ways — a new component nothing exercises, a listed component that an example now does reach,
+and a listed component the spec no longer declares — so the inventory cannot become a stale
+waiver. That third failure mode earned itself immediately: `CoverageInfo` was on the list
+with the reason "only appears on a partially-calibrated antenna, and the antenna_details
+examples document a fully calibrated one", which was **already false** — the spec's own
+`POST /api/v1/gain` 200 `partially_calibrated` example carries the block. Picking up the
+inline examples reached it and the waiver had to go, which is the check working as intended.
+The remaining four are a **finding, filed not fixed** (standing rule 5): writing example
+bodies for the H3 response, the feed-list response and a failed batch item is example
+authorship, not guard work.
+
+**One finding, filed not fixed (standing rule 5).** utoipa emits a Rust `(f64, f64)` as
+`prefixItems` + `items: false` with **no `minItems`**, so every published `(min, max)` pair —
+`ValidityRangesInfo`'s three ranges, `CoverageInfo`'s three, `FeedInfo.frequency_range_mhz` —
+is a schema that accepts `[]` and `[0.0]` as readily as `[0.0, 360.0]`, while serde requires
+exactly two. A Rust *array* (`[f64; 4]`, `vehicle_attitude`) does get `minItems`/`maxItems`;
+the gap is tuples specifically. The over-long case is caught, by the `items: false` tail. No
+example is affected — this is the published schema being looser than the type, and closing it
+means changing what the frozen spec says, which is a contract change rather than guard work.
+
+**Still uncovered after this.** `examples/python_examples.py` (request bodies as Python dict
+literals) and the `examples/*.md` prose files would each need a parser for a non-JSON host
+language. `examples/curl-examples.sh` was checked and needs nothing: it carries no inline
+JSON, only `-d @requests/*.json` references to files this guard already validates. `docs/*.md`
+beyond `api-documentation.md` remains option 2's territory.
 
 ### C8 — v1 contract finalization (the one sanctioned breaking pass) — Effort: L
 **[DECIDED 2026-07-08 — pre-production confirmed: no consumers exist; break once now, then freeze]**
@@ -3174,8 +3279,11 @@ deterministic emission). As landed:
   (see the table below). The spec is now OpenAPI **3.1** (was 3.0.3); docs point 3.1-capable
   viewers. `security: []` is no longer declared (absence means the same thing).
 - **The contract is now frozen** — post-C8 shapes, behind the generate-and-diff guard.
-- **Stretch goal (validating `examples/*` files against component schemas) remains open**,
-  coordinated with C15 (whose `examples/api_requests.json` guard landed in stage 4).
+- **Stretch goal (validating `examples/*` files against component schemas) — ✅ landed
+  2026-08-22** as C15 option 3, `antenna-model/tests/openapi_examples_validate.rs`: all 38
+  JSON example bodies (including `examples/postman_collection.json`, previously read by no
+  guard) are validated against this spec's component schemas, resolved through the endpoint
+  each example claims. Details in the C15 section above.
 
 - **Entrance / read first:** `api/routes.rs` route registration; openapi.yaml paths.
 - **Re-scoped 2026-07-28 (during C8 stage 4).** Originally "hand-maintained spec plus a
