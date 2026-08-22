@@ -337,6 +337,27 @@ The `calibrate` tool processes measurement data:
   `service/heatmap.rs` is why). Heatmap/H3 aggregation dedupes on `(code, message)`, so a
   warning meant to appear once per response must keep its message constant across grid
   points.
+- **Changing a request/response schema means updating the examples too, and four guards
+  will say so.** Three check an example against the Rust type
+  (`tests/example_requests_deserialize.rs`, `example_responses_deserialize.rs`,
+  `example_api_requests_deserialize.rs`); the fourth,
+  `tests/openapi_examples_validate.rs` (roadmap **C15 option 3** / C7's stretch goal,
+  2026-08-22), checks **76 JSON example bodies from five sources** — the `examples/` tree,
+  `examples/postman_collection.json`, and `openapi.yaml`'s own inline
+  `content.application/json.examples` (the bodies Swagger UI and Redoc render) — against the
+  generated spec, each one resolved through the `(method, path[, status])` endpoint it
+  claims rather than a hand-picked component name. Postman's seven bodyless GETs are
+  asserted a different way: their URLs must still resolve to a documented route.
+  That fourth one is the only guard that can see a *spec*-vs-type gap (a lying
+  `#[schema(value_type = …)]`, a field the derive cannot see, a custom serializer like
+  `nan_as_null` whose wire shape utoipa cannot know) and the only one that asserts `enum`
+  membership, `minimum`, tuple arity, or nullability. Two of its properties are deliberate
+  and must not be relaxed: a JSON Schema keyword that is **unimplemented — or present but
+  malformed — is a hard failure**, never a silent skip (a validator that shrugs at what it
+  cannot read keeps passing while checking less), and every negative control is paired with
+  a positive one. If you add a component schema, either give it an example or add it to
+  `UNEXERCISED_COMPONENTS` with the reason — and that reason is checked, not trusted: the
+  list fails if an example does reach a component it names.
 
 ### Testing Philosophy
 
