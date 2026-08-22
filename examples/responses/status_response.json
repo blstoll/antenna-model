@@ -1,5 +1,8 @@
 {
   "status": "ok",
   "version": "0.1.0",
-  "uptime_seconds": 13749
+  "uptime_seconds": 13749,
+  "antenna_count": 2,
+  "antenna_ids": ["antenna_1", "antenna_2"],
+  "memory_bytes": 134217728
 }

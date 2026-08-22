@@ -7311,7 +7311,108 @@ then implementation delegating to `service/h3_link_budget.rs`. Requires a new re
 decision — and note it would be a post-C8 breaking change, so it needs v2-grade
 justification per roadmap principle 4.
 
-### F6 — Cross-platform `/status` memory metric — Effort: S
+### F6 — Cross-platform `/status` memory metric — Effort: S — ✅ **DONE 2026-08-21**
+
+> **Closeout 2026-08-21**, branch `feat/f6-cross-platform-memory-metric`. The unit filed a
+> *coverage* gap — the metric is missing off Linux. Executing it found that the metric was
+> also **wrong where it did run**, which is the part worth carrying forward.
+>
+> **The defect the filing did not name: a hardcoded page size.** `AppState::get_memory_usage`
+> read field 2 of `/proc/self/statm` (RSS, in pages) and multiplied by a literal `4096`.
+> `sysconf(_SC_PAGESIZE)` is **16384** on common aarch64 kernels and **65536** on RHEL
+> aarch64, so on that hardware `/status` under-reported resident memory by **4x or 16x** —
+> silently, with no platform gate to warn anyone, on exactly the machine class a service like
+> this gets deployed to. `sysinfo` reads the same `statm` field and scales it by the real page
+> size (`src/unix/linux/system.rs:155` obtains it via `sysconf`, `process.rs:768-778` applies
+> it). Nothing in this repo could have caught it: CI runs x86-64 Linux, where 4096 is right,
+> and the only test asserted `is_none()` off Linux.
+>
+> **The old test pinned the gap as if it were the contract.** `test_app_state_memory_usage`
+> asserted `memory.is_none()` under `#[cfg(not(target_os = "linux"))]` — so the missing metric
+> was not merely untested, it was *guarded*, and every macOS dev run confirmed it. Replaced by
+> `memory_usage_is_reported_on_this_platform_and_tracks_real_allocations`, which asserts the
+> figure **tracks**: allocate and touch 64 MiB, require RSS to move with it. `is_some()` alone
+> would be satisfied by a constant, which is D3's vacuity lesson. **Negative control run, not
+> assumed:** stubbing the accessor to a constant `8 MiB` fails on exactly the growth assertion
+> (`RSS grew by only 0 bytes (8388608 -> 8388608)`), while the plausibility floor still passes.
+> The 16 MiB floor against a 64 MiB allocation is a **4x margin, not a proof**: the first cut
+> called the flake direction one-sided because "reclaiming the pages needs swap", and review
+> corrected it — on **macOS**, the platform this unit exists to enable, the memory compressor
+> evicts dirty anonymous pages from `pti_resident_size` (the field `sysinfo` reads there,
+> `apple/macos/process.rs:447`) under pressure alone, no swap involved. The window between
+> writing the pages and reading RSS back is microseconds, so the risk is small, but the
+> docstring now states it as a margin and names the mechanism to look at if it ever flakes.
+> `test_status_endpoint` carries the served half over real HTTP.
+>
+> **The schema half — decided, not defaulted.** The unit offered `sysinfo` **or** an explicit
+> `supported: false`. `sysinfo` alone does not close the hole it names: `memory_bytes` carried
+> `skip_serializing_if = "Option::is_none"`, so where the metric is unavailable the field
+> *vanishes*, which no consumer can tell apart from a build that does not implement it — the
+> ambiguity S5 removed from `antenna_count`/`antenna_ids`. **[MAINTAINER, 2026-08-21: emit an
+> explicit `null`.]** The field is now always present, `#[schema(required)]`, null when
+> unreportable — **C12's decided convention verbatim** ("present and null, never omitted;
+> omission is reserved for structurally absent members"), so `/status` and `CalibrationInfo`
+> now encode absence the same way rather than two ways. `memory_bytes_is_serialized_as_null_rather_than_omitted`
+> pins it, with the `Some` case as its negative control; note the property is invisible to a
+> round-trip test, since `Option<u64>` deserializes identically from an absent key and from an
+> explicit `null`, so only the serialized key set can see it.
+>
+> **Contract movement, wider than the field this unit owns — and that was a review finding,
+> not the plan.** `openapi.yaml` regenerated (C7 — never hand-edited): `memory_bytes`,
+> `antenna_count` **and** `antenna_ids` all join `StatusResponse.required`.
+>
+> The first cut fixed only `memory_bytes`, and a review caught that this left **one struct
+> spelling one guarantee two ways**: the other two carry S5's always-populated guarantee in
+> the *handler* (`handlers::status` unconditionally calls `with_antennas`) while still
+> carrying `skip_serializing_if` in the *type*, so the generated spec called them optional and
+> a spec-generated client under-trusted two fields the server always sends. The review's
+> sharper point is that the first cut's comment cited those two as precedent for a convention
+> they did not actually follow. **[MAINTAINER, 2026-08-21: finish the convention.]**
+>
+> **Zero wire change, and that is what made it a routine fix rather than a contract
+> negotiation:** both fields are always `Some` on the only served construction path, so
+> dropping `skip_serializing_if` moves no response byte. Only the spec moved, from
+> under-promising to truthful. Nor is any of it breaking post-C7-freeze: on a *response*
+> schema, moving a field into `required` is a stronger promise from server to client, and no
+> client that tolerated a field can be broken by always receiving it.
+>
+> The guard widened with it — `every_optional_status_field_is_serialized_as_null_rather_than_omitted`
+> asserts all three fields, because a test that checked only `memory_bytes` is precisely what
+> would let the split survive unnoticed a second time.
+> `examples/responses/status_response.json` carried three of the six fields the handler emits
+> and now carries all six; `example_responses_deserialize.rs` only proves the file *parses*, so
+> a missing optional can never fail it — that example's completeness is maintained by reading,
+> which is why it had drifted.
+>
+> **Dependency cost, measured rather than estimated** (`cargo tree` on a throwaway crate, both
+> targets):
+>
+> | target | net new packages |
+> |---|---|
+> | Linux | **1** — `sysinfo` (`libc`, `memchr` already in the tree) |
+> | macOS | **3** — `sysinfo`, `objc2-core-foundation`, `objc2-io-kit` |
+>
+> `default-features = false, features = ["system"]` drops the `disk`/`network`/`component`/`user`
+> collectors this crate never reads. `Cargo.lock` also gains the `windows-*` packages sysinfo
+> declares for that target; they resolve but never compile on the two targets built here.
+> Nothing reaches `antenna-core` or `calibrate`, so D4's crate-split invariants and D27's
+> `CORE_MAX_DEPS = 28` ceiling are untouched.
+>
+> **Two things to know before touching this again.** (1) **sysinfo 0.39.6 declares
+> `rust-version = "1.95"`**, and the workspace pins no `rust-version` while CI runs
+> `dtolnay/rust-toolchain@stable` — so this makes 1.95 a de-facto floor, and sysinfo moves its
+> MSRV in *minor* releases. If this repo ever adopts an MSRV policy, this dependency is the one
+> that will bind first. (2) A fresh `System` is built **per call**, not cached behind a lock in
+> `AppState`: `sysinfo` needs `&mut` to refresh, one single-process refresh measured **80-180 us**
+> on macOS, and `/status` is a monitoring-frequency endpoint — a `Mutex<System>` would buy
+> nothing and could serialize status checks behind each other.
+>
+> **Unchanged, deliberately:** the quantity is still **RSS in bytes** — resident, not virtual —
+> so the published meaning of the field does not move, only its correctness and its reach.
+> `docs/api-documentation.md` is untouched: it lists `/status` among the endpoints but
+> documents no response body for it, so there was no prose to re-true.
+
+*Original unit follows.*
 
 `/status` `memory_bytes` reads `/proc/self/statm` (Linux-only). Use the `sysinfo` crate or
 report an explicit `supported: false` off-Linux. Low risk; schedulable any time after

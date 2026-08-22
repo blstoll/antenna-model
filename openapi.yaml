@@ -2282,6 +2282,9 @@ components:
       - status
       - version
       - uptime_seconds
+      - antenna_count
+      - antenna_ids
+      - memory_bytes
       properties:
         status:
           type: string
@@ -2298,7 +2301,16 @@ components:
           type:
           - integer
           - 'null'
-          description: Number of loaded antennas
+          description: |-
+            Number of loaded antennas.
+
+            **Present and null** rather than omitted, on the same C12 convention as
+            `memory_bytes` below. S5 already guaranteed the *value*: a degraded start
+            reports `0` here and `[]` in `antenna_ids`, so monitoring can tell "loaded
+            nothing" from "did not answer". What F6 added is that the guarantee is now
+            also what the generated spec says — these carried `skip_serializing_if`
+            while `handlers::status` always populated them, so the spec under-promised
+            two fields the server always sends.
           minimum: 0
         antenna_ids:
           type:
@@ -2306,13 +2318,28 @@ components:
           - 'null'
           items:
             type: string
-          description: List of loaded antenna IDs
+          description: |-
+            List of loaded antenna IDs.
+
+            **Present and null** rather than omitted — see `antenna_count`. Empty on a
+            degraded start, never absent.
         memory_bytes:
           type:
           - integer
           - 'null'
           format: int64
-          description: Memory usage in bytes (if available)
+          description: |-
+            Resident set size of the service process, in bytes.
+
+            **Present and null**, never omitted, when the platform cannot report it
+            (roadmap F6). The encoding is C12's, decided for `CalibrationInfo.rmse_db`:
+            an omitted field cannot be told apart from one this build does not
+            implement, so omission stays reserved for structurally absent members such
+            as `PhysicalParametersInfo.mesh`.
+
+            Resident, not virtual. `sysinfo` supplies it on Linux, macOS, Windows and
+            the BSDs, so `null` means an unsupported target or a refresh that found no
+            process — not "this platform is not Linux", which is what it used to mean.
           minimum: 0
     ValidityRangesInfo:
       type: object
