@@ -1006,16 +1006,40 @@ pub struct StatusResponse {
     /// Uptime in seconds since server start
     pub uptime_seconds: u64,
 
-    /// Number of loaded antennas
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Number of loaded antennas.
+    ///
+    /// **Present and null** rather than omitted, on the same C12 convention as
+    /// `memory_bytes` below. S5 already guaranteed the *value*: a degraded start
+    /// reports `0` here and `[]` in `antenna_ids`, so monitoring can tell "loaded
+    /// nothing" from "did not answer". What F6 added is that the guarantee is now
+    /// also what the generated spec says — these carried `skip_serializing_if`
+    /// while `handlers::status` always populated them, so the spec under-promised
+    /// two fields the server always sends.
+    #[schema(required)]
     pub antenna_count: Option<usize>,
 
-    /// List of loaded antenna IDs
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// List of loaded antenna IDs.
+    ///
+    /// **Present and null** rather than omitted — see `antenna_count`. Empty on a
+    /// degraded start, never absent.
+    #[schema(required)]
     pub antenna_ids: Option<Vec<String>>,
 
-    /// Memory usage in bytes (if available)
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// Resident set size of the service process, in bytes.
+    ///
+    /// **Present and null**, never omitted, when the platform cannot report it
+    /// (roadmap F6). The encoding is C12's, decided for `CalibrationInfo.rmse_db`:
+    /// an omitted field cannot be told apart from one this build does not
+    /// implement, so omission stays reserved for structurally absent members such
+    /// as `PhysicalParametersInfo.mesh`.
+    ///
+    /// Resident, not virtual. `sysinfo` supplies it on Linux, macOS, Windows and
+    /// the BSDs, so `null` means an unsupported target or a refresh that found no
+    /// process — not "this platform is not Linux", which is what it used to mean.
+    // Always serialized, so the spec must list it as required; utoipa derives
+    // `required` from the absence of `Option`, and cannot see that the field has
+    // no `skip_serializing_if`.
+    #[schema(required)]
     pub memory_bytes: Option<u64>,
 }
 
@@ -1505,6 +1529,55 @@ mod tests {
         assert_eq!(
             response.antenna_ids,
             Some(vec!["antenna_1".to_string(), "antenna_2".to_string()])
+        );
+    }
+
+    /// Every optional member of `StatusResponse` is **present and null** rather
+    /// than omitted (roadmap F6, on C12's convention for `CalibrationInfo.rmse_db`).
+    ///
+    /// The distinction is the whole point of the encoding and is invisible to a
+    /// round-trip test: an `Option` deserializes from an absent key and from an
+    /// explicit `null` identically, so only the serialized key set can see it.
+    ///
+    /// All three fields are asserted together deliberately. `memory_bytes` is the
+    /// one F6 set out to fix; `antenna_count`/`antenna_ids` are the two that
+    /// already *behaved* this way — S5 made `handlers::status` always populate
+    /// them — while still carrying `skip_serializing_if`, so the struct spelled one
+    /// guarantee two ways and the generated spec under-promised two fields the
+    /// server always sends. A test that checked only `memory_bytes` is what let
+    /// that split survive being noticed.
+    ///
+    /// The negative control is the second half: a populated response must still
+    /// emit real values, or "always null" would satisfy the first assertion.
+    #[test]
+    fn every_optional_status_field_is_serialized_as_null_rather_than_omitted() {
+        let bare = StatusResponse::ok("1.0.0".to_string(), 100);
+        let json = serde_json::to_value(&bare).expect("serializes");
+
+        for field in ["memory_bytes", "antenna_count", "antenna_ids"] {
+            assert_eq!(
+                json.get(field),
+                Some(&serde_json::Value::Null),
+                "{field} must be present and null when unset, not omitted; an \
+                 omitted field cannot be told apart from one this build does not \
+                 implement. Full body: {json}"
+            );
+        }
+
+        let populated = StatusResponse::ok("1.0.0".to_string(), 100)
+            .with_antennas(vec!["antenna_1".to_string()])
+            .with_memory(4096);
+        let json = serde_json::to_value(&populated).expect("serializes");
+        assert_eq!(
+            json.get("memory_bytes").and_then(serde_json::Value::as_u64),
+            Some(4096),
+            "a reported figure must still reach the wire"
+        );
+        assert_eq!(
+            json.get("antenna_count")
+                .and_then(serde_json::Value::as_u64),
+            Some(1),
+            "a loaded antenna count must still reach the wire"
         );
     }
 

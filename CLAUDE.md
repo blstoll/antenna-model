@@ -19,7 +19,7 @@ Sprints 1–7 of 8 are complete (see `docs/implementation-plan.md`): physics eng
 # Build both service and calibration tool
 cargo build --release
 
-# Run all tests — dev inner loop (1071 tests, ~24 s, measured 2026-08-20 on an
+# Run all tests — dev inner loop (1072 tests, ~24 s, measured 2026-08-21 on an
 # idle 8-core machine). The default nextest profile excludes the slow tier: three
 # heavy physics pins + the two calibrate full-mode e2e binaries. See
 # .config/nextest.toml and roadmap D18. (P10-perf returned six pins to this tier
@@ -42,7 +42,7 @@ cargo build --release
 cargo nextest run --workspace
 
 # Run BOTH tiers — what scripts/check.sh and CI run.
-# 1101 tests, ~280 s, measured 2026-08-20 on the same idle 8-core machine. `calibrate`
+# 1102 tests, ~280 s, measured 2026-08-20 on the same idle 8-core machine. `calibrate`
 # is the dominant member and its own tail (`cli_full_mode_e2e`) sets this figure;
 # D18 task 3 halved it on 2026-08-17 by parallelising calibrate's two per-point
 # physics sweeps, 510.6 s -> 253.8 s for that package, with no assertion changed and

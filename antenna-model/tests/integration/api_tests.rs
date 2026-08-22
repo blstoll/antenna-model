@@ -52,10 +52,23 @@ async fn test_status_endpoint() {
     // Uptime should be reasonable (u64 is always >= 0, so just check it's set)
     let _ = response.uptime_seconds;
     // Should have loaded test antennas
-    // Should have loaded test antennas
     if let Some(antenna_ids) = &response.antenna_ids {
         assert!(!antenna_ids.is_empty());
     }
+
+    // Roadmap F6: the served metric, not just the accessor. `AppState`'s own test
+    // proves the number tracks this process; what this adds is that it survives the
+    // handler and the JSON round trip, on whatever platform CI is running — the
+    // Linux-only implementation this replaced returned `None` here on macOS, and
+    // the field then vanished from the body entirely.
+    let memory_bytes = response
+        .memory_bytes
+        .expect("/status reports resident memory on every platform sysinfo supports");
+    assert!(
+        memory_bytes > 1024 * 1024,
+        "served memory_bytes = {memory_bytes}, under 1 MiB for a running service; \
+         a unit error (KiB or pages reported as bytes) looks exactly like this"
+    );
 
     server.shutdown().await;
 }

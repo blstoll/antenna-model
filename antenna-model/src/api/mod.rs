@@ -124,29 +124,38 @@ impl AppState {
         *self.antenna_ids.write() = ids;
     }
 
-    /// Get memory usage in bytes (if available)
+    /// Resident set size of this process, in bytes, or `None` where the platform
+    /// cannot report it (roadmap F6).
     ///
-    /// Returns the current process memory usage. On some platforms this may not be available.
+    /// Delegates to `sysinfo`, which is what makes this cross-platform — the
+    /// previous implementation read `/proc/self/statm` behind
+    /// `#[cfg(target_os = "linux")]` and returned `None` everywhere else, so the
+    /// metric was absent on every developer machine in this project.
+    ///
+    /// **That path was also wrong on Linux itself, off x86.** It multiplied the
+    /// RSS page count by a hardcoded `4096`; `sysconf(_SC_PAGESIZE)` is 16384 or
+    /// 65536 on common aarch64 kernels, so the reported figure was 4x or 16x low
+    /// on exactly the hardware a service like this gets deployed to. `sysinfo`
+    /// reads the same `statm` field and scales it by the real page size.
+    ///
+    /// The unit is bytes on every platform, and the quantity is RSS (resident,
+    /// not virtual) — unchanged from the Linux path this replaces, so the
+    /// published meaning of `/status`'s `memory_bytes` does not move.
+    ///
+    /// A fresh `System` is built per call rather than cached behind a lock in
+    /// `AppState`: `sysinfo` needs `&mut` to refresh, `/status` is a
+    /// monitoring-frequency endpoint, and one single-process refresh measured
+    /// 80-180 us on macOS. A `Mutex<System>` would buy nothing and could serialize
+    /// status checks behind each other.
     pub fn get_memory_usage(&self) -> Option<u64> {
-        // Try to get memory usage from /proc/self/statm on Linux
-        #[cfg(target_os = "linux")]
-        {
-            use std::fs;
-            if let Ok(contents) = fs::read_to_string("/proc/self/statm") {
-                // statm format: size resident shared text lib data dt
-                // We want RSS (resident set size) which is the second field
-                // Each page is typically 4096 bytes
-                if let Some(rss_pages) = contents.split_whitespace().nth(1) {
-                    if let Ok(pages) = rss_pages.parse::<u64>() {
-                        return Some(pages * 4096);
-                    }
-                }
-            }
-        }
-
-        // On macOS, we could use task_info but that requires unsafe code
-        // For now, return None on non-Linux platforms
-        None
+        let pid = sysinfo::get_current_pid().ok()?;
+        let mut system = sysinfo::System::new();
+        system.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::Some(&[pid]),
+            true,
+            sysinfo::ProcessRefreshKind::nothing().with_memory(),
+        );
+        system.process(pid).map(|process| process.memory())
     }
 }
 

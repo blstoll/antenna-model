@@ -146,7 +146,8 @@ pub async fn ready(state: Data<&Arc<AppState>>) -> Response {
 /// - uptime_seconds: Seconds since server started
 /// - antenna_count: Number of loaded antennas (always present, 0 on a degraded start)
 /// - antenna_ids: List of loaded antenna IDs (always present, `[]` on a degraded start)
-/// - memory_bytes: Memory usage in bytes (when available, Linux only)
+/// - memory_bytes: Resident memory in bytes (always present; null where the
+///   platform cannot report it)
 ///
 /// # Example Response
 /// ```json
@@ -1623,26 +1624,59 @@ mod tests {
         assert_eq!(state.get_antenna_ids(), ids);
     }
 
+    /// `get_memory_usage` reports this process's real RSS on every platform
+    /// `sysinfo` supports — including the macOS this project is developed on,
+    /// where the `/proc/self/statm` implementation this replaces returned `None`
+    /// unconditionally (roadmap F6).
+    ///
+    /// The old test asserted `is_none()` off Linux, i.e. it pinned the gap as if
+    /// it were the contract. Asserting `is_some()` instead is not enough on its
+    /// own: a stub returning a constant satisfies it just as well, which is the
+    /// vacuity D3 guards against elsewhere. So the assertion is that the number
+    /// *tracks* — allocate and touch 64 MiB, and require the reported figure to
+    /// move with it.
+    ///
+    /// **The 16 MiB floor against a 64 MiB allocation is a 4x margin, not a
+    /// proof.** Touching the pages makes them resident and dirty, and the window
+    /// between writing them and reading RSS back is microseconds, so in practice
+    /// the measurement only moves up. But do not write down that reclaiming them
+    /// "requires swap": on macOS — the platform this unit exists to enable — the
+    /// memory compressor evicts dirty anonymous pages from `pti_resident_size`
+    /// (what `sysinfo` reads here) under pressure alone, with no swap involved.
+    /// If this ever flakes, that is the mechanism, and the fix is a larger
+    /// ballast or a retry, not a smaller floor.
     #[test]
-    fn test_app_state_memory_usage() {
+    fn memory_usage_is_reported_on_this_platform_and_tracks_real_allocations() {
         let state = AppState::with_defaults();
-        let memory = state.get_memory_usage();
 
-        // On Linux, we should get a value
-        #[cfg(target_os = "linux")]
-        {
-            // Memory might be None if /proc/self/statm is not available
-            // but in most cases it should be Some
-            if let Some(mem) = memory {
-                assert!(mem > 0);
-            }
-        }
+        let before = state
+            .get_memory_usage()
+            .expect("sysinfo reports RSS on every platform this test suite runs on");
+        assert!(
+            before > 1024 * 1024,
+            "a Rust test binary has more than 1 MiB resident; got {before} bytes, \
+             which suggests a unit error rather than a measurement"
+        );
 
-        // On non-Linux, should be None
-        #[cfg(not(target_os = "linux"))]
-        {
-            assert!(memory.is_none());
-        }
+        const ALLOCATION_BYTES: usize = 64 * 1024 * 1024;
+        // `vec!` of a non-zero byte writes every page, so the pages are resident
+        // rather than lazily mapped — a zeroed allocation could be served from the
+        // shared zero page and never show up in RSS at all.
+        let ballast = vec![0xA5u8; ALLOCATION_BYTES];
+        std::hint::black_box(&ballast);
+
+        let after = state
+            .get_memory_usage()
+            .expect("RSS is still reportable after allocating");
+        let growth = after.saturating_sub(before);
+
+        assert!(
+            growth > 16 * 1024 * 1024,
+            "RSS grew by only {growth} bytes ({before} -> {after}) after touching \
+             {ALLOCATION_BYTES} bytes; the metric is not tracking this process"
+        );
+
+        drop(ballast);
     }
 
     // Note: Handler function tests are in routes.rs module tests
