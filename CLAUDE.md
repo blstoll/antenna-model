@@ -1,7 +1,3 @@
-# CLAUDE.md
-
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
 ## Project Overview
 
 Antenna Model Service is a high-performance REST API for parabolic dish antenna gain modeling using **physical optics computation** with calibrated correction surfaces. The system computes G/T (Gain-to-Temperature) predictions based on 3D geometry, supporting real-time queries with <100ms p95 latency.
@@ -10,70 +6,43 @@ Antenna Model Service is a high-performance REST API for parabolic dish antenna 
 1. **Physical optics computation** - Aperture integration with phase functions (path, coma, surface error via the statistical Ruze efficiency, mesh effects)
 2. **Correction surface** - B-spline interpolation for residual error corrections (measured - physics model)
 
-Sprints 1–7 of 8 are complete (see `docs/implementation-plan.md`): physics engine, calibration tool, core + advanced REST endpoints, partial-calibration support, and boresight calibration are all built and tested.
-
 ## Commands
 
 ### Build and Test
 ```bash
-# Build both service and calibration tool
-cargo build --release
+cargo build --release          # both binaries
 
-# Run all tests — dev inner loop (1072 tests, ~24 s, measured 2026-08-21 on an
-# idle 8-core machine). The default nextest profile excludes the slow tier: three
-# heavy physics pins + the two calibrate full-mode e2e binaries. See
-# .config/nextest.toml and roadmap D18. (P10-perf returned six pins to this tier
-# on 2026-08-01 — the list is meant to shrink, not ratchet.)
-#
-# This line carried NO wall-clock figure between 2026-08-14 and 2026-08-15,
-# because four runs of the IDENTICAL suite on one idle machine came out at
-# 339 s, 821 s and 931 s and that spread is not a number a doc can carry. The
-# cause is now found and fixed (D18): reqwest's default `system-proxy` feature
-# made `reqwest::Client::builder().build()` cost **11.8 s** on macOS, via a
-# serialized `configd` query — paid once per test by every test that starts a
-# `TestServer`. A contended global system daemon is exactly the kind of shared
-# resource whose cost swings 2.7× with unrelated machine state, which is why the
-# figure was unquotable. `antenna-model` alone went 848 s -> 33 s.
-# See docs/findings-2026-08-15-test-suite-execution-time.md.
-#
-# Quoting a figure again is a deliberate reversal, and it is a tripwire: if your
-# run is minutes rather than ~25 s, something has regressed — check first that
-# `reqwest` in antenna-model/Cargo.toml still has `default-features = false`.
+# Dev inner loop. The default nextest profile EXCLUDES the slow tier (three heavy
+# physics pins + the two calibrate full-mode e2e binaries) — see .config/nextest.toml.
 cargo nextest run --workspace
 
-# Run BOTH tiers — what scripts/check.sh and CI run.
-# 1102 tests, ~280 s, measured 2026-08-20 on the same idle 8-core machine. `calibrate`
-# is the dominant member and its own tail (`cli_full_mode_e2e`) sets this figure;
-# D18 task 3 halved it on 2026-08-17 by parallelising calibrate's two per-point
-# physics sweeps, 510.6 s -> 253.8 s for that package, with no assertion changed and
-# no artifact byte moved bar the timestamp and CRC.
+# Both tiers — what scripts/check.sh and CI run. `calibrate` dominates the wall clock.
 cargo nextest run --workspace --profile full
 
-# Run specific workspace member tests
-cargo nextest run -p antenna-core
-cargo nextest run -p antenna-model
-cargo nextest run -p calibrate
+# Doctests are NOT run by nextest — they need their own command.
+cargo test --doc --workspace
 
-# Run single test with output. Use --profile full for a slow-tier test — the
-# default profile filters it out and reports 0 tests run.
-cargo nextest run --profile full --no-capture test_name
-
-# Run benchmarks
+cargo nextest run -p antenna-core          # single workspace member
+cargo nextest run --profile full --no-capture test_name   # single slow-tier test
 cargo bench
 ```
 
+**Tripwire:** the default tier runs in ~25 s on an idle 8-core machine. If your run
+takes *minutes*, something has regressed — check first that `reqwest` in
+`antenna-model/Cargo.toml` still has `default-features = false`. Its default
+`system-proxy` feature makes `reqwest::Client::builder().build()` cost ~11.8 s on
+macOS via a serialized `configd` query, paid once per test that starts a `TestServer`
+(848 s vs 33 s on the `antenna-model` suite alone). See
+`docs/findings-2026-08-15-test-suite-execution-time.md`.
+
 ### Run Service
 ```bash
-# Run service locally (default: http://localhost:3000)
-cargo run --release --bin antenna-model
-
-# With custom config
-CONFIG_PATH=/path/to/config.toml cargo run --release --bin antenna-model
+cargo run --release --bin antenna-model                          # http://localhost:3000
+CONFIG_PATH=/path/to/service.yaml cargo run --release --bin antenna-model
 ```
 
 ### Calibration Tool
 ```bash
-# Generate calibration artifacts from measurement CSV
 cargo run --release --bin calibrate -- \
   --input measurements/antenna_1.csv \
   --output calibration_data/antenna_1.bin \
@@ -83,354 +52,126 @@ cargo run --release --bin calibrate -- \
 
 ### Code Quality
 ```bash
-# Format code
 cargo fmt
-
-# Run linter
 cargo clippy -- -D warnings
-
-# Security audit
 cargo audit
-
-# Generate docs
-cargo doc --open
-
-# Run all checks exactly as CI does (fmt --check, clippy --workspace
-# --all-targets -D warnings, full workspace tests, doctests, cargo audit) —
-# single entrypoint. It no longer sets RUST_MIN_STACK, and neither does CI:
-# roadmap D3 retired that 16 MiB workaround on 2026-08-20 after measuring the path
-# it was blamed on at 24 KiB. The Linux overflow it was added for was real, but the
-# cause it named is disproven (that evaluator was already iterative when the
-# workaround was written); the replacement explanation — the fit's OpenBLAS solve,
-# dropped five days later — is a hypothesis nobody has reproduced. The property is
-# now pinned on every platform by `the_round_trip_fits_in_a_small_thread_stack`,
-# which sets its own 512 KiB stack.
-#
-# It also runs two PACKAGE-scoped checks that no workspace-scoped command can
-# perform, because a workspace build unifies features ON across members and so
-# hides both properties (roadmap D4):
-#   - `cargo clippy -p antenna-core --all-targets` — the only compile of
-#     antenna-core with its `openapi` feature OFF, the configuration the CLI
-#     actually builds under. antenna-model enables it, so the workspace build
-#     never sees the OFF side.
-#   - `scripts/assert-dep-graphs.sh` (also run by CI, from that one copy) —
-#     `cargo build -p calibrate` is the only build using calibrate's normal deps
-#     alone, so the only one that fails if calibrate leans on a feature it does
-#     not declare. `clippy -p calibrate --all-targets` does NOT substitute:
-#     --all-targets pulls the dev-dependency antenna-model back in and
-#     re-unifies features. The script then asserts three graph invariants, each
-#     with a control proving the detector is alive (so a dead detector fails the
-#     gate instead of blessing everything). The first two use a negative control
-#     pointed at antenna-model, where the detector MUST fire: antenna-model is
-#     not a *normal* dep of calibrate, keeping the web stack out of the CLI (D4);
-#     and antenna-core carries no config-file stack and no more than
-#     CORE_MAX_DEPS packages, keeping it a physics/artifact crate (D27). The
-#     third (D18) asserts reqwest resolves without the `system-proxy` feature,
-#     which on macOS costs ~11.8 s per `reqwest::Client` construction — i.e.
-#     ~11.8 s per test that starts a `TestServer`, worth 848 s vs 33 s on the
-#     antenna-model suite. It is the only invariant here that **no compile can
-#     observe**: restoring `default-features` keeps build, clippy and CI green
-#     and silently costs ~14 minutes a run. Its control is a positive one
-#     (`reqwest feature "json"` must be present), because after the fix no graph
-#     contains the banned feature to point a negative control at; it asserts the
-#     *feature* edge rather than the `system-configuration` package because that
-#     package is macOS-only and so a package check is vacuous on Linux CI.
-#     Do not weaken any of the three controls — a guard whose power nothing
-#     asserts is the exact rot P13 records.
-./scripts/check.sh
+./scripts/check.sh    # runs all checks exactly as CI does — single entrypoint
 ```
+
+`check.sh` also runs **package-scoped** checks that no workspace-scoped command can perform,
+because a workspace build unifies features ON across members and hides the properties
+they test (roadmap D4):
+
+- `cargo clippy -p antenna-core --all-targets` — the only compile of `antenna-core` with
+  its `openapi` feature OFF, the configuration the CLI actually builds under.
+- `scripts/assert-dep-graphs.sh` — `cargo build -p calibrate` is the only build using
+  calibrate's normal deps alone. `clippy -p calibrate --all-targets` does NOT substitute:
+  `--all-targets` pulls the dev-dependency `antenna-model` back in and re-unifies features.
+  It asserts the dependency-graph invariants — each with a live control, since a guard
+  whose power nothing asserts is exactly the rot roadmap P13 records. **Do not weaken the
+  controls**; the script's header says what each invariant is and why.
+
+## Repo Etiquette
+
+Work is organized as **roadmap units** with IDs (`D21`, `P13`, `C15`, `F6`, `S3`) defined in
+`docs/roadmap-2026-07-work-units.md`; code comments, docs and commit subjects cite them by ID.
+Never commit to `main` — branch first. For implementing a unit and opening its PR, use the
+`roadmap-unit` skill.
 
 ## Architecture
 
 ### Workspace Structure
-```
-antenna-model/           # Cargo workspace root — three members (roadmap D4)
-├── antenna-core/       # Physics engine + artifact data layer (no web stack)
-│   └── src/
-│       ├── model/      # Physics engine: bessel, coordinates, coordinates_3d,
-│       │               #   correction_interpolator, edge_cases, fft, geometry,
-│       │               #   illumination, integration, mesh, pattern, phase,
-│       │               #   ray_trace
-│       ├── data/       # Calibration artifact layer: types.rs + loader.rs (ANTC)
-│       ├── error.rs    # Shared error vocabulary
-│       └── warnings.rs # Shared WarningCode / ApiWarning vocabulary
-├── antenna-model/      # REST API service binary — depends on antenna-core
-│   └── src/
-│       ├── api/        # REST layer (poem framework)
-│       ├── service/    # Business logic (evaluator, batch, cache, heatmap,
-│       │               #   h3_link_budget, validator)
-│       ├── data/       # repository.rs only; types/loader re-exported from core
-│       ├── config/     # Configuration system
-│       └── bin/        # generate_openapi
-├── calibrate/          # CLI calibration tool binary — depends on antenna-core
-│   └── src/
-│       ├── parser.rs             # CSV measurement parsing
-│       ├── parameter_tuner.rs    # Nelder-Mead simplex optimizer
-│       ├── correction_surface.rs # B-spline/RBF fitting
-│       ├── validator.rs          # Cross-validation
-│       ├── artifact_export.rs    # Service-loadable AntennaCalibration (3D→4D bridge)
-│       ├── sidecar.rs            # Optional JSON metadata/report sidecars only
-│       └── bin/cr159703_grid.rs  # D14 dev tool: real-anchored measurement-grid generator
-└── calibration_data/   # Calibration config (antennas.yaml) + generated *.bin artifacts (none checked in; see roadmap D9)
-```
 
-**`antenna-model` re-exports what moved**, so every pre-existing path still
-resolves: `lib.rs` does `pub use antenna_core::{error, model, warnings};` and
-`data/mod.rs` does `pub use antenna_core::data::{loader, types};` beside its own
-`pub mod repository;`. No test or bench import changed in the split. The
-canonical home of a physics or artifact type is nevertheless `antenna_core::…`;
-prefer that path in new code.
+Three members (roadmap D4). The split is an enforced boundary, not just layout —
+`scripts/assert-dep-graphs.sh` fails the build if it erodes:
 
-**`calibrate` depends on `antenna-core` for production and keeps `antenna-model`
-as a *dev*-dependency** — deliberately and load-bearingly. `calibrate/tests/**`
-serve generated artifacts through the real service path
-(`service::compute_gain_from_request`), which is what caught the 27.3 dB C13
-defect; the dependency must stay dev-only so the shipped CLI compiles no web
-stack, and it must not be deleted as "unused" by a dependency audit.
+- **`antenna-core`** — physics engine and the calibration-artifact layer, plus the shared
+  error/warning vocabularies. **No web stack**, and it stays under `CORE_MAX_DEPS` packages
+  so it does not drift into a general-purpose crate.
+- **`antenna-model`** — the REST service binary (poem).
+- **`calibrate`** — the CLI tool. `antenna-core` is its only production dependency.
+
+Two things about this that the code will not tell you:
+
+- `antenna-model` glob-re-exports what moved to core, so both paths compile forever and
+  nothing will ever flag the older one. **The canonical home of a physics or artifact type
+  is `antenna_core::…` — prefer that path in new code.**
+- **`calibrate` keeps `antenna-model` as a *dev*-dependency, and it must stay one.** It looks
+  unused: do not remove it. `calibrate/tests/**` serve generated artifacts through the real
+  service path (`service::compute_gain_from_request`), which is what caught the 27.3 dB C13
+  defect — and it must stay dev-only so the shipped CLI compiles no web stack.
 
 ### Data Flow: API Request → Response
 
-1. **API Layer** (`src/api/`) - poem framework routes and handlers
-   - Middleware: RequestId, RequestLogger, ErrorHandler, RequestSizeTracker
-   - Schema validation via `schemas.rs`
+```
+3D Positions → Coordinate Transforms → Physics Model → Correction Surface → Final Gain
+```
 
-2. **Service Layer** (`src/service/`) - Business logic orchestration
-   - `evaluator.rs` - Main gain computation pipeline
-   - `validator.rs` - Input validation
-   - `batch.rs` - Parallel batch processing
-
-3. **Gain Computation Pipeline** (Service → Model layers):
-   ```
-   3D Positions → Coordinate Transforms → Physics Model → Correction Surface → Final Gain
-   ```
-
-   **Step-by-step:**
-   - Parse request with 3D positions (ECEF or Geodetic, per each position's required `coordinate_system` tag)
-   - Transform to antenna frame using vehicle position/attitude (`model/coordinates.rs`)
-   - Compute emitter direction (azimuth, elevation) from geometry
-   - Evaluate **physics model** (`model/pattern.rs`):
-     - Aperture integration over reflector surface (`model/integration.rs`)
-     - Phase accumulation: path + coma + mesh (`model/phase.rs`); surface error is applied statistically as a Ruze efficiency in `model/pattern.rs`, not as a per-point aperture phase
-     - Feed illumination pattern (`model/illumination.rs`)
-     - Apply Ruze efficiency and mesh transparency
-   - Interpolate **correction surface** (4D B-spline — implemented and live in `model/correction_interpolator.rs`, applied in `service/evaluator.rs`)
-   - Combine: `Gain_final = Gain_physics + Correction`
-   - Generate warnings for out-of-range queries
-
-4. **Data Layer** (`antenna-core/src/data/types.rs`) - `AntennaCalibration` structure
-   - `physical_config: PhysicalAntennaConfig` - reflector geometry, feed parameters
-   - `correction_surface: Option<BSplineModel4D>` - residual corrections
-   - Loaded at startup from `.bin` artifacts referenced by `antennas.yaml`. **No `.bin` artifacts ship in-repo — decided, not incidental (roadmap D9, decided 2026-08-16): an artifact is a build output derived from measurements *plus* this codebase's physics model, so a committed one goes stale when `PHYSICS_MODEL_VERSION` moves (4 → 9 in one month) and nothing in the build can notice. The four `antennas.yaml` entries that reference a `.bin` file are `enabled: false` and are TEMPLATES; the five uncalibrated design-spec antennas are `enabled: true` and load with no artifact, so a clean checkout starts healthy. Counts verified 2026-08-16 — five enabled / 11 feeds; earlier drafts of this line said "four and four", which was already stale when `dsn_70m` and `gbt_100m` were added, and `test_simple` was disabled by D9 as a dev fixture that should not appear in an operator's `/status`.** D9's worked generation path is `scripts/generate-cr159703-artifact.sh` (roadmap D14): committed inputs → generated grid → `calibrate` → `.bin`, written outside the repo tree and never committed.
-   - **`physical_config.feed.position` is the feed's design offset *from the focal point*, not its vertex-origin position** — an on-axis feed is `(0, 0, 0)`. The service adds it to a steering position that is already vertex-origin, so the other reading places the feed at `z ≈ 2f`; full-mode `calibrate` did exactly that until roadmap **C13** was closed on 2026-08-02, costing **27.3 dB** of boresight gain on the first artifact ever served. See the field's doc comment in `data/types.rs`.
-   - **Every parameter the fitting model uses must be in the artifact, or the service serves a different antenna than the residuals describe.** C13 and **D23** (closed 2026-08-03) were the same defect two lines apart in `export_physical_params`. D23's was `feed.asymmetry_factor`: `calibrate` fits against the antenna class's value, the artifact had no field for it, and `FeedParametersBuilder` defaulted the service to 1.0 — so a residual surface fitted against an asymmetric illumination was applied on top of a symmetric one, and the evaluation silently moved off the azimuthal-mode integrator branch onto the symmetric one. Worst measured **1.20 dB** (`UHF_Array_Element`, cone 14°, 700 MHz) and 0.60 dB (`GroundStation_13m`), but **0.0003 dB at boresight** — it is a φ-dependent error, which is exactly why C13's boresight-focused pass over the same function did not catch it. Asymmetry is a **declared** design property (`antennas.yaml` design specs, calibrate's `DesignSpecs::FeedSpecs`, and the class registry), deliberately not a tuned one: it is horn geometry, and boresight data carries no information about it. Each producer has its own round-trip guard, and the served-path guard in `service::evaluator` carries a negative control against the symmetric default.
-
-### Key Physics Modules (`antenna-core/src/model/`)
-
-- **`coordinates.rs`** - ECEF ↔ Geodetic ↔ Antenna Frame ↔ Spherical transforms
-- **`geometry.rs`** - `ReflectorGeometry`, `FeedParameters`, `MeshParameters`
-- **`phase.rs`** - Phase functions: path length, coma (full path-length model), surface error (statistical Ruze model; per-point Zernike maps are not implemented — the aperture integrand uses `surface_error = 0.0` and the calibration correction surface absorbs systematic surface deviations), mesh
-- **`illumination.rs`** - Feed pattern: cos^q with q-factor
-- **`integration.rs`** - Aperture integration via the **Hankel / azimuthal-mode (Jₘ) integrator** (roadmap P10, landed 2026-07-15): the φ' integral is collapsed analytically (Jacobi–Anger), radial density is derived adaptively from `(D/λ, θ)` at ~2× Nyquist, and runtime self-checks flag non-convergence (surfaced as a response warning). **Both branches now verify BOTH axes** (roadmap **P12**, landed 2026-07-31, `PHYSICS_MODEL_VERSION` 6). Until P12 the asymmetric (azimuthal-mode) branch sized `n_rho` once and self-checked only mode truncation `I(M)` vs `I(M+1)`, so on a laterally-offset or `asymmetry_factor != 1.0` feed — **five of the enabled feeds** — `converged = true` asserted nothing about the radial quadrature. Measured silent errors: 0.82 dB (`gs_3.7m` X-band, θ=5°), 1.17 dB (`dsn_34m` X-band, θ=0.10°), **7.08 dB** (D12's UHF fixture, θ=16°, φ=0); all now within 0.013 dB. The mechanism was **not** a missing term in the cycle budget (measured bandwidth 7–8 cycles vs the budget's 10.5) and **not** a too-coarse samples-per-cycle constant (the symmetric branch is 0.043 dB accurate at the same density) — it was that the mode path returned the coarse leg and never checked, while the answer is a residue of mode integrals that cancel 59–111×, so per-mode errors of ~1% become ~10% of the result. The mode path now returns the **fine (2N) leg** and refines until converged (`MAX_RADIAL_REFINEMENTS`). P12 also put a cheap `{0,1}`-mode pre-gate in front of that loop on expensive geometries; **`PHYSICS_MODEL_VERSION` 8 (P13, 2026-08-01) deleted it**, along with `RADIAL_PROBE_MODES`, `RADIAL_PRE_GATE_SAFETY`, `FULL_RADIAL_CHECK_WORK_LIMIT` and `radial_probe_field`, so there is now exactly one radial shape for every geometry. Two independent reasons, and the first is the one to remember: the safety factor **stopped bounding its quantity because of a change with no physics content** — P10-perf's `next_fast_len` φ' resizing (512 → 270) moved the worst *passing* probe-to-total ratio from 26× to **43.5×** against a constant of 32, on `dsn_34m` Ka θ=90°, with nothing in the build able to notice. Second, post-FFT the pre-gate was strictly dominated: 2.33× baseline returning the *coarse* leg, where computing at 2N and returning the *fine* leg costs 2.00×. Deleting it made the affected Ka geometries **16× more accurate** (+0.0126 → +0.0008 dB) for +28 % work, and made `dsn_34m` X θ=45° **31 % cheaper**. **Do not reintroduce a fitted numeric guard on this path without a test that asserts its margin** — that absence is what let this one rot silently. See `docs/findings-2026-08-01-p13-pre-gate-retirement.md` and `docs/findings-2026-07-31-p12-mode-path-radial-budget.md`. **The φ' cap is fixed too** (same unit, `PHYSICS_MODEL_VERSION` 7). `MODE_PHI_STEERED_MAX` used to clamp `n_phi` to 64 on steered feeds (`δ/f > 0.05`), aliasing high modes into `g₀` — measured **+82 dB** wrong against the 2D oracle on a routine ~5° beam steer, with `converged = true`, because neither existing check can see φ' aliasing (both operate on the already-corrupted `gₘ`). `n_phi` is now sized from the azimuthal bandwidth `B = k·δ·(R/f)`, rounded up only to the next even 5-smooth FFT length (**P10-perf**, 2026-08-01 — before that it was not rounded at all, because the transform was a naive DFT), `MODE_PHI_MAX` = 2048, and `ModeSizing::azimuthally_resolved` gates `converged` when the ceiling binds. An effort ceiling *does* remain, but keyed to `SEVERE_OFFSET_THRESHOLD` (0.5f) — the model's own PO scope boundary, where it already warns and routes to the ray-tracing stub — instead of the old arbitrary 0.05, and it announces itself instead of being silent. Removing it outright over-corrected: the integration suite's 3.06f-steered fixture went from 5.5 s to 66 s converging a number the model had already disclaimed. Its sibling `MODE_RADIAL_CYCLE_CAP` was re-keyed the same way (now `BEYOND_SCOPE_COMA_CYCLE_CAP`): inside scope it was strictly harmful, making the same geometry *both* 0.34 dB worse and 2× more expensive (a refinement loop started below the physics discards every wasted leg); outside scope it is kept, and P12's radial check reports if it costs accuracy. **The rule both caps now follow: size from the physics inside the model's scope, cap effort outside it, never be silent about which.** The old constants capped *inside* scope and did it silently — the threshold, not the mechanism, was the defect. That in turn exposed `m_theta = k·R·sinθ + 6`: `Jₘ` has an Airy turning point at `m = x` with transition width `~x^(1/3)`, so a flat `+6` truncated live spectrum (+0.49 dB at θ=3°); it is now `x + 4·x^(1/3) + 6`. **Cost:** a steered geometry is ~69× more expensive than the capped version, which briefly made it a *coverage* item — it could hit S3's wall-clock budget and serve a 504 rather than return an aliased number. **Closed by P10-perf, 2026-08-01** (no physics change, `PHYSICS_MODEL_VERSION` still 7): the φ' transform is now an in-house mixed-radix FFT (`model/fft.rs`, `O(n_φ log n_φ)` instead of `O(n_φ·M)`), every `Jₘ` order at a given argument comes from one recurrence sweep (`bessel_jn_array`, `O(M)` instead of `O(M²)`), and the aperture-plane function `g(ρ,φ')` — which those two changes left as ~79% of a sweep — lost its `acos`→`cos` round trip and its per-radial-sample recomputation of φ'-invariant trigonometry. Net **2.4–7.4×**: the ~5° steer went 500 → 67 ms (its test 22.3 s → 4.0 s), `dsn_34m` Ka θ=90° 2135 → 559 ms. The φ' axis has exactly one automatic guard, `served_n_phi_sizing_is_sufficient_on_every_asymmetric_geometry`; do not weaken it. The legacy 2D Simpson quadrature survives only as a `#[cfg(test)]` reference oracle. The `IntegrationParams` presets (`fast()`, `high_accuracy()`) no longer gate served correctness — the served path uses `adaptive()` and most preset fields are inert (see the docstrings in `integration.rs`).
-- **`bessel.rs`** - In-house Bessel Jₘ (pure Rust), pinned by tests in every branch, across the **turning point** `m ≈ x`, and — since **P14** (2026-08-01, `PHYSICS_MODEL_VERSION` 9) — against an **independent oracle**: a compensated trapezoidal quadrature of `Jₘ(x) = (1/2π)∫₀^{2π} cos(mτ − x sinτ)dτ`, which shares no machinery with the recurrences. Add that oracle to any Bessel change: the module's other graders are recurrence identities, and *an identity is scale-invariant* — a uniformly mis-normalized Miller result satisfies it exactly, which is the one way Miller's algorithm actually fails. `bessel_jn_array` returns every order `J_0…J_{m_max}` from a single sweep and is what the mode integrator uses — do not mix it with per-order `bessel_jn` calls on the same path, since the two select their recurrence direction from different orders. P14 closed the accuracy cliff at `m ≈ x` (was 2e-8 at x=255, 9e-3 at x=10⁴, **growing without bound in x**; now ~3e-16 flat) by making the Miller start offset scale with the turning-point width, `12·x^(1/3)`, where the 12 is **derived** from an Airy decay requirement rather than fitted — and, per P13's lesson, `miller_start_offset_has_real_margin` asserts that constant's margin *directly*, by re-running the shipped recurrence at 3× the offset and requiring the answer not to move, with a negative control proving the check has power. **Two accuracy floors remain, both deliberate and pinned:** `bessel_j0`/`bessel_j1` above |x| = 8 are still the Numerical Recipes rational fit at **~3e-9 absolute** (below |x| = 8 P14 replaced it with the convergent series, ~1e-14 and exactly 1 at the origin), and that ceiling propagates to every order the *upward* branch produces; and a renormalized downward sweep is accurate to ~ε·(largest Jₘ in the sweep) in **absolute** terms, so orders well below the turning-point peak are relatively less accurate by exactly that ratio — chasing either one relatively is asking a normalized recurrence for something it cannot give.
-- **`fft.rs`** - Mixed-radix (2/3/5) forward FFT backing the integrator's φ' transform (P10-perf). Crate-internal, forward-only, deliberately not a general FFT crate. `next_fast_len` rounds a requested length up to the next even 5-smooth number — **not** a power of two, because the padding is paid in aperture-plane evaluations (536 → 540 costs 0.7%; 536 → 1024 would cost 91%). Validated against a literal DFT transcription at every fast length the integrator can ask for, not spot-checked.
-- **`pattern.rs`** - Far-field pattern computation with Ruze efficiency and the Huygens obliquity factor `(1+cosθ)/2` (F7, 2026-07-16, `absolute_gain_from_integral`)
-- **`coordinates_3d.rs`** - 3D position → antenna-frame direction transforms (ECEF/geodetic vehicle geometry)
-- **`correction_interpolator.rs`** - 4D B-spline evaluation of the residual correction surface
-- **`edge_cases.rs`, `ray_trace.rs`** - Special case / large-feed-offset handling
-- **`mesh.rs`** - Mesh transparency (wire-mesh reflection efficiency). Surface RMS / Ruze efficiency lives in `pattern.rs`.
-
-### Coma Aberration Model
-
-The coma aberration (feed displacement) uses a **full path-length model** that computes the exact geometric path difference between:
-- Path from ideal focal point to each aperture point on the parabolic surface
-- Path from displaced feed position to each aperture point
-
-This naturally includes all orders of aberration:
-- **First order (linear)**: Beam steering (θ ≈ δ/f)
-- **Second order**: Defocus/astigmatism effects
-- **Third order**: True coma with asymmetric sidelobes
-- **Higher orders**: Additional aberrations for large displacements
-
-The model is more accurate than simplified linear approximations, especially for:
-- Large feed offsets (>0.1f)
-- Predicting gain loss at boresight when feed is displaced
-- Computing asymmetric sidelobe patterns (coma lobes)
-
-**No separate higher-order aberration mode (roadmap P2, 2026-07):** because
-`phase_feed_displacement` is the *exact* geometric path difference, it already carries the
-complete low-order aberration content (astigmatism, field curvature, distortion, trefoil) as
-an exact function of the displacement. The former `HigherOrderAberrations` computation mode
-(0.3f–0.5f band) added heuristic Seidel terms *on top of* that exact phase — a double-count,
-and worse, with wrong-sign/wrong-scale/wrong-pupil-power coefficients (e.g. it coded ρ³
-distortion where the exact model and classical theory give leading ρ¹). It was removed;
-0.3f–0.5f offsets now route through `StandardPhysicalOptics`, whose exact coma phase covers
-them. The completeness pin
-`edge_cases::exact_feed_displacement_phase_contains_all_low_order_aberrations` proves the
-exact phase's full content against an independent closed form. Offsets >0.5f still route to
-the ray-tracing stub (roadmap P3). This is why `PHYSICS_MODEL_VERSION` is 4.
-
-### Calibration Workflow
-
-The `calibrate` tool processes measurement data:
-
-1. **Parse CSV** (`parser.rs`) - Read G/T measurements (azimuth, elevation, frequency, temperature, g_over_t_db). **E-clock/E-cone are spherical coordinates about boresight, and the parser puts every row in the *polar convention* on the way in** (`MeasurementPoint::to_polar_convention`, roadmap **D26**, 2026-08-13): a negative E-cone is legal recorded input — a one-sided pattern cut on a fixed clock plane — but `(φ, −θ)` names the same direction as `(φ + 180°, θ)`, and only the second form is consumable. The served elevation is a polar angle from boresight and is **never negative**, so a correction surface fitted on a signed cone axis is unreachable on the served path, and the artifact's validity/coverage elevation ranges are polar-angle ranges too. Before D26 the gap was bridged by a silent clamp in `export_full_calibration` (`el_lo = min.max(0.0)`), which collapsed a `-14°…0°` cut to `(0.0, 0.0)`: the artifact then reported `is_boresight_only()` over thousands of measurements and the service applied **no correction at all**, with every other health signal normal — the D13 signature, "every observable healthy except the one nobody asserted". A wholly-negative span produced the *inverted* range `(0.0, -1.0)`. The reflection is physics-preserving (the far-field carries `sin θ` signed, and `Jₘ(−u) = (−1)ᵐJₘ(u)` cancels against `e^{im(φ+π)}` mode by mode — measured 3.2e-6 dB on the asymmetric branch), and the export now **refuses** an out-of-convention extent rather than clamping it: a clamp cannot tell "already correct" from "silently truncated", which is how this survived.
-2. **Tune Parameters** (`parameter_tuner.rs`) - Nelder-Mead simplex optimizer adjusts physical parameters (surface RMS, mesh spacing, wire diameter). Search bounds come from `ParameterBounds::from_class` — a multiplicative bracket around each antenna class's own nominal, **not** a fixed global range (D16, 2026-07-31). The objective must be evaluated under the same `IntegrationParams` as `main.rs::compute_model_predictions` (`default()`), or the tuner optimizes against integrator discretisation error rather than the physics — see `docs/findings-2026-07-30-full-mode-parameter-tuning-broken.md` defect 4. **Both of `calibrate`'s per-measurement-point physics sweeps — this objective and `compute_model_predictions` — are parallel over points via rayon (D18 task 3, 2026-08-17); one objective evaluation is the pipeline's unit of cost, and Nelder-Mead pays it once per simplex vertex.** Each parallel site **collects into an index-ordered `Vec` and reduces serially**, so every reported number is bit-for-bit what the serial code produced (verified: two artifacts differ only in their timestamp and CRC, 16 of 39,436 bytes). **Do not replace those reductions with a parallel `sum()`/`reduce()`** — f64 addition is not associative, and this crate's known-answer tests and D13's real-data tolerances pin measured constants to four decimals.
-3. **Fit Correction Surface** (`correction_surface.rs`) - B-spline/RBF fitted to residuals (measured - physics). **The data requirement is the coefficient count `∏(placed_knots_axis + order)`, not the `(spline_order+1)³ = 125` pre-check** (roadmap D20, 2026-08-02): an underdetermined fit is now a hard `UnderdeterminedFit` error, checked after knot generation because the knot counts in `CorrectionSurfaceParams` are a *request* that interior-only placement and minimum-spacing can reduce. Full mode's shipped 4/6/8 counts declare up to 960 coefficients, so a full-mode dataset needs ≥960 points — and ≥1440 if a 3-fold cross-validation has to pass, since the training split is what must cover them. Switching this check on failed 24 tests that had been fitting underdetermined surfaces and reporting excellent RMSE: such a fit interpolates its own data points almost exactly while oscillating between them. Related, same day: adaptive knots are now **strictly interior** (D19) — a knot equal to an axis bound became multiplicity `order+1` after clamping, giving that basis function zero-width support, so 37.5% of the shipped configuration's coefficients were attached to functions that were identically zero. `validate_knot_vector` enforces end multiplicity `== order` and interior `<= order-1`. **Sizing a test fixture here means sizing it to the coefficient count of the params it fits, and for the tightest CV fold it runs** — not to 125. **The angular knots are absolute while the pattern scale is `λ/D`** — 0.06°–5.4° across the antennas in this tree — so on anything but a broad-beam antenna the surface carries the residual's *envelope trend*, not its lobe structure, and **in-sample RMSE structurally cannot see the difference** (the grid is sampled no finer than the knots). Measured under D14: 8.42 dB of unrepresentable lobe-scale structure on a 1.22 m dish at 12.1 GHz. **Since D21 (2026-08-04) every full-mode fit says so**: `correction_surface::assess_angular_resolution` compares the delivered knot spacing to `λ/D`, `calibrate` warns when it falls short, and the figures ride in `CalibrationMetadata.angular_resolution` and the `--metadata` sidecar. Three things to know before touching it. (1) The assessment reads the **delivered** knot vectors, never `CorrectionSurfaceParams` — the requested floors are wrong in both directions, and the knot *count* binds at least as often as the spacing floor (on D14's fixture, deriving the floors from `λ/D` alone would have changed nothing, because `num_knots_econe = 6` binds at the same 2°). (2) **The clock axis is the worse of the two, by 5×** (0.119 knots per lobe period against cone's 0.577), delivering 40° against its own 5° floor, and its requirement *tightens* off-axis: traversing φ at polar angle θ crosses an arc of `sin θ`, so `Δφ = (λ/D)/sin θ` — the opposite of what an absolute floor assumes. (3) `MIN_KNOTS_PER_LOBE_PERIOD = 2.0` is **derived** (Nyquist), not fitted, which is why it carries no margin test. **D26 (2026-08-13) hardened the assessment against input it cannot measure**: `widest_knot_gap` returns `Result` and refuses an empty, degenerate or non-finite axis instead of reporting a number for it — a NaN gap used to be *discarded* by `fold(0.0, f64::max)`, reporting the widest *finite* gap and so a **better**-resolved verdict out of corrupt input. `f64::INFINITY` now has exactly one meaning in `AngularResolution` (no clock structure to resolve, the best case, on the `sin θ → 0` path); the opposite "infinitely coarse knots" encoding is gone, so `INF/INF = NaN` into the artifact metadata and `PartialEq` is unreachable by construction. On the consumer side the ratio accessors return 0.0 for a spacing they cannot divide by, and `AngularResolution::validate` — called from `AntennaCalibration::validate`, which never inspected `metadata` before — refuses such an artifact at load. The shipped knot configuration has **one** owner, `CorrectionSurfaceParams::shipped()`; it existed as three hand-copies (`main::surface_fitting_params`, `validator`'s `artifact_params`, `correction_surface`'s `shipped_shape_params`), so a test could describe a shape nothing ships. And the assessment is derived **inside** `export_full_calibration` from the same `diameter_m` it stamps — it used to be a parameter while the caller read the diameter independently off the antenna class, so an artifact could describe one dish in `diameter_m` and another in `angular_resolution` (the C13/D23 invariant, two lines apart in that same function). Whether the limitation can ever be lifted is genuinely open and filed as **D24**: the obvious fix — derive the knots from `λ/D` — is untestable here (D14's fill contains no lobe-scale residual by construction) and would make `calibrate` *refuse* every narrow-beam antenna under D20's sufficiency check. See `docs/findings-2026-08-02-correction-surface-angular-resolution.md`.
-4. **Validate** (`validator.rs`) - Cross-validation, ensure <1 dB error in main lobe/first sidelobe. **Folds are strided — point `i` is held out by fold `i % K`** (D22, 2026-08-03), through the single shared definition `correction_surface::is_held_out`. **There are two k-fold implementations** and both must use it: `validator::perform_cross_validation`, and `correction_surface::cross_validate` inside `fit_correction_surface` — the latter is the one `--validate` reaches *first*, because `main::surface_fitting_params` sets `cross_validation_folds` straight from the flag. D22's first cut fixed only the validator, which left the decided behaviour unreachable from the CLI. They used to be contiguous slices of the input file, so on a grid-ordered measurement set the edge folds held out a whole axis slab and scored an *extrapolation*: 10.07 / 0.56 / 0.12 / 0.64 / 10.86 dB against an in-sample 0.027 dB, a headline `--validate` number that changed if you re-sorted the same measurements. Striding is deterministic and invariant to which axis varies fastest; its known bias is the opposite one (optimistic on a dense grid, since every held-out point has training neighbours), and that is now a stated property rather than a side effect of row order. **Read `fold_rmse_values`, not just the mean** — the mean alone hid a 100× spread, and `format_summary` prints every fold for that reason. A fold whose training split cannot be fitted is **recorded and reported, not fatal**: since D20 an underdetermined fit is a hard error and a fold trains on `(1 − 1/folds)` of the data, so aborting made `--validate` *remove* an artifact the same command without it produces. See `docs/findings-2026-08-02-cross-validation-fold-assignment.md`.
-5. **Serialize** (`artifact_export::write_calibration_artifact` — the tool's **only** artifact writer, shared by full and boresight mode since D2, 2026-07-30) - Generate binary `.bin` artifact: an `AntennaCalibration` encoded with **postcard** (documented, versioned wire format), wrapped in the ANTC header (magic + version + CRC32 + length). Migrated off the unmaintained `bincode` crate 2026-07-18. An artifact carries **two** version axes and the loader enforces both: the ANTC header `u32` (`ANTC_ARTIFACT_VERSION` = **4** since 2026-08-04) is the *container* axis, readable before the decode; `metadata.format_version` (`CALIBRATION_SCHEMA_VERSION` = **"5.0"** since 2026-08-04) is the *schema* axis, readable only after it, and a foreign MAJOR is a hard error. **Three recent bumps cover the three cases worth knowing, and they moved the axes differently.** D21 (5.0 / container 4) added `metadata.angular_resolution` and is the case where the bump **fixes no wrong number at all**: every 4.0 artifact means exactly what it said and no consumer reads the new field, but postcard is positional, so a 4.0 payload is short by the `Option` discriminant and everything after it decodes from the wrong offset — layout, not correctness, is what the first two rows of the bump table are about. C13 (3.0) was *meaning-only*: not a single byte of the layout moved, but what `feed.position`'s three `f64`s meant in a full-mode artifact changed (vertex- vs focus-relative), which no consumer could detect and which cost 27.3 dB of served gain — so the schema axis rejected pre-3.0 artifacts while the container axis stayed at 2. D23 (4.0) was a *layout* change, adding `feed.asymmetry_factor`, so it bumped **both**: a 3.0 payload is one `f64` short and postcard reads positionally, so the decode itself is untrustworthy and only the container stamp is readable early enough to say so. Producers must stamp the constant, never a literal — three of them carried `"2.0"` by hand and would have drifted straight past the bump, and D23 found a *fourth* hand-rolled ANTC writer in a test carrying a literal `2u32`. **Since D27 (2026-08-14) there is exactly one definition of the framing, `antenna_core::data::loader::encode_calibration_artifact`, beside the loader that reads it** — `write_calibration_artifact` wraps it and adds file I/O, and test helpers use it too. Do not lay the header out by hand; that is how the repo accumulated a fourth copy (D23) and then a fifth that wrote no header at all (D27). **ANTC framing is also now required on load**: the legacy headerless fallback is gone, because the schema gate already refused every artifact it existed for (`CALIBRATION_SCHEMA_VERSION` has moved 2.0 → 5.0 since D2 made framing universal), so it could only ever accept a bare payload no producer writes. See `data/loader.rs`'s module docs and `docs/calibration-workflow-guide.md` §10.5.1 before touching either. Do NOT add `#[serde(skip_serializing_if)]`/`skip`/`flatten` to any serialized calibration type — postcard is positional and non-self-describing, so those attributes silently corrupt the format (see the note atop `data/types.rs`).
+`service/evaluator.rs` orchestrates this and its module docs carry the authoritative
+step-by-step diagram (including beam squint, G/T, and loss) — read those rather than a copy.
+`AntennaCalibration` (`antenna-core/src/data/types.rs`) is loaded at startup from the `.bin`
+artifacts `antennas.yaml` names; see `.claude/rules/calibration.md` before touching it.
 
 ### Configuration System
 
-- **Service config**: `config/service.yaml` (override the path with `CONFIG_PATH`) or environment variables. There is no `service.toml` — the loader reads YAML, and README/CLAUDE both claimed `.toml` until D9 checked (2026-08-16).
-- **Antenna configs**: `calibration_data/antennas.yaml` - lists available antennas
-- **Calibration data**: Binary `.bin` artifacts referenced by `antennas.yaml` (generated locally; none committed — see D9)
-- Uses `config` crate for hierarchical config (file + env vars)
+- **Service config**: `config/service.yaml` (override the path with `CONFIG_PATH`). There is
+  no `service.toml` — the loader reads YAML, and README/CLAUDE both claimed `.toml` until
+  D9 checked (2026-08-16).
+- **Antenna configs**: `calibration_data/antennas.yaml`. **No `.bin` artifacts ship in-repo**
+  (roadmap D9) — the entries that reference one are `enabled: false` templates; the
+  uncalibrated design-spec antennas are `enabled: true` and load with no artifact, so a
+  clean checkout starts healthy. Counts drift — count them, don't quote a doc.
 
 ## Important Design Constraints
 
-### Physics Model Implementation
+### Coordinate Systems Are Declared, Never Inferred
 
-1. **Coordinate Systems Are Declared, Never Inferred**
-   (`antenna-core/src/model/coordinates_3d.rs`, re-exported by
-   `antenna-model/src/api/schemas.rs`)
-   - `Position3D.coordinate_system` is **required**: `"ecef"` (x,y,z meters from Earth's
-     centre) or `"geodetic"` (lon°, lat°, alt m). Omitting it is a 400 naming the field.
-   - Construct in Rust with `Position3D::ecef(...)` / `Position3D::geodetic(...)`; there is
-     no `new()` that picks a frame for you.
-   - The former magnitude heuristic (>6400 km → ECEF) was removed by roadmap unit C8 stage 2
-     (2026-07-27). **Do not reintroduce a default or a fallback** — it could not tell a
-     geodetic GEO satellite from an ECEF point, and silently returned a wrong gain when it
-     guessed. See `docs/domain-contract.md`, "Resolved by design 2026-07-27".
+(`antenna-core/src/model/coordinates_3d.rs`, re-exported by `antenna-model/src/api/schemas.rs`)
 
-2. **Multi-Feed Support**
-   - Antennas can have multiple feeds
-   - Use composite identifier: `(antenna_id, feed_id)`
-   - Each feed has unique position, pattern, correction surface
+- `Position3D.coordinate_system` is **required**: `"ecef"` (x,y,z meters from Earth's centre)
+  or `"geodetic"` (lon°, lat°, alt m). Omitting it is a 400 naming the field.
+- Construct in Rust with `Position3D::ecef(...)` / `Position3D::geodetic(...)`; there is no
+  `new()` that picks a frame for you.
+- **Do not reintroduce a default or a fallback.** The magnitude heuristic that C8 stage 2
+  removed could not tell a geodetic GEO satellite from an ECEF point, and returned a
+  silently wrong gain when it guessed.
 
-3. **Performance Targets**
-   - Single evaluation: <100ms p95 latency (physics computation is expensive)
-   - Batch throughput: 1-20 req/s per instance
-   - Memory: <512MB footprint
-   - Startup: <10s
+### Other Constraints
 
-4. **Accuracy Requirements**
-   - <1 dB error in main lobe (validated against measurements)
-   - <1 dB error in first sidelobe
-   - Warnings for extrapolated queries (out of calibrated range)
+- **Multi-feed:** antennas can have multiple feeds; the composite identifier is
+  `(antenna_id, feed_id)`. Each feed has its own position, pattern, correction surface.
+- **Performance targets:** single evaluation <100 ms p95; batch 1–20 req/s per instance;
+  <512 MB memory; <10 s startup.
+- **Accuracy:** <1 dB error in main lobe and first sidelobe; warnings (not errors) for
+  extrapolated queries.
 
 ### Error Handling
 
-- **Never use `unwrap()` or `expect()` in production code** - use proper error propagation
-- Use `thiserror` for error types (`antenna-core/src/error.rs`)
-- Return actionable error messages specifying which field/parameter failed
-- Generate warnings (not errors) for extrapolation or edge cases. Response warnings are
-  **typed**: `ApiWarning { code: WarningCode, message: String }` (roadmap C8 stage 3,
-  2026-07-27). `WarningCode` is a **closed** enum in `antenna-core/src/warnings.rs` — a peer of
-  `error.rs`, since the model layer produces warnings too. Adding a producer means adding
-  a variant, updating `WarningCode::ALL` and `docs/api-documentation.md`, then regenerating
-  `openapi.yaml` (`cargo run -p antenna-model --bin generate_openapi` — the spec is
-  generated since C7, never hand-edited); `tests/warning_code_vocabulary.rs` fails
-  otherwise. The error-code vocabulary is the closed `ErrorCode` enum in `api/schemas.rs`
-  (promoted from `&str` consts by C7) with the same procedure via
-  `tests/error_code_vocabulary.rs`. **`code` is the contract, `message`
-  is not** — never branch on message text (the substring test that C8 stage 3 deleted from
-  `service/heatmap.rs` is why). Heatmap/H3 aggregation dedupes on `(code, message)`, so a
-  warning meant to appear once per response must keep its message constant across grid
-  points.
-- **Changing a request/response schema means updating the examples too, and four guards
-  will say so.** Three check an example against the Rust type
-  (`tests/example_requests_deserialize.rs`, `example_responses_deserialize.rs`,
-  `example_api_requests_deserialize.rs`); the fourth,
-  `tests/openapi_examples_validate.rs` (roadmap **C15 option 3** / C7's stretch goal,
-  2026-08-22), checks **76 JSON example bodies from five sources** — the `examples/` tree,
-  `examples/postman_collection.json`, and `openapi.yaml`'s own inline
-  `content.application/json.examples` (the bodies Swagger UI and Redoc render) — against the
-  generated spec, each one resolved through the `(method, path[, status])` endpoint it
-  claims rather than a hand-picked component name. Postman's seven bodyless GETs are
-  asserted a different way: their URLs must still resolve to a documented route.
-  That fourth one is the only guard that can see a *spec*-vs-type gap (a lying
-  `#[schema(value_type = …)]`, a field the derive cannot see, a custom serializer like
-  `nan_as_null` whose wire shape utoipa cannot know) and the only one that asserts `enum`
-  membership, `minimum`, tuple arity, or nullability. Two of its properties are deliberate
-  and must not be relaxed: a JSON Schema keyword that is **unimplemented — or present but
-  malformed — is a hard failure**, never a silent skip (a validator that shrugs at what it
-  cannot read keeps passing while checking less), and every negative control is paired with
-  a positive one. If you add a component schema, either give it an example or add it to
-  `UNEXERCISED_COMPONENTS` with the reason — and that reason is checked, not trusted: the
-  list fails if an example does reach a component it names.
+- **Never use `unwrap()` or `expect()` in production code** — use proper error propagation.
+- Use `thiserror` for error types (`antenna-core/src/error.rs`).
+- Return actionable error messages specifying which field/parameter failed.
+- Generate warnings (not errors) for extrapolation or edge cases. The typed warning and
+  error vocabularies have a required change procedure — see `.claude/rules/api-contract.md`.
 
-### Testing Philosophy
+### Testing
 
-- Unit tests for all physics functions (with known reference values)
-- Integration tests with realistic calibration data
-- Property-based tests for coordinate transforms (round-trip accuracy) and physics
-  bounds — **implemented** (roadmap D7): `proptest` is a dev-dependency of `antenna-core`
-  and the properties live in `antenna-core/tests/property_tests.rs`. Generators are
-  constrained to the *validated physical domain* (they build reflectors through the
-  `ReflectorGeometry` builder, keep frequency inside [100, 50,000] MHz, etc.) so they
-  exercise the physics rather than rediscovering inputs upstream validation rejects.
-- Benchmarks for performance-critical paths (aperture integration is hottest)
-- Target: >80% test coverage
+- **Property tests** (roadmap D7) live in `antenna-core/tests/property_tests.rs`. Generators
+  are constrained to the *validated physical domain* so they exercise the physics rather than
+  rediscovering inputs upstream validation already rejects.
+- **A new test costing >10 s either gets faster or joins the slow tier** in
+  `.config/nextest.toml` — it stays CI-blocking, it just leaves the inner loop.
 
 ### Logging
 
-- Use `tracing` with structured fields (not format strings)
-- Include request IDs for correlation
-- Log at appropriate levels: DEBUG for physics details, INFO for requests, WARN for extrapolation
-- JSON format in production for structured parsing
-
-## Project Status
-
-Per `docs/implementation-plan.md`, Sprints 1–7 are complete:
-- Physics engine (aperture integration, phase functions, far-field pattern, Ruze/mesh efficiency).
-- Calibration tool (parameter tuning, correction-surface fitting, boresight calibration).
-- REST API: single gain, batch, rectangular heatmap, H3 link budget, antenna/feed listing,
-  partial-calibration statuses, multi-feed support. `/heatmap` serves **rectangular grids
-  only** — the `h3` grid type was a `not_implemented` stub, removed 2026-07-28 (roadmap C8
-  stage 4); the real H3 grid is the separate `/h3-heatmap` endpoint. A merge of the two is
-  tracked as feature **F5**, not yet decided.
-- The **4D B-spline correction surface is implemented and live** (`model/correction_interpolator.rs`,
-  applied at `service/evaluator.rs:265-287`).
-- The **P10 off-axis integrator landed 2026-07-15**: served off-axis gain is numerically
-  converged at all angles (the pre-P10 aliasing that returned gain 20–35 dB too high beyond a
-  few degrees is fixed). Served values on uncalibrated antennas are *idealised* physical optics
-  (no blockage/strut/edge-diffraction), stated honestly by the off-axis warning.
-- The **F7 sidelobe-floor redesign landed 2026-07-16/17** (`PHYSICS_MODEL_VERSION` 5): Huygens
-  obliquity factor `(1+cosθ)/2` on the far-field conversion, plus the statistical Ruze sidelobe
-  floor on uncorrected-physics antennas (power sum forward, floor-only rear). Calibrated
-  antennas unaffected — see `docs/domain-contract.md`.
-
-Active hardening and debt work is tracked in `docs/roadmap-2026-07.md` and
-`docs/roadmap-2026-07-work-units.md`.
-
-## Common Pitfalls
-
-1. **Coordinate System Confusion**: See `docs/domain-contract.md` for the frame table and known gotchas (ENU axis direction, the removed GEO-altitude auto-detection, antenna-frame origin, `feed_pointing_location` = pointing target not physical offset) before touching coordinate transforms.
-
-2. **A wrong oscillatory integrator is not obviously wrong** — it returns a plausible number. Any change to `integration.rs` or `bessel.rs` must be cross-checked at angles whose answers are independently known, spanning the full θ range **and both Bessel branches** (small-argument and asymptotic): a P10-era spike was confidently wrong by 22 dB at θ=0 while looking flawless at θ=90°, because special-function bugs fail branch-locally. The validation protocol lives in `antenna-model/tests/reference_validation.rs` (anchors, independent Hankel oracle, physicality sweeps, and since P12 the mode-path radial-convergence anchors + symmetric control) — run it, and never validate at a single angle. **Cross-check against a method that is not the one you are changing**: P12's `p2_moderate_offset` pin moved 2.3 dB and only the 2D Simpson oracle could show that *both* the old and new values were ~29 dB wrong for an unrelated reason. Performance note: the integrator is O(D/λ) per point, cheap near boresight; the remaining hot case is wide-angle Ka on offset-feed (coma) antennas (~559 ms at θ=90° after P10-perf, down from 2135 ms). **Never buy speed by reducing sample density** — P10-perf got 2.4–7.4× without touching a single sample count, by making each sample cheaper (FFT φ' transform, one-sweep `Jₘ` ladder, hoisted φ'-invariant trigonometry). The remaining cost is ~85% aperture-plane function evaluation, so that is where the next win is, not in the quadrature. Counter-intuitively, cost and convergence are **anti-correlated** here: every geometry measured with a radial error was sub-millisecond, while the 300 ms–3.7 s Ka cases were already accurate to ±0.02 dB.
-
-3. **Phase Wrapping**: Phase functions must handle 2π wrapping correctly (see the phase accumulation in `model/phase.rs`).
-
-4. **Feed Offset Sign Conventions**: Coma lobe direction depends on feed displacement sign; follow right-hand rule.
-
-5. **Correction Surface vs Physics Model**: Correction surface is *residual* (measured - physics), not absolute gain.
-
-6. **Validity Ranges**: Queries outside calibrated ranges should generate warnings but still return values (extrapolated).
-
-7. **No system BLAS — the build is pure Rust**: `cargo build` / `cargo test` need no environment variables, no Homebrew packages, and no system libraries on any platform. Do not add `LDFLAGS`/`CPPFLAGS`, and do not reintroduce `ndarray-linalg`/OpenBLAS. The correction-surface fit (`correction_surface.rs`) exploits the B-spline's local support to accumulate the normal equations `(BᵀB + λI)` directly from the `order³` non-zero basis values per data point, then solves the SPD system with an in-house Cholesky factorization. This is both dependency-free and substantially cheaper than the dense `BᵀB` product it replaced.
+`tracing` with structured fields, never format strings; include the request ID for
+correlation. DEBUG for physics detail, INFO for requests, WARN for extrapolation.
 
 ## References
 
-- **Implementation Plan**: `docs/implementation-plan.md` - Sprint-by-sprint development plan (8 sprints)
-- **Architecture Doc**: `docs/architecture.md` - System architecture and deployment
-- **Design Doc**: `docs/antenna-model-design-doc.md` - Physical models and mathematical formulation
-- **Sprint 1-4 Summary**: `docs/implementation-plan-sprints-1-4-summary.md` - Foundation work completed
-- **Domain Contract**: `docs/domain-contract.md` — coordinate frames, parameter meanings, and invariants. Read this before touching anything in `model/coordinates*.rs`, `service/heatmap.rs`, or any API field named `*position*`/`*boresight*`. Frame or parameter-meaning ambiguity has caused real, expensive bugs in this codebase before.
-
-## Physics References (for Physical Model Work)
-
-- **Antenna Theory**: Balanis - reflector antenna chapters
-- **Ruze Equation**: J. Ruze "Antenna Tolerance Theory" (1966) - surface error effects
-- **Zernike Polynomials**: Noll "Zernike Polynomials and Atmospheric Turbulence" - standard ordering
-- **Mesh Reflectors**: Wire mesh EM scattering literature
-- **Numerical Integration & Special Functions**: Jacobi–Anger expansion / Hankel transforms for the azimuthal collapse; composite Simpson's rule for the radial quadrature; mixed-radix Cooley–Tukey FFT for the φ' Fourier coefficients; Bessel Jₘ rational approximations and recurrences, including Miller's downward recurrence for the whole order ladder (Press et al. "Numerical Recipes"; Abramowitz & Stegun for reference values)
+- **Domain Contract**: `docs/domain-contract.md` — coordinate frames, parameter meanings, and
+  invariants. **Read this before touching anything in `model/coordinates*.rs`,
+  `service/heatmap.rs`, or any API field named `*position*`/`*boresight*`.** Frame or
+  parameter-meaning ambiguity has caused real, expensive bugs in this codebase before.
+- **Architecture**: `docs/architecture.md`
+- **Design Doc**: `docs/antenna-model-design-doc.md` — physical models and formulation
+- **Calibration Guide**: `docs/calibration-workflow-guide.md`
