@@ -7378,6 +7378,82 @@ than a test-latency one. **Maintainer took it the same day** ("I'm all for remov
 - **Depends on:** nothing. **Coupled to:** D17 (the two-pass structure), D18 (which measured
   it).
 
+### D32 — `--antenna-class` defaults to `DSN_34m`, and nothing checks the guess — Effort: S
+
+**Filed 2026-08-25** during a CLAUDE.md review, by reading `calibrate/src/main.rs:96` against
+the C13/D23 invariant. Not observed in a failing run — no artifact in this tree is known to be
+wrong because of it — but the mechanism is the one that has already cost 27.3 dB (C13) and
+1.20 dB (D23) twice: **the model is fitted against one antenna's parameters and the artifact is
+served as another's.**
+
+**The defect.** `--antenna-class` (`-c`) carries `default_value = "DSN_34m"`. The class supplies
+`diameter_m`, `f_over_d`, surface RMS, mesh spacing/wire diameter, feed `q_factor`,
+`phase_center_offset_wavelengths`, `asymmetry_factor` and `system_noise_temperature_k`
+(`main.rs:251-340`) — i.e. essentially the whole physical model. Calibrating a 3.7 m dish
+without passing the flag therefore fits and exports a 34 m antenna's physics, stamped with the
+measured antenna's `--antenna-id`. Nothing cross-checks the class against `--antenna-id`, the
+measurement data, or `--design-specs`. The **only** failure mode is a typo: an unknown class
+name errors (`Antenna class 'X' not found`), a valid-but-wrong one succeeds silently.
+
+**Why no existing signal catches it.**
+
+1. **RMSE cannot see it.** The correction surface is fitted to residuals (measured − physics),
+   so the wrong class's systematic error is absorbed into the surface. In-sample RMSE and R²
+   stay excellent — the same property that let D20's underdetermined fits report excellent
+   RMSE, and the D13 signature: every observable healthy except the one nobody asserted.
+2. **The artifact keeps no evidence.** `CalibrationMetadata.antenna_class: Option<String>`
+   exists for exactly this, and `export_full_calibration`'s builder chain
+   (`artifact_export.rs:456-484`) never calls `.antenna_class(...)`, so every full-mode artifact
+   carries `None`. `PhysicalAntennaConfig` has no id field either, and the
+   `AntennaConfigurationBuilder::id(&antenna_class.class_id)` set at `main.rs:297` does not
+   reach the artifact. **The mismatch is therefore not diagnosable after the fact** — not from
+   the `.bin`, not from the sidecars.
+3. **Load-time validation is orthogonal.** `AntennaCalibration::validate` checks internal
+   consistency, and a wrong-class artifact is perfectly self-consistent: it describes a DSN_34m
+   coherently. It is simply not the antenna that was measured.
+
+**Two independent halves; either is worth shipping alone.**
+
+- **Stamp it (diagnosis).** Set `metadata.antenna_class` in `export_full_calibration`. The field
+  is already in the 5.0 layout, so writing `Some(..)` where `None` was written is a *value*
+  change, not a layout one — **no version bump on either axis** (contrast D21, which added the
+  field and had to bump for the `Option` discriminant). Verify that claim against
+  `data/types.rs` before relying on it. Boresight mode should stamp it too if it consumes a
+  class.
+- **Refuse the guess (prevention).** Drop `default_value = "DSN_34m"` and require
+  `--antenna-class` in full mode. This is D26's choice — a refusal over a silent default,
+  because a default cannot distinguish "the user meant DSN_34m" from "the user forgot". It is a
+  breaking CLI change for **external** callers only: verified 2026-08-25 that every in-repo
+  invocation already passes it explicitly — `scripts/generate-cr159703-artifact.sh` (twice),
+  `cli_full_mode_real_data_e2e.rs` (three), `cli_full_mode_e2e.rs` (one). Re-grep at
+  implementation time rather than trusting this list.
+
+**Gotchas.**
+
+- The flag's doc comment says "Only used for full calibration mode" — check whether that is
+  still true of the boresight path before scoping the requirement to one mode.
+- `ParameterBounds::from_class` (D16) brackets the tuner's search around the class's nominals,
+  so a wrong class also silently moves the *search space*, not just the starting point.
+- A guard that compares class `diameter_m` against something derived from the measurements is
+  tempting and should be resisted unless someone can state what it is being compared to —
+  boresight G/T does not determine diameter independently of efficiency assumptions.
+
+**Exit criteria.**
+
+1. `metadata.antenna_class` is populated by every producer that consumes a class, asserted by a
+   round-trip test in the producer (the C13/D23 pattern: each producer carries its own guard).
+2. A full-mode `calibrate` run with no `--antenna-class` either fails with an actionable message
+   or is proven still-defaulting by a deliberate, documented decision recorded here.
+3. Every in-repo invocation of `calibrate` passes `--antenna-class` explicitly (already true as
+   of filing — re-verify, do not assume).
+4. `.claude/rules/calibration.md`'s "Unguarded, same shape" section is updated to describe what
+   now holds, or deleted if the defect is fully closed.
+5. No artifact byte moves except `metadata.antenna_class` (and the timestamp/CRC) — verify by
+   regenerating with `scripts/generate-cr159703-artifact.sh` and diffing.
+
+- **Depends on:** nothing. **Coupled to:** C13/D23 (same invariant), D16 (tuner bounds come from
+  the class), D14 (whose generation script is the most-used in-repo caller).
+
 ---
 
 ## Phase 5 — Decision-gated features
