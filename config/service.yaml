@@ -3,7 +3,7 @@
 
 server:
   # Host to bind to (use "0.0.0.0" for all interfaces, "127.0.0.1" for localhost only)
-  host: "127.0.0.1"
+  host: "0.0.0.0"
 
   # Port to listen on
   port: 3000

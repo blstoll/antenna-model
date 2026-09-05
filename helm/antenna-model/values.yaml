@@ -129,36 +129,51 @@ readinessProbe:
   failureThreshold: 3
 
 # Environment variables
+#
+# Overrides are named `ANTENNA_MODEL__<SECTION>__<KEY>` — the underscore after the
+# prefix is doubled, same separator as between nested keys. They take precedence
+# over the `config:` block below, which is rendered into the mounted service.yaml.
+#
+#   ANTENNA_MODEL__LOGGING__LEVEL: "debug"
 env:
   RUST_LOG: "info"
-  SERVICE_HOST: "0.0.0.0"
-  SERVICE_PORT: "3000"
 
-# Service configuration
+# Service configuration, rendered verbatim into the mounted `service.yaml`.
+# These keys must match `ServiceConfig` in antenna-model/src/config/settings.rs —
+# the loader does not reject unknown fields, so a misnamed section is silently
+# dropped rather than reported.
 config:
-  service:
+  server:
     host: "0.0.0.0"
     port: 3000
-    request_timeout_seconds: 30
-    max_request_body_size_bytes: 10485760  # 10 MB
+    request_timeout_secs: 30
+    max_body_size_bytes: 10485760  # 10 MB
+    # Graceful shutdown (roadmap S5). delay + timeout must stay strictly under this
+    # chart's terminationGracePeriodSeconds (30), with room left for cleanup.
+    shutdown_readiness_delay_secs: 5
+    shutdown_timeout_secs: 20
+
+  calibration:
+    data_directory: "/app/calibration_data"
+    antenna_config_file: "/app/calibration_data/antennas.yaml"
+    fail_fast: true
 
   logging:
     level: "info"
-    format: "json"
-    request_logging: true
+    format: "json"  # text or json
+    include_location: false
 
-  data:
-    calibration_data_dir: "/app/calibration_data"
-    antennas_config_file: "/app/calibration_data/antennas.yaml"
-
-  computation:
-    default_integration_mode: "default"  # fast, default, high_accuracy
-    parallel_batch_threshold: 5
+  performance:
+    worker_threads: 0  # 0 = auto-detect from CPU count
     max_batch_size: 1000
+    enable_parallel_processing: true
+    integration_budget_ms: 30000
+    max_concurrent_heavy_requests: 0  # 0 = admission control disabled
+    admission_retry_after_secs: 5
 
-  health:
+  cache:
     enabled: true
-    detailed_status: true
+    max_entries_per_feed: 10000
 
 # Calibration data configuration
 # In production, this should be loaded from persistent storage or object storage

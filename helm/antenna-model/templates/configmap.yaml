@@ -5,31 +5,45 @@ metadata:
   labels:
     {{- include "antenna-model.labels" . | nindent 4 }}
 data:
+  # Rendered from .Values.config, whose keys mirror `ServiceConfig`
+  # (antenna-model/src/config/settings.rs). The loader has no deny_unknown_fields:
+  # a section it does not recognise is dropped silently, which is how the previous
+  # `service:` / `data:` / `computation:` / `health:` rendering became a no-op and
+  # left the pod bound to the 127.0.0.1 default.
   service.yaml: |
     # Antenna Model Service Configuration
-    service:
-      host: {{ .Values.config.service.host | quote }}
-      port: {{ .Values.config.service.port }}
-      request_timeout_seconds: {{ .Values.config.service.request_timeout_seconds }}
-      max_request_body_size_bytes: {{ .Values.config.service.max_request_body_size_bytes }}
+    server:
+      host: {{ .Values.config.server.host | quote }}
+      port: {{ .Values.config.server.port }}
+      request_timeout_secs: {{ .Values.config.server.request_timeout_secs }}
+      # `int` is load-bearing: Helm renders a bare 10485760 as 1.048576e+07, which the
+      # loader cannot deserialize into a usize — the whole file would fail and the
+      # service would silently fall back to defaults (host 127.0.0.1).
+      max_body_size_bytes: {{ int .Values.config.server.max_body_size_bytes }}
+      shutdown_readiness_delay_secs: {{ .Values.config.server.shutdown_readiness_delay_secs }}
+      shutdown_timeout_secs: {{ .Values.config.server.shutdown_timeout_secs }}
+
+    calibration:
+      data_directory: {{ .Values.config.calibration.data_directory | quote }}
+      antenna_config_file: {{ .Values.config.calibration.antenna_config_file | quote }}
+      fail_fast: {{ .Values.config.calibration.fail_fast }}
 
     logging:
       level: {{ .Values.config.logging.level | quote }}
       format: {{ .Values.config.logging.format | quote }}
-      request_logging: {{ .Values.config.logging.request_logging }}
+      include_location: {{ .Values.config.logging.include_location }}
 
-    data:
-      calibration_data_dir: {{ .Values.config.data.calibration_data_dir | quote }}
-      antennas_config_file: {{ .Values.config.data.antennas_config_file | quote }}
+    performance:
+      worker_threads: {{ .Values.config.performance.worker_threads }}
+      max_batch_size: {{ .Values.config.performance.max_batch_size }}
+      enable_parallel_processing: {{ .Values.config.performance.enable_parallel_processing }}
+      integration_budget_ms: {{ .Values.config.performance.integration_budget_ms }}
+      max_concurrent_heavy_requests: {{ .Values.config.performance.max_concurrent_heavy_requests }}
+      admission_retry_after_secs: {{ .Values.config.performance.admission_retry_after_secs }}
 
-    computation:
-      default_integration_mode: {{ .Values.config.computation.default_integration_mode | quote }}
-      parallel_batch_threshold: {{ .Values.config.computation.parallel_batch_threshold }}
-      max_batch_size: {{ .Values.config.computation.max_batch_size }}
-
-    health:
-      enabled: {{ .Values.config.health.enabled }}
-      detailed_status: {{ .Values.config.health.detailed_status }}
+    cache:
+      enabled: {{ .Values.config.cache.enabled }}
+      max_entries_per_feed: {{ .Values.config.cache.max_entries_per_feed }}
 ---
 apiVersion: v1
 kind: ConfigMap

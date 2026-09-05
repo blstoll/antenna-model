@@ -1,0 +1,185 @@
+name: Docker image
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  schedule:
+    # Weekly sweep. The prune job normally runs right after a push, but a
+    # cancelled or failed run can leave a dangling manifest behind with nothing
+    # scheduled to collect it.
+    - cron: '17 4 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    name: build and push
+    runs-on: ubuntu-latest
+    # The scheduled run exists only to prune; there is nothing new to build.
+    if: github.event_name != 'schedule'
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Fork pull requests get a read-only GITHUB_TOKEN, so they cannot log in
+      # or push. They still build, which is the part that catches a broken
+      # Dockerfile; the push steps below are gated on the same condition.
+      - name: Log in to ghcr.io
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # metadata-action lowercases the image name for us. ghcr.io rejects
+          # uppercase, and github.repository preserves the owner's casing.
+          images: ${{ env.REGISTRY }}/${{ github.repository }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      # Split into build -> smoke test -> push on purpose. buildx cannot both
+      # `load` an image into the local daemon and `push` it in one invocation,
+      # and nothing may reach ghcr.io until it has been proven to boot. The push
+      # step re-runs the same build, which is a cache hit and costs seconds.
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: antenna-model:smoke
+          # Shares the repository's 10 GB Actions cache, LRU-evicted. A branch
+          # can read the default branch's cache but not another branch's, so a
+          # PR's first build is cold.
+          #
+          # This caches layers, and the Dockerfile does `COPY . .` before
+          # `cargo build`, so any source change invalidates the compile layer
+          # and rebuilds the workspace from scratch. What this does buy is the
+          # base image, the toolchain install, and a free rebuild when the tree
+          # is unchanged (a tag pushed on top of an already-built commit).
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Attestation manifests publish untagged, and the prune job deletes
+          # untagged versions.
+          provenance: false
+
+      # Runs on pull requests too, where nothing is pushed. This is the check
+      # that catches an image which builds but cannot serve -- see the header of
+      # the script for the two defects that shipped because nothing ran the image.
+      - name: Smoke test
+        run: ./scripts/smoke-test-image.sh antenna-model:smoke
+
+      - name: Push image
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # No cache-to: the build step above already wrote this build's layers.
+          cache-from: type=gha
+          provenance: false
+
+  prune:
+    name: prune untagged images
+    runs-on: ubuntu-latest
+    needs: [build]
+    # `always()` so the scheduled run still prunes when build is skipped. Never
+    # on a pull request: nothing was pushed, and a fork's token cannot delete.
+    if: >-
+      always()
+      && github.event_name != 'pull_request'
+      && (needs.build.result == 'success' || needs.build.result == 'skipped')
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      # ghcr package names are lowercased (metadata-action does it for the push),
+      # while github.event.repository.name preserves the repository's casing. A
+      # repo with any uppercase letter would name a package that does not exist,
+      # and the delete would quietly do nothing forever.
+      - name: Resolve package name
+        id: pkg
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+        run: |
+          set -euo pipefail
+          name=$(printf '%s' "$REPO_NAME" | tr '[:upper:]' '[:lower:]')
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+          # The package does not exist until the first push succeeds, and the
+          # delete action treats that as an error. Tell that case apart from a
+          # real one here instead of blanket-tolerating failures in the delete
+          # step: `continue-on-error` there would keep the job green even when a
+          # revoked token or an API change means nothing is ever pruned.
+          probe() {
+            curl -s -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer $GH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/$1/$OWNER/packages/container/$name"
+          }
+          # An `if`, not `[ ... ] && ...`: under `set -e` a false test as the last
+          # command of an AND-list aborts the step.
+          code=$(probe orgs)
+          if [ "$code" = "404" ]; then
+            code=$(probe users)
+          fi
+
+          case "$code" in
+            200)
+              echo "exists=true" >> "$GITHUB_OUTPUT" ;;
+            404)
+              echo "exists=false" >> "$GITHUB_OUTPUT"
+              echo "Package $OWNER/$name does not exist yet; nothing to prune." ;;
+            *)
+              echo "Unexpected HTTP $code looking up package $OWNER/$name" >&2
+              exit 1 ;;
+          esac
+
+      # Retention policy: delete every untagged version, keep every tagged one.
+      #
+      # Untagged versions are the manifests orphaned when `main`, `latest`, or a
+      # semver tag moves to a new digest. They are the only versions that hold
+      # layers nothing else references, so they are the only ones that actually
+      # cost storage. Tagged versions are cheap to keep — the per-commit
+      # `sha-*` tags share all their layers with `main`/`latest` — and pruning
+      # them by age would eventually delete a release tag someone deployed.
+      - name: Delete untagged versions
+        if: steps.pkg.outputs.exists == 'true'
+        uses: actions/delete-package-versions@v5
+        with:
+          owner: ${{ github.repository_owner }}
+          package-name: ${{ steps.pkg.outputs.name }}
+          package-type: container
+          delete-only-untagged-versions: 'true'
+          # 0 = keep none of the untagged ones.
+          min-versions-to-keep: 0
+          token: ${{ secrets.GITHUB_TOKEN }}

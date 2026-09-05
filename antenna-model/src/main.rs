@@ -7,17 +7,21 @@
 //!
 //! The service can be configured via:
 //! 1. Configuration file at `config/service.yaml` (or path specified by CONFIG_PATH env var)
-//! 2. Environment variables with `ANTENNA_MODEL_` prefix
+//! 2. Environment variables with `ANTENNA_MODEL__` prefix
 //! 3. Default values if no configuration is provided
 //!
 //! # Environment Variables
 //!
 //! - `RUST_LOG` - Log level (overrides config file)
 //! - `CONFIG_PATH` - Path to configuration file
-//! - `ANTENNA_MODEL_SERVER__HOST` - Server host (e.g., "0.0.0.0")
-//! - `ANTENNA_MODEL_SERVER__PORT` - Server port (e.g., 8080)
-//! - `ANTENNA_MODEL_LOGGING__LEVEL` - Log level ("trace", "debug", "info", "warn", "error")
-//! - `ANTENNA_MODEL_LOGGING__FORMAT` - Log format ("text" or "json")
+//! - `ANTENNA_MODEL__SERVER__HOST` - Server host (e.g., "0.0.0.0")
+//! - `ANTENNA_MODEL__SERVER__PORT` - Server port (e.g., 8080)
+//! - `ANTENNA_MODEL__LOGGING__LEVEL` - Log level ("trace", "debug", "info", "warn", "error")
+//! - `ANTENNA_MODEL__LOGGING__FORMAT` - Log format ("text" or "json")
+//!
+//! Note the doubled underscore after the prefix: it separates the prefix from the key just
+//! as it separates nested keys, so `ANTENNA_MODEL_SERVER__PORT` matches nothing and leaves
+//! the file value in place.
 //!
 //! # Startup Process
 //!
@@ -76,7 +80,7 @@ async fn main() {
 /// 3. Default configuration values if file doesn't exist
 ///
 /// Environment variables can override file-based configuration using
-/// the `ANTENNA_MODEL_` prefix (e.g., `ANTENNA_MODEL_SERVER__PORT=8080`).
+/// the `ANTENNA_MODEL__` prefix (e.g., `ANTENNA_MODEL__SERVER__PORT=8080`).
 ///
 /// Returns `(config, config_from_defaults, config_path)`.
 fn load_configuration() -> (ServiceConfig, bool, String) {
@@ -91,8 +95,23 @@ fn load_configuration() -> (ServiceConfig, bool, String) {
                 "Warning: Failed to load configuration from {}: {}",
                 config_path, e
             );
-            eprintln!("Using default configuration values");
-            (ServiceConfig::with_defaults(), true, config_path)
+            // Defaults + environment, NOT bare defaults: the environment is the
+            // only layer still reachable when the file is unusable, and dropping
+            // it here is what would leave a container bound to 127.0.0.1 with the
+            // operator's ANTENNA_MODEL__SERVER__HOST override silently ignored.
+            match ServiceConfig::from_env_and_defaults() {
+                Ok(config) => {
+                    eprintln!("Using default configuration values with environment overrides");
+                    (config, true, config_path)
+                }
+                Err(env_err) => {
+                    eprintln!(
+                        "Warning: environment overrides also rejected: {}. Using bare defaults",
+                        env_err
+                    );
+                    (ServiceConfig::with_defaults(), true, config_path)
+                }
+            }
         }
     }
 }
@@ -159,18 +178,23 @@ mod tests {
         assert!(config.server.port > 0);
     }
 
+    /// The environment override must actually reach `server.port`.
+    ///
+    /// This test previously set `ANTENNA_MODEL_SERVER__PORT` (single underscore after the
+    /// prefix) and asserted nothing, so it passed under any separator — which is how the
+    /// wrong variable name survived long enough to leave containers bound to 127.0.0.1.
+    /// The doubled underscore separates the prefix from the key as well as nested keys.
     #[test]
     fn test_load_configuration_with_env() {
-        // Set environment variable
-        env::set_var("ANTENNA_MODEL_SERVER__PORT", "8080");
+        env::set_var("ANTENNA_MODEL__SERVER__PORT", "8080");
 
-        let (_config, _from_defaults, _path) = load_configuration();
+        let (config, _from_defaults, _path) = load_configuration();
 
-        // Should have loaded the environment override
-        // Note: This test may not work consistently due to global env state
-        // In a real test, we'd use a test-specific config loading function
+        env::remove_var("ANTENNA_MODEL__SERVER__PORT");
 
-        // Clean up
-        env::remove_var("ANTENNA_MODEL_SERVER__PORT");
+        assert_eq!(
+            config.server.port, 8080,
+            "ANTENNA_MODEL__SERVER__PORT did not override server.port"
+        );
     }
 }

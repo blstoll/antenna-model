@@ -17,19 +17,20 @@ services:
 
     # Environment variables (override defaults from Dockerfile)
     environment:
-      - SERVICE_HOST=0.0.0.0
-      - SERVICE_PORT=3000
+      # Bind settings come from the image's config/service.yaml (0.0.0.0:3000).
       - RUST_LOG=${RUST_LOG:-info}
-      - CONFIG_PATH=/app/config/service.yaml
 
     # Volume mounts for development (optional, comment out for production-like testing)
     # volumes:
     #   - ./config:/app/config:ro
     #   - ./calibration_data:/app/calibration_data:ro
 
-    # Health check using curl (requires adding curl to compose or using http check)
+    # curl, not wget: the runtime is ubi9/ubi-minimal, which ships curl-minimal
+    # and no wget at all. The wget form this used to carry could never succeed,
+    # so the container sat permanently "unhealthy" while serving fine -- and any
+    # `depends_on: condition: service_healthy` waiting on it never fired.
     healthcheck:
-      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:3000/health || exit 1"]
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/health || exit 1"]
       interval: 30s
       timeout: 10s
       retries: 3

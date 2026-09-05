@@ -339,9 +339,14 @@ impl ServiceConfig {
     ///
     /// # Environment Variables
     /// Configuration values can be overridden using environment variables with the prefix
-    /// `ANTENNA_MODEL_`. For example:
-    /// - `ANTENNA_MODEL_SERVER__PORT=8080` overrides `server.port`
-    /// - `ANTENNA_MODEL_LOGGING__LEVEL=debug` overrides `logging.level`
+    /// `ANTENNA_MODEL` and `__` as the separator — which separates the prefix from the key
+    /// as well as nested keys, so the variable carries a *doubled* underscore after the
+    /// prefix. For example:
+    /// - `ANTENNA_MODEL__SERVER__PORT=8080` overrides `server.port`
+    /// - `ANTENNA_MODEL__LOGGING__LEVEL=debug` overrides `logging.level`
+    ///
+    /// `ANTENNA_MODEL_SERVER__PORT` (single underscore) matches nothing and silently leaves
+    /// the file value in place.
     ///
     /// # Example
     /// ```no_run
@@ -352,7 +357,7 @@ impl ServiceConfig {
     /// ```
     pub fn from_file(config_path: &str) -> Result<Self, ConfigError> {
         let config: ServiceConfig =
-            Self::load_unvalidated(config_path).map_err(config_crate_err)?;
+            Self::load_unvalidated(Some(config_path)).map_err(config_crate_err)?;
         config.validate()?;
 
         Ok(config)
@@ -365,8 +370,8 @@ impl ServiceConfig {
     /// ConfigError`, which made `?` work directly here at the cost of putting the whole
     /// config-file stack into a crate that is meant to be physics and artifacts only (roadmap
     /// D27 finding 4). This crate owns the `config` dependency, so the conversion belongs here.
-    fn load_unvalidated(config_path: &str) -> Result<Self, config::ConfigError> {
-        let settings = config::Config::builder()
+    fn load_unvalidated(config_path: Option<&str>) -> Result<Self, config::ConfigError> {
+        let builder = config::Config::builder()
             // Start with default values
             .set_default("server.host", default_host())?
             .set_default("server.port", default_port() as i64)?
@@ -418,15 +423,26 @@ impl ServiceConfig {
             .set_default(
                 "performance.admission_retry_after_secs",
                 default_admission_retry_after_secs() as i64,
-            )?
-            // Load from YAML file (optional - won't fail if missing)
-            .add_source(
-                config::File::from(std::path::Path::new(config_path))
+            )?;
+
+        // `None` means "defaults + environment, no file at all" -- the fallback
+        // path in main.rs, which must still honour the environment.
+        let builder = match config_path {
+            Some(path) => builder.add_source(
+                config::File::from(std::path::Path::new(path))
                     .format(config::FileFormat::Yaml)
                     .required(false),
-            )
-            // Override with environment variables (prefix: ANTENNA_MODEL_)
-            // Use separator "__" for nested fields (e.g., ANTENNA_MODEL_SERVER__PORT)
+            ),
+            None => builder,
+        };
+
+        let settings = builder
+            // Override with environment variables (prefix: ANTENNA_MODEL).
+            // "__" separates the prefix from the key as well as nested fields,
+            // so the real name is ANTENNA_MODEL__SERVER__PORT. config 0.15
+            // defaults prefix_separator to the configured separator; this
+            // comment previously showed ANTENNA_MODEL_SERVER__PORT, which
+            // matches nothing and silently leaves the file value in place.
             .add_source(
                 config::Environment::with_prefix("ANTENNA_MODEL")
                     .separator("__")
@@ -435,6 +451,22 @@ impl ServiceConfig {
             .build()?;
 
         settings.try_deserialize()
+    }
+
+    /// Defaults plus `ANTENNA_MODEL__*` environment overrides, with no config file.
+    ///
+    /// This is the startup fallback for when the config file is missing or does not
+    /// parse. It exists because the fallback used to be [`ServiceConfig::with_defaults`],
+    /// which consults no environment source: a ConfigMap rendering one bad value (a
+    /// byte size emitted as `1.048576e+07`, say) made the loader reject the whole file
+    /// AND silently discarded `ANTENNA_MODEL__SERVER__HOST=0.0.0.0`, so the process
+    /// bound `127.0.0.1` and no readiness probe could ever succeed. The environment is
+    /// the one layer an operator can still reach in that state, so it must survive.
+    pub fn from_env_and_defaults() -> Result<Self, ConfigError> {
+        let config: ServiceConfig = Self::load_unvalidated(None).map_err(config_crate_err)?;
+        config.validate()?;
+
+        Ok(config)
     }
 
     /// Load configuration from the default path ("config/service.yaml")
