@@ -449,41 +449,24 @@ pub fn compute_gain_from_request_with_budget(
 
 /// Check if the query is within the calibrated coverage region.
 ///
+/// This is the served correction-application gate. It owns exactly one decision
+/// the calibration artifact cannot make for itself — what an *absent* coverage
+/// record means — and delegates the range test to
+/// [`CalibrationCoverage::contains_direction_at_frequency`], which is the sole
+/// authority for it (roadmap #60). The service previously carried its own copy of
+/// that expression; the two agreed only by inspection, and the pole limitation
+/// documented on the core predicate had to be fixed in two places.
+///
 /// When no coverage restriction is recorded (`None`) the correction surface is
 /// treated as valid everywhere it has data — the query is considered in-coverage.
 /// Actual correction application is still gated separately on
 /// `correction_surface.is_some()`, so returning `true` here for `None` is safe.
 ///
-/// When a `CalibrationCoverage` is present (partially calibrated artifact), the
-/// query must fall within the specified azimuth, elevation, and frequency ranges.
-///
-/// # Known limitation: the azimuth clause is meaningless at the pole
-///
-/// `elevation_deg` is the polar angle off boresight, so `elevation_deg ≈ 0` is the
-/// **pole** of the coordinate system, where azimuth is degenerate: it comes from
-/// `atan2` on two components that are float noise and can be any value (measured:
-/// 63.43° for a query aimed exactly at the boresight point). Applying an azimuth
-/// constraint there tests a coordinate that carries no information.
-///
-/// Boresight artifacts avoid this by declaring azimuth **unconstrained** —
-/// `(0, 360)` with the on-axis restriction carried by elevation alone; see
-/// `data::types::BORESIGHT_COVERAGE_CONE_DEG`. That is the artifact expressing what
-/// it actually covers, which is the right place for it.
-///
-/// The general case is still wrong and is deliberately not fixed here: any coverage
-/// region whose elevation range includes 0 contains the pole, so a full-mode
-/// artifact with, say, azimuth coverage `(170, 190)` would also wrongly reject an
-/// exact-boresight query whose noise azimuth is 63°. It is mostly theoretical today
-/// because full-mode coverage extents come from measured points and rarely include
-/// elevation 0 exactly. The fix — skip the azimuth clause when `elevation_deg` is
-/// below a pole threshold — is filed on the roadmap, not applied here, because
-/// doing it silently would mask rather than express a boresight artifact's intent.
-///
-/// **When that fix lands it must touch two functions.** This one and
-/// [`CalibrationCoverage::contains`](crate::data::types::CalibrationCoverage::contains)
-/// implement the same range test independently — this function does not delegate to
-/// it. They agree today; fixing one alone would make the public type lie about what
-/// the service does. Prefer making this delegate rather than editing both.
+/// This is the **full** coverage question: azimuth, E-cone, and frequency. The
+/// partial-calibration advisory asks the narrower spatial-only question
+/// ([`CalibrationCoverage::contains_direction`]) and the two must stay distinct —
+/// a query on the measured grid at an uncalibrated frequency gets no correction
+/// but is not outside the calibrated *region*.
 pub(crate) fn is_in_coverage(
     coverage: &Option<CalibrationCoverage>,
     azimuth_deg: f64,
@@ -491,14 +474,7 @@ pub(crate) fn is_in_coverage(
     frequency_mhz: f64,
 ) -> bool {
     match coverage {
-        Some(cov) => {
-            azimuth_deg >= cov.azimuth_range.0
-                && azimuth_deg <= cov.azimuth_range.1
-                && elevation_deg >= cov.elevation_range.0
-                && elevation_deg <= cov.elevation_range.1
-                && frequency_mhz >= cov.frequency_range.0
-                && frequency_mhz <= cov.frequency_range.1
-        }
+        Some(cov) => cov.contains_direction_at_frequency(azimuth_deg, elevation_deg, frequency_mhz),
         // No coverage restriction recorded (fully calibrated artifact):
         // the correction surface applies everywhere it has data.
         None => true,
@@ -539,13 +515,11 @@ fn generate_calibration_warnings(
                 calibration.antenna_id, accuracy_estimate_db
             )));
 
-            // Check if query is outside calibrated spatial region (azimuth/elevation)
-            let in_spatial_coverage = azimuth_deg >= coverage.azimuth_range.0
-                && azimuth_deg <= coverage.azimuth_range.1
-                && elevation_deg >= coverage.elevation_range.0
-                && elevation_deg <= coverage.elevation_range.1;
-
-            if !in_spatial_coverage {
+            // Whether the query left the measured *region*. Deliberately spatial
+            // only: this advisory reports direction, not band, so an in-grid query
+            // at an uncalibrated frequency gets `correction_not_applied` below
+            // without also claiming to be outside the calibrated region.
+            if !coverage.contains_direction(azimuth_deg, elevation_deg) {
                 warnings.push(WarningCode::OutOfCoverage.with(
                     "Query is outside calibrated region - using physics model extrapolation",
                 ));
@@ -951,7 +925,8 @@ mod tests {
         assert!(
             !is_in_coverage(&legacy, 63.43, 0.0, 4000.0),
             "if this now passes, the azimuth clause has been made pole-aware — good, \
-             but update is_in_coverage's doc comment and the roadmap item it points at"
+             but update CalibrationCoverage::contains_direction_at_frequency's doc \
+             comment and the roadmap item it points at"
         );
     }
 
@@ -1120,6 +1095,84 @@ mod tests {
 
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].code, WarningCode::CorrectionNotApplied);
+    }
+
+    /// The two coverage questions are deliberately different, and centralizing
+    /// them on `CalibrationCoverage` (roadmap #60) must not merge them.
+    ///
+    /// A query on the calibrated grid but at an uncalibrated FREQUENCY fails full
+    /// coverage, so no correction is applied and `correction_not_applied` fires.
+    /// It is still inside the measured spatial region, so `out_of_coverage` — the
+    /// partial-calibration advisory, which reports only that the *direction* left
+    /// the measured region — must stay silent.
+    #[test]
+    fn frequency_outside_the_band_does_not_report_out_of_spatial_coverage() {
+        let coverage = CalibrationCoverage::builder()
+            .azimuth_range(0.0, 360.0)
+            .elevation_range(0.0, 30.0)
+            .frequency_range(8000.0, 9000.0)
+            .num_measurements(500)
+            .has_correction_surface(true)
+            .build()
+            .unwrap();
+
+        let mut calibration = create_test_calibration(CalibrationStatus::PartiallyCalibrated {
+            accuracy_estimate_db: 1.5,
+            coverage: coverage.clone(),
+        });
+        calibration.correction_surface = Some(dummy_correction_surface());
+
+        // 12 GHz is far outside the calibrated band; (45°, 15°) is inside the grid.
+        assert!(!is_in_coverage(
+            &calibration.calibration_coverage,
+            45.0,
+            15.0,
+            12_000.0
+        ));
+
+        let warnings = generate_calibration_warnings(&calibration, 45.0, 15.0, false);
+
+        assert_eq!(
+            warnings.iter().map(|w| w.code).collect::<Vec<_>>(),
+            vec![
+                WarningCode::PartiallyCalibrated,
+                WarningCode::CorrectionNotApplied,
+            ],
+            "frequency alone must not raise the spatial out-of-coverage advisory"
+        );
+    }
+
+    /// The served predicate is the calibration-coverage authority plus the
+    /// `None` (unrestricted) case — nothing else. Pinning agreement on the
+    /// closed-interval bounds is what stops a second service-local range test
+    /// from growing back.
+    #[test]
+    fn is_in_coverage_agrees_with_the_calibration_coverage_authority() {
+        let coverage = CalibrationCoverage::builder()
+            .azimuth_range(10.0, 350.0)
+            .elevation_range(5.0, 60.0)
+            .frequency_range(8000.0, 9000.0)
+            .num_measurements(500)
+            .has_correction_surface(true)
+            .build()
+            .unwrap();
+
+        for (az, el, freq) in [
+            (10.0, 5.0, 8000.0),
+            (350.0, 60.0, 9000.0),
+            (9.9, 30.0, 8500.0),
+            (350.1, 30.0, 8500.0),
+            (180.0, 4.9, 8500.0),
+            (180.0, 60.1, 8500.0),
+            (180.0, 30.0, 7999.9),
+            (180.0, 30.0, 9000.1),
+        ] {
+            assert_eq!(
+                is_in_coverage(&Some(coverage.clone()), az, el, freq),
+                coverage.contains_direction_at_frequency(az, el, freq),
+                "served coverage diverged from CalibrationCoverage at ({az}, {el}, {freq})"
+            );
+        }
     }
 
     // ------------------------------------------------------------------

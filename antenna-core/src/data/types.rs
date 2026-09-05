@@ -1130,19 +1130,71 @@ impl CalibrationCoverage {
         self.elevation_range.0 == 0.0 && self.elevation_range.1 <= BORESIGHT_COVERAGE_CONE_DEG
     }
 
-    /// Checks if a query point is within the calibrated coverage.
+    /// Checks whether a direction lies in the calibrated **spatial** region,
+    /// ignoring frequency entirely.
     ///
-    /// **This logic is duplicated by `service::evaluator::is_in_coverage`, which is
-    /// what the served path actually runs — it does not call this method.** The two
-    /// agree today. They share the pole limitation documented on `is_in_coverage`
-    /// (the azimuth clause is meaningless at `elevation ≈ 0`, where azimuth is
-    /// degenerate); the roadmap fix for that must touch both, or the public type
-    /// starts lying about what the service does.
-    pub fn contains(&self, azimuth: f64, elevation: f64, frequency: f64) -> bool {
+    /// This is the narrower of the two containment questions the service asks, and
+    /// it has exactly one caller-visible meaning: whether the partial-calibration
+    /// advisory should report that this direction left the measured region
+    /// (`WarningCode::OutOfCoverage`). A query on the measured grid at an
+    /// uncalibrated frequency is spatially covered and must not raise it — see
+    /// [`Self::contains_direction_at_frequency`] for the decision that *does*
+    /// consider frequency.
+    ///
+    /// Both bounds of both axes are inclusive. `elevation` is the E-cone polar
+    /// angle off boresight, never horizon elevation.
+    ///
+    /// Shares the pole limitation described on
+    /// [`Self::contains_direction_at_frequency`].
+    pub fn contains_direction(&self, azimuth: f64, elevation: f64) -> bool {
         azimuth >= self.azimuth_range.0
             && azimuth <= self.azimuth_range.1
             && elevation >= self.elevation_range.0
             && elevation <= self.elevation_range.1
+    }
+
+    /// Checks whether a full query point — direction **and** frequency — is within
+    /// the calibrated coverage.
+    ///
+    /// This is the authority for whether a correction surface may be applied at
+    /// all; `service::evaluator::is_in_coverage` adds only the unrestricted
+    /// (`None` coverage) case and delegates the range test here (roadmap #60), so
+    /// the served path and this public type cannot drift apart.
+    ///
+    /// Both bounds of all three axes are inclusive. `elevation` is the E-cone polar
+    /// angle off boresight; `frequency` is in MHz.
+    ///
+    /// # Known limitation: the azimuth clause is meaningless at the pole
+    ///
+    /// `elevation` is the polar angle off boresight, so `elevation ≈ 0` is the
+    /// **pole** of the coordinate system, where azimuth is degenerate: it comes
+    /// from `atan2` on two components that are float noise and can be any value
+    /// (measured: 63.43° for a query aimed exactly at the boresight point).
+    /// Applying an azimuth constraint there tests a coordinate that carries no
+    /// information.
+    ///
+    /// Boresight artifacts avoid this by declaring azimuth **unconstrained** —
+    /// `(0, 360)` with the on-axis restriction carried by elevation alone; see
+    /// [`BORESIGHT_COVERAGE_CONE_DEG`]. That is the artifact expressing what it
+    /// actually covers, which is the right place for it.
+    ///
+    /// The general case is still wrong and is deliberately not fixed here: any
+    /// coverage region whose elevation range includes 0 contains the pole, so a
+    /// full-mode artifact with, say, azimuth coverage `(170, 190)` would also
+    /// wrongly reject an exact-boresight query whose noise azimuth is 63°. It is
+    /// mostly theoretical today because full-mode coverage extents come from
+    /// measured points and rarely include elevation 0 exactly. The fix — skip the
+    /// azimuth clause when `elevation` is below a pole threshold — is filed on the
+    /// roadmap, not applied here, because doing it silently would mask rather than
+    /// express a boresight artifact's intent. Since #60 there is one place to
+    /// apply it: here, and in [`Self::contains_direction`] beside it.
+    pub fn contains_direction_at_frequency(
+        &self,
+        azimuth: f64,
+        elevation: f64,
+        frequency: f64,
+    ) -> bool {
+        self.contains_direction(azimuth, elevation)
             && frequency >= self.frequency_range.0
             && frequency <= self.frequency_range.1
     }
@@ -2438,18 +2490,23 @@ mod tests {
         // A query aimed exactly at boresight: azimuth is atan2 on float noise, so
         // it can be anything. It must still be in coverage.
         assert!(
-            cone.contains(63.43, 0.0, 4000.0),
+            cone.contains_direction_at_frequency(63.43, 0.0, 4000.0),
             "boresight coverage must not reject a boresight query over its \
              meaningless azimuth"
         );
 
         // Just outside the cone is genuinely off-axis and must fall out.
-        assert!(!cone.contains(63.43, 10.0 * BORESIGHT_COVERAGE_CONE_DEG, 4000.0));
+        assert!(!cone.contains_direction_at_frequency(
+            63.43,
+            10.0 * BORESIGHT_COVERAGE_CONE_DEG,
+            4000.0
+        ));
     }
 
     /// Artifacts written before 2026-07-31 carry the degenerate `(0,0)/(0,0)`
     /// encoding. They must keep reporting boresight-only — but note they remain
-    /// unreachable through `contains` for any nonzero azimuth, which is the defect
+    /// unreachable through the containment predicates for any nonzero azimuth,
+    /// which is the defect
     /// the cone encoding fixes going forward.
     #[test]
     fn legacy_degenerate_boresight_coverage_still_reports_boresight_only() {
@@ -2461,7 +2518,7 @@ mod tests {
             has_correction_surface: true,
         };
         assert!(legacy.is_boresight_only());
-        assert!(!legacy.contains(63.43, 0.0, 8000.0));
+        assert!(!legacy.contains_direction_at_frequency(63.43, 0.0, 8000.0));
     }
 
     /// A full-mode grid that happens to reach the on-axis point is NOT
@@ -2488,9 +2545,94 @@ mod tests {
             has_correction_surface: true,
         };
 
-        assert!(coverage.contains(45.0, 45.0, 8000.0));
-        assert!(!coverage.contains(45.0, 20.0, 8000.0)); // elevation too low
-        assert!(!coverage.contains(45.0, 45.0, 9000.0)); // frequency too high
+        assert!(coverage.contains_direction_at_frequency(45.0, 45.0, 8000.0));
+        assert!(!coverage.contains_direction_at_frequency(45.0, 20.0, 8000.0)); // E-cone too low
+        assert!(!coverage.contains_direction_at_frequency(45.0, 45.0, 9000.0)); // frequency too high
+    }
+
+    /// Both bounds of all three axes are inclusive. This is the predicate the
+    /// served path runs to decide whether a correction surface may be applied
+    /// (roadmap #60 made it the sole authority), so the closed-interval
+    /// convention is pinned here rather than in the service.
+    #[test]
+    fn full_containment_bounds_are_inclusive() {
+        let coverage = CalibrationCoverage {
+            azimuth_range: (10.0, 350.0),
+            elevation_range: (5.0, 60.0),
+            frequency_range: (7100.0, 8500.0),
+            num_measurements: 324,
+            has_correction_surface: true,
+        };
+
+        // Both extreme corners of the closed box are in coverage.
+        assert!(coverage.contains_direction_at_frequency(10.0, 5.0, 7100.0));
+        assert!(coverage.contains_direction_at_frequency(350.0, 60.0, 8500.0));
+
+        // One step outside each bound, one axis at a time.
+        assert!(!coverage.contains_direction_at_frequency(9.9, 30.0, 8000.0));
+        assert!(!coverage.contains_direction_at_frequency(350.1, 30.0, 8000.0));
+        assert!(!coverage.contains_direction_at_frequency(180.0, 4.9, 8000.0));
+        assert!(!coverage.contains_direction_at_frequency(180.0, 60.1, 8000.0));
+        assert!(!coverage.contains_direction_at_frequency(180.0, 30.0, 7099.9));
+        assert!(!coverage.contains_direction_at_frequency(180.0, 30.0, 8500.1));
+    }
+
+    /// The spatial predicate is the same closed box with the frequency axis
+    /// dropped — not a different az/E-cone rule.
+    #[test]
+    fn spatial_containment_bounds_are_inclusive() {
+        let coverage = CalibrationCoverage {
+            azimuth_range: (10.0, 350.0),
+            elevation_range: (5.0, 60.0),
+            frequency_range: (7100.0, 8500.0),
+            num_measurements: 324,
+            has_correction_surface: true,
+        };
+
+        assert!(coverage.contains_direction(10.0, 5.0));
+        assert!(coverage.contains_direction(350.0, 60.0));
+
+        assert!(!coverage.contains_direction(9.9, 30.0));
+        assert!(!coverage.contains_direction(350.1, 30.0));
+        assert!(!coverage.contains_direction(180.0, 4.9));
+        assert!(!coverage.contains_direction(180.0, 60.1));
+    }
+
+    /// The two predicates answer different questions and must stay different:
+    /// frequency decides whether the correction surface may be applied, but the
+    /// partial-calibration advisory reports only whether the *direction* left the
+    /// measured region. A query on the calibrated grid at an uncalibrated
+    /// frequency is spatially covered and not fully covered.
+    #[test]
+    fn spatial_containment_ignores_frequency() {
+        let coverage = CalibrationCoverage {
+            azimuth_range: (0.0, 360.0),
+            elevation_range: (0.0, 30.0),
+            frequency_range: (7100.0, 8500.0),
+            num_measurements: 324,
+            has_correction_surface: true,
+        };
+
+        assert!(coverage.contains_direction(45.0, 15.0));
+        assert!(!coverage.contains_direction_at_frequency(45.0, 15.0, 12000.0));
+    }
+
+    /// The pole limitation is shared by both predicates, and #60 preserves it
+    /// rather than fixing it: at E-cone 0 the azimuth is `atan2` on float noise,
+    /// so a legacy `(0,0)` azimuth range rejects the very point it describes.
+    /// Fixing this is filed separately; if it lands, both predicates move together.
+    #[test]
+    fn both_predicates_share_the_pole_limitation() {
+        let legacy = CalibrationCoverage {
+            azimuth_range: (0.0, 0.0),
+            elevation_range: (0.0, 0.0),
+            frequency_range: (7100.0, 8500.0),
+            num_measurements: 5,
+            has_correction_surface: true,
+        };
+
+        assert!(!legacy.contains_direction(63.43, 0.0));
+        assert!(!legacy.contains_direction_at_frequency(63.43, 0.0, 8000.0));
     }
 
     #[test]

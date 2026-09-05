@@ -261,7 +261,7 @@ fn a_boresight_artifact_carrying_a_frequency_correction_loads() {
 ///
 /// Boresight is the pole of the (azimuth, polar-angle) system: azimuth is degenerate there,
 /// so an `azimuth_range = (0, 0)` claim constrains a coordinate carrying no information and
-/// `is_in_coverage` then rejects the very query the coverage describes — the artifact loads,
+/// the served coverage predicate then rejects the very query the coverage describes — the artifact loads,
 /// reports `PartiallyCalibrated`, carries its correction, and serves raw physics anyway.
 #[test]
 fn boresight_coverage_is_written_as_an_on_axis_cone() {
@@ -286,19 +286,17 @@ fn boresight_coverage_is_written_as_an_on_axis_cone() {
         "the on-axis restriction belongs entirely to elevation"
     );
 
-    // `CalibrationCoverage::contains` — the type's own range test, on the azimuth a
-    // boresight-aimed query really produces. NOTE: this is *not* the function the
-    // evaluator runs; that is the private `service::evaluator::is_in_coverage`, which
-    // duplicates this logic rather than calling it. They agree today, and the served
-    // path is asserted separately by
+    // `CalibrationCoverage::contains_direction_at_frequency` — the type's own range
+    // test, on the azimuth a boresight-aimed query really produces. Since roadmap #60
+    // this IS what the served path runs: `service::evaluator::is_in_coverage` delegates
+    // here rather than carrying its own copy. The served path is asserted separately by
     // `evaluator::tests::a_boresight_aimed_query_gets_the_boresight_correction_applied`.
-    // If the roadmap's pole fix ever makes them disagree, that is the drift to fix.
     assert!(
-        coverage.contains(63.43, 0.0, 7800.0),
+        coverage.contains_direction_at_frequency(63.43, 0.0, 7800.0),
         "boresight coverage must accept a boresight query whatever its azimuth reads"
     );
     assert!(
-        !coverage.contains(63.43, 5.0, 7800.0),
+        !coverage.contains_direction_at_frequency(63.43, 5.0, 7800.0),
         "5° off axis is not boresight coverage"
     );
 
