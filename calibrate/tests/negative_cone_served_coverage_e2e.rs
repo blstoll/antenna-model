@@ -414,7 +414,8 @@ fn correction_is_applied_for_a_negative_cone_measurement_set() {
     // 180°-side planes that only exist because the negative rows were reflected onto them.
     //
     // Kept off the exact azimuth maximum on purpose: the aim geometry reproduces a requested
-    // 315° as 315.00000000000017, and `CalibrationCoverage::contains` is a closed comparison,
+    // 315° as 315.00000000000017, and `CalibrationCoverage::contains_direction_at_frequency`
+    // is a closed comparison,
     // so a probe *on* the boundary tests floating-point luck rather than this fix. That
     // knife-edge is a pre-existing property of coverage tests, not something D26 introduces.
     let probes = [

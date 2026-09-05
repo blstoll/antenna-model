@@ -1133,9 +1133,9 @@ impl CalibrationCoverage {
     /// Checks whether a direction lies in the calibrated **spatial** region,
     /// ignoring frequency entirely.
     ///
-    /// This is the narrower of the two containment questions the service asks, and
-    /// it has exactly one caller-visible meaning: whether the partial-calibration
-    /// advisory should report that this direction left the measured region
+    /// This is the narrower of the two containment questions the service asks. Its
+    /// one caller today is the partial-calibration advisory, deciding whether to
+    /// report that this direction left the measured region
     /// (`WarningCode::OutOfCoverage`). A query on the measured grid at an
     /// uncalibrated frequency is spatially covered and must not raise it — see
     /// [`Self::contains_direction_at_frequency`] for the decision that *does*
@@ -1157,9 +1157,9 @@ impl CalibrationCoverage {
     /// the calibrated coverage.
     ///
     /// This is the authority for whether a correction surface may be applied at
-    /// all; `service::evaluator::is_in_coverage` adds only the unrestricted
-    /// (`None` coverage) case and delegates the range test here (roadmap #60), so
-    /// the served path and this public type cannot drift apart.
+    /// all. The served path delegates the range test here and adds only the
+    /// unrestricted (absent-coverage) case, so it and this type cannot drift
+    /// apart (issue #60) — before that it carried its own copy of the expression.
     ///
     /// Both bounds of all three axes are inclusive. `elevation` is the E-cone polar
     /// angle off boresight; `frequency` is in MHz.
@@ -2536,7 +2536,7 @@ mod tests {
     }
 
     #[test]
-    fn test_calibration_coverage_contains() {
+    fn test_calibration_coverage_containment() {
         let coverage = CalibrationCoverage {
             azimuth_range: (0.0, 360.0),
             elevation_range: (30.0, 60.0),
@@ -2550,19 +2550,25 @@ mod tests {
         assert!(!coverage.contains_direction_at_frequency(45.0, 45.0, 9000.0)); // frequency too high
     }
 
-    /// Both bounds of all three axes are inclusive. This is the predicate the
-    /// served path runs to decide whether a correction surface may be applied
-    /// (roadmap #60 made it the sole authority), so the closed-interval
-    /// convention is pinned here rather than in the service.
-    #[test]
-    fn full_containment_bounds_are_inclusive() {
-        let coverage = CalibrationCoverage {
+    /// A coverage box whose bounds are all strictly interior to their axes, so a
+    /// probe can sit one step outside any single bound without leaving the others.
+    fn bounded_coverage() -> CalibrationCoverage {
+        CalibrationCoverage {
             azimuth_range: (10.0, 350.0),
             elevation_range: (5.0, 60.0),
             frequency_range: (7100.0, 8500.0),
             num_measurements: 324,
             has_correction_surface: true,
-        };
+        }
+    }
+
+    /// Both bounds of all three axes are inclusive. This is the predicate the
+    /// served path runs to decide whether a correction surface may be applied
+    /// (issue #60 made it the sole authority), so the closed-interval
+    /// convention is pinned here rather than in the service.
+    #[test]
+    fn full_containment_bounds_are_inclusive() {
+        let coverage = bounded_coverage();
 
         // Both extreme corners of the closed box are in coverage.
         assert!(coverage.contains_direction_at_frequency(10.0, 5.0, 7100.0));
@@ -2581,13 +2587,7 @@ mod tests {
     /// dropped — not a different az/E-cone rule.
     #[test]
     fn spatial_containment_bounds_are_inclusive() {
-        let coverage = CalibrationCoverage {
-            azimuth_range: (10.0, 350.0),
-            elevation_range: (5.0, 60.0),
-            frequency_range: (7100.0, 8500.0),
-            num_measurements: 324,
-            has_correction_surface: true,
-        };
+        let coverage = bounded_coverage();
 
         assert!(coverage.contains_direction(10.0, 5.0));
         assert!(coverage.contains_direction(350.0, 60.0));

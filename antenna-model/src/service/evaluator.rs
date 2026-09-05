@@ -453,7 +453,7 @@ pub fn compute_gain_from_request_with_budget(
 /// the calibration artifact cannot make for itself — what an *absent* coverage
 /// record means — and delegates the range test to
 /// [`CalibrationCoverage::contains_direction_at_frequency`], which is the sole
-/// authority for it (roadmap #60). The service previously carried its own copy of
+/// authority for it (issue #60). The service previously carried its own copy of
 /// that expression; the two agreed only by inspection, and the pole limitation
 /// documented on the core predicate had to be fixed in two places.
 ///
@@ -1098,7 +1098,7 @@ mod tests {
     }
 
     /// The two coverage questions are deliberately different, and centralizing
-    /// them on `CalibrationCoverage` (roadmap #60) must not merge them.
+    /// them on `CalibrationCoverage` (issue #60) must not merge them.
     ///
     /// A query on the calibrated grid but at an uncalibrated FREQUENCY fails full
     /// coverage, so no correction is applied and `correction_not_applied` fires.

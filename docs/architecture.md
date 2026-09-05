@@ -323,7 +323,7 @@ fn is_in_coverage(
 }
 ```
 
-`CalibrationCoverage` owns both coverage predicates (roadmap #60); the service adds
+`CalibrationCoverage` owns both coverage predicates (issue #60); the service adds
 only the `None` case. The **full** predicate above (azimuth, E-cone, frequency)
 decides whether a correction surface may be applied. The narrower **spatial**
 predicate, `contains_direction(azimuth_deg, elevation_deg)`, decides only whether

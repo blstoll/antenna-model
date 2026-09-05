@@ -1233,7 +1233,11 @@ pub struct CalibrationCoverage {
   rejects the very direction the coverage describes. Boresight artifacts therefore write
   `azimuth_range = (0, 360)` and carry the on-axis restriction in elevation alone. The
   legacy `(0,0)/(0,0)` encoding written before 2026-07-31 still reports true.
-- `contains(az, el, freq) -> bool`: Checks if query point is within coverage
+- `contains_direction(az, el) -> bool`: Checks if a direction is within the **spatial**
+  coverage region, ignoring frequency. This is what the `out_of_coverage` advisory asks.
+- `contains_direction_at_frequency(az, el, freq) -> bool`: Checks if a full query point is
+  within coverage. This is what gates correction application; the served path delegates to
+  it (issue #60) rather than carrying its own copy.
 - `validate() -> Result<()>`: Ensures range consistency (min ≤ max)
 
 **Example Coverage Scenarios:**
@@ -1360,7 +1364,7 @@ fn get_accuracy(
         },
 
         CalibrationStatus::PartiallyCalibrated { coverage, .. } => {
-            if coverage.contains(query_az, query_el, query_freq) {
+            if coverage.contains_direction_at_frequency(query_az, query_el, query_freq) {
                 1.5  // In-coverage: tuned physics model
             } else {
                 2.5  // Out-of-coverage: physics extrapolation
@@ -1702,11 +1706,22 @@ fn is_in_coverage(
     frequency_mhz: f64,
 ) -> bool {
     match coverage {
-        Some(cov) => cov.contains(azimuth_deg, elevation_deg, frequency_mhz),
-        None => false,  // Uncalibrated: no coverage
+        Some(cov) => cov.contains_direction_at_frequency(azimuth_deg, elevation_deg, frequency_mhz),
+        // No coverage restriction recorded (fully calibrated artifact): the
+        // correction surface applies everywhere it has data. Application is
+        // still gated separately on the surface existing at all.
+        None => true,
     }
 }
 ```
+
+`CalibrationCoverage` owns both coverage predicates (issue #60); the service adds only the
+`None` case. The **full** predicate above (azimuth, E-cone, frequency) decides whether a
+correction surface may be applied. The narrower **spatial** predicate,
+`contains_direction(azimuth_deg, elevation_deg)`, decides only whether the
+partial-calibration advisory reports the direction as outside the measured region — so an
+in-grid query at an uncalibrated frequency gets no correction without being called
+out-of-coverage.
 
 ### 10.3 Warning Generation Rules
 

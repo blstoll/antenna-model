@@ -261,8 +261,9 @@ fn a_boresight_artifact_carrying_a_frequency_correction_loads() {
 ///
 /// Boresight is the pole of the (azimuth, polar-angle) system: azimuth is degenerate there,
 /// so an `azimuth_range = (0, 0)` claim constrains a coordinate carrying no information and
-/// the served coverage predicate then rejects the very query the coverage describes — the artifact loads,
-/// reports `PartiallyCalibrated`, carries its correction, and serves raw physics anyway.
+/// the served coverage predicate then rejects the very query the coverage describes — the
+/// artifact loads, reports `PartiallyCalibrated`, carries its correction, and serves raw
+/// physics anyway.
 #[test]
 fn boresight_coverage_is_written_as_an_on_axis_cone() {
     let run = run_boresight_over(RIPPLED_BORESIGHT_CSV);
@@ -287,7 +288,7 @@ fn boresight_coverage_is_written_as_an_on_axis_cone() {
     );
 
     // `CalibrationCoverage::contains_direction_at_frequency` — the type's own range
-    // test, on the azimuth a boresight-aimed query really produces. Since roadmap #60
+    // test, on the azimuth a boresight-aimed query really produces. Since issue #60
     // this IS what the served path runs: `service::evaluator::is_in_coverage` delegates
     // here rather than carrying its own copy. The served path is asserted separately by
     // `evaluator::tests::a_boresight_aimed_query_gets_the_boresight_correction_applied`.
