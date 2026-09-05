@@ -41,7 +41,7 @@ spec:
         imagePullPolicy: {{ .Values.image.pullPolicy }}
         ports:
         - name: http
-          containerPort: {{ .Values.config.service.port }}
+          containerPort: {{ .Values.config.server.port }}
           protocol: TCP
         env:
         {{- range $key, $value := .Values.env }}
@@ -50,9 +50,6 @@ spec:
         {{- end }}
         - name: CONFIG_PATH
           value: "/app/config/service.yaml"
-        envFrom:
-        - configMapRef:
-            name: {{ include "antenna-model.fullname" . }}-config
         livenessProbe:
           {{- toYaml .Values.livenessProbe | nindent 12 }}
         readinessProbe:

@@ -306,31 +306,53 @@ Configure via ConfigMap or Helm values:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `RUST_LOG` | `info` | Log level (trace, debug, info, warn, error) |
-| `SERVICE_HOST` | `0.0.0.0` | Service bind address |
-| `SERVICE_PORT` | `3000` | Service port |
 | `CONFIG_PATH` | `/app/config/service.yaml` | Config file path |
+| `ANTENNA_MODEL__SERVER__HOST` | unset — image config supplies `0.0.0.0` | Bind address; **overrides** the config file if set |
+| `ANTENNA_MODEL__SERVER__PORT` | unset — image config supplies `3000` | Bind port; **overrides** the config file if set |
+
+Any config-file key can be overridden by an environment variable named
+`ANTENNA_MODEL__<SECTION>__<KEY>`.
+
+**These variables outrank the mounted `service.yaml`**, not the other way round:
+`ServiceConfig::from_file` adds the environment source after the file source. The
+image sets no runtime environment, so the chart's ConfigMap is what configures the
+service and `.Values.config.server.{host,port}` are authoritative. The underscore after the prefix is **doubled** —
+it is the same separator used between nested keys, so `ANTENNA_MODEL_SERVER__HOST`
+matches nothing. `SERVICE_HOST` / `SERVICE_PORT` were never read by the service:
+setting them left the pod on the `127.0.0.1` default, with the readiness probe
+refused at the pod IP.
 
 ### Service Configuration
 
 Key configuration options in `service.yaml`:
 
 ```yaml
-service:
+server:
   host: "0.0.0.0"
   port: 3000
-  request_timeout_seconds: 30
-  max_request_body_size_bytes: 10485760  # 10 MB
+  request_timeout_secs: 30
+  max_body_size_bytes: 10485760  # 10 MB
+
+calibration:
+  data_directory: "/app/calibration_data"
+  antenna_config_file: "/app/calibration_data/antennas.yaml"
+  fail_fast: true
 
 logging:
   level: "info"
-  format: "json"
-  request_logging: true
+  format: "json"  # text or json
+  include_location: false
 
-computation:
-  default_integration_mode: "default"  # fast, default, high_accuracy
-  parallel_batch_threshold: 5
+performance:
+  worker_threads: 0  # 0 = auto-detect
   max_batch_size: 1000
+  enable_parallel_processing: true
 ```
+
+The section names come from `ServiceConfig` (`antenna-model/src/config/settings.rs`).
+The loader does not reject unknown fields, so a mistyped section is dropped without a
+warning — check the startup log line reporting the bind address rather than assuming
+the file took effect.
 
 ### Calibration Data Management
 
