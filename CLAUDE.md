@@ -175,3 +175,17 @@ correlation. DEBUG for physics detail, INFO for requests, WARN for extrapolation
 - **Architecture**: `docs/architecture.md`
 - **Design Doc**: `docs/antenna-model-design-doc.md` — physical models and formulation
 - **Calibration Guide**: `docs/calibration-workflow-guide.md`
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked in this repository's GitHub Issues using the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Triage roles use the default label vocabulary. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Domain documentation uses the single-context layout. See `docs/agents/domain.md`.
