@@ -314,11 +314,23 @@ fn is_in_coverage(
     frequency_mhz: f64,
 ) -> bool {
     match coverage {
-        Some(cov) => cov.contains(azimuth_deg, elevation_deg, frequency_mhz),
-        None => false,  // Uncalibrated: no coverage
+        Some(cov) => cov.contains_direction_at_frequency(azimuth_deg, elevation_deg, frequency_mhz),
+        // No coverage restriction recorded (fully calibrated artifact): the
+        // correction surface applies everywhere it has data. Application is
+        // still gated separately on the surface existing at all.
+        None => true,
     }
 }
 ```
+
+`CalibrationCoverage` owns both coverage predicates (issue #60); the service adds
+only the `None` case. The **full** predicate above (azimuth, E-cone, frequency)
+decides whether a correction surface may be applied. The narrower **spatial**
+predicate, `contains_direction(azimuth_deg, elevation_deg)`, decides only whether
+the partial-calibration advisory reports the direction as outside the measured
+region — so an in-grid query at an uncalibrated frequency gets no correction
+without being called out-of-coverage. `ValidityRanges::contains` is a separate
+domain concept and is not calibration coverage.
 
 **Correction Surface Application:**
 Correction surface is applied only when:

@@ -5088,15 +5088,17 @@ Best candidate: **Andrew 43998, 10 m — 6 frequencies spanning 3700–6425 MHz*
   rather than express, the boresight artifact's intent — the artifact should say what it
   covers.
 
-  **There are TWO copies of this predicate and the fix must touch both.**
-  `service::evaluator::is_in_coverage` (private, and the one the served path actually runs)
-  and `CalibrationCoverage::contains` (public API on the type, currently exercised only by
-  tests) implement the same range test independently — `contains` is not called by
-  `is_in_coverage`. They agree today; a fix applied to one alone makes the public type lie
-  about what the service does. Either fix both or, preferably, make `is_in_coverage` delegate
-  to `contains` so the duplication cannot come back. Documented in `is_in_coverage`'s doc
-  comment and pinned by `legacy_degenerate_boresight_coverage_rejects_its_own_point`, whose
-  failure message points back here.
+  **The duplication is gone — there is now ONE place to apply the fix** (issue #60, done
+  2026-09-05). `service::evaluator::is_in_coverage` used to reimplement the range test that
+  `CalibrationCoverage::contains` also carried; they agreed only by inspection, and a fix
+  applied to one alone would have made the public type lie about what the service does.
+  `CalibrationCoverage` now owns both coverage questions —
+  `contains_direction_at_frequency` (the full test that gates correction application) and
+  `contains_direction` (the spatial-only test behind the `out_of_coverage` advisory) — and
+  `is_in_coverage` keeps only the `None`-means-unrestricted decision. Apply the pole fix to
+  the two core predicates. Documented on `contains_direction_at_frequency` and pinned by
+  `legacy_degenerate_boresight_coverage_rejects_its_own_point`, whose failure message points
+  back here.
 - **Depends on:** D2 (✅ done 2026-07-30 — the headered artifact format is final, so this
   test pins that rather than the legacy one), D12 (reuses its CLI-harness pattern; the
   boresight harness in `cli_boresight_mode_e2e.rs` is the closer starting point).
