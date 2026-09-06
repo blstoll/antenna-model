@@ -616,88 +616,165 @@ pub fn integrate_aperture(
     // Probe one extra mode (M+1) so the self-check can measure its contribution in a
     // single φ' sweep. `mode_count_for` kept m_max ≤ n_phi/2 − 2, so the probe is alias-free.
     let m_probe = m_max + 1;
-    let mut n_rho = radial_points_for(config, theta, wavelength, params);
-    let mut sweep =
-        azimuthal_mode_field_inner(config, theta, phi, k, n_rho, n_phi, m_probe, deadline)?;
-    let mut evaluations = mode_sweep_work(n_rho, n_phi, m_probe as usize + 1);
+    let n_start = radial_points_for(config, theta, wavelength, params);
 
     // ---- P12: the RADIAL axis, which before that unit was never verified at all ----
     //
-    // The mode-truncation check below and this one answer different questions, and the
+    // The mode-truncation check and the radial one answer different questions, and the
     // integrator is only honest when BOTH are answered. Radial convergence is established
     // exactly as the symmetric branch establishes it — compare N against 2N and return the
     // FINE leg — plus refinement, because no single density is right everywhere: at the same
     // budget the 2N leg lands at −0.045 dB on `gs_3.7m` but −0.349 dB on D12's UHF fixture.
     //
     // P13 (2026-08-01) deleted the cheap `{0,1}`-mode pre-gate that used to sit in front of
-    // this loop on expensive geometries. It was priced when the φ' transform was an
+    // the refinement loop on expensive geometries. It was priced when the φ' transform was an
     // `O(n_phi·M)` DFT, which made a 2-mode leg ~18 % of a full one; P10-perf's FFT made the
     // mode work `O(M)`, so a probe leg is now **66 %** of a full leg (measured, `dsn_34m` Ka)
     // and the pre-gate saved ~28 % rather than ~3×. It bought that 28 % by certifying the
-    // COARSE leg — 16× less accurate at `dsn_34m` Ka θ=5° than the fine leg this loop returns
+    // COARSE leg — 16× less accurate at `dsn_34m` Ka θ=5° than the fine leg the loop returns
     // for the same two sweeps — on the strength of a fitted safety factor that a θ × D/λ sweep
     // then showed does not bound what it was supposed to bound (worst passing probe-to-total
     // ratio 43.5× against a constant of 32, on a served geometry). See
     // `docs/findings-2026-08-01-p13-pre-gate-retirement.md`.
-    let radial_rtol = params.relative_tolerance.max(HANKEL_SELF_CHECK_RTOL);
-    let mut radial_error = 0.0_f64;
-    let mut radially_converged = false;
+    //
+    // The loop itself lives in [`refine_radial`] and the two-axis combination in
+    // [`mode_path_verdict`] (#72): the sweep operation is a closure here, so the control can
+    // be exercised with scripted legs and a small density limit in the default test tier
+    // instead of only by a geometry expensive enough to reach the real cap.
+    let radial = refine_radial(
+        n_start,
+        RADIAL_POINTS_SAFETY_MAX,
+        params,
+        HANKEL_SELF_CHECK_RTOL,
+        |n_rho| {
+            let sweep =
+                azimuthal_mode_field_inner(config, theta, phi, k, n_rho, n_phi, m_probe, deadline)?;
+            Ok((sweep, mode_sweep_work(n_rho, n_phi, m_probe as usize + 1)))
+        },
+    )?;
+
+    Ok(mode_path_verdict(&radial, azimuthally_resolved, params))
+}
+
+/// Outcome of the mode path's radial refinement control — see [`refine_radial`].
+#[derive(Debug, Clone, Copy)]
+struct RadialRefinement {
+    /// The finest sweep evaluated. Its `total` is the returned field (before the mode
+    /// truncation check reads the top mode off it), never the coarser leg it was compared
+    /// against: with Simpson's O(h⁴) the fine leg's own error is ≈ diff/15.
+    sweep: ModeSweep,
+    /// `|I(2N) − I(N)|` for the LAST comparison performed. 0.0 only when no strictly finer
+    /// leg existed at all — never as a stand-in for "not checked" (that was the historical
+    /// defect; see [`refine_radial`]).
+    error: f64,
+    /// Whether the last comparison agreed within tolerance.
+    converged: bool,
+    /// Summed [`mode_sweep_work`] of every leg evaluated, baseline included.
+    evaluations: usize,
+}
+
+/// The mode path's radial refinement control: sweep, compare against a strictly finer
+/// sweep, and repeat until the two agree or the doubling budget runs out.
+///
+/// Both the density ceiling (`limit`, [`RADIAL_POINTS_SAFETY_MAX`] in production) and the
+/// sweep operation (`leg`, a full `Jₘ` sweep at a given radial density in production) are
+/// parameters, so the control is the same code in production and under test while a test
+/// can drive it with a small limit and scripted legs (#72). It adds no public API and no
+/// configuration knob: production always passes the real constant.
+///
+/// `leg` returns the sweep at the requested density together with its work units, which are
+/// accumulated into [`RadialRefinement::evaluations`].
+///
+/// **Refine while a genuinely finer leg EXISTS — not while `n_rho` is under the density
+/// cap.** The distinction matters at the cap itself: [`radial_check_points_within`] has its
+/// own, higher ceiling (`2·limit + 1`), so at `n_rho == limit` a strictly finer leg is still
+/// available, and comparing against it is the ONLY way to report how wrong the capped
+/// density is. Guarding on `n_rho >= limit` instead (as this loop did until 2026-08-01)
+/// broke out before the first comparison, leaving the error at 0.0 — so `converged` was
+/// correctly false but `error_estimate` reported the azimuthal axis alone, understating by
+/// ~7 orders of magnitude on the fixture in
+/// `mode_path_reports_a_radial_error_even_when_the_density_cap_binds`. That contradicted
+/// P12's combination decision, whose whole justification is that summing the two axes never
+/// understates. The symmetric branch never had the bug: it computes its capped `2N` leg
+/// unconditionally.
+///
+/// Running out of refinements is NOT an error — it returns the best estimate with
+/// `converged = false` and an honest error, which is what P12 asks for on geometries that
+/// cannot be resolved cheaply.
+fn refine_radial<F>(
+    n_start: usize,
+    limit: usize,
+    params: &IntegrationParams,
+    rtol_floor: f64,
+    mut leg: F,
+) -> ComputationResult<RadialRefinement>
+where
+    F: FnMut(usize) -> ComputationResult<(ModeSweep, usize)>,
+{
+    let mut n_rho = n_start;
+    let (mut sweep, mut evaluations) = leg(n_rho)?;
+    let mut error = 0.0_f64;
+    let mut converged = false;
 
     for _ in 0..MAX_RADIAL_REFINEMENTS {
-        let n_fine = radial_check_points(n_rho);
-        // Refine while a genuinely finer leg EXISTS — not while `n_rho` is under the density
-        // cap. The distinction matters at the cap itself: `radial_check_points` has its own,
-        // higher ceiling (`2·MAX + 1`), so at `n_rho == RADIAL_POINTS_SAFETY_MAX` a strictly
-        // finer leg is still available, and comparing against it is the ONLY way to report how
-        // wrong the capped density is. Guarding on `n_rho >= RADIAL_POINTS_SAFETY_MAX` instead
-        // (as this loop did until 2026-08-01) broke out before the first comparison, leaving
-        // `radial_error` at 0.0 — so `converged` was correctly false but `error_estimate`
-        // reported the azimuthal axis alone, understating by ~7 orders of magnitude on the
-        // fixture in `mode_path_reports_a_radial_error_even_when_the_density_cap_binds`. That
-        // contradicted P12's combination decision, whose whole justification is that summing
-        // the two axes never understates. The symmetric branch never had the bug: it computes
-        // its capped `2N` leg unconditionally.
+        let n_fine = radial_check_points_within(n_rho, limit);
         if n_fine <= n_rho {
             break;
         }
-        let fine =
-            azimuthal_mode_field_inner(config, theta, phi, k, n_fine, n_phi, m_probe, deadline)?;
-        evaluations += mode_sweep_work(n_fine, n_phi, m_probe as usize + 1);
-        radial_error = (fine.total - sweep.total).norm();
+        let (fine, work) = leg(n_fine)?;
+        evaluations += work;
+        // Same verdict the symmetric branch takes on its N-vs-2N pair, against `|fine|`.
         // Return the FINE leg: with Simpson's O(h⁴) the returned estimate's own error is
         // ≈ diff/15, which is the entire reason the symmetric branch is accurate at the
         // same budget the mode path was under-delivering on.
+        let (_, diff, agreed) = self_check(sweep.total, fine.total, params, rtol_floor);
+        error = diff;
+        converged = agreed;
         n_rho = n_fine;
         sweep = fine;
-        radially_converged = radial_error
-            <= radial_rtol * sweep.total.norm().max(params.absolute_tolerance)
-            || radial_error < params.absolute_tolerance;
-        if radially_converged {
+        if converged {
             break;
         }
     }
 
-    // ---- The AZIMUTHAL axis: mode truncation, unchanged in kind since P10 ----
-    // I(M) = I(M+1) − (top-mode contribution); the self-check compares I(M) vs I(M+1).
-    let f_m = sweep.total - sweep.top_mode;
-    let (field, mode_error, mode_converged) =
-        self_check(f_m, sweep.total, params, MODE_SELF_CHECK_RTOL);
-
-    // The two estimates bound errors on DIFFERENT axes of the same returned field, so they
-    // are summed rather than either overwriting the other (P12 required this be decided
-    // explicitly). Summing is the conservative combination: it never understates, and both
-    // are already absolute field-magnitude differences in the same units.
-    //
-    // `azimuthally_resolved` is the THIRD axis and carries no magnitude — φ' aliasing has no
-    // cheap estimator, only a yes/no from the sampling theorem — so it gates `converged`
-    // without contributing to `error_estimate`. A false here means the number may be wrong by
-    // tens of dB, which is exactly why it must not be silent.
-    Ok(IntegrationResult {
-        field,
-        error_estimate: mode_error + radial_error,
-        num_evaluations: evaluations,
-        converged: mode_converged && radially_converged && azimuthally_resolved,
+    Ok(RadialRefinement {
+        sweep,
+        error,
+        converged,
+        evaluations,
     })
+}
+
+/// Combine the mode path's three convergence axes into the returned [`IntegrationResult`].
+///
+/// The AZIMUTHAL axis is the mode truncation, unchanged in kind since P10:
+/// `I(M) = I(M+1) − (top-mode contribution)`, and the self-check compares `I(M)` against
+/// `I(M+1)`.
+///
+/// The radial and azimuthal estimates bound errors on DIFFERENT axes of the same returned
+/// field, so they are **summed** rather than either overwriting the other (P12 required this
+/// be decided explicitly). Summing is the conservative combination: it never understates,
+/// and both are already absolute field-magnitude differences in the same units.
+///
+/// `azimuthally_resolved` is the THIRD axis and carries no magnitude — φ' aliasing has no
+/// cheap estimator, only a yes/no from the sampling theorem — so it gates `converged`
+/// without contributing to `error_estimate`. A false here means the number may be wrong by
+/// tens of dB, which is exactly why it must not be silent.
+fn mode_path_verdict(
+    radial: &RadialRefinement,
+    azimuthally_resolved: bool,
+    params: &IntegrationParams,
+) -> IntegrationResult {
+    let f_m = radial.sweep.total - radial.sweep.top_mode;
+    let (field, mode_error, mode_converged) =
+        self_check(f_m, radial.sweep.total, params, MODE_SELF_CHECK_RTOL);
+
+    IntegrationResult {
+        field,
+        error_estimate: mode_error + radial.error,
+        num_evaluations: radial.evaluations,
+        converged: mode_converged && radial.converged && azimuthally_resolved,
+    }
 }
 
 /// Radial sample count for the self-check's fine (2N) leg: ~double `n1`, kept odd, and
@@ -706,9 +783,17 @@ pub fn integrate_aperture(
 /// Nyquist, this finer leg exposes the disagreement so it is flagged, not hidden.
 #[inline]
 fn radial_check_points(n1: usize) -> usize {
-    let n2 = (2 * n1)
-        .saturating_sub(1)
-        .min(2 * RADIAL_POINTS_SAFETY_MAX + 1);
+    radial_check_points_within(n1, RADIAL_POINTS_SAFETY_MAX)
+}
+
+/// [`radial_check_points`] against an explicit density `limit`, so [`refine_radial`] can be
+/// driven with a small limit in a test without production ever seeing anything but
+/// [`RADIAL_POINTS_SAFETY_MAX`] (#72). The ceiling is `2·limit + 1` — deliberately ABOVE
+/// the limit, so a strictly finer leg still exists at the cap and the disagreement there
+/// can be measured rather than skipped.
+#[inline]
+fn radial_check_points_within(n1: usize, limit: usize) -> usize {
+    let n2 = (2 * n1).saturating_sub(1).min(2 * limit + 1);
     if n2.is_multiple_of(2) {
         n2 + 1
     } else {
@@ -2190,6 +2275,292 @@ mod tests {
         );
         // Even when flagged, the error estimate stays a finite, non-negative number.
         assert!(r.error_estimate.is_finite() && r.error_estimate >= 0.0);
+    }
+
+    // ---- #72: cheap deterministic coverage of the mode path's refinement control ----
+    //
+    // These drive the SAME control production drives — `refine_radial` and
+    // `mode_path_verdict`, which are the only place `integrate_aperture`'s mode branch
+    // refines, decides convergence and combines the two axes — but with a scripted sweep
+    // operation and a small explicit density limit in place of real aperture sweeps. That
+    // makes the control flow assertable in microseconds instead of the ~35 s (debug) the
+    // real 65 537-point cap costs.
+    //
+    // They do NOT replace `mode_path_reports_a_radial_error_even_when_the_density_cap_binds`
+    // below. Nothing here evaluates a single aperture sample, so no test in this block can
+    // show that the production constant is reachable by a real geometry, that the capped
+    // legs genuinely disagree, or by how much. That certification stays, and stays
+    // CI-blocking.
+
+    /// Two-field sweep with a chosen total and top-mode contribution — the only parts of a
+    /// `ModeSweep` the refinement control reads.
+    fn scripted_sweep(total: f64, top_mode: f64) -> ModeSweep {
+        ModeSweep {
+            total: Complex64::new(total, 0.0),
+            top_mode: Complex64::new(top_mode, 0.0),
+        }
+    }
+
+    /// Tolerances for the scripted tests: tight enough that a 0.5-magnitude disagreement is
+    /// non-convergence and a 1e-9 one is convergence, with no dependence on a preset that
+    /// production may retune.
+    fn scripted_params() -> IntegrationParams {
+        IntegrationParams {
+            relative_tolerance: 1e-6,
+            absolute_tolerance: 1e-12,
+            ..IntegrationParams::default()
+        }
+    }
+
+    /// The discriminating replacement for the historical defect, at 1/10⁶ of the cost.
+    ///
+    /// Until 2026-08-01 the loop guarded on `n_rho >= RADIAL_POINTS_SAFETY_MAX` and so
+    /// `break`ed **before** any comparison when the adaptive density arrived already at the
+    /// cap: `converged` was correctly `false`, but `radial_error` kept its 0.0 initial value
+    /// and `error_estimate` reported the azimuthal axis alone.
+    ///
+    /// Neither non-convergence nor a positive error estimate can detect that — the first is
+    /// right under the defect and the second is satisfied by the azimuthal term. So this
+    /// asserts the two things the defect actually removed: that a strictly finer leg is
+    /// **requested** at all, and that the reported radial error is the difference between
+    /// the legs rather than zero.
+    #[test]
+    fn refinement_compares_a_finer_leg_when_the_limit_binds_from_the_first_sweep() {
+        const LIMIT: usize = 9; // stands in for RADIAL_POINTS_SAFETY_MAX
+        let totals = [1.0, 1.5, 2.0];
+        let mut asked = Vec::new();
+        let mut leg = 0usize;
+        let out = refine_radial(LIMIT, LIMIT, &scripted_params(), 1e-2, |n| {
+            asked.push(n);
+            let total = totals[leg.min(totals.len() - 1)];
+            leg += 1;
+            Ok((scripted_sweep(total, 0.0), 100))
+        })
+        .unwrap();
+
+        // A finer leg EXISTS above the limit (`radial_check_points_within` ceilings at
+        // 2·limit+1), so starting at the limit must not stop the comparison.
+        assert_eq!(
+            asked,
+            vec![9, 17, 19],
+            "starting at the density limit must still request strictly finer legs"
+        );
+        assert_eq!(
+            out.error, 0.5,
+            "reported radial error must be the last coarse/fine difference, not 0.0"
+        );
+        assert!(
+            !out.converged,
+            "legs that disagree by 0.5 are not converged"
+        );
+        assert_eq!(
+            out.sweep.total.re, 2.0,
+            "the finest leg is the one returned"
+        );
+        assert_eq!(out.evaluations, 300, "every leg's work is counted");
+    }
+
+    /// The one case where a zero radial error is honest: no strictly finer leg exists,
+    /// because the starting density is already the ceiling `radial_check_points_within`
+    /// can reach. Pins the `break` that the defect above fired too early.
+    #[test]
+    fn refinement_reports_no_error_only_when_no_finer_leg_exists() {
+        const LIMIT: usize = 9;
+        let mut asked = Vec::new();
+        let out = refine_radial(2 * LIMIT + 1, LIMIT, &scripted_params(), 1e-2, |n| {
+            asked.push(n);
+            Ok((scripted_sweep(1.0, 0.0), 100))
+        })
+        .unwrap();
+
+        assert_eq!(asked, vec![19], "no leg above the ceiling can be requested");
+        assert_eq!(out.error, 0.0);
+        assert!(
+            !out.converged,
+            "an unverified density is never reported converged"
+        );
+        assert_eq!(out.evaluations, 100);
+    }
+
+    /// Running out of doublings is not an error: it returns the finest estimate with
+    /// `converged = false` and the honest last disagreement (P12). Pins the budget at
+    /// `MAX_RADIAL_REFINEMENTS` refinements — `MAX_RADIAL_REFINEMENTS + 1` legs — and the
+    /// odd `2N − 1` density ladder.
+    #[test]
+    fn refinement_exhausts_the_doubling_budget_and_reports_the_last_disagreement() {
+        let mut asked = Vec::new();
+        let mut leg = 0usize;
+        let out = refine_radial(3, usize::MAX / 4, &scripted_params(), 1e-2, |n| {
+            asked.push(n);
+            leg += 1;
+            // Never agrees: every leg is 1.0 above the previous one.
+            Ok((scripted_sweep(leg as f64, 0.0), 10))
+        })
+        .unwrap();
+
+        assert_eq!(
+            asked.len(),
+            MAX_RADIAL_REFINEMENTS + 1,
+            "one baseline leg plus MAX_RADIAL_REFINEMENTS refinements"
+        );
+        assert_eq!(asked, vec![3, 5, 9, 17, 33], "odd 2N−1 density ladder");
+        assert_eq!(
+            out.error, 1.0,
+            "the last coarse/fine difference is reported"
+        );
+        assert!(!out.converged);
+        assert_eq!(
+            out.sweep.total.re, 5.0,
+            "the finest leg is the one returned"
+        );
+    }
+
+    /// Agreement stops the ladder immediately, and the FINE leg is what comes back — the
+    /// Richardson `diff/15` benefit the mode path exists to collect depends on returning
+    /// the fine estimate, not the coarse one it was compared against.
+    #[test]
+    fn refinement_stops_at_agreement_and_returns_the_fine_leg() {
+        let mut asked = Vec::new();
+        let mut leg = 0usize;
+        let out = refine_radial(3, usize::MAX / 4, &scripted_params(), 1e-2, |n| {
+            asked.push(n);
+            let total = if leg == 0 { 1.0 } else { 1.0 + 1e-9 };
+            leg += 1;
+            Ok((scripted_sweep(total, 0.0), 10))
+        })
+        .unwrap();
+
+        assert_eq!(asked, vec![3, 5], "no refinement past the first agreement");
+        assert!(out.converged);
+        assert_eq!(
+            out.sweep.total.re,
+            1.0 + 1e-9,
+            "the fine leg is returned, not the coarse leg it was checked against"
+        );
+        assert_eq!(out.evaluations, 20);
+    }
+
+    /// A leg that fails (the S3 wall-clock budget expiring mid-refinement is the production
+    /// case) aborts the refinement with that error rather than being absorbed into a
+    /// convergence verdict.
+    #[test]
+    fn refinement_propagates_a_failing_leg() {
+        let mut leg = 0usize;
+        let out = refine_radial(3, usize::MAX / 4, &scripted_params(), 1e-2, |_| {
+            leg += 1;
+            if leg == 1 {
+                Ok((scripted_sweep(1.0, 0.0), 10))
+            } else {
+                Err(ComputationError::NumericalInstability {
+                    operation: "scripted".to_string(),
+                    reason: "leg failed".to_string(),
+                })
+            }
+        });
+        assert!(matches!(
+            out,
+            Err(ComputationError::NumericalInstability { .. })
+        ));
+    }
+
+    /// P12's combination decision, asserted directly: the radial and azimuthal estimates
+    /// bound errors on DIFFERENT axes of the same returned field, so they are summed —
+    /// neither overwrites the other. A test that only asserted `error_estimate > 0` would
+    /// pass on either term alone; this pins the sum against both.
+    #[test]
+    fn mode_path_verdict_sums_the_radial_and_azimuthal_axes() {
+        let radial = RadialRefinement {
+            sweep: scripted_sweep(10.0, 0.02),
+            error: 0.5,
+            converged: true,
+            evaluations: 42,
+        };
+        let r = mode_path_verdict(&radial, true, &scripted_params());
+
+        // Azimuthal axis: |I(M+1) − I(M)| is the top mode's own contribution, 0.02 (up to
+        // the rounding of forming `I(M) = 10.0 − 0.02` and differencing it again).
+        assert!(
+            (r.error_estimate - 0.52).abs() < 1e-15,
+            "error_estimate must be radial (0.5) + azimuthal (0.02), got {}",
+            r.error_estimate
+        );
+        assert!(
+            r.error_estimate > 0.5,
+            "the azimuthal term must be present, not overwritten by the radial one"
+        );
+        assert_eq!(r.field.re, 10.0, "the field is the finest sweep's total");
+        assert_eq!(r.num_evaluations, 42);
+        // Both axes are inside their floors here (0.02/10 = 2e-3 < 5e-3 mode floor;
+        // the radial verdict was handed in as converged), so the SUM being reported does
+        // not depend on either axis having failed.
+        assert!(r.converged);
+    }
+
+    /// Every axis gates `converged`, but the third one — φ' aliasing — carries no magnitude
+    /// (the sampling theorem gives a yes/no, not an error bound), so it must gate WITHOUT
+    /// contributing to `error_estimate`.
+    #[test]
+    fn mode_path_verdict_gates_on_each_axis_and_aliasing_adds_no_error() {
+        let converged_both = RadialRefinement {
+            sweep: scripted_sweep(10.0, 0.001), // 1e-4 relative: inside the 5e-3 mode floor
+            error: 1e-6,                        // 1e-7 relative: inside the 2e-2 radial floor
+            converged: true,
+            evaluations: 7,
+        };
+        let params = scripted_params();
+
+        let ok = mode_path_verdict(&converged_both, true, &params);
+        assert!(ok.converged, "both axes inside tolerance and φ' resolved");
+
+        let aliased = mode_path_verdict(&converged_both, false, &params);
+        assert!(!aliased.converged, "φ' aliasing must gate convergence");
+        assert_eq!(
+            aliased.error_estimate, ok.error_estimate,
+            "aliasing contributes no magnitude to error_estimate"
+        );
+
+        let radially_unconverged = RadialRefinement {
+            converged: false,
+            ..converged_both
+        };
+        assert!(
+            !mode_path_verdict(&radially_unconverged, true, &params).converged,
+            "a non-converged radial axis must gate convergence"
+        );
+
+        let azimuthally_unconverged = RadialRefinement {
+            sweep: scripted_sweep(10.0, 0.5), // 5e-2 relative: outside the 5e-3 mode floor
+            ..converged_both
+        };
+        assert!(
+            !mode_path_verdict(&azimuthally_unconverged, true, &params).converged,
+            "an under-truncated mode sum must gate convergence"
+        );
+    }
+
+    /// The density ladder's ceiling, on the real production constant, without integrating
+    /// anything: at the cap a strictly finer leg still exists (that is what makes the
+    /// comparison above possible), and one step past it there is none.
+    #[test]
+    fn radial_check_points_ceilings_just_above_the_production_cap() {
+        assert!(
+            radial_check_points(RADIAL_POINTS_SAFETY_MAX) > RADIAL_POINTS_SAFETY_MAX,
+            "a strictly finer leg must exist AT the production density cap"
+        );
+        assert_eq!(
+            radial_check_points(RADIAL_POINTS_SAFETY_MAX),
+            2 * RADIAL_POINTS_SAFETY_MAX - 1,
+            "the leg at the cap is the ordinary 2N−1 doubling, still under the ceiling"
+        );
+        assert_eq!(
+            radial_check_points(2 * RADIAL_POINTS_SAFETY_MAX + 1),
+            2 * RADIAL_POINTS_SAFETY_MAX + 1,
+            "the ceiling is a fixed point: no leg above it"
+        );
+        assert!(
+            !radial_check_points(RADIAL_POINTS_SAFETY_MAX).is_multiple_of(2),
+            "Simpson needs an odd sample count"
+        );
     }
 
     /// The **mode path's** counterpart to `unconverged_is_flagged_not_silently_returned`,
