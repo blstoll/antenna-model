@@ -1143,9 +1143,15 @@ mod tests {
     }
 
     /// The served predicate is the calibration-coverage authority plus the
-    /// `None` (unrestricted) case — nothing else. Pinning agreement on the
-    /// closed-interval bounds is what stops a second service-local range test
-    /// from growing back.
+    /// `None` (unrestricted) case — nothing else.
+    ///
+    /// This asserts *agreement*, not semantics: `CalibrationCoverage`'s own tests
+    /// own what the bounds mean. What this guards is a service-local copy of the
+    /// range test growing back, and such a copy is only visible **at the
+    /// boundary** — a clearly-inside and a clearly-outside probe agree even with
+    /// a copy that has `>` where the authority has `>=`. So the probes walk every
+    /// bound, derived from the coverage's own ranges rather than restated, and a
+    /// coarser in/out set would not be a cheaper version of this test.
     #[test]
     fn is_in_coverage_agrees_with_the_calibration_coverage_authority() {
         let coverage = CalibrationCoverage::builder()
@@ -1157,20 +1163,46 @@ mod tests {
             .build()
             .unwrap();
 
-        for (az, el, freq) in [
-            (10.0, 5.0, 8000.0),
-            (350.0, 60.0, 9000.0),
-            (9.9, 30.0, 8500.0),
-            (350.1, 30.0, 8500.0),
-            (180.0, 4.9, 8500.0),
-            (180.0, 60.1, 8500.0),
-            (180.0, 30.0, 7999.9),
-            (180.0, 30.0, 9000.1),
-        ] {
+        /// One step outside a bound, in degrees and in MHz.
+        const STEP: f64 = 0.1;
+
+        let (az_lo, az_hi) = coverage.azimuth_range;
+        let (el_lo, el_hi) = coverage.elevation_range;
+        let (f_lo, f_hi) = coverage.frequency_range;
+        let (az_mid, el_mid, f_mid) = (
+            f64::midpoint(az_lo, az_hi),
+            f64::midpoint(el_lo, el_hi),
+            f64::midpoint(f_lo, f_hi),
+        );
+
+        let probes = [
+            // Plainly inside, then both extreme corners of the closed box.
+            (az_mid, el_mid, f_mid),
+            (az_lo, el_lo, f_lo),
+            (az_hi, el_hi, f_hi),
+            // One step outside each bound, one axis at a time.
+            (az_lo - STEP, el_mid, f_mid),
+            (az_hi + STEP, el_mid, f_mid),
+            (az_mid, el_lo - STEP, f_mid),
+            (az_mid, el_hi + STEP, f_mid),
+            (az_mid, el_mid, f_lo - STEP),
+            (az_mid, el_mid, f_hi + STEP),
+        ];
+
+        for (az, el, freq) in probes {
             assert_eq!(
                 is_in_coverage(&Some(coverage.clone()), az, el, freq),
                 coverage.contains_direction_at_frequency(az, el, freq),
                 "served coverage diverged from CalibrationCoverage at ({az}, {el}, {freq})"
+            );
+        }
+
+        // The one decision the service owns rather than delegates: an absent
+        // coverage record is unrestricted, so every probe above is in coverage.
+        for (az, el, freq) in probes {
+            assert!(
+                is_in_coverage(&None, az, el, freq),
+                "absent coverage must be unrestricted at ({az}, {el}, {freq})"
             );
         }
     }
