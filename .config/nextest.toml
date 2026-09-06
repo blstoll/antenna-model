@@ -247,8 +247,8 @@ not (
 # Measured 2026-09-06 on a warmed debug build, same runner settings on both sides.
 #
 #   Standalone: cargo nextest run -p antenna-model --test integration <name> --test-threads 1
-#     Before (test_sustained_load):                 2.290 s, 2.275 s
-#     After  (test_repeated_concurrent_gain_requests): 0.353 s
+#     Before (test_sustained_load):                     2.291 / 2.265 / 2.257 s
+#     After  (test_repeated_concurrent_gain_requests):  0.311 / 0.311 / 0.309 s
 #
 #   Default tier: cargo nextest run --workspace
 #     Before: 23.939 / 23.408 / 23.262 s nextest summary, at 360 / 545 / 585% CPU
@@ -260,7 +260,11 @@ not (
 # paused anywhere: the workers do real HTTP round trips against a real server, as before.
 #
 # Throughput and soak measurement is not homeless, it just does not live here: it needs a
-# release build on a controlled machine, which is `cargo bench` (`antenna-model/benches/`).
+# release build on a controlled machine, driven from outside the process. That is the k6
+# harness in `tests/load/load_test_scenarios.js`, which drives real arrival rates against a
+# running service (`normal` = 10 req/s for 5 min, `peak` = 20 req/s for 1 min) — the thing the
+# deleted 2 s window was imitating — with `cargo bench` covering the aperture-integration hot
+# path underneath it.
 
 [profile.full]
 default-filter = "all()"

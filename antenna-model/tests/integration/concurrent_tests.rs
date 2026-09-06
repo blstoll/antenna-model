@@ -387,9 +387,12 @@ async fn test_concurrent_health_checks() {
 /// bound is a function of how much of the machine the test happens to get, which is why the
 /// predecessor (`test_sustained_load`, a 2 s window with a throughput-derived floor) flaked
 /// twice on CI and had to reserve every test thread to stay green. Real throughput and soak
-/// numbers require a release build on a controlled machine: that measurement belongs in
-/// `cargo bench` (see `antenna-model/benches/`), never in a debug-build integration test on a
-/// shared runner.
+/// numbers require a release build on a controlled machine, driven from outside the process:
+/// that is the k6 harness in `tests/load/load_test_scenarios.js`, which holds a real arrival
+/// rate against a running service (`normal` = 10 req/s for 5 min, `peak` = 20 req/s for 1 min)
+/// — the thing the deleted 2 s window was imitating — with `cargo bench` covering the
+/// aperture-integration hot path underneath it. Neither belongs in a debug-build integration
+/// test on a shared runner.
 #[tokio::test]
 async fn test_repeated_concurrent_gain_requests() {
     /// Concurrent workers, started together on a barrier.
@@ -397,16 +400,13 @@ async fn test_repeated_concurrent_gain_requests() {
     /// Sequential requests each worker must complete. Two is the smallest count that proves a
     /// worker went round its loop again rather than blocking forever in the first `send()`.
     const REQUESTS_PER_WORKER: usize = 2;
-    /// Failure bound, not a performance budget. Six real gain evaluations in a debug build
-    /// take ~1 s here and a couple of seconds on the slowest CI runner seen; two minutes is
-    /// far outside any plausible scheduling variance, so tripping it means a hang or deadlock,
-    /// never a slow machine.
+    /// Outer failure bound, not a performance budget. It is deliberately *not* the only bound:
+    /// `TestServer`'s shared client already carries a 30 s per-request timeout, so a request
+    /// that hangs surfaces as a transport error long before this fires. What this catches is
+    /// everything outside a single `send()` — a worker parked forever on the start barrier, a
+    /// task that never joins — where nothing else would ever wake the test. Six real gain
+    /// evaluations take ~0.35 s here, so two minutes is far outside any scheduling variance.
     const COMPLETION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-    /// Two identical requests must produce the same gain. The tolerance absorbs float
-    /// summation reordering in the parallel aperture integration, nothing more — it is *not*
-    /// an accuracy budget, and any real cross-request state corruption moves the value by
-    /// orders of magnitude more than this.
-    const REPEAT_TOLERANCE_DB: f64 = 1e-9;
 
     let server = TestServer::start()
         .await
@@ -433,30 +433,33 @@ async fn test_repeated_concurrent_gain_requests() {
                 request.frequency_mhz = 8000.0 + (worker_id as f64 * 10.0);
 
                 let url = format!("{}/api/v1/gain", server_url);
-                let where_ = format!("worker {worker_id} request {request_index}");
+                let request_label = format!("worker {worker_id} request {request_index}");
 
                 let response = client
                     .post(&url)
                     .json(&request)
                     .send()
                     .await
-                    .map_err(|e| format!("{where_}: transport error: {e}"))?;
+                    .map_err(|e| format!("{request_label}: transport error: {e}"))?;
 
                 let status = response.status();
                 if !status.is_success() {
                     let body = response.text().await.unwrap_or_default();
-                    return Err(format!("{where_}: expected 2xx, got {status}: {body}"));
+                    return Err(format!(
+                        "{request_label}: expected 2xx, got {status}: {body}"
+                    ));
                 }
 
                 let gain: GainResponse = response
                     .json()
                     .await
-                    .map_err(|e| format!("{where_}: body is not a GainResponse: {e}"))?;
+                    .map_err(|e| format!("{request_label}: body is not a GainResponse: {e}"))?;
 
-                validators::validate_gain_response(&gain).map_err(|e| format!("{where_}: {e}"))?;
+                validators::validate_gain_response(&gain)
+                    .map_err(|e| format!("{request_label}: {e}"))?;
                 if gain.antenna_id != request.antenna_id || gain.feed_id != request.feed_id {
                     return Err(format!(
-                        "{where_}: response is for ({}, {}), not the requested ({}, {}) \
+                        "{request_label}: response is for ({}, {}), not the requested ({}, {}) \
                          — responses were crossed between concurrent requests",
                         gain.antenna_id, gain.feed_id, request.antenna_id, request.feed_id,
                     ));
@@ -504,12 +507,16 @@ async fn test_repeated_concurrent_gain_requests() {
             gains.len(),
         );
 
-        // Repeated identical requests must agree: the shared calibration repository and
-        // evaluator carry no per-request state that concurrency can corrupt.
+        // Repeated identical requests must agree BITWISE. `/api/v1/gain` evaluates one point
+        // on the calling task with no rayon fan-out (that is `service::batch` and
+        // `service::heatmap`, not this path), so the same input is exactly reproducible and a
+        // tolerance here would only be a place for a real defect to hide. The shared
+        // calibration repository and evaluator carry no per-request state, so any drift means
+        // concurrency corrupted something.
         let first = gains[0].gain_db;
         for (request_index, gain) in gains.iter().enumerate().skip(1) {
-            assert!(
-                (gain.gain_db - first).abs() <= REPEAT_TOLERANCE_DB,
+            assert_eq!(
+                gain.gain_db, first,
                 "worker {worker_id} request {request_index} returned {} dB for the same \
                  request that returned {first} dB on its first pass",
                 gain.gain_db,
