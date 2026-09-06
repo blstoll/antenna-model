@@ -71,6 +71,21 @@ slow-timeout = { period = "10s" }
 # **504 s -> 217 s**, the whole package 510.6 s -> 235.7 s, with no assertion touched and every
 # artifact byte unchanged bar its timestamp and CRC.
 #
+# Re-measured 2026-09-05 for GitHub issue #67 after warming the build, using Rust's debug
+# `test` profile (`unoptimized + debuginfo`) and nextest's `full` profile at one test thread:
+#
+#   cargo nextest run -p calibrate --profile full --test cli_full_mode_e2e --test-threads 1
+#
+# Before: 13 tests, 230.805 s nextest summary / 232.18 s real / 1592.58 s user.
+# After:  12 tests, 140.271 s nextest summary / 142.09 s real /  941.23 s user.
+#
+# The removed 88.608 s test ran three complete 1,728-row calibrations but asserted only
+# copied metadata and artifact loadability. Its replacement parses the real Clap arguments
+# through the production tuning-options boundary in milliseconds; the five-point optimizer
+# test still executes N = 1, 2 and 3 with mode-specific result assertions, and the remaining
+# 59.153 s full-CLI known-answer test still loads the artifact and recovers 2.6 mm surface RMS.
+# This removes 39% of this binary's sequential wall time without moving either behavioral pin.
+#
 # Two things to know before quoting or re-measuring any figure in this file.
 #
 # 1. **Say whether a figure is standalone or from a full run.** They differ by ~4x here and

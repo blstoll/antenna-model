@@ -140,6 +140,38 @@ struct Args {
     max_tuning_iterations: u64,
 }
 
+/// Optimizer selection assembled from the parsed CLI arguments.
+///
+/// Kept as one production boundary so cheap tests can prove that Clap's mode strings and
+/// iteration cap reach the real optimizer inputs without running a full 1,728-row calibration
+/// once per mode (GitHub issue #67).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct TuningOptions {
+    mode: TuningMode,
+    max_iterations: u64,
+}
+
+fn tuning_options(args: &Args) -> TuningOptions {
+    let mode = match args.tuning_mode.as_str() {
+        "surface-only" => TuningMode::SurfaceRmsOnly,
+        "surface-and-mesh" => TuningMode::SurfaceAndMeshSpacing,
+        "all" => TuningMode::All,
+        _ => {
+            warn!(
+                tuning_mode = %args.tuning_mode,
+                fallback = "surface-only",
+                "Unknown tuning mode, using 'surface-only'"
+            );
+            TuningMode::SurfaceRmsOnly
+        }
+    };
+
+    TuningOptions {
+        mode,
+        max_iterations: args.max_tuning_iterations,
+    }
+}
+
 /// Parameters the shipped correction surface is fitted with (full-mode step 5).
 ///
 /// The shape itself lives on [`CorrectionSurfaceParams::shipped`] — its single owner, so
@@ -592,30 +624,18 @@ async fn run_calibration(args: Args) -> Result<()> {
 
     if args.tune_parameters {
         info!("Step 3/6: Tuning physical parameters...");
+        let options = tuning_options(&args);
         info!(
             "  Running parameter optimization (max {} iterations)...",
-            args.max_tuning_iterations
+            options.max_iterations
         );
-
-        let tuning_mode = match args.tuning_mode.as_str() {
-            "surface-only" => TuningMode::SurfaceRmsOnly,
-            "surface-and-mesh" => TuningMode::SurfaceAndMeshSpacing,
-            "all" => TuningMode::All,
-            _ => {
-                warn!(
-                    "Unknown tuning mode '{}', using 'surface-only'",
-                    args.tuning_mode
-                );
-                TuningMode::SurfaceRmsOnly
-            }
-        };
 
         let tuning_result = tune_parameters(
             class.clone(),
             tunable_params.clone(),
             measurements.clone(),
-            tuning_mode,
-            Some(args.max_tuning_iterations),
+            options.mode,
+            Some(options.max_iterations),
         )?;
 
         tunable_params = tuning_result.to_tunable_parameters();
@@ -941,6 +961,67 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn parse_full_mode_args(extra: &[&str]) -> Args {
+        let mut argv = vec![
+            "calibrate",
+            "--input",
+            "measurements.csv",
+            "--output",
+            "calibration.bin",
+            "--antenna-id",
+            "test_antenna",
+            "--antenna-class",
+            "UHF_Array_Element",
+            "--tune-parameters",
+        ];
+        argv.extend_from_slice(extra);
+        Args::try_parse_from(argv).expect("parse full-mode CLI arguments")
+    }
+
+    /// GitHub issue #67: parse the real CLI and then exercise the same tuning-options
+    /// construction that `run_calibration` passes to the optimizer. Each explicit mode must
+    /// remain distinct; mapping every string to surface-only makes this test fail.
+    #[test]
+    fn cli_tuning_modes_reach_production_options() {
+        for (name, expected) in [
+            ("surface-only", TuningMode::SurfaceRmsOnly),
+            ("surface-and-mesh", TuningMode::SurfaceAndMeshSpacing),
+            ("all", TuningMode::All),
+        ] {
+            let args = parse_full_mode_args(&["--tuning-mode", name]);
+
+            assert_eq!(
+                tuning_options(&args).mode,
+                expected,
+                "--tuning-mode {name} mapped to the wrong optimizer mode"
+            );
+        }
+    }
+
+    /// Defaults and the historical unknown-mode fallback are user-facing CLI behavior and
+    /// must not move while the expensive all-modes subprocess smoke is removed (#67).
+    #[test]
+    fn cli_tuning_mode_default_and_unknown_fallback_are_surface_only() {
+        let default_args = parse_full_mode_args(&[]);
+        let default_options = tuning_options(&default_args);
+        assert_eq!(default_options.mode, TuningMode::SurfaceRmsOnly);
+        assert_eq!(default_options.max_iterations, 100);
+
+        let unknown_args = parse_full_mode_args(&["--tuning-mode", "future-mode"]);
+        assert_eq!(
+            tuning_options(&unknown_args).mode,
+            TuningMode::SurfaceRmsOnly
+        );
+    }
+
+    /// The iteration cap must cross the Clap-to-optimizer boundary unchanged (#67).
+    #[test]
+    fn cli_iteration_cap_reaches_production_options() {
+        let args = parse_full_mode_args(&["--max-tuning-iterations", "37"]);
+
+        assert_eq!(tuning_options(&args).max_iterations, 37);
+    }
 
     /// D10 defect (a): the validation config must carry the params the artifact was
     /// actually fitted with. Before the fix this was `CorrectionSurfaceParams::default()`,
