@@ -5,7 +5,7 @@
 **Scope:** the azimuthal-mode path's radial refinement control in
 `antenna-core/src/model/integration.rs`.
 **Result:** the refinement loop and the two-axis error combination moved out of
-`integrate_aperture` into two internal functions, `refine_radial` and `mode_path_verdict`,
+`integrate_aperture` into two internal functions, `refine_radial` and `mode_path_result`,
 with the density limit and the sweep operation as parameters. Production numerical output is
 **bitwise unchanged** on nine geometries, including the capped one. Eight scripted tests now
 cover the control in **0.026 s** in the default developer tier; the expensive real-cap
@@ -47,7 +47,7 @@ let radial = refine_radial(
     HANKEL_SELF_CHECK_RTOL,
     |n_rho| { /* one full Jm sweep at n_rho; returns (ModeSweep, work units) */ },
 )?;
-Ok(mode_path_verdict(&radial, azimuthally_resolved, params))
+Ok(mode_path_result(&radial, azimuthally_resolved, params))
 ```
 
 Both parameters are what make the control testable: a test passes a limit of `9` and a closure
@@ -80,9 +80,17 @@ Eight tests in `antenna-core/src/model/integration.rs`, all in the **default** t
 | `refinement_exhausts_the_doubling_budget_and_reports_the_last_disagreement` | `MAX_RADIAL_REFINEMENTS + 1` legs, the odd `2N−1` ladder, honest last disagreement, not an error |
 | `refinement_stops_at_agreement_and_returns_the_fine_leg` | agreement stops the ladder and the **fine** leg is returned |
 | `refinement_propagates_a_failing_leg` | a failing sweep (the S3 budget expiring) aborts rather than being absorbed into a verdict |
-| `mode_path_verdict_sums_the_radial_and_azimuthal_axes` | `error_estimate` = radial + azimuthal, both terms present; field is the finest sweep's total |
-| `mode_path_verdict_gates_on_each_axis_and_aliasing_adds_no_error` | each of the three axes gates `converged`; φ' aliasing contributes no magnitude |
+| `mode_path_result_sums_the_radial_and_azimuthal_axes` | `error_estimate` = radial + azimuthal, both terms present; field is the finest sweep's total |
+| `mode_path_result_gates_on_each_axis_and_aliasing_adds_no_error` | each of the three axes gates `converged`; φ' aliasing contributes no magnitude |
 | `radial_check_points_ceilings_just_above_the_production_cap` | on the **real** `RADIAL_POINTS_SAFETY_MAX`: a strictly finer leg exists at the cap, the ceiling is a fixed point, the count stays odd |
+
+Two of the eight are beyond the four cases the issue enumerates: `refinement_propagates_a_failing_leg`
+and `mode_path_result_gates_on_each_axis_and_aliasing_adds_no_error`. They cover the seam's two
+remaining exits — a failing sweep and the φ' axis — for the same ~3 ms, and are called out here
+so the difference from the acceptance list is deliberate and visible rather than silent.
+`refinement_reports_no_error_only_when_no_finer_leg_exists` covers a state production cannot
+reach (`radial_points_for` clamps `n_start` to the limit); it pins the loop's termination
+condition and does **not** discriminate the historical defect, which its doc comment says.
 
 **Discrimination, measured rather than argued.** The historical guard
 (`if n_rho >= limit { break; }`) was reintroduced and the block re-run:
@@ -90,7 +98,7 @@ Eight tests in `antenna-core/src/model/integration.rs`, all in the **default** t
 - `refinement_compares_a_finer_leg_when_the_limit_binds_from_the_first_sweep` **FAILS**:
   `left: [9] right: [9, 17, 19]`.
 - The other seven **PASS**. In particular the non-convergence assertions and
-  `mode_path_verdict_sums_the_radial_and_azimuthal_axes` (whose azimuthal term is nonzero)
+  `mode_path_result_sums_the_radial_and_azimuthal_axes` (whose azimuthal term is nonzero)
   pass under the defect — which is the point of the acceptance criterion: neither
   non-convergence alone nor a nonzero azimuthal-only estimate constitutes replacement
   coverage.
@@ -115,11 +123,13 @@ Symmetric-branch coverage is untouched: `unconverged_is_flagged_not_silently_ret
 
 ## 4. No production numerical regression
 
-A temporary harness printed `field.re`, `field.im`, `error_estimate` (as raw IEEE-754 bit
-patterns), `num_evaluations` and `converged` for nine geometries covering both branches, both
-convergence outcomes, and the capped case, using
-`IntegrationParams { time_budget: None, ..adaptive() }`. Release build, before and after the
-change:
+A harness printed `field.re`, `field.im`, `error_estimate` (as raw IEEE-754 bit patterns),
+`num_evaluations` and `converged` for nine geometries covering both branches, both convergence
+outcomes, and the capped case, using `IntegrationParams { time_budget: None, ..adaptive() }`.
+Release build (`cargo test --release -p antenna-core --test tmp_snapshot_72 -- --nocapture`),
+run on `main` and again on this branch. It is reproduced in §6 so the comparison can be redone
+rather than taken on trust; it is not committed, because it asserts nothing — its only output is
+the table below, which a rerun on a later commit would have to be diffed against by hand.
 
 | Case | field.re (bits) | field.im (bits) | error (bits) | evals | conv |
 |---|---|---|---|---:|---|
@@ -134,7 +144,9 @@ change:
 | `capped_mode_cap_binds` | `bfe2498001582442` | `3fd3ba246a301524` | `3ff34567e9fbaae6` | 24,248,690 | false |
 
 `diff` of the before and after tables is empty: every field, error estimate, evaluation count
-and convergence flag is **bitwise identical**. The harness was deleted; the table is the record.
+and convergence flag is **bitwise identical**. (Re-confirmed after the review pass that dropped
+`refine_radial`'s redundant tolerance-floor parameter and renamed `mode_path_verdict` →
+`mode_path_result`.)
 The suite's own numerical pins (`p12_mode_path_radial_convergence_anchors`,
 `p12_phi_cap_removed_steered_feed_matches_stored_anchors`, the `reference_validation` sweeps and
 the `calibrate` known-answer scenarios) all pass unchanged.
@@ -147,7 +159,7 @@ stated. Figures are from full concurrent runs, not standalone.
 | Measurement | Before | After |
 |---|---:|---:|
 | `-p antenna-core`, default profile | 349 tests, **6.188 s** | 357 tests, **6.156 s** |
-| `--workspace`, default profile | — | 1,115 tests, **24.090 s** |
+| `--workspace`, default profile | 1,107 tests, **23.820 s** | 1,115 tests, **24.090 s** |
 | the eight new tests alone (`-E` filtered, debug) | — | **0.026 s** |
 | `mode_path_reports_a_radial_error_even_when_the_density_cap_binds` (release, `profile full`) | 1.85 s | **1.85 s** |
 
@@ -156,3 +168,53 @@ The eight tests add no measurable wall time: the default-tier `antenna-core` fig
 process startup. This is what issue #74 needs in place before it can move the actual-cap
 certification into an optimized lane: the control flow is now covered in the debug tier at
 essentially zero cost, so that lane's job is narrowed to the numerical certification itself.
+
+## 6. The no-regression harness
+
+Dropped into `antenna-core/tests/tmp_snapshot_72.rs` and run with
+`cargo test --release -p antenna-core --test tmp_snapshot_72 -- --nocapture`, on `main` and on
+the branch; the two outputs are compared with `diff`.
+
+```rust
+use antenna_core::model::geometry::{
+    AntennaConfiguration, FeedParameters, FeedPosition, ReflectorGeometry,
+};
+use antenna_core::model::integration::{integrate_aperture, IntegrationParams};
+
+fn cfg(d: f64, f: f64, rms: f64, off: f64, q: f64, asym: f64) -> AntennaConfiguration {
+    let reflector = ReflectorGeometry::new(d, f, rms).unwrap();
+    let mut pos = FeedPosition::at_focus(f);
+    pos.x = off;
+    let feed = FeedParameters::new(pos, q, 0.0, asym).unwrap();
+    AntennaConfiguration::new("snap".into(), "Snap".into(), reflector, feed, None).unwrap()
+}
+
+#[test]
+fn snapshot() {
+    let pi = std::f64::consts::PI;
+    let cases: Vec<(&str, AntennaConfiguration, f64, f64)> = vec![
+        ("sym_1m_x_boresight", cfg(1.0, 0.5, 0.0, 0.0, 8.0, 1.0), 8.4e9, 0.0),
+        ("sym_1m_x_5deg", cfg(1.0, 0.5, 0.0, 0.0, 8.0, 1.0), 8.4e9, 5f64.to_radians()),
+        ("sym_10m_x_20deg", cfg(10.0, 6.0, 0.0005, 0.0, 8.0, 1.0), 8.4e9, 20f64.to_radians()),
+        ("mode_1m_offset_2deg", cfg(1.0, 0.5, 0.0, 0.02, 8.0, 1.0), 8.4e9, 2f64.to_radians()),
+        ("mode_asym_illum_3deg", cfg(1.0, 0.5, 0.0, 0.0, 8.0, 1.5), 8.4e9, 3f64.to_radians()),
+        ("mode_34m_ka_5deg", cfg(34.0, 11.0, 0.0002, 0.05, 3.0, 1.0), 32.0e9, 5f64.to_radians()),
+        ("mode_12m_uhf_40deg", cfg(12.0, 4.8, 0.001, 0.1, 3.0, 1.0), 0.45e9, 40f64.to_radians()),
+        ("sym_gbt_q_90deg", cfg(100.0, 60.0, 0.000_275, 0.0, 3.15, 1.0), 43.0e9, pi / 2.0),
+        // The fixture of the retained slow-tier certification: the density cap binds here.
+        ("capped_mode_cap_binds", cfg(750.0, 375.0, 0.0, 0.001, 2.0, 1.0), 40.0e9, pi / 2.0),
+    ];
+    for (name, config, f_hz, theta) in cases {
+        let p = IntegrationParams { time_budget: None, ..IntegrationParams::adaptive() };
+        let r = integrate_aperture(theta, 0.0, &config, f_hz, &p).unwrap();
+        println!(
+            "{name}\tre={:016x}\tim={:016x}\terr={:016x}\tevals={}\tconv={}",
+            r.field.re.to_bits(),
+            r.field.im.to_bits(),
+            r.error_estimate.to_bits(),
+            r.num_evaluations,
+            r.converged
+        );
+    }
+}
+```

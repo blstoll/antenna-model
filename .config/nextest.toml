@@ -65,8 +65,8 @@ slow-timeout = { period = "10s" }
 #     the test's subject is what happens when the sample cap binds, so it must reach the cap.
 #     Shrinking the dish does not help, because the cost is set by the cap, not by D/λ.
 #     Kept 2026-09-06 by GitHub issue #72, which added eight scripted default-tier companions
-#     (`refinement_*`, `mode_path_verdict_*`, `radial_check_points_ceilings_*`, 0.026 s for all
-#     eight) driving the same `refine_radial` / `mode_path_verdict` control through a small
+#     (`refinement_*`, `mode_path_result_*`, `radial_check_points_ceilings_*`, 0.026 s for all
+#     eight) driving the same `refine_radial` / `mode_path_result` control through a small
 #     injected density limit. They do NOT replace this entry: none of them evaluates an
 #     aperture sample, so only this test can show the real 65 537-point cap is reachable by a
 #     real geometry and that the capped legs genuinely disagree. See

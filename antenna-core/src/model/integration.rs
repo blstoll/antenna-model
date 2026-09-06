@@ -638,22 +638,16 @@ pub fn integrate_aperture(
     // `docs/findings-2026-08-01-p13-pre-gate-retirement.md`.
     //
     // The loop itself lives in [`refine_radial`] and the two-axis combination in
-    // [`mode_path_verdict`] (#72): the sweep operation is a closure here, so the control can
+    // [`mode_path_result`] (#72): the sweep operation is a closure here, so the control can
     // be exercised with scripted legs and a small density limit in the default test tier
     // instead of only by a geometry expensive enough to reach the real cap.
-    let radial = refine_radial(
-        n_start,
-        RADIAL_POINTS_SAFETY_MAX,
-        params,
-        HANKEL_SELF_CHECK_RTOL,
-        |n_rho| {
-            let sweep =
-                azimuthal_mode_field_inner(config, theta, phi, k, n_rho, n_phi, m_probe, deadline)?;
-            Ok((sweep, mode_sweep_work(n_rho, n_phi, m_probe as usize + 1)))
-        },
-    )?;
+    let radial = refine_radial(n_start, RADIAL_POINTS_SAFETY_MAX, params, |n_rho| {
+        let sweep =
+            azimuthal_mode_field_inner(config, theta, phi, k, n_rho, n_phi, m_probe, deadline)?;
+        Ok((sweep, mode_sweep_work(n_rho, n_phi, m_probe as usize + 1)))
+    })?;
 
-    Ok(mode_path_verdict(&radial, azimuthally_resolved, params))
+    Ok(mode_path_result(&radial, azimuthally_resolved, params))
 }
 
 /// Outcome of the mode path's radial refinement control — see [`refine_radial`].
@@ -666,7 +660,7 @@ struct RadialRefinement {
     /// `|I(2N) − I(N)|` for the LAST comparison performed. 0.0 only when no strictly finer
     /// leg existed at all — never as a stand-in for "not checked" (that was the historical
     /// defect; see [`refine_radial`]).
-    error: f64,
+    error_estimate: f64,
     /// Whether the last comparison agreed within tolerance.
     converged: bool,
     /// Summed [`mode_sweep_work`] of every leg evaluated, baseline included.
@@ -679,8 +673,9 @@ struct RadialRefinement {
 /// Both the density ceiling (`limit`, [`RADIAL_POINTS_SAFETY_MAX`] in production) and the
 /// sweep operation (`leg`, a full `Jₘ` sweep at a given radial density in production) are
 /// parameters, so the control is the same code in production and under test while a test
-/// can drive it with a small limit and scripted legs (#72). It adds no public API and no
-/// configuration knob: production always passes the real constant.
+/// can drive it with a small limit and scripted legs (#72). Nothing else is: the tolerance
+/// floor is [`HANKEL_SELF_CHECK_RTOL`] outright, and there is no public API and no
+/// configuration knob — production always passes the real constant.
 ///
 /// `leg` returns the sweep at the requested density together with its work units, which are
 /// accumulated into [`RadialRefinement::evaluations`].
@@ -705,7 +700,6 @@ fn refine_radial<F>(
     n_start: usize,
     limit: usize,
     params: &IntegrationParams,
-    rtol_floor: f64,
     mut leg: F,
 ) -> ComputationResult<RadialRefinement>
 where
@@ -713,7 +707,7 @@ where
 {
     let mut n_rho = n_start;
     let (mut sweep, mut evaluations) = leg(n_rho)?;
-    let mut error = 0.0_f64;
+    let mut error_estimate = 0.0_f64;
     let mut converged = false;
 
     for _ in 0..MAX_RADIAL_REFINEMENTS {
@@ -727,8 +721,8 @@ where
         // Return the FINE leg: with Simpson's O(h⁴) the returned estimate's own error is
         // ≈ diff/15, which is the entire reason the symmetric branch is accurate at the
         // same budget the mode path was under-delivering on.
-        let (_, diff, agreed) = self_check(sweep.total, fine.total, params, rtol_floor);
-        error = diff;
+        let (_, diff, agreed) = self_check(sweep.total, fine.total, params, HANKEL_SELF_CHECK_RTOL);
+        error_estimate = diff;
         converged = agreed;
         n_rho = n_fine;
         sweep = fine;
@@ -739,7 +733,7 @@ where
 
     Ok(RadialRefinement {
         sweep,
-        error,
+        error_estimate,
         converged,
         evaluations,
     })
@@ -760,7 +754,7 @@ where
 /// cheap estimator, only a yes/no from the sampling theorem — so it gates `converged`
 /// without contributing to `error_estimate`. A false here means the number may be wrong by
 /// tens of dB, which is exactly why it must not be silent.
-fn mode_path_verdict(
+fn mode_path_result(
     radial: &RadialRefinement,
     azimuthally_resolved: bool,
     params: &IntegrationParams,
@@ -771,7 +765,7 @@ fn mode_path_verdict(
 
     IntegrationResult {
         field,
-        error_estimate: mode_error + radial.error,
+        error_estimate: mode_error + radial.error_estimate,
         num_evaluations: radial.evaluations,
         converged: mode_converged && radial.converged && azimuthally_resolved,
     }
@@ -2280,7 +2274,7 @@ mod tests {
     // ---- #72: cheap deterministic coverage of the mode path's refinement control ----
     //
     // These drive the SAME control production drives — `refine_radial` and
-    // `mode_path_verdict`, which are the only place `integrate_aperture`'s mode branch
+    // `mode_path_result`, which are the only place `integrate_aperture`'s mode branch
     // refines, decides convergence and combines the two axes — but with a scripted sweep
     // operation and a small explicit density limit in place of real aperture sweeps. That
     // makes the control flow assertable in microseconds instead of the ~35 s (debug) the
@@ -2301,9 +2295,10 @@ mod tests {
         }
     }
 
-    /// Tolerances for the scripted tests: tight enough that a 0.5-magnitude disagreement is
-    /// non-convergence and a 1e-9 one is convergence, with no dependence on a preset that
-    /// production may retune.
+    /// Tolerances for the scripted tests. The effective radial gate is
+    /// `max(relative_tolerance, HANKEL_SELF_CHECK_RTOL)` = 2e-2, so a 0.5-magnitude
+    /// disagreement on a unit-scale field is non-convergence and a 1e-9 one is convergence —
+    /// verdicts that do not depend on a preset production may retune.
     fn scripted_params() -> IntegrationParams {
         IntegrationParams {
             relative_tolerance: 1e-6,
@@ -2330,7 +2325,7 @@ mod tests {
         let totals = [1.0, 1.5, 2.0];
         let mut asked = Vec::new();
         let mut leg = 0usize;
-        let out = refine_radial(LIMIT, LIMIT, &scripted_params(), 1e-2, |n| {
+        let out = refine_radial(LIMIT, LIMIT, &scripted_params(), |n| {
             asked.push(n);
             let total = totals[leg.min(totals.len() - 1)];
             leg += 1;
@@ -2346,7 +2341,7 @@ mod tests {
             "starting at the density limit must still request strictly finer legs"
         );
         assert_eq!(
-            out.error, 0.5,
+            out.error_estimate, 0.5,
             "reported radial error must be the last coarse/fine difference, not 0.0"
         );
         assert!(
@@ -2362,19 +2357,25 @@ mod tests {
 
     /// The one case where a zero radial error is honest: no strictly finer leg exists,
     /// because the starting density is already the ceiling `radial_check_points_within`
-    /// can reach. Pins the `break` that the defect above fired too early.
+    /// can reach.
+    ///
+    /// This state is unreachable in production — `radial_points_for` clamps `n_start` to the
+    /// limit, and at the limit the ladder still yields `2·limit − 1`. So it does NOT
+    /// discriminate the historical defect (it passes under it); it pins the loop's
+    /// termination condition, which is what keeps a future `break` from silently reporting
+    /// a zero it did not measure.
     #[test]
     fn refinement_reports_no_error_only_when_no_finer_leg_exists() {
         const LIMIT: usize = 9;
         let mut asked = Vec::new();
-        let out = refine_radial(2 * LIMIT + 1, LIMIT, &scripted_params(), 1e-2, |n| {
+        let out = refine_radial(2 * LIMIT + 1, LIMIT, &scripted_params(), |n| {
             asked.push(n);
             Ok((scripted_sweep(1.0, 0.0), 100))
         })
         .unwrap();
 
         assert_eq!(asked, vec![19], "no leg above the ceiling can be requested");
-        assert_eq!(out.error, 0.0);
+        assert_eq!(out.error_estimate, 0.0);
         assert!(
             !out.converged,
             "an unverified density is never reported converged"
@@ -2390,7 +2391,7 @@ mod tests {
     fn refinement_exhausts_the_doubling_budget_and_reports_the_last_disagreement() {
         let mut asked = Vec::new();
         let mut leg = 0usize;
-        let out = refine_radial(3, usize::MAX / 4, &scripted_params(), 1e-2, |n| {
+        let out = refine_radial(3, usize::MAX / 4, &scripted_params(), |n| {
             asked.push(n);
             leg += 1;
             // Never agrees: every leg is 1.0 above the previous one.
@@ -2405,7 +2406,7 @@ mod tests {
         );
         assert_eq!(asked, vec![3, 5, 9, 17, 33], "odd 2N−1 density ladder");
         assert_eq!(
-            out.error, 1.0,
+            out.error_estimate, 1.0,
             "the last coarse/fine difference is reported"
         );
         assert!(!out.converged);
@@ -2422,7 +2423,7 @@ mod tests {
     fn refinement_stops_at_agreement_and_returns_the_fine_leg() {
         let mut asked = Vec::new();
         let mut leg = 0usize;
-        let out = refine_radial(3, usize::MAX / 4, &scripted_params(), 1e-2, |n| {
+        let out = refine_radial(3, usize::MAX / 4, &scripted_params(), |n| {
             asked.push(n);
             let total = if leg == 0 { 1.0 } else { 1.0 + 1e-9 };
             leg += 1;
@@ -2446,7 +2447,7 @@ mod tests {
     #[test]
     fn refinement_propagates_a_failing_leg() {
         let mut leg = 0usize;
-        let out = refine_radial(3, usize::MAX / 4, &scripted_params(), 1e-2, |_| {
+        let out = refine_radial(3, usize::MAX / 4, &scripted_params(), |_| {
             leg += 1;
             if leg == 1 {
                 Ok((scripted_sweep(1.0, 0.0), 10))
@@ -2468,14 +2469,14 @@ mod tests {
     /// neither overwrites the other. A test that only asserted `error_estimate > 0` would
     /// pass on either term alone; this pins the sum against both.
     #[test]
-    fn mode_path_verdict_sums_the_radial_and_azimuthal_axes() {
+    fn mode_path_result_sums_the_radial_and_azimuthal_axes() {
         let radial = RadialRefinement {
             sweep: scripted_sweep(10.0, 0.02),
-            error: 0.5,
+            error_estimate: 0.5,
             converged: true,
             evaluations: 42,
         };
-        let r = mode_path_verdict(&radial, true, &scripted_params());
+        let r = mode_path_result(&radial, true, &scripted_params());
 
         // Azimuthal axis: |I(M+1) − I(M)| is the top mode's own contribution, 0.02 (up to
         // the rounding of forming `I(M) = 10.0 − 0.02` and differencing it again).
@@ -2500,19 +2501,19 @@ mod tests {
     /// (the sampling theorem gives a yes/no, not an error bound), so it must gate WITHOUT
     /// contributing to `error_estimate`.
     #[test]
-    fn mode_path_verdict_gates_on_each_axis_and_aliasing_adds_no_error() {
+    fn mode_path_result_gates_on_each_axis_and_aliasing_adds_no_error() {
         let converged_both = RadialRefinement {
             sweep: scripted_sweep(10.0, 0.001), // 1e-4 relative: inside the 5e-3 mode floor
-            error: 1e-6,                        // 1e-7 relative: inside the 2e-2 radial floor
+            error_estimate: 1e-6,               // 1e-7 relative: inside the 2e-2 radial floor
             converged: true,
             evaluations: 7,
         };
         let params = scripted_params();
 
-        let ok = mode_path_verdict(&converged_both, true, &params);
+        let ok = mode_path_result(&converged_both, true, &params);
         assert!(ok.converged, "both axes inside tolerance and φ' resolved");
 
-        let aliased = mode_path_verdict(&converged_both, false, &params);
+        let aliased = mode_path_result(&converged_both, false, &params);
         assert!(!aliased.converged, "φ' aliasing must gate convergence");
         assert_eq!(
             aliased.error_estimate, ok.error_estimate,
@@ -2524,7 +2525,7 @@ mod tests {
             ..converged_both
         };
         assert!(
-            !mode_path_verdict(&radially_unconverged, true, &params).converged,
+            !mode_path_result(&radially_unconverged, true, &params).converged,
             "a non-converged radial axis must gate convergence"
         );
 
@@ -2533,7 +2534,7 @@ mod tests {
             ..converged_both
         };
         assert!(
-            !mode_path_verdict(&azimuthally_unconverged, true, &params).converged,
+            !mode_path_result(&azimuthally_unconverged, true, &params).converged,
             "an under-truncated mode sum must gate convergence"
         );
     }
