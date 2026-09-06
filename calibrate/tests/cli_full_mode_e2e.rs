@@ -10,75 +10,137 @@ use support::*;
 
 #[test]
 fn generator_is_deterministic() {
-    let a = rows_to_csv(&generate_rows());
-    let b = rows_to_csv(&generate_rows());
-    assert_eq!(a, b, "the fixture generator must be byte-reproducible");
+    let frequencies_mhz = [410.0, 635.0];
+    let e_cone_deg = [1.0, 9.0];
+    let e_clock_deg = [15.0, 125.0, 280.0];
+
+    let grid = FixtureGrid {
+        frequencies_mhz: &frequencies_mhz,
+        e_cone_deg: &e_cone_deg,
+        e_clock_deg: &e_clock_deg,
+    };
+    let first = generate_rows_on_grid(grid);
+    let second = generate_rows_on_grid(grid);
+
+    let ordered_coordinates: Vec<_> = first
+        .iter()
+        .map(|row| (row.frequency_mhz, row.e_cone_deg, row.e_clock_deg))
+        .collect();
+    assert_eq!(
+        ordered_coordinates,
+        [
+            (410.0, 1.0, 15.0),
+            (410.0, 1.0, 125.0),
+            (410.0, 1.0, 280.0),
+            (410.0, 9.0, 15.0),
+            (410.0, 9.0, 125.0),
+            (410.0, 9.0, 280.0),
+            (635.0, 1.0, 15.0),
+            (635.0, 1.0, 125.0),
+            (635.0, 1.0, 280.0),
+            (635.0, 9.0, 15.0),
+            (635.0, 9.0, 125.0),
+            (635.0, 9.0, 280.0),
+        ],
+        "the parallel generator must retain frequency/cone/clock nesting order"
+    );
+    assert_eq!(first, second, "ordered generated rows must be reproducible");
+    assert_eq!(
+        rows_to_csv(&first),
+        rows_to_csv(&second),
+        "rendered fixture CSV must be byte-reproducible"
+    );
 }
 
-fn assert_fixture_grid_satisfies_the_fitter_constraints(rows: &[FixtureRow]) {
-    assert_eq!(rows.len(), FIXTURE_ROW_COUNT, "fixture row count");
+#[test]
+fn generator_grid_satisfies_the_fitter_constraints() {
+    const CV_FOLDS: usize = 3;
 
-    // The binding quantity is the fitted COEFFICIENT count, not the fitter's cheap
-    // `(spline_order + 1)^3 = 125` pre-check — roadmap D20. Full mode requests 4/6/8
-    // internal knots at order 4, and each axis contributes `placed_knots + order` basis
-    // functions, so the surface declares at most 8 * 10 * 12 = 960 coefficients.
-    //
-    // The tightest split any test here runs at is `--cv-folds 3` (see
-    // `cli_cv_three_folds_reports_finite_scores`), whose training fold is 2/3 of the
-    // grid. That fold, not the whole grid, is what has to cover the coefficients.
-    const MAX_COEFFICIENTS: usize = 8 * 10 * 12;
-    const TIGHTEST_TRAINING_FRACTION: f64 = 2.0 / 3.0;
+    struct Axis<'a> {
+        label: &'static str,
+        values: &'a [f64],
+        requested_knots: usize,
+        minimum_spacing: f64,
+    }
 
-    let tightest_fold = (rows.len() as f64 * TIGHTEST_TRAINING_FRACTION) as usize;
+    let params = CorrectionSurfaceParams::shipped();
+    let axes = [
+        Axis {
+            label: "frequency",
+            values: &FIXTURE_FREQUENCIES_MHZ,
+            requested_knots: params.num_knots_frequency,
+            minimum_spacing: params.min_knot_spacing_frequency,
+        },
+        Axis {
+            label: "E-cone",
+            values: &FIXTURE_CONE_DEG,
+            requested_knots: params.num_knots_econe,
+            minimum_spacing: params.min_knot_spacing_econe,
+        },
+        Axis {
+            label: "E-clock",
+            values: &FIXTURE_CLOCK_DEG,
+            requested_knots: params.num_knots_eclock,
+            minimum_spacing: params.min_knot_spacing_eclock,
+        },
+    ];
+
+    for axis in &axes {
+        let cardinality = axis.values.len();
+        assert!(
+            cardinality >= axis.requested_knots + 2,
+            "{} needs at least {} interior values plus two bounds; got {cardinality} values",
+            axis.label,
+            axis.requested_knots
+        );
+
+        let span = axis.values[cardinality - 1] - axis.values[0];
+        let required_span = axis.requested_knots as f64 * axis.minimum_spacing;
+        assert!(
+            span >= required_span,
+            "{} span {span} is too narrow for {} shipped knots at {} minimum spacing; \
+             need at least {required_span}",
+            axis.label,
+            axis.requested_knots,
+            axis.minimum_spacing
+        );
+    }
+
+    // The binding quantity is the fitted coefficient count, not the cheap
+    // `(spline_order + 1)^3` pre-check. The largest held-out fold determines the smallest
+    // training split, so use the ceiling rather than assuming the row count divides evenly.
+    let maximum_coefficients = axes
+        .iter()
+        .map(|axis| axis.requested_knots + params.spline_order)
+        .product::<usize>();
+    let row_count = axes.iter().map(|axis| axis.values.len()).product::<usize>();
+    let minimum_training_rows = row_count - row_count.div_ceil(CV_FOLDS);
     assert!(
-        tightest_fold >= MAX_COEFFICIENTS,
-        "a 3-fold CV training split ({tightest_fold} of {} rows) must cover the \
-         {MAX_COEFFICIENTS} coefficients the shipped knot counts declare, or the fitter \
-         rejects it as underdetermined",
-        rows.len()
+        minimum_training_rows >= maximum_coefficients,
+        "a {CV_FOLDS}-fold CV training split has only {minimum_training_rows} of \
+         {row_count} rows for up to {maximum_coefficients} shipped coefficients"
     );
+}
 
-    let freq_span =
-        FIXTURE_FREQUENCIES_MHZ[FIXTURE_FREQUENCIES_MHZ.len() - 1] - FIXTURE_FREQUENCIES_MHZ[0];
-    let cone_span = FIXTURE_CONE_DEG[FIXTURE_CONE_DEG.len() - 1] - FIXTURE_CONE_DEG[0];
-    let clock_span = FIXTURE_CLOCK_DEG[FIXTURE_CLOCK_DEG.len() - 1] - FIXTURE_CLOCK_DEG[0];
+fn assert_fixture_grid_dimensions_and_order(rows: &[FixtureRow]) {
+    assert_eq!(rows.len(), FIXTURE_ROW_COUNT, "full fixture row count");
 
-    // Knot *counts* full mode fits with. These are not importable — they're a private
-    // local in `calibrate/src/main.rs::surface_fitting_params` (4/6/8) — so they're
-    // mirrored here as named constants. If that function's knot counts change, these
-    // must change with it.
-    const NUM_KNOTS_FREQUENCY: f64 = 4.0;
-    const NUM_KNOTS_ECONE: f64 = 6.0;
-    const NUM_KNOTS_ECLOCK: f64 = 8.0;
-
-    // The minimum knot *spacing* floors, by contrast, ARE importable: they're public
-    // fields of `CorrectionSurfaceParams`, and `default()` carries the same values
-    // `surface_fitting_params` hardcodes. Deriving the required spans from here means a
-    // change to the floors (e.g. widening `min_knot_spacing_frequency`) is caught
-    // automatically instead of silently passing against a stale bare literal.
-    let knot_floors = CorrectionSurfaceParams::default();
-    let required_freq_span = NUM_KNOTS_FREQUENCY * knot_floors.min_knot_spacing_frequency;
-    let required_cone_span = NUM_KNOTS_ECONE * knot_floors.min_knot_spacing_econe;
-    let required_clock_span = NUM_KNOTS_ECLOCK * knot_floors.min_knot_spacing_eclock;
-
-    assert!(
-        freq_span >= required_freq_span,
-        "frequency span {freq_span} MHz too narrow for {NUM_KNOTS_FREQUENCY} knots at \
-         {} MHz minimum spacing (need >= {required_freq_span})",
-        knot_floors.min_knot_spacing_frequency
-    );
-    assert!(
-        cone_span >= required_cone_span,
-        "cone span {cone_span} deg too narrow for {NUM_KNOTS_ECONE} knots at {} deg \
-         minimum spacing (need >= {required_cone_span})",
-        knot_floors.min_knot_spacing_econe
-    );
-    assert!(
-        clock_span >= required_clock_span,
-        "clock span {clock_span} deg too narrow for {NUM_KNOTS_ECLOCK} knots at {} deg \
-         minimum spacing (need >= {required_clock_span})",
-        knot_floors.min_knot_spacing_eclock
-    );
+    let rows_per_frequency = FIXTURE_CONE_DEG.len() * FIXTURE_CLOCK_DEG.len();
+    for (index, row) in rows.iter().enumerate() {
+        let frequency_index = index / rows_per_frequency;
+        let within_frequency = index % rows_per_frequency;
+        let cone_index = within_frequency / FIXTURE_CLOCK_DEG.len();
+        let clock_index = within_frequency % FIXTURE_CLOCK_DEG.len();
+        assert_eq!(
+            (row.frequency_mhz, row.e_cone_deg, row.e_clock_deg),
+            (
+                FIXTURE_FREQUENCIES_MHZ[frequency_index],
+                FIXTURE_CONE_DEG[cone_index],
+                FIXTURE_CLOCK_DEG[clock_index],
+            ),
+            "full fixture coordinate order at row {index}"
+        );
+    }
 }
 
 /// Standing pin on roadmap unit D11: the fixture must contain rows the pre-D11 parser
@@ -130,7 +192,7 @@ fn injected_bias_is_bounded() {
 /// the term must not swing past its own designed amplitude.
 #[test]
 fn injected_bias_is_smooth() {
-    let knot_floors = CorrectionSurfaceParams::default();
+    let knot_floors = CorrectionSurfaceParams::shipped();
 
     let freq_rate = FIXTURE_FREQUENCIES_MHZ
         .windows(2)
@@ -181,15 +243,16 @@ fn injected_bias_is_smooth() {
     );
 }
 
-/// Drift guard: `support::fixture_config` hardcodes the `UHF_Array_Element` parameters
-/// (rather than loading `antenna_classes.yaml` itself) so that `generate_rows()` stays
-/// free of file I/O and the physics config stays visibly self-contained. That means
-/// nothing fails automatically if the YAML entry is edited — the drift would otherwise
-/// surface much later as a confusing recovery-tolerance failure in a binary-execution
-/// test, with no obvious link back to "the fixture is stale". This test closes that gap
-/// by asserting the hardcoded values still match the registry, field by field.
+/// Drift guard between the actual nominal fixture and `antenna_classes.yaml`.
+///
+/// The fixture remains free of file I/O, so compare the configuration it constructs—not a
+/// second list of literals—with the registry. Core geometry uses SI units while the class
+/// registry stores surface and mesh dimensions in millimetres; those conversions are kept
+/// explicit here to pin that boundary.
 #[test]
 fn fixture_config_matches_antenna_classes_yaml() {
+    const MILLIMETRES_PER_METRE: f64 = 1_000.0;
+
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("antenna_classes.yaml");
     let registry = AntennaClassRegistry::load_from_file(&path).unwrap_or_else(|e| {
         panic!(
@@ -200,52 +263,52 @@ fn fixture_config_matches_antenna_classes_yaml() {
     let class = registry
         .get_class(FIXTURE_CLASS)
         .unwrap_or_else(|| panic!("{FIXTURE_CLASS} missing from {}", path.display()));
+    let fixture = fixture_config(NOMINAL_SURFACE_RMS_MM);
+    let mesh = fixture
+        .mesh
+        .as_ref()
+        .expect("the fixture class uses a mesh reflector");
 
+    assert_eq!(fixture.id, class.class_id, "fixture class id");
+    assert_eq!(fixture.name, class.description, "fixture description");
     assert_eq!(
-        class.geometry.diameter_m, 8.0,
-        "fixture is stale: antenna_classes.yaml diameter_m for {FIXTURE_CLASS} no longer \
-         matches support::fixture_config — update fixture_config"
+        fixture.reflector.diameter, class.geometry.diameter_m,
+        "fixture reflector diameter"
     );
     assert_eq!(
-        class.geometry.f_over_d, 0.45,
-        "fixture is stale: antenna_classes.yaml f_over_d for {FIXTURE_CLASS} no longer \
-         matches support::fixture_config — update fixture_config"
+        fixture.reflector.f_over_d(),
+        class.geometry.f_over_d,
+        "fixture reflector f/D"
     );
     assert_eq!(
-        class.feed.q_factor, 5.0,
-        "fixture is stale: antenna_classes.yaml feed.q_factor for {FIXTURE_CLASS} no \
-         longer matches support::fixture_config — update fixture_config"
+        fixture.reflector.surface_rms * MILLIMETRES_PER_METRE,
+        class.surface.rms_mm,
+        "fixture surface RMS (m converted to mm)"
+    );
+    assert_eq!(fixture.feed.q_factor, class.feed.q_factor, "fixture feed q");
+    // The shipped class records zero, the only offset invariant under wavelengths-to-metres
+    // conversion across this multi-frequency fixture.
+    assert_eq!(
+        fixture.feed.phase_center_offset, class.feed.phase_center_offset_wavelengths,
+        "fixture phase-centre offset"
     );
     assert_eq!(
-        class.feed.phase_center_offset_wavelengths, 0.0,
-        "fixture is stale: antenna_classes.yaml feed.phase_center_offset_wavelengths for \
-         {FIXTURE_CLASS} no longer matches support::fixture_config — update fixture_config"
+        fixture.feed.asymmetry_factor, class.feed.asymmetry_factor,
+        "fixture feed asymmetry"
     );
     assert_eq!(
-        class.feed.asymmetry_factor, 1.1,
-        "fixture is stale: antenna_classes.yaml feed.asymmetry_factor for {FIXTURE_CLASS} \
-         no longer matches support::fixture_config — update fixture_config"
+        mesh.spacing * MILLIMETRES_PER_METRE,
+        class.mesh.spacing_mm,
+        "fixture mesh spacing (m converted to mm)"
     );
     assert_eq!(
-        class.mesh.spacing_mm, 10.0,
-        "fixture is stale: antenna_classes.yaml mesh.spacing_mm for {FIXTURE_CLASS} no \
-         longer matches support::fixture_config — update fixture_config"
-    );
-    assert_eq!(
-        class.mesh.wire_diameter_mm, 1.0,
-        "fixture is stale: antenna_classes.yaml mesh.wire_diameter_mm for {FIXTURE_CLASS} \
-         no longer matches support::fixture_config — update fixture_config"
-    );
-    assert_eq!(
-        class.surface.rms_mm, NOMINAL_SURFACE_RMS_MM,
-        "fixture is stale: antenna_classes.yaml surface.rms_mm for {FIXTURE_CLASS} no \
-         longer matches support::NOMINAL_SURFACE_RMS_MM — update fixture_config"
+        mesh.wire_diameter * MILLIMETRES_PER_METRE,
+        class.mesh.wire_diameter_mm,
+        "fixture wire diameter (m converted to mm)"
     );
     assert_eq!(
         class.system_noise_temperature_k, FIXTURE_TEMPERATURE_K,
-        "fixture is stale: antenna_classes.yaml system_noise_temperature_k for \
-         {FIXTURE_CLASS} no longer matches support::FIXTURE_TEMPERATURE_K — update \
-         fixture_config"
+        "fixture system noise temperature"
     );
 }
 
@@ -369,7 +432,7 @@ fn run_untuned_scenario() -> UntunedScenario {
 fn cli_untuned_scenario_preserves_artifact_correction_and_no_validation() {
     let scenario = run_untuned_scenario();
 
-    assert_fixture_grid_satisfies_the_fitter_constraints(&scenario.rows);
+    assert_fixture_grid_dimensions_and_order(&scenario.rows);
     assert_fixture_has_realistic_sub_minus_twenty_sidelobes(&scenario.rows);
     assert_service_loadable_corrected_artifact(&scenario);
     assert_correction_beats_the_uncorrected_model(&scenario);
@@ -389,6 +452,20 @@ fn assert_service_loadable_corrected_artifact(scenario: &UntunedScenario) {
     assert_eq!(
         calibration.antenna_id, "d12_uhf_test",
         "service load: antenna ID"
+    );
+    assert_eq!(
+        calibration.metadata.num_measurements,
+        scenario.rows.len(),
+        "artifact metadata must preserve the parsed fixture measurement count"
+    );
+    let coverage = calibration
+        .calibration_coverage
+        .as_ref()
+        .expect("full-mode artifact must describe its measurement coverage");
+    assert_eq!(
+        coverage.num_measurements,
+        scenario.rows.len(),
+        "service-loaded coverage must preserve the parsed fixture measurement count"
     );
     assert!(
         calibration.correction_surface.is_some(),
