@@ -12,8 +12,9 @@ Antenna Model Service is a high-performance REST API for parabolic dish antenna 
 ```bash
 cargo build --release          # both binaries
 
-# Dev inner loop. The default nextest profile EXCLUDES the slow tier (two heavy
-# physics pins and four named calibration scenarios) — see .config/nextest.toml.
+# Dev inner loop. The default nextest profile EXCLUDES the slow tier (four named
+# calibration scenarios) — see .config/nextest.toml. Both heavy physics pins rejoined
+# this tier on 2026-09-06 (#74) when antenna-core became an optimized compile.
 cargo nextest run --workspace
 
 # Both tiers — what scripts/check.sh and CI run. `calibrate` dominates the wall clock.
@@ -27,9 +28,14 @@ cargo nextest run --profile full --no-capture test_name   # single slow-tier tes
 cargo bench
 ```
 
-**Tripwire:** the default tier runs in ~25 s on an idle 8-core machine. If your run
-takes *minutes*, something has regressed — check first that `reqwest` in
-`antenna-model/Cargo.toml` still has `default-features = false`. Its default
+**Tripwire:** the default tier runs in ~8 s and the full profile in ~18 s on an idle
+8-core machine (measured 2026-09-06; they were ~20 s and ~110 s before #74). If your run
+takes *minutes*, something has regressed — check two things first. One: `antenna-core` must
+still be compiled at `opt-level = 3` in the debug and test builds
+(`[profile.dev.package.antenna-core]` in the root `Cargo.toml`, GitHub issue #74).
+Everything still passes without it, ~6x slower, which is why
+`scripts/assert-numerical-certification.sh` asserts it. Two: `reqwest` in
+`antenna-model/Cargo.toml` must still have `default-features = false`. Its default
 `system-proxy` feature makes `reqwest::Client::builder().build()` cost ~11.8 s on
 macOS via a serialized `configd` query, paid once per test that starts a `TestServer`
 (848 s vs 33 s on the `antenna-model` suite alone). See
@@ -70,6 +76,14 @@ they test (roadmap D4):
   It asserts the dependency-graph invariants — each with a live control, since a guard
   whose power nothing asserts is exactly the rot roadmap P13 records. **Do not weaken the
   controls**; the script's header says what each invariant is and why.
+
+It also runs `scripts/assert-numerical-certification.sh` (GitHub issue #74), which is
+workspace-scoped but asserts two things no test result can show: the numerical certification
+named in `.config/numerical-certification-manifest.txt` is still *selected* by the profiles
+that are supposed to run it, and `antenna-core` is still compiled optimized so it stays
+affordable there. A filter that drops a test and a deleted profile override both leave a
+green suite — one with less in it, one several times slower. Same live-control discipline as
+the dep-graph script.
 
 ## Repo Etiquette
 

@@ -46,6 +46,14 @@ echo "==> cargo clippy -p calibrate --features s3-input -- -D warnings (S3 path 
 # features, which is the same trap D4 documents for the dep-graph assertions.
 cargo clippy -p calibrate --features s3-input -- -D warnings
 
+echo "==> scripts/assert-numerical-certification.sh"
+# Asserts that the numerical certification is still selected by the profiles that run it,
+# and that antenna-core is still compiled optimized (GitHub issue #74). Neither failure
+# shows up as a failing test — see the script's header for what each invariant is, and
+# the profile comment in Cargo.toml for the measurements. The certification itself runs in
+# the test step below: one execution of each of those tests, and it is optimized.
+./scripts/assert-numerical-certification.sh
+
 echo "==> cargo nextest run --workspace --profile full"
 # full profile = both test tiers (see .config/nextest.toml, roadmap unit D18).
 # The bare default profile is the dev inner loop and excludes the slow tier;

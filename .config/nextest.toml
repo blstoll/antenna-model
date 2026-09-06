@@ -12,6 +12,14 @@
 #             slow tier stays CI-blocking: coverage moves out of the inner
 #             loop, it is never lost.
 #
+# The tier list shrank on 2026-09-06 (GitHub issue #74) for a reason that has nothing
+# to do with the tests: `antenna-core` is now compiled at opt-level 3 in the debug and
+# test builds (see [profile.dev.package.antenna-core] in Cargo.toml), and these tests
+# are aperture-integration bound. The whole `full` suite went 110.5 s -> 17.7 s wall and
+# 770.7 s -> 81.3 s CPU, and BOTH remaining physics pins fell under the 10 s policy line
+# and rejoined the dev loop. Every figure below that predates that date was measured
+# against an unoptimized core; do not compare across it without saying so.
+#
 # Policy (see the D18 unit in docs/roadmap-2026-07-work-units.md): a new test
 # that costs > 10 s either gets faster or is added to the exclusion list below.
 # The default profile marks such tests SLOW at 10 s so they surface at review
@@ -36,12 +44,13 @@ slow-timeout = { period = "10s" }
 #   dsn34m_offset_feed_mode_count_converges                         -> 1.8 s
 #   p2_moderate_offset_exact_only_gain_pinned_and_routes_standard_po-> 1.8 s
 #   test_beam_steering_from_feed_displacement                       -> 1.8 s
-# The one that stays (three until 2026-08-15, when test_heavy_heatmap_times_out_with_504 left
-# the tier, then two until issue #71 returned the radial anchors):
-#   p12_phi_cap_removed_steered_feed_matches_stored_anchors  125 s -> 15.7 s under
-#     P10-perf, then 7.58 s under #71 by deriving field level and convergence metadata from
-#     one production result at each of its three pinned angles. It remains over the 10 s
-#     marker on slower/contended runners.
+# Removed from this list 2026-09-06 (GitHub issue #74):
+#   p12_phi_cap_removed_steered_feed_matches_stored_anchors — REJOINS the dev loop at
+#     0.43 s (7.44 s here with an unoptimized core). It was the last physics pin in this
+#     list: 125 s -> 15.7 s under P10-perf, then 7.58 s under #71 by deriving field level
+#     and convergence metadata from one production result at each of its three pinned
+#     angles, and now 0.43 s because the core it sweeps is compiled optimized. Its three
+#     stored anchors and their thresholds are untouched.
 # Removed from this list 2026-09-05 (GitHub issue #71):
 #   p12_mode_path_radial_convergence_anchors — REJOINS the dev loop at 0.09 s after its four
 #     runtime dense references were replaced by fixed-axis, independently certified anchors.
@@ -55,9 +64,13 @@ slow-timeout = { period = "10s" }
 #     wall clock at all; it now runs on a paused clock in process, the way its S2b sibling
 #     already did. Worth remembering as a pattern: "slow by construction" was asserted about
 #     the *mechanism* when it was really a property of one *implementation* of the assertion.
-# Added 2026-08-01 by roadmap unit P13:
+# Added 2026-08-01 by roadmap unit P13, REMOVED from this list 2026-09-06 by GitHub issue
+# #74 — it now runs in the dev loop at 2.12 s, having been the single most expensive test in
+# the suite at 35.99 s. Nothing about the test changed; `antenna-core` is compiled optimized
+# (Cargo.toml), so the ~3 x 65,537 radial samples it must evaluate cost what they cost in a
+# release build. The entry is kept because what it says about the test is still true:
 #   mode_path_reports_a_radial_error_even_when_the_density_cap_binds  ~1.9 s release, ~35 s
-#     debug — it pins that the mode path still reports a radial error estimate when
+#     unoptimized debug — it pins that the mode path still reports a radial error estimate when
 #     radial_points_for clamps to RADIAL_POINTS_SAFETY_MAX, so it must actually reach that cap:
 #     ~3 × 65 537 radial samples, which is what "the cap binds" MEANS. Genuinely slow by
 #     construction — unlike test_heavy_heatmap_times_out_with_504, which was filed in this same
@@ -67,10 +80,10 @@ slow-timeout = { period = "10s" }
 #     Kept 2026-09-06 by GitHub issue #72, which added nine scripted default-tier companions
 #     (`refinement_*`, `mode_path_result_*`, `radial_check_points_ceilings_*`, 0.019 s for all
 #     nine) driving the same `refine_radial` / `mode_path_result` control through an injected
-#     density limit — including one at the real RADIAL_POINTS_SAFETY_MAX. They do NOT replace this entry: none of them evaluates an
-#     aperture sample, so only this test can show the real 65 537-point cap is reachable by a
-#     real geometry and that the capped legs genuinely disagree. See
-#     docs/findings-2026-09-06-issue-72-radial-cap-control-seam.md.
+#     density limit — including one at the real RADIAL_POINTS_SAFETY_MAX. They do NOT replace
+#     this entry: none of them evaluates an aperture sample, so only this test can show the
+#     real 65 537-point cap is reachable by a real geometry and that the capped legs
+#     genuinely disagree. See docs/findings-2026-09-06-issue-72-radial-cap-control-seam.md.
 # Re-measured 2026-08-17 by roadmap D18 task 3 — both full-mode e2e binaries stay excluded,
 # but they cost well under half what they did. `calibrate`'s two per-measurement-point physics
 # sweeps (the tuner's Nelder-Mead objective and `main.rs::compute_model_predictions`) were
@@ -222,8 +235,6 @@ not (
   + (binary_id(calibrate::cli_full_mode_e2e) & test(cli_cv_three_folds_reports_finite_scores))
   + (binary_id(calibrate::cli_full_mode_e2e) & test(cli_tuned_run_recovers_the_surface_rms_perturbation))
   + (binary_id(calibrate::cli_full_mode_real_data_e2e) & test(real_data_scenario_preserves_generator_cli_artifact_and_service_contract))
-  + test(p12_phi_cap_removed_steered_feed_matches_stored_anchors)
-  + test(mode_path_reports_a_radial_error_even_when_the_density_cap_binds)
 )
 """
 
@@ -265,6 +276,26 @@ not (
 # running service (`normal` = 10 req/s for 5 min, `peak` = 20 req/s for 1 min) — the thing the
 # deleted 2 s window was imitating — with `cargo bench` covering the aperture-integration hot
 # path underneath it.
+
+# Re-measured 2026-09-06 for GitHub issue #74, warmed build, `--profile full
+# --ignore-default-filter --test-threads 1`, with antenna-core compiled at opt-level 3:
+#
+#   cli_untuned_scenario_preserves_artifact_correction_and_no_validation      1.06 s
+#   cli_cv_three_folds_reports_finite_scores                                  3.78 s
+#   cli_tuned_run_recovers_the_surface_rms_perturbation                       3.96 s  (85.9 s)
+#   real_data_scenario_preserves_generator_cli_artifact_and_service_contract  6.43 s  (7.6 s)
+#
+# Those are sequential figures. In a concurrent `--profile full` run on the same machine the
+# same four report 2.99, 6.70, 6.21 and 9.61 s — the real-data scenario sitting right on the
+# 10 s policy line, which is the D18 measurement caveat about standalone vs contended figures
+# playing out again. So they are under the line, but not clearly under it, and by the D18 rule
+# they qualify to rejoin the dev loop — and if they do, `default` and `full` select the same
+# 1122 tests and the two-tier split has nothing left to do. That is a D18-level decision about
+# the tier system rather than a consequence of issue #74, whose subject was the numerical
+# regressions, so the four stay excluded here and the decision is left to be taken
+# deliberately. The figures are recorded so it can be taken on measurements rather than on
+# the pre-#74 ones above, which were taken against an unoptimized core and are 3-20x too high
+# for today's build.
 
 [profile.full]
 default-filter = "all()"

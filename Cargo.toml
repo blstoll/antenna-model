@@ -16,3 +16,46 @@ opt-level = 3
 lto = true
 codegen-units = 1
 strip = true
+
+# antenna-core is compiled OPTIMIZED in the debug/test builds too (GitHub issue #74).
+#
+# This is the one line the numerical certification rests on. The heavy numerical
+# regressions — the real-cap radial test, the φ'-cap steered-feed anchors, and the
+# calibrate full-mode scenarios — spend essentially all of their time inside
+# `antenna_core::model`'s aperture integration, so an unoptimized core is what made them
+# minutes of work. Measured 2026-09-06 on an 8-core M-series laptop, warm build, nextest
+# `full` profile (`--ignore-default-filter`, all 1122 tests):
+#
+#                                                  before        after
+#   whole suite (1122 tests), wall                 110.5 s       17.7 s
+#   whole suite (1122 tests), CPU                  770.7 s       81.3 s
+#   default dev loop, wall                          20.4 s        8.3 s
+#   mode_path_reports_a_radial_error…cap_binds       36.0 s        2.1 s
+#   p12_phi_cap_removed_steered_feed…anchors          7.4 s        0.4 s
+#   cli_tuned_run_recovers_the_surface_rms…          85.9 s        4.0 s
+#
+# The compilation trade-off, measured the same day with `cargo clean -p antenna-core &&
+# cargo build -p antenna-core --tests`: **2.54 s -> 7.38 s wall, 6.12 s -> 33.18 s CPU**.
+# That is the whole cost, and it is paid only when antenna-core itself is recompiled; it
+# buys back ~92 s of wall and ~690 s of CPU on every full run. An end-to-end cycle that
+# edits a core file and runs the full suite went 138 s -> 44 s.
+#
+# Only `opt-level` is overridden, so `debug-assertions` and `overflow-checks` stay ON —
+# verified with `cargo build -p antenna-core --profile test -v` (`-C opt-level=3
+# -C debug-assertions=on`). Nothing about the checks these tests apply is weakened; the
+# same 1122 tests pass. Optimized code is harder to step through in a debugger; if you
+# need that for a core-internals session, drop opt-level LOCALLY rather than in this file
+# — `scripts/assert-numerical-certification.sh` fails the gate if it goes.
+#
+# Deliberately NOT `[profile.dev.package."*"]`: optimizing the dependency tree as well
+# closes very little (the cap test is 2.1 s here against 2.03 s in a fully optimized
+# `release`-like build) and makes every cold CI build recompile every dependency.
+#
+# One block is enough, and it is the `dev` one. The `test` profile inherits `dev`, package
+# overrides included, so this covers antenna-core both as a library dependency of
+# antenna-model/calibrate and as its own unit-test binary. Checked rather than assumed:
+# with only this block present, `cargo build -p antenna-core --profile test -v` still
+# compiles with `-C opt-level=3`. A `[profile.test.package.antenna-core]` twin was written
+# first and removed as redundant — if you add one back, say what it changed.
+[profile.dev.package.antenna-core]
+opt-level = 3

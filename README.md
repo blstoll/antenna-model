@@ -94,6 +94,7 @@ cargo build --release
 # Run tests (nextest runs each test in its own process, in parallel)
 cargo nextest run --workspace
 cargo test --doc --workspace   # nextest does not run doctests
+./scripts/check.sh             # everything CI runs, including both test tiers
 
 # Run benchmarks
 cargo bench
@@ -520,6 +521,16 @@ cargo tarpaulin --out Html --output-dir coverage/
 ### Running Tests
 
 ```bash
+# Everything CI runs, in CI's order. This is the only complete check: no single
+# nextest invocation covers the doctests or the package-scoped guards.
+./scripts/check.sh
+
+# Dev inner loop (excludes the four slow calibration scenarios; see .config/nextest.toml)
+cargo nextest run --workspace
+
+# Both test tiers
+cargo nextest run --workspace --profile full
+
 # Unit tests
 cargo nextest run --lib
 
