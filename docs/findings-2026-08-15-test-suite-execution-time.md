@@ -69,7 +69,7 @@ restore `default-features`** to obtain one of them; add the feature by name.
 | `antenna-core`, 331 tests | 40 s | 40 s (untouched — never the problem) |
 
 After the fix the two slowest tests in `antenna-model` are the genuine physics pins,
-`p12_phi_cap_removed_steered_feed_matches_converged_reference` (16.0 s) and
+`p12_phi_cap_removed_steered_feed_matches_stored_anchors` (16.0 s) and
 `p12_mode_path_radial_convergence_anchors` (15.5 s) — i.e. the slow tier is now actually the
 slow tier, which is what `.config/nextest.toml` always claimed it was.
 

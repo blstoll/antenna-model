@@ -318,7 +318,7 @@ Tests:
 
 All 995 tests pass across both nextest tiers, including every P12 anchor
 (`p12_mode_path_radial_convergence_anchors`, `p12_symmetric_branch_control_still_accurate_and_cheap`,
-`p12_phi_cap_removed_steered_feed_matches_converged_reference`).
+`p12_phi_cap_removed_steered_feed_matches_stored_anchors`).
 
 ## 4a. Found in review: the refinement loop skipped its comparison at the density cap
 

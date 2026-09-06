@@ -2777,7 +2777,7 @@ mod tests {
 ///
 /// Run with:
 /// ```text
-/// cargo test --release -p antenna-model --lib p12_ -- --ignored --nocapture
+/// cargo test --release -p antenna-core --lib p12_ -- --ignored --nocapture
 /// ```
 ///
 /// This module lives inside `integration.rs` because the quantities under investigation
@@ -4357,6 +4357,128 @@ mod p12_radial_diagnostic {
                 20.0 * (r.field.norm() / reference.norm()).log10(),
                 r.converged,
                 r.num_evaluations
+            );
+        }
+    }
+
+    /// Certify the smaller radial references used by the issue #71 integration-test anchors.
+    ///
+    /// This is an intentionally ignored regeneration/certification harness, not a production
+    /// convergence test. It evaluates exact radial point counts through the private mode-field
+    /// seam while deriving `n_phi` and `m_max` once per geometry and holding both fixed over the
+    /// complete ladder. The production `IntegrationResult::converged` verdict is not consulted.
+    ///
+    /// Run single-threaded in release mode so both the numerical method and timing are explicit:
+    /// ```text
+    /// cargo test --release -p antenna-core --lib \
+    ///   issue_71_certifies_smaller_radial_references -- \
+    ///   --ignored --nocapture --test-threads=1
+    /// ```
+    #[test]
+    #[ignore = "reference certification: evaluates the full 32,769-point radial ladder"]
+    fn issue_71_certifies_smaller_radial_references() {
+        const CANDIDATE_N_RHO: usize = 2049;
+        const LADDER: [usize; 6] = [1025, 2049, 4097, 8193, 16385, 32769];
+        const CANDIDATE_ERROR_BUDGET_DB: f64 = 0.005;
+        const DENSE_TAIL_BUDGET_DB: f64 = 0.0005;
+
+        struct RadialReferenceCase {
+            label: &'static str,
+            config: AntennaConfiguration,
+            frequency_hz: f64,
+            theta_deg: f64,
+            phi_deg: f64,
+            stored_anchor_db: f64,
+        }
+
+        let cases = [
+            RadialReferenceCase {
+                label: "gs_3.7m/x_band_feed",
+                config: gs_3_7m_x_band(),
+                frequency_hz: 8.4e9,
+                theta_deg: 5.0,
+                phi_deg: 0.0,
+                stored_anchor_db: -61.980_025_126_101,
+            },
+            RadialReferenceCase {
+                label: "dsn_34m/x_band",
+                config: dsn_34m_x_band(),
+                frequency_hz: 8.45e9,
+                theta_deg: 0.10,
+                phi_deg: 0.0,
+                stored_anchor_db: -10.622_071_728_263,
+            },
+            RadialReferenceCase {
+                label: "D12 UHF fixture phi=0",
+                config: d12_uhf_fixture(),
+                frequency_hz: 600.0e6,
+                theta_deg: 16.0,
+                phi_deg: 0.0,
+                stored_anchor_db: -51.720_297_408_702,
+            },
+            RadialReferenceCase {
+                label: "D12 UHF fixture phi=90",
+                config: d12_uhf_fixture(),
+                frequency_hz: 600.0e6,
+                theta_deg: 16.0,
+                phi_deg: 90.0,
+                stored_anchor_db: -57.676_029_531_433,
+            },
+        ];
+
+        println!("\n[issue #71] fixed-axis radial reference certification");
+        for case in cases {
+            let wavelength = wavelength_from_frequency(case.frequency_hz);
+            let k = wavenumber(wavelength);
+            let theta = case.theta_deg.to_radians();
+            let phi = case.phi_deg.to_radians();
+            let ModeSizing { m_max, n_phi, .. } = mode_count_for(&case.config, wavelength, theta);
+            let m_probe = m_max + 1;
+
+            let levels_db: Vec<f64> = LADDER
+                .into_iter()
+                .map(|n_rho| {
+                    let field = mode_field_at(&case.config, theta, phi, k, n_rho, n_phi, m_probe);
+                    20.0 * field.norm().log10()
+                })
+                .collect();
+            let candidate_db = levels_db[1];
+            let dense_db = *levels_db.last().expect("non-empty radial ladder");
+            let candidate_error_db = (candidate_db - dense_db).abs();
+            let dense_tail_db = (levels_db[4] - dense_db).abs();
+
+            println!(
+                "  {:<25} f={:.0} Hz theta={:.2} deg phi={:.0} deg \
+                 n_phi={n_phi} m_probe={m_probe}",
+                case.label, case.frequency_hz, case.theta_deg, case.phi_deg
+            );
+            for (n_rho, level_db) in LADDER.into_iter().zip(&levels_db) {
+                println!("    n_rho={n_rho:>5}: {level_db:+.12} dB re 1");
+            }
+            println!(
+                "    candidate error={candidate_error_db:.12} dB; \
+                 dense-tail uncertainty={dense_tail_db:.12} dB"
+            );
+
+            assert!(
+                (dense_db - case.stored_anchor_db).abs() < 5e-10,
+                "{}: dense endpoint {dense_db:.12} dB does not reproduce stored anchor \
+                 {:.12} dB",
+                case.label,
+                case.stored_anchor_db
+            );
+            assert!(
+                candidate_error_db < CANDIDATE_ERROR_BUDGET_DB,
+                "{}: n_rho={CANDIDATE_N_RHO} differs from n_rho=32769 by \
+                 {candidate_error_db:.9} dB, not comfortably below the 0.05 dB regression \
+                 tolerance",
+                case.label
+            );
+            assert!(
+                dense_tail_db < DENSE_TAIL_BUDGET_DB,
+                "{}: 16385-to-32769 tail {dense_tail_db:.9} dB does not certify the dense \
+                 endpoint",
+                case.label
             );
         }
     }

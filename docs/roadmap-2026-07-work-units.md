@@ -858,7 +858,7 @@ risks tuning the integrator to preserve a number that is off by a dB.
 
 **No physics changed. `PHYSICS_MODEL_VERSION` is unchanged (7).** Every anchor in the P10/P12
 validation protocol passes untouched, including the two that arbitrate this exact code
-(`p12_mode_path_radial_convergence_anchors`, `p12_phi_cap_removed_steered_feed_matches_converged_reference`),
+(`p12_mode_path_radial_convergence_anchors`, `p12_phi_cap_removed_steered_feed_matches_stored_anchors`),
 plus the independent 2D Simpson oracle cross-checks. Workspace: 996/996 green under
 `scripts/check.sh`.
 
@@ -916,7 +916,7 @@ sizing the fix.
 **Test-suite effect (feeds D18).** Six of the nine physics tests in D18's slow tier dropped back
 under the 10 s line and were returned to the dev inner loop; the `threads-required = 4`
 reservation on `test_feed_steering_large_offset` was deleted, exactly as its own comment
-anticipated. `p12_phi_cap_removed_steered_feed_matches_converged_reference` went 125 s → 15.7 s
+anticipated. `p12_phi_cap_removed_steered_feed_matches_stored_anchors` went 125 s → 15.7 s
 (D18 task 3 asked for precisely this) but stays excluded, as does
 `p12_mode_path_radial_convergence_anchors` — the latter on tail-latency grounds, not absolute
 cost. Dev loop: **980 tests / 85.9 s**, against 963 / 72.8 s before, i.e. 17 more tests inside
@@ -1288,7 +1288,8 @@ to preserve a number that is off by a dB.
   because the shared fixture steers to **3.06f** and the integrator was converging a number the
   model had already disclaimed (suite 5.5 s → 66 s). Same shape as the deleted constant,
   differing on the two things that made it a defect — the threshold and the silence.
-  All four steered angles now land within **0.007 dB** of converged, `converged = true`.
+  All three retained regression angles (θ=0°, 1°, and 3°) now land within **0.007 dB** of
+  converged, `converged = true`.
   `p2_moderate_offset`'s pin moved 13.72 → **−14.95 dBi**, exactly the oracle-consistent value.
   Two enabled geometries got *cheaper* (`dsn_34m` X `n_phi` 128 → 76, Ka 512 → 260). **Cost:**
   steered geometries are ~69× more expensive and can now reach S3's budget (504) instead of
@@ -5492,7 +5493,7 @@ changes *how often tests get run*, which is a correctness input, not a comfort.
   inflates both): 985 tests, **1193 s total CPU, ~190–226 s wall**. The tail is extreme: the
   **22 excluded tests hold 653 s of that CPU** (15 exceed 10 s; the rest ride along because
   `cli_full_mode_e2e` is excluded whole-binary) — the two worst are
-  `p12_phi_cap_removed_steered_feed_matches_converged_reference` (125 s) and
+  `p12_phi_cap_removed_steered_feed_matches_stored_anchors` (125 s) and
   `cli_full_mode_e2e::cli_tuned_run_completes_for_every_tuning_mode` (122 s). The timing run
   also caught a load-flake: `test_feed_steering_large_offset` breached S3's 30 s wall-clock
   budget under parallel contention (31.6 s FAIL vs 22.3 s pass in isolation). **Fixed
@@ -5529,12 +5530,13 @@ changes *how often tests get run*, which is a correctness input, not a comfort.
   3. **Right-size the two 2-minute tests.** `cli_tuned_run_completes_for_every_tuning_mode`
      runs a full Nelder-Mead per tuning mode — check whether reduced iteration caps or a
      smaller fixture grid preserve the assertion (mode completes + recovers truth) at a
-     fraction of the cost. ~~`p12_phi_cap_removed...` sweeps four steered angles against a
-     converged reference — ask P10-perf to revisit after the FFT lands (it directly shrinks
-     this test).~~ **✅ Half done 2026-08-01 by P10-perf: `p12_phi_cap_removed...` went
-     125 s → 15.7 s** (2.9× even under a contended full run) with no assertion weakened — the
-     test still sweeps all four angles against the same converged reference, the geometry just
-     costs 7.4× less. It remains in the slow tier. ~~The calibrate-side test is untouched and
+     fraction of the cost. ~~Ask P10-perf to revisit `p12_phi_cap_removed...` after the FFT
+     lands (it directly shrinks this test).~~ **✅ Half done 2026-08-01 by P10-perf:
+     `p12_phi_cap_removed...` went 125 s → 15.7 s** (2.9× even under a contended full run)
+     with no assertion weakened. **Follow-up #71, 2026-09-05:** the stale “four angles against
+     a runtime converged reference” description was corrected—the test has three pinned angles
+     (0°, 1°, 3°). Reusing one production result per angle took it 15.154 s → 7.581 s on the
+     same debug single-threaded runner. It remains in the slow tier. ~~The calibrate-side test is untouched and
      is what is left of this task.~~ **✅ Closed 2026-08-17 — 504 s → 243 s, by parallelising
      `calibrate`'s two per-point physics sweeps rather than by asserting less. Both levers this
      task proposed turned out to be dead; see the closeout at the head of this unit.**

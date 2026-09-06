@@ -1762,8 +1762,12 @@ fn field_dbi_at(
     p: &IntegrationParams,
 ) -> f64 {
     use antenna_model::model::integrate_aperture;
-    let r = integrate_aperture(theta, phi, cfg, freq, p).expect("integration");
-    20.0 * r.field.norm().log10()
+    let result = integrate_aperture(theta, phi, cfg, freq, p).expect("integration");
+    integration_result_dbi(&result)
+}
+
+fn integration_result_dbi(result: &antenna_core::model::IntegrationResult) -> f64 {
+    20.0 * result.field.norm().log10()
 }
 
 /// The three geometries P12 measured, at the angles it measured them. Each was served with a
@@ -1830,12 +1834,57 @@ fn p12_mode_path_radial_convergence_anchors() {
         Some((0.15, 0.0)),
     );
 
-    // (label, config, freq, θ°, φ°, pre-P12 error dB)
-    let cases: Vec<(&str, &AntennaConfiguration, f64, f64, f64, f64)> = vec![
-        ("gs_3.7m/x_band_feed", &gs, 8.4e9, 5.0, 0.0, 0.82),
-        ("dsn_34m/x_band", &dsn, 8.45e9, 0.10, 0.0, 1.17),
-        ("D12 UHF fixture φ=0", &uhf, 600.0e6, 16.0, 0.0, 7.08),
-        ("D12 UHF fixture φ=90", &uhf, 600.0e6, 16.0, 90.0, 3.85),
+    struct RadialConvergenceCase<'a> {
+        label: &'static str,
+        config: &'a AntennaConfiguration,
+        frequency_hz: f64,
+        theta_deg: f64,
+        phi_deg: f64,
+        pre_p12_error_db: f64,
+        reference_field_db: f64,
+    }
+
+    // The field-level anchors are dense 32,769-point references in dB re 1, independently
+    // certified against a fixed-(n_phi, m_max) radial ladder under issue #71. Geometry, method,
+    // uncertainty, and regeneration instructions are recorded in
+    // `docs/findings-2026-09-05-issue-71-radial-reference-certification.md`.
+    let cases = [
+        RadialConvergenceCase {
+            label: "gs_3.7m/x_band_feed",
+            config: &gs,
+            frequency_hz: 8.4e9,
+            theta_deg: 5.0,
+            phi_deg: 0.0,
+            pre_p12_error_db: 0.82,
+            reference_field_db: -61.980_025_126_101,
+        },
+        RadialConvergenceCase {
+            label: "dsn_34m/x_band",
+            config: &dsn,
+            frequency_hz: 8.45e9,
+            theta_deg: 0.10,
+            phi_deg: 0.0,
+            pre_p12_error_db: 1.17,
+            reference_field_db: -10.622_071_728_263,
+        },
+        RadialConvergenceCase {
+            label: "D12 UHF fixture φ=0",
+            config: &uhf,
+            frequency_hz: 600.0e6,
+            theta_deg: 16.0,
+            phi_deg: 0.0,
+            pre_p12_error_db: 7.08,
+            reference_field_db: -51.720_297_408_702,
+        },
+        RadialConvergenceCase {
+            label: "D12 UHF fixture φ=90",
+            config: &uhf,
+            frequency_hz: 600.0e6,
+            theta_deg: 16.0,
+            phi_deg: 90.0,
+            pre_p12_error_db: 3.85,
+            reference_field_db: -57.676_029_531_433,
+        },
     ];
 
     // 0.05 dB: an order of magnitude inside the smallest pre-P12 error (0.82 dB), and well
@@ -1844,28 +1893,43 @@ fn p12_mode_path_radial_convergence_anchors() {
     const TOL_DB: f64 = 0.05;
 
     println!("\n[P12] mode-path radial convergence");
-    for (label, cfg, freq, th, ph, was) in cases {
+    for case in cases {
         let p = integrator_params();
-        let served = field_dbi_at(cfg, deg(th), deg(ph), freq, &p);
-        let reference = radially_converged_reference(cfg, deg(th), deg(ph), freq);
-        let err = served - reference;
-
-        let result =
-            antenna_model::model::integrate_aperture(deg(th), deg(ph), cfg, freq, &p).unwrap();
+        let result = antenna_model::model::integrate_aperture(
+            deg(case.theta_deg),
+            deg(case.phi_deg),
+            case.config,
+            case.frequency_hz,
+            &p,
+        )
+        .unwrap();
+        let served = integration_result_dbi(&result);
+        let err = served - case.reference_field_db;
 
         println!(
-            "  {label:<24} θ={th:<6} φ={ph:<4} served={served:>10.4} ref={reference:>10.4} \
-             Δ={err:+.4} dB (was {was:.2}) converged={} evals={}",
-            result.converged, result.num_evaluations
+            "  {:<24} θ={:<6} φ={:<4} served={served:>10.4} ref={:>10.4} \
+             Δ={err:+.4} dB (was {:.2}) converged={} evals={}",
+            case.label,
+            case.theta_deg,
+            case.phi_deg,
+            case.reference_field_db,
+            case.pre_p12_error_db,
+            result.converged,
+            result.num_evaluations
         );
         assert!(
             err.abs() < TOL_DB,
-            "{label} θ={th}° φ={ph}°: radial error {err:+.4} dB exceeds {TOL_DB} dB \
-             (this geometry was {was:.2} dB wrong before P12 — the defect is back)"
+            "{} θ={}° φ={}°: radial error {err:+.4} dB exceeds {TOL_DB} dB \
+             (this geometry was {:.2} dB wrong before P12 — the defect is back)",
+            case.label,
+            case.theta_deg,
+            case.phi_deg,
+            case.pre_p12_error_db
         );
         assert!(
             result.converged,
-            "{label} θ={th}° φ={ph}°: must report converged once radially resolved"
+            "{} θ={}° φ={}°: must report converged once radially resolved",
+            case.label, case.theta_deg, case.phi_deg
         );
     }
 }
@@ -2005,13 +2069,15 @@ fn mode_path_settles_an_already_converged_geometry_in_two_legs() {
 /// inside the 0.5f ray-tracing threshold, so it is a geometry the model is expected to get
 /// RIGHT):
 ///
-/// 1. the served pattern matches a converged-`n_phi` reference across the steered lobe, and
+/// 1. the served pattern matches three stored field-level anchors across the steered lobe,
+///    and
 /// 2. it does so at angles where the old clamp was catastrophically wrong.
 ///
-/// The reference varies `n_phi` ALONE (radial density pinned high, mode count allowed to
-/// track `n_phi`), so a regression cannot be masked by radial refinement.
+/// The anchors were established with the φ' cap removed; the independent
+/// `served_n_phi_sizing_is_sufficient_on_every_asymmetric_geometry` control varies `n_phi`
+/// alone so a regression cannot be masked by radial refinement.
 #[test]
-fn p12_phi_cap_removed_steered_feed_matches_converged_reference() {
+fn p12_phi_cap_removed_steered_feed_matches_stored_anchors() {
     use antenna_model::model::geometry::{
         AntennaConfigurationBuilder, FeedParametersBuilder, ReflectorGeometryBuilder,
     };
@@ -2071,12 +2137,12 @@ fn p12_phi_cap_removed_steered_feed_matches_converged_reference() {
         (1.0, -72.7210, 82.1),
         (3.0, -80.0547, 80.6),
     ] {
-        let served = field_dbi_at(&cfg, deg(theta_deg), 0.0, freq, &p);
-        let r = integrate_aperture(deg(theta_deg), 0.0, &cfg, freq, &p).unwrap();
+        let result = integrate_aperture(deg(theta_deg), 0.0, &cfg, freq, &p).unwrap();
+        let served = integration_result_dbi(&result);
         println!(
             "  θ={theta_deg:<5} served={served:>10.4} (expect {expected:.4}; old clamp was \
              +{old_clamp_error_db:.1} dB wrong) converged={}",
-            r.converged
+            result.converged
         );
         assert!(
             (served - expected).abs() < 0.05,
@@ -2086,7 +2152,7 @@ fn p12_phi_cap_removed_steered_feed_matches_converged_reference() {
         // A δ/f = 0.0875 steered feed is an ordinary geometry, well inside the 0.5f
         // ray-tracing threshold. It must be resolvable on all three axes, not merely served.
         assert!(
-            r.converged,
+            result.converged,
             "θ={theta_deg}°: a routine ~5° beam steer must report converged"
         );
     }
