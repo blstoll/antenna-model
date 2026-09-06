@@ -73,10 +73,11 @@ they test (roadmap D4):
 
 ## Repo Etiquette
 
-Work is organized as **roadmap units** with IDs (`D21`, `P13`, `C15`, `F6`, `S3`) defined in
-`docs/roadmap-2026-07-work-units.md`; code comments, docs and commit subjects cite them by ID.
-Never commit to `main` — branch first. For implementing a unit and opening its PR, use the
-`roadmap-unit` skill.
+Work may originate from either **roadmap units** with IDs (`D21`, `P13`, `C15`, `F6`, `S3`)
+defined in `docs/roadmap-2026-07-work-units.md` or tickets in this repository's issue tracker.
+Code comments, docs and commit subjects cite whichever source governs the change (for example,
+`D21` or `#60`). Never commit to `main` — branch first. For implementing a roadmap unit and
+opening its PR, use the `roadmap-unit` skill.
 
 ## Architecture
 
