@@ -2355,6 +2355,48 @@ mod tests {
         assert_eq!(out.evaluations, 300, "every leg's work is counted");
     }
 
+    /// The same control, driven at the **real** [`RADIAL_POINTS_SAFETY_MAX`] rather than a
+    /// stand-in, so the tie between the scripted test above and the production constant is
+    /// asserted instead of inferred. Scripted legs make the density values free — nothing
+    /// here allocates or integrates — so this costs the same microseconds as the `LIMIT = 9`
+    /// version while pinning the actual ladder production walks when the cap binds:
+    /// `65 537 → 131 073 → 131 075`.
+    ///
+    /// It cannot replace `mode_path_reports_a_radial_error_even_when_the_density_cap_binds`:
+    /// that test's subject is that a REAL geometry drives `radial_points_for` to this
+    /// constant and that the resulting legs genuinely disagree, neither of which a scripted
+    /// leg can show.
+    #[test]
+    fn refinement_at_the_real_production_cap_still_compares() {
+        let totals = [1.0, 1.5, 2.0];
+        let mut asked = Vec::new();
+        let mut leg = 0usize;
+        let out = refine_radial(
+            RADIAL_POINTS_SAFETY_MAX,
+            RADIAL_POINTS_SAFETY_MAX,
+            &scripted_params(),
+            |n| {
+                asked.push(n);
+                let total = totals[leg.min(totals.len() - 1)];
+                leg += 1;
+                Ok((scripted_sweep(total, 0.0), 100))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            asked,
+            vec![
+                RADIAL_POINTS_SAFETY_MAX,
+                2 * RADIAL_POINTS_SAFETY_MAX - 1,
+                2 * RADIAL_POINTS_SAFETY_MAX + 1,
+            ],
+            "arriving at the production cap must still request strictly finer legs"
+        );
+        assert_eq!(out.error_estimate, 0.5);
+        assert!(!out.converged);
+    }
+
     /// The one case where a zero radial error is honest: no strictly finer leg exists,
     /// because the starting density is already the ceiling `radial_check_points_within`
     /// can reach.

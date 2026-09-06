@@ -7,8 +7,8 @@
 **Result:** the refinement loop and the two-axis error combination moved out of
 `integrate_aperture` into two internal functions, `refine_radial` and `mode_path_result`,
 with the density limit and the sweep operation as parameters. Production numerical output is
-**bitwise unchanged** on nine geometries, including the capped one. Eight scripted tests now
-cover the control in **0.026 s** in the default developer tier; the expensive real-cap
+**bitwise unchanged** on nine geometries, including the capped one. Nine scripted tests now
+cover the control in **0.019 s** in the default developer tier; the expensive real-cap
 certification is retained unchanged and stays CI-blocking.
 
 ## 1. What the defect was, and why cheap coverage was hard
@@ -40,19 +40,18 @@ only way to make that assertion was to reach the production cap with a real geom
 the mode-truncation self-check and the error combination. It now calls
 
 ```rust
-let radial = refine_radial(
-    n_start,
-    RADIAL_POINTS_SAFETY_MAX,   // the density limit, explicit
-    params,
-    HANKEL_SELF_CHECK_RTOL,
-    |n_rho| { /* one full Jm sweep at n_rho; returns (ModeSweep, work units) */ },
-)?;
+let radial = refine_radial(n_start, RADIAL_POINTS_SAFETY_MAX, params, |n_rho| {
+    // one full Jm sweep at n_rho; returns (ModeSweep, work units)
+})?;
 Ok(mode_path_result(&radial, azimuthally_resolved, params))
 ```
 
-Both parameters are what make the control testable: a test passes a limit of `9` and a closure
-that returns scripted `ModeSweep` values, so the same code that runs in production is exercised
-without evaluating a single aperture sample. `radial_check_points` gained a
+Both injected parameters — the density limit and the sweep operation — are what make the
+control testable: a test passes a small limit and a closure that returns scripted `ModeSweep`
+values, so the same code that runs in production is exercised without evaluating a single
+aperture sample. The tolerance floor is **not** injected: an earlier draft passed
+`HANKEL_SELF_CHECK_RTOL` as a fifth argument, and the review pass in §4 removed it because one
+production caller passed the constant and nothing else ever would. `radial_check_points` gained a
 `radial_check_points_within(n1, limit)` form for the same reason and remains a wrapper that
 passes the production constant.
 
@@ -71,7 +70,7 @@ Deliberately **not** done, per the acceptance criteria:
 
 ## 3. Coverage added, and what it does not replace
 
-Eight tests in `antenna-core/src/model/integration.rs`, all in the **default** tier:
+Nine tests in `antenna-core/src/model/integration.rs`, all in the **default** tier:
 
 | Test | What it pins |
 |---|---|
@@ -82,9 +81,10 @@ Eight tests in `antenna-core/src/model/integration.rs`, all in the **default** t
 | `refinement_propagates_a_failing_leg` | a failing sweep (the S3 budget expiring) aborts rather than being absorbed into a verdict |
 | `mode_path_result_sums_the_radial_and_azimuthal_axes` | `error_estimate` = radial + azimuthal, both terms present; field is the finest sweep's total |
 | `mode_path_result_gates_on_each_axis_and_aliasing_adds_no_error` | each of the three axes gates `converged`; φ' aliasing contributes no magnitude |
+| `refinement_at_the_real_production_cap_still_compares` | the same control at the **real** `RADIAL_POINTS_SAFETY_MAX`: the ladder is `65 537 → 131 073 → 131 075`, tying the scripted limit above to the production constant rather than leaving it inferred |
 | `radial_check_points_ceilings_just_above_the_production_cap` | on the **real** `RADIAL_POINTS_SAFETY_MAX`: a strictly finer leg exists at the cap, the ceiling is a fixed point, the count stays odd |
 
-Two of the eight are beyond the four cases the issue enumerates: `refinement_propagates_a_failing_leg`
+Two of the nine are beyond the four cases the issue enumerates: `refinement_propagates_a_failing_leg`
 and `mode_path_result_gates_on_each_axis_and_aliasing_adds_no_error`. They cover the seam's two
 remaining exits — a failing sweep and the φ' axis — for the same ~3 ms, and are called out here
 so the difference from the acceptance list is deliberate and visible rather than silent.
@@ -96,7 +96,8 @@ condition and does **not** discriminate the historical defect, which its doc com
 (`if n_rho >= limit { break; }`) was reintroduced and the block re-run:
 
 - `refinement_compares_a_finer_leg_when_the_limit_binds_from_the_first_sweep` **FAILS**:
-  `left: [9] right: [9, 17, 19]`.
+  `left: [9] right: [9, 17, 19]`, and so does its real-constant twin
+  `refinement_at_the_real_production_cap_still_compares`.
 - The other seven **PASS**. In particular the non-convergence assertions and
   `mode_path_result_sums_the_radial_and_azimuthal_axes` (whose azimuthal term is nonzero)
   pass under the defect — which is the point of the acceptance criterion: neither
@@ -160,11 +161,11 @@ stated. Figures are from full concurrent runs, not standalone.
 |---|---:|---:|
 | `-p antenna-core`, default profile | 349 tests, **6.188 s** | 357 tests, **6.156 s** |
 | `--workspace`, default profile | 1,107 tests, **23.820 s** | 1,115 tests, **24.090 s** |
-| the eight new tests alone (`-E` filtered, debug) | — | **0.026 s** |
+| the nine new tests alone (`-E` filtered, debug) | — | **0.019 s** |
 | `mode_path_reports_a_radial_error_even_when_the_density_cap_binds` (release, `profile full`) | 1.85 s | **1.85 s** |
 
-The eight tests add no measurable wall time: the default-tier `antenna-core` figure moved by
-−0.03 s, inside run-to-run noise, and the filtered 0.026 s for all eight is dominated by test
+The nine tests add no measurable wall time: the default-tier `antenna-core` figure moved by
+−0.03 s, inside run-to-run noise, and the filtered 0.019 s for all nine is dominated by test
 process startup. This is what issue #74 needs in place before it can move the actual-cap
 certification into an optimized lane: the control flow is now covered in the debug tier at
 essentially zero cost, so that lane's job is narrowed to the numerical certification itself.
