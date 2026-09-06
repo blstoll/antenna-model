@@ -16,7 +16,6 @@ use antenna_model::model::{
     IntegrationParams, MeshParametersBuilder, ReflectorGeometryBuilder,
 };
 use rayon::prelude::*;
-use std::path::Path;
 
 // ============================================================================
 // The injected truth
@@ -92,8 +91,8 @@ pub const BIAS_CONE_DB: f64 = 0.40;
 //    support them.** Knots are placed at data quantiles and must be strictly interior
 //    (roadmap D19), so `n` internal knots need at least `n + 2` distinct values on that
 //    axis. Hence >= 6 frequencies, >= 8 cone angles, >= 10 clock angles.
-// 3. **Cross-validation folds must clear the count too.** `cli_cv_folds_controls_the_
-//    reported_fold_count` exercises `--cv-folds 3`, whose training split is 2/3 of the
+// 3. **Cross-validation folds must clear the count too.** `cli_cv_three_folds_reports_
+//    finite_scores` exercises `--cv-folds 3`, whose training split is 2/3 of the
 //    grid, so the grid needs >= 960 / (2/3) = 1440 rows before that test can pass.
 //
 // 1728 rows gives the 3-fold training split 1152 points against 960 coefficients. That is
@@ -220,13 +219,13 @@ pub fn generate_rows_without_bias() -> Vec<FixtureRow> {
 ///
 /// Parallel over grid points (roadmap D18 task 3). **~4.8 s** in a debug build, measured
 /// 2026-08-17 running one test at a time on an idle 8-core machine; it was ~21.7 s serial
-/// under the same conditions. Both figures are standalone — under a full-binary run the same
-/// generation reports ~18 s, because thirteen test processes are competing, so a figure from
-/// a contended run measures the scheduler as much as this function.
+/// under the same conditions.
 ///
-/// nextest runs process-per-test, so the `OnceLock` in `cli_full_mode_e2e.rs` shares this
-/// within a test and not across them: **every** test in that binary that touches the fixture
-/// pays it once.
+/// GitHub issue #68 removed the process-local CSV cache and made each expensive scenario own
+/// its generated rows. The untuned scenario now passes one grid to all fixture, artifact,
+/// correction, and no-validation assertions. Across the seven-test binary there are five
+/// calls to this generator: two required by the determinism test and one for each of the
+/// untuned, K=3 validation, and tuned CLI scenarios.
 ///
 /// The grid is flattened first so the parallel iterator is indexed, and `collect()` fills the
 /// result in that index order — the emitted CSV is byte-identical to the serial nest's, which
@@ -288,11 +287,4 @@ pub fn rows_to_csv(rows: &[FixtureRow]) -> String {
         ));
     }
     csv
-}
-
-/// Generate the fixture and write it to `path`.
-pub fn write_fixture_csv(path: &Path) -> Vec<FixtureRow> {
-    let rows = generate_rows();
-    std::fs::write(path, rows_to_csv(&rows)).expect("write fixture CSV");
-    rows
 }

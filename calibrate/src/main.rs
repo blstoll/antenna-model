@@ -215,6 +215,26 @@ fn validation_config(
     }
 }
 
+/// Full-mode fitting and validation options assembled from parsed CLI arguments.
+///
+/// Both consumers must receive the same requested cross-validation count. Keeping that
+/// mapping at one production boundary lets cheap tests cover multiple counts without running
+/// another 1,728-row calibration (GitHub issue #68).
+struct FullModeValidationOptions {
+    surface_params: CorrectionSurfaceParams,
+    validation_config: ValidationConfig,
+}
+
+fn full_mode_validation_options(args: &Args) -> FullModeValidationOptions {
+    let surface_params = surface_fitting_params(args.validate, args.cv_folds);
+    let validation_config = validation_config(args.validate, args.cv_folds, &surface_params);
+
+    FullModeValidationOptions {
+        surface_params,
+        validation_config,
+    }
+}
+
 /// The physical parameters stamped into a full-mode artifact.
 ///
 /// Tuned values where the tuner produced one, the class nominal otherwise — the same
@@ -690,7 +710,10 @@ async fn run_calibration(args: Args) -> Result<()> {
     // Step 5: Fit correction surface to residuals
     info!("Step 5/6: Fitting correction surface to residuals...");
 
-    let surface_params = surface_fitting_params(args.validate, args.cv_folds);
+    let FullModeValidationOptions {
+        surface_params,
+        validation_config,
+    } = full_mode_validation_options(&args);
 
     let correction_surface =
         fit_correction_surface(&measurements.points, &model_predictions, &surface_params)?;
@@ -739,8 +762,6 @@ async fn run_calibration(args: Args) -> Result<()> {
 
     // Step 6: Validation
     info!("Step 6/6: Running validation...");
-
-    let validation_config = validation_config(args.validate, args.cv_folds, &surface_params);
 
     let validation_report = validate_calibration(
         &measurements.points,
@@ -973,7 +994,6 @@ mod tests {
             "test_antenna",
             "--antenna-class",
             "UHF_Array_Element",
-            "--tune-parameters",
         ];
         argv.extend_from_slice(extra);
         Args::try_parse_from(argv).expect("parse full-mode CLI arguments")
@@ -989,7 +1009,7 @@ mod tests {
             ("surface-and-mesh", TuningMode::SurfaceAndMeshSpacing),
             ("all", TuningMode::All),
         ] {
-            let args = parse_full_mode_args(&["--tuning-mode", name]);
+            let args = parse_full_mode_args(&["--tune-parameters", "--tuning-mode", name]);
 
             assert_eq!(
                 tuning_options(&args).mode,
@@ -1003,12 +1023,13 @@ mod tests {
     /// must not move while the expensive all-modes subprocess smoke is removed (#67).
     #[test]
     fn cli_tuning_mode_default_and_unknown_fallback_are_surface_only() {
-        let default_args = parse_full_mode_args(&[]);
+        let default_args = parse_full_mode_args(&["--tune-parameters"]);
         let default_options = tuning_options(&default_args);
         assert_eq!(default_options.mode, TuningMode::SurfaceRmsOnly);
         assert_eq!(default_options.max_iterations, 100);
 
-        let unknown_args = parse_full_mode_args(&["--tuning-mode", "future-mode"]);
+        let unknown_args =
+            parse_full_mode_args(&["--tune-parameters", "--tuning-mode", "future-mode"]);
         assert_eq!(
             tuning_options(&unknown_args).mode,
             TuningMode::SurfaceRmsOnly
@@ -1018,7 +1039,7 @@ mod tests {
     /// The iteration cap must cross the Clap-to-optimizer boundary unchanged (#67).
     #[test]
     fn cli_iteration_cap_reaches_production_options() {
-        let args = parse_full_mode_args(&["--max-tuning-iterations", "37"]);
+        let args = parse_full_mode_args(&["--tune-parameters", "--max-tuning-iterations", "37"]);
 
         assert_eq!(tuning_options(&args).max_iterations, 37);
     }
@@ -1179,16 +1200,23 @@ mod tests {
         assert_eq!(physical.asymmetry_factor, 1.0);
     }
 
-    /// `--cv-folds N` reaches both the surface fit and the validation fold count, and
-    /// cross-validation stays off entirely without `--validate`.
+    /// GitHub issue #68: actual Clap parsing must carry multiple requested fold counts to
+    /// both production consumers. Testing two values keeps a hardcoded count from passing.
     #[test]
-    fn cv_folds_reaches_the_fit_and_the_validator() {
-        let with_validate = surface_fitting_params(true, 7);
-        assert_eq!(with_validate.cross_validation_folds, 7);
-        assert_eq!(validation_config(true, 7, &with_validate).num_folds, 7);
+    fn cli_cv_folds_reach_the_fit_and_validator_options() {
+        for folds in [3usize, 6] {
+            let value = folds.to_string();
+            let args = parse_full_mode_args(&["--validate", "--cv-folds", &value]);
+            let options = full_mode_validation_options(&args);
 
-        let without_validate = surface_fitting_params(false, 7);
-        assert_eq!(without_validate.cross_validation_folds, 0);
-        assert_eq!(validation_config(false, 7, &without_validate).num_folds, 0);
+            assert_eq!(
+                options.surface_params.cross_validation_folds, folds,
+                "--cv-folds {folds} did not reach correction-surface fitting"
+            );
+            assert_eq!(
+                options.validation_config.num_folds, folds,
+                "--cv-folds {folds} did not reach the validation report"
+            );
+        }
     }
 }

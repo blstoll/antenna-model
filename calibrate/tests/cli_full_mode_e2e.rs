@@ -2,6 +2,7 @@
 
 mod support;
 
+use antenna_core::AntennaCalibration;
 use calibrate::{AntennaClassRegistry, CorrectionSurfaceParams};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -14,11 +15,8 @@ fn generator_is_deterministic() {
     assert_eq!(a, b, "the fixture generator must be byte-reproducible");
 }
 
-#[test]
-fn generator_grid_satisfies_the_fitter_constraints() {
-    let rows = generate_rows();
-
-    assert_eq!(rows.len(), FIXTURE_ROW_COUNT);
+fn assert_fixture_grid_satisfies_the_fitter_constraints(rows: &[FixtureRow]) {
+    assert_eq!(rows.len(), FIXTURE_ROW_COUNT, "fixture row count");
 
     // The binding quantity is the fitted COEFFICIENT count, not the fitter's cheap
     // `(spline_order + 1)^3 = 125` pre-check — roadmap D20. Full mode requests 4/6/8
@@ -26,7 +24,7 @@ fn generator_grid_satisfies_the_fitter_constraints() {
     // functions, so the surface declares at most 8 * 10 * 12 = 960 coefficients.
     //
     // The tightest split any test here runs at is `--cv-folds 3` (see
-    // `cli_cv_folds_controls_the_reported_fold_count`), whose training fold is 2/3 of the
+    // `cli_cv_three_folds_reports_finite_scores`), whose training fold is 2/3 of the
     // grid. That fold, not the whole grid, is what has to cover the coefficients.
     const MAX_COEFFICIENTS: usize = 8 * 10 * 12;
     const TIGHTEST_TRAINING_FRACTION: f64 = 2.0 / 3.0;
@@ -86,9 +84,7 @@ fn generator_grid_satisfies_the_fitter_constraints() {
 /// Standing pin on roadmap unit D11: the fixture must contain rows the pre-D11 parser
 /// discarded (it rejected anything below -20 dB/K as "atypical G/T", which is a boresight
 /// figure, silently dropping legitimate sidelobe measurements).
-#[test]
-fn generator_produces_realistic_sub_minus_twenty_sidelobes() {
-    let rows = generate_rows();
+fn assert_fixture_has_realistic_sub_minus_twenty_sidelobes(rows: &[FixtureRow]) {
     let deep = rows.iter().filter(|r| r.g_over_t_db < -20.0).count();
 
     assert!(
@@ -279,69 +275,20 @@ impl CalibrateRun {
     }
 }
 
-/// The fixture CSV text, computed once per test binary run and shared across every
-/// `run_calibrate` call.
+/// Run the real `calibrate` binary in full mode over caller-owned fixture rows.
 ///
-/// `generate_rows()` runs the real physics model over the fixture grid. **~4.8 s in a debug
-/// build**, measured 2026-08-17 running one test at a time on an idle 8-core machine (it was
-/// ~21.7 s before D18 task 3 parallelised `support::generate_grid`). Every call writes an
-/// identical file (the generator is deterministic — see `generator_is_deterministic`), so
-/// recomputing it per call buys nothing but wall-clock time.
-///
-/// Quote standalone figures here, not figures from a full-binary run: the same generation
-/// reports ~18 s inside one, because thirteen test processes are competing for eight cores.
-/// The figure this line used to carry, ~1.4 s, was neither — it was measured on the 288-row
-/// grid D20 replaced with 1728 rows on 2026-08-02, and sat stale for a fortnight.
-///
-/// **The cache is per process, and nextest is process-per-test**, so this shares the cost
-/// within a test and not across them: every test here that touches the fixture pays those
-/// ~4.8 s once, ~43 s of CPU across the binary. That is small enough that D18 task 3 made
-/// the generation faster rather than reaching for a cross-process cache, which would have
-/// had to key on `PHYSICS_MODEL_VERSION` to avoid serving a stale grid after a model change
-/// — a staleness hazard out of all proportion to 43 s.
-///
-/// This cache lives here, not in `support/mod.rs`: `generate_rows` and
-/// `write_fixture_csv` themselves stay unmemoized and behaviorally unchanged, since
-/// `generator_is_deterministic` depends on calling `generate_rows()` twice for real to
-/// prove reproducibility.
-fn fixture_csv() -> &'static str {
-    static CSV: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    CSV.get_or_init(|| rows_to_csv(&generate_rows()))
-}
-
-/// The same grid without the injected systematic bias, cached the same way.
-///
-/// Used only by the parameter-tuning tests: the bias is what the *correction surface* has
-/// to recover, and it is ~120–360× larger than the surface-RMS signal the *tuner* has to
-/// recover, which makes the two confounded on one fixture. See
-/// `support::generate_rows_without_bias` for the measurement.
-fn bias_free_fixture_csv() -> &'static str {
-    static CSV: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    CSV.get_or_init(|| rows_to_csv(&generate_rows_without_bias()))
-}
-
-/// Run the real `calibrate` binary in full mode over a freshly generated fixture.
-///
+/// Keeping generation outside this imperative shell exposes the exact rows to every named
+/// scenario assertion. Each nextest process owns its scenario; there is no persistent or
+/// cross-process fixture cache that can outlive a physics-model change (GitHub issue #68).
 /// `extra_args` appends flags such as `--validate` / `--cv-folds N`.
-///
-/// Asserts success internally (see below) — a future test that needs to exercise an
-/// *expected* CLI failure will need a variant that returns the raw `Output` instead of
-/// panicking here.
-fn run_calibrate(extra_args: &[&str]) -> CalibrateRun {
-    run_calibrate_on(fixture_csv(), extra_args)
-}
-
-/// As [`run_calibrate`], over a caller-supplied measurement CSV.
-fn run_calibrate_on(csv: &str, extra_args: &[&str]) -> CalibrateRun {
+fn run_calibrate(rows: &[FixtureRow], extra_args: &[&str]) -> CalibrateRun {
     let dir = tempfile::tempdir().expect("temp dir");
     let input = dir.path().join("measurements.csv");
     let artifact = dir.path().join("antenna.bin");
     let report = dir.path().join("report.json");
     let metadata = dir.path().join("metadata.json");
 
-    // Each call gets its own tempdir and its own copy of the file on disk — only the
-    // physics evaluation behind the cached CSV is shared.
-    std::fs::write(&input, csv).expect("write fixture CSV");
+    std::fs::write(&input, rows_to_csv(rows)).expect("write fixture CSV");
 
     // `--classes-file` defaults to `calibrate/antenna_classes.yaml`, resolved against the
     // process CWD. An integration test's CWD is the crate root, so build the path from
@@ -389,26 +336,63 @@ fn run_calibrate_on(csv: &str, extra_args: &[&str]) -> CalibrateRun {
     run
 }
 
-#[test]
-fn cli_full_mode_writes_a_service_loadable_artifact() {
-    let run = run_calibrate(&[]);
+/// Immutable outputs shared by every assertion in the untuned full-mode scenario.
+struct UntunedScenario {
+    rows: Vec<FixtureRow>,
+    run: CalibrateRun,
+    artifact_bytes: Vec<u8>,
+    calibration: AntennaCalibration,
+    report: serde_json::Value,
+}
 
-    let bytes = std::fs::read(&run.artifact).expect("read artifact");
+fn run_untuned_scenario() -> UntunedScenario {
+    let rows = generate_rows();
+    let run = run_calibrate(&rows, &[]);
+    let artifact_bytes = std::fs::read(&run.artifact).expect("read untuned artifact");
+
+    // The scenario must cross the SERVICE loader boundary, not just calibrate's own
+    // round-trip code.
+    let calibration = antenna_model::data::loader::load_calibration_artifact(&run.artifact)
+        .expect("the service loader must accept a freshly written full-mode artifact");
+    let report = run.report_json();
+
+    UntunedScenario {
+        rows,
+        run,
+        artifact_bytes,
+        calibration,
+        report,
+    }
+}
+
+#[test]
+fn cli_untuned_scenario_preserves_artifact_correction_and_no_validation() {
+    let scenario = run_untuned_scenario();
+
+    assert_fixture_grid_satisfies_the_fitter_constraints(&scenario.rows);
+    assert_fixture_has_realistic_sub_minus_twenty_sidelobes(&scenario.rows);
+    assert_service_loadable_corrected_artifact(&scenario);
+    assert_correction_beats_the_uncorrected_model(&scenario);
+    assert_injected_bias_recovery(&scenario);
+    assert_cross_validation_was_not_requested(&scenario);
+}
+
+fn assert_service_loadable_corrected_artifact(scenario: &UntunedScenario) {
+    let bytes = &scenario.artifact_bytes;
     assert!(
         bytes.starts_with(b"ANTC"),
-        "artifact is missing the ANTC magic; first bytes: {:?}",
+        "artifact export: missing the ANTC magic; first bytes: {:?}",
         &bytes[..bytes.len().min(8)]
     );
 
-    // The point of this assertion: the artifact must load through the SERVICE's loader,
-    // not just calibrate's own round-trip code.
-    let calibration = antenna_model::data::loader::load_calibration_artifact(&run.artifact)
-        .expect("the service loader must accept a freshly written full-mode artifact");
-
-    assert_eq!(calibration.antenna_id, "d12_uhf_test");
+    let calibration = &scenario.calibration;
+    assert_eq!(
+        calibration.antenna_id, "d12_uhf_test",
+        "service load: antenna ID"
+    );
     assert!(
         calibration.correction_surface.is_some(),
-        "full mode must ship a correction surface"
+        "artifact export: full mode must ship a correction surface"
     );
 
     // The premise `main.rs::compute_model_predictions` fits its residuals under: because a
@@ -419,8 +403,9 @@ fn cli_full_mode_writes_a_service_loadable_artifact() {
     // is pinned rather than assumed (roadmap D17).
     assert!(
         !calibration.physics_is_uncorrected(),
-        "a full-mode artifact must present as corrected physics to the service; if full mode \
-         ever ships without a correction surface, calibrate/src/main.rs must stop hard-coding \
+        "corrected-physics classification: a full-mode artifact must present as corrected \
+         physics to the service; if full mode ever ships without a correction surface, \
+         calibrate/src/main.rs must stop hard-coding \
          `with_uncorrected_physics_gates(false)` and choose per artifact the way \
          calibrate_boresight does"
     );
@@ -430,74 +415,38 @@ fn cli_full_mode_writes_a_service_loadable_artifact() {
     // class, and the geometry the 1.20 dB worst case was measured on. Until D23 the
     // artifact had no field for it, so `calibrate` fitted residuals against an asymmetric
     // illumination and the service rebuilt the feed at the builder default of 1.0.
-    //
-    // The unit tests pin each producer in-process; this pins the whole path a user actually
-    // exercises — CLI → postcard → the service's loader — where a positional format makes
-    // "the field is there but shifted" a real failure mode that an in-process round trip
-    // through the same structs cannot see.
     assert_eq!(
         calibration.physical_config.feed.asymmetry_factor, FIXTURE_ASYMMETRY_FACTOR,
-        "the artifact must carry the fitting model's asymmetry_factor across the real \
-         CLI → postcard → loader path"
+        "non-default asymmetry: the artifact must carry the fitting model's \
+         asymmetry_factor across the real CLI → postcard → service-loader path"
     );
     assert_ne!(
         FIXTURE_ASYMMETRY_FACTOR, 1.0,
-        "negative control: this fixture's class must be asymmetric, or the assertion above \
-         passes against the very default it exists to exclude"
+        "non-default asymmetry negative control: this fixture must be asymmetric"
     );
 }
 
-#[test]
-fn cli_full_mode_correction_beats_the_uncorrected_model() {
-    let run = run_calibrate(&[]);
-    let report = run.report_json();
-
+fn assert_correction_beats_the_uncorrected_model(scenario: &UntunedScenario) {
+    let report = &scenario.report;
     let model_only = report["model_only_rmse"].as_f64().expect("model_only_rmse");
     let corrected = report["corrected_rmse"].as_f64().expect("corrected_rmse");
 
     println!("model-only RMSE {model_only:.4} dB, corrected {corrected:.4} dB");
     assert!(
         corrected < model_only,
-        "the correction surface must improve on the physics model: \
+        "correction quality: the correction surface must improve on the physics model: \
          corrected {corrected:.4} dB vs model-only {model_only:.4} dB"
     );
 
     // The correction removes essentially all of the injected bias AT THE MEASUREMENT
-    // POINTS: model-only 1.3206 dB -> corrected 0.0014 dB. History: before the D15
-    // endpoint fix (`bspline_basis` evaluating to zero at the exact maximum of an axis,
-    // starving the last coefficient on every axis to ~0 by the ridge term) this was
-    // 0.9756 dB; the fix took it to 0.0058 dB on the old 288-row grid.
-    //
-    // D20 (2026-08-02) grew the grid to 1728 rows and it fell further, to 0.0014 dB. That
-    // is not the fit getting freer — it got *less* free, from 288 points against 600
-    // coefficients to 1728 against 960. It is the fit getting more expressive where it
-    // matters: on the old grid the frequency axis could place only 2 of its 4 requested
-    // internal knots and the clock axis 6 of 8, because a knot must be strictly interior
-    // (D19) and those axes had too few distinct values. The larger grid places all of them.
-    //
-    // This is RMSE at the fitted data points, so it is not by itself evidence the surface
-    // is accurate between them — that is `BIAS_RECOVERY_TOLERANCE_DB` below, which D20
-    // tightened 0.65 -> 0.20 dB. Both numbers moving together, rather than on-grid RMSE
-    // improving alone, is what distinguishes a better-determined fit from a better-
-    // interpolating one.
-    //
-    // The bound is an ABSOLUTE epsilon, not a proportional one: this pipeline is
-    // deterministic (no `--tune-parameters`, nothing in the fit path is thread-parallel),
-    // and `corrected` was measured reproducible to 4 decimal places (0.0058) across both a
-    // debug and a release run on 2026-07-30, so there is no run-to-run variance on this
-    // machine to size a percentage against. The +0.002 dB epsilon is therefore sized for
-    // cross-platform libm ULP differences in `cos`/`sin`/`atan2` on OTHER hardware, not
-    // local noise — deliberately tight because, this close to zero, a loose absolute bound
-    // would hide a large proportional regression (the old +0.02 dB was 3.4x the value it
-    // bounded).
-    let today_corrected_rmse = 0.0014;
-    let ceiling = today_corrected_rmse + 0.002;
+    // POINTS: model-only 1.3206 dB -> corrected 0.0014 dB. D20 grew the grid to 1728 rows
+    // and made the 960-coefficient fit determined. This in-sample bound complements, rather
+    // than replaces, the off-grid probes below.
+    const CORRECTED_RMSE_CEILING_DB: f64 = 0.0034;
     assert!(
-        corrected < ceiling,
-        "corrected RMSE regressed past the measured ceiling: \
-         corrected {corrected:.4} dB vs ceiling {ceiling:.4} dB ({today_corrected_rmse:.4} dB \
-         measured on 2026-08-02 (D20's 1728-row grid) + 0.002 dB for cross-platform libm \
-         ULP noise)"
+        corrected <= CORRECTED_RMSE_CEILING_DB,
+        "corrected RMSE: {corrected:.4} dB exceeds the measured 0.0014 dB plus 0.002 dB \
+         cross-platform libm allowance ({CORRECTED_RMSE_CEILING_DB:.4} dB ceiling)"
     );
 }
 
@@ -557,12 +506,9 @@ fn cli_full_mode_correction_beats_the_uncorrected_model() {
 /// property, not a defect — but it is the thing to look at first if this number moves.
 const BIAS_RECOVERY_TOLERANCE_DB: f64 = 0.20;
 
-#[test]
-fn cli_full_mode_recovers_the_injected_bias() {
-    let run = run_calibrate(&[]);
-    let calibration = antenna_model::data::loader::load_calibration_artifact(&run.artifact)
-        .expect("load artifact");
-    let surface = calibration
+fn assert_injected_bias_recovery(scenario: &UntunedScenario) {
+    let surface = scenario
+        .calibration
         .correction_surface
         .as_ref()
         .expect("full mode must ship a correction surface");
@@ -611,6 +557,12 @@ fn cli_full_mode_recovers_the_injected_bias() {
         .expect("evaluate the 4D correction surface")
         .correction_db;
 
+        assert!(
+            got.is_finite(),
+            "off-grid bias recovery: probe f={frequency_mhz} cone={e_cone_deg} \
+             clock={e_clock_deg} produced non-finite correction {got}"
+        );
+
         let expected = injected_bias_db(frequency_mhz, e_cone_deg, e_clock_deg);
         let err = (got - expected).abs();
         worst = worst.max(err);
@@ -628,62 +580,71 @@ fn cli_full_mode_recovers_the_injected_bias() {
     );
 }
 
-/// D10's standing pin at CLI level: `--cv-folds N` must reach the validator.
+/// D10's standing CLI pin. K=3 is the non-default validated scenario; multiple requested
+/// counts are covered cheaply at the parsed-arguments production boundary in `main.rs`.
 #[test]
-fn cli_cv_folds_controls_the_reported_fold_count() {
-    for folds in [3usize, 6] {
-        let n = folds.to_string();
-        let run = run_calibrate(&["--validate", "--cv-folds", &n]);
-        let report = run.report_json();
+fn cli_cv_three_folds_reports_finite_scores() {
+    const FOLDS: usize = 3;
+    let rows = generate_rows();
+    let run = run_calibrate(&rows, &["--validate", "--cv-folds", "3"]);
+    let report = run.report_json();
 
-        let reported = report["cross_validation"]["num_folds"]
-            .as_u64()
-            .unwrap_or_else(|| {
-                panic!(
-                    "--validate --cv-folds {folds} should produce a cross-validation \
-                     section; report was:\n{report:#}"
-                )
-            });
-        assert_eq!(reported as usize, folds);
+    let reported = report["cross_validation"]["num_folds"]
+        .as_u64()
+        .unwrap_or_else(|| {
+            panic!(
+                "--validate --cv-folds {FOLDS} should produce a cross-validation \
+                 section; report was:\n{report:#}"
+            )
+        });
+    assert_eq!(reported as usize, FOLDS, "requested CV fold count");
 
-        let values = report["cross_validation"]["fold_rmse_values"]
-            .as_array()
-            .expect("fold_rmse_values");
-        assert_eq!(values.len(), folds, "one RMSE per fold");
+    let values = report["cross_validation"]["fold_rmse_values"]
+        .as_array()
+        .expect("fold_rmse_values");
+    assert_eq!(values.len(), FOLDS, "one RMSE per fold");
+    for (index, value) in values.iter().enumerate() {
+        let score = value
+            .as_f64()
+            .unwrap_or_else(|| panic!("CV fold {index} score is not numeric: {value}"));
+        assert!(
+            score.is_finite(),
+            "CV fold {index} score is not finite: {score}"
+        );
     }
 }
 
-/// Task 1's pin: without `--validate`, step 6 must not cross-validate — but the rest of
-/// the validation report must still be there.
-#[test]
-fn cli_without_validate_does_not_cross_validate() {
-    let run = run_calibrate(&[]);
-    let report = run.report_json();
+/// Without `--validate`, step 6 must not cross-validate — but the numerical quality report
+/// must still be present. This helper deliberately shares the untuned scenario's one CLI run.
+fn assert_cross_validation_was_not_requested(scenario: &UntunedScenario) {
+    let report = &scenario.report;
 
     assert!(
         report["cross_validation"].is_null(),
-        "cross-validation ran without --validate; report was:\n{report:#}"
+        "no-validation behavior: cross-validation ran without --validate; report was:\n{report:#}"
     );
     assert!(
-        !run.output().contains("cross-validation"),
-        "the binary announced cross-validation on a run that did not request it:\n{}",
-        run.output()
+        !scenario.run.output().contains("cross-validation"),
+        "no-validation behavior: the binary announced cross-validation on an untuned run:\n{}",
+        scenario.run.output()
     );
 
-    // The rest of step 6 still runs.
-    assert!(
-        report["corrected_rmse"].as_f64().is_some(),
-        "corrected_rmse missing from report despite --validate being off; report was:\n{report:#}"
-    );
-    assert!(
-        report["main_lobe_max_error"].as_f64().is_some(),
-        "main_lobe_max_error missing from report despite --validate being off; report was:\n{report:#}"
-    );
-    assert!(
-        report["first_sidelobe_max_error"].as_f64().is_some(),
-        "first_sidelobe_max_error missing from report despite --validate being off; \
-         report was:\n{report:#}"
-    );
+    for field in [
+        "corrected_rmse",
+        "main_lobe_max_error",
+        "first_sidelobe_max_error",
+    ] {
+        let value = report[field].as_f64().unwrap_or_else(|| {
+            panic!(
+                "no-validation quality report: {field} is not numeric despite --validate \
+                 being off; report was:\n{report:#}"
+            )
+        });
+        assert!(
+            value.is_finite(),
+            "no-validation quality report: {field} is non-finite: {value}"
+        );
+    }
 }
 
 // ============================================================================
@@ -730,8 +691,9 @@ fn cli_without_validate_does_not_cross_validate() {
 #[test]
 fn cli_tuned_run_recovers_the_surface_rms_perturbation() {
     let start = std::time::Instant::now();
-    let run = run_calibrate_on(
-        bias_free_fixture_csv(),
+    let rows = generate_rows_without_bias();
+    let run = run_calibrate(
+        &rows,
         &["--tune-parameters", "--max-tuning-iterations", "4"],
     );
     let elapsed = start.elapsed();

@@ -86,12 +86,28 @@ slow-timeout = { period = "10s" }
 # 59.153 s full-CLI known-answer test still loads the artifact and recovers 2.6 mm surface RMS.
 # This removes 39% of this binary's sequential wall time without moving either behavioral pin.
 #
+# Re-measured 2026-09-05 for GitHub issue #68 with the same warmed debug build, nextest full
+# profile, and one-test-thread command shown above:
+#
+# Before: 12 tests, 140.271 s nextest summary / 142.09 s real / 941.23 s user.
+# After:   7 tests, 103.605 s nextest summary / 104.03 s real / 618.86 s user.
+#
+# Setup accounting is explicit: before, the binary performed 10 real 1,728-row grid
+# generations and 7 full CLI calibrations (four duplicate untuned runs, K=3 plus K=6, and one
+# tuned run). After, it performs 5 grid generations and 3 CLI calibrations: determinism still
+# generates twice, while the untuned, validated K=3, and tuned scenarios each own one grid and
+# one CLI run. Named helpers apply the preserved grid, artifact/service-loader, corrected-
+# physics, asymmetry, RMSE, four off-grid probes, and no-validation assertions to the single
+# immutable untuned result. K=6 moved to cheap Clap-to-production-options coverage beside K=3;
+# the real K=3 report still proves every fold score is finite. That removes another 26% of
+# sequential wall time without weakening a behavioral boundary.
+#
 # Two things to know before quoting or re-measuring any figure in this file.
 #
-# 1. **Say whether a figure is standalone or from a full run.** They differ by ~4x here and
-#    the difference is the scheduler, not the code: the fixture generation is ~4.8 s running
-#    one test at a time and ~18 s inside the binary; `cli_tuned_run_completes_for_every_
-#    tuning_mode` is 86 s standalone and 217 s in the binary. An earlier draft of the D18
+# 1. **Say whether a figure is standalone, sequential, or from a concurrent full run.** The
+#    historical D18 figures differ by ~4x because the scheduler, not the code, made fixture
+#    generation ~4.8 s standalone and ~18 s with thirteen test processes competing. The
+#    issue #67/#68 figures avoid that ambiguity by using `--test-threads 1`. An earlier D18
 #    closeout compared a standalone "after" against a contended "before" and reported a 3x
 #    improvement that was really 1.8x.
 #
@@ -125,6 +141,11 @@ slow-timeout = { period = "10s" }
 # CPU bound. No reservation was added: there is no measurement supporting one, and reserving
 # the machine for a 217 s test would cost far more than it could buy. If these ever do flake,
 # start here — the measurement above is the baseline to compare against.
+#
+# Updated 2026-09-05 for GitHub issue #68: the renamed untuned, K=3 validation, and tuned
+# scenario tests remain selected by this whole-binary exclusion. They take 11–67 s each in
+# the sequential measurement above, so they stay CI-blocking in `profile.full` without
+# silently rejoining the default developer tier.
 #
 # Added 2026-08-02 by roadmap unit D14, on review:
 #   binary_id(calibrate::cli_full_mode_real_data_e2e) — the real-anchored full-mode e2e. No
