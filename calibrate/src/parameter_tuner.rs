@@ -787,12 +787,14 @@ mod tests {
     /// subtraction underflowed: "attempt to subtract with overflow", ~0.7 s in, for every
     /// tuning mode and every iteration cap. Nothing drove `tune_parameters` through argmin
     /// in a test, which is why it hid — so this test does exactly that, for N = 1, 2 and 3.
+    /// The result-shape assertions added for GitHub issue #67 also prove that each mode tunes
+    /// only its requested dimensions rather than merely completing the optimizer.
     #[test]
     fn tune_parameters_completes_for_every_tuning_mode() {
-        for mode in [
-            TuningMode::SurfaceRmsOnly,
-            TuningMode::SurfaceAndMeshSpacing,
-            TuningMode::All,
+        for (mode, expects_mesh_spacing, expects_wire_diameter) in [
+            (TuningMode::SurfaceRmsOnly, false, false),
+            (TuningMode::SurfaceAndMeshSpacing, true, false),
+            (TuningMode::All, true, true),
         ] {
             let result = tune_parameters(
                 create_test_class(),
@@ -813,6 +815,16 @@ mod tests {
                  point ({}), which it can only do if the simplex never evaluated",
                 result.final_rmse_db,
                 result.initial_rmse_db
+            );
+            assert_eq!(
+                result.mesh_spacing_mm.is_some(),
+                expects_mesh_spacing,
+                "{mode:?} returned the wrong mesh-spacing result shape"
+            );
+            assert_eq!(
+                result.mesh_wire_diameter_mm.is_some(),
+                expects_wire_diameter,
+                "{mode:?} returned the wrong wire-diameter result shape"
             );
         }
     }
