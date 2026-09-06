@@ -182,6 +182,7 @@ pub fn fixture_config(surface_rms_mm: f64) -> AntennaConfiguration {
 }
 
 /// One generated measurement row.
+#[derive(Debug, PartialEq)]
 pub struct FixtureRow {
     pub e_clock_deg: f64,
     pub e_cone_deg: f64,
@@ -190,9 +191,31 @@ pub struct FixtureRow {
     pub temperature_k: f64,
 }
 
+/// Coordinate axes for one synthetic fixture grid.
+#[derive(Clone, Copy)]
+pub struct FixtureGrid<'a> {
+    pub frequencies_mhz: &'a [f64],
+    pub e_cone_deg: &'a [f64],
+    pub e_clock_deg: &'a [f64],
+}
+
+const FULL_FIXTURE_GRID: FixtureGrid<'static> = FixtureGrid {
+    frequencies_mhz: &FIXTURE_FREQUENCIES_MHZ,
+    e_cone_deg: &FIXTURE_CONE_DEG,
+    e_clock_deg: &FIXTURE_CLOCK_DEG,
+};
+
 /// Generate the full perturbed-truth grid.
 pub fn generate_rows() -> Vec<FixtureRow> {
-    generate_grid(injected_bias_db)
+    generate_grid(FULL_FIXTURE_GRID, injected_bias_db)
+}
+
+/// Generate perturbed-truth rows on a caller-selected grid.
+///
+/// This is the same ordered parallel path as [`generate_rows`], exposed so determinism can
+/// be checked cheaply without evaluating the complete production-sized fixture twice.
+pub fn generate_rows_on_grid(grid: FixtureGrid<'_>) -> Vec<FixtureRow> {
+    generate_grid(grid, injected_bias_db)
 }
 
 /// Generate the same grid with the systematic bias omitted.
@@ -212,7 +235,7 @@ pub fn generate_rows() -> Vec<FixtureRow> {
 /// genuine known answer to recover. The correction-surface recovery assertions keep using
 /// [`generate_rows`], which is what the bias is for.
 pub fn generate_rows_without_bias() -> Vec<FixtureRow> {
-    generate_grid(|_, _, _| 0.0)
+    generate_grid(FULL_FIXTURE_GRID, |_, _, _| 0.0)
 }
 
 /// Shared grid walk. `bias` is `(frequency_mhz, e_cone_deg, e_clock_deg) -> dB`.
@@ -223,31 +246,35 @@ pub fn generate_rows_without_bias() -> Vec<FixtureRow> {
 ///
 /// GitHub issue #68 removed the process-local CSV cache and made each expensive scenario own
 /// its generated rows. The untuned scenario now passes one grid to all fixture, artifact,
-/// correction, and no-validation assertions. Across the seven-test binary there are five
-/// calls to this generator: two required by the determinism test and one for each of the
-/// untuned, K=3 validation, and tuned CLI scenarios.
+/// correction, and no-validation assertions. GitHub issue #69 reduced the two determinism
+/// calls to a small caller-selected grid; only the untuned, K=3 validation, and tuned CLI
+/// scenarios generate the complete 1,728-row grid.
 ///
 /// The grid is flattened first so the parallel iterator is indexed, and `collect()` fills the
 /// result in that index order — the emitted CSV is byte-identical to the serial nest's, which
 /// `generator_is_deterministic` and every measured constant downstream depend on. `bias` must
 /// stay `Sync` for the same reason it is already pure: it is called from worker threads.
-fn generate_grid(bias: impl Fn(f64, f64, f64) -> f64 + Sync) -> Vec<FixtureRow> {
+fn generate_grid(
+    grid: FixtureGrid<'_>,
+    bias: impl Fn(f64, f64, f64) -> f64 + Sync,
+) -> Vec<FixtureRow> {
     let config = fixture_config(PERTURBED_SURFACE_RMS_MM);
     let params = IntegrationParams::default();
 
-    let grid: Vec<(f64, f64, f64)> = FIXTURE_FREQUENCIES_MHZ
+    let coordinates: Vec<(f64, f64, f64)> = grid
+        .frequencies_mhz
         .iter()
         .flat_map(|&frequency_mhz| {
-            FIXTURE_CONE_DEG.iter().flat_map(move |&e_cone_deg| {
-                FIXTURE_CLOCK_DEG
+            grid.e_cone_deg.iter().flat_map(move |&e_cone_deg| {
+                grid.e_clock_deg
                     .iter()
                     .map(move |&e_clock_deg| (frequency_mhz, e_cone_deg, e_clock_deg))
             })
         })
         .collect();
-    assert_eq!(grid.len(), FIXTURE_ROW_COUNT);
 
-    grid.par_iter()
+    coordinates
+        .par_iter()
         .map(|&(frequency_mhz, e_cone_deg, e_clock_deg)| {
             let truth = compute_g_over_t(
                 e_cone_deg.to_radians(),

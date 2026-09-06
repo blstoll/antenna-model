@@ -13,7 +13,8 @@ Antenna Model Service is a high-performance REST API for parabolic dish antenna 
 cargo build --release          # both binaries
 
 # Dev inner loop. The default nextest profile EXCLUDES the slow tier (three heavy
-# physics pins + the two calibrate full-mode e2e binaries) — see .config/nextest.toml.
+# physics pins, three synthetic calibration scenarios, and the real-data full-mode binary)
+# — see .config/nextest.toml.
 cargo nextest run --workspace
 
 # Both tiers — what scripts/check.sh and CI run. `calibrate` dominates the wall clock.

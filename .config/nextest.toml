@@ -1,13 +1,13 @@
 # Test tiers — roadmap unit D18 (filed 2026-08-01).
 #
 #   default = the dev inner loop. Excludes the slow tail: three heavy physics
-#             pins and both whole calibrate full-mode e2e binaries (the second,
-#             cli_full_mode_real_data_e2e, was added by D14). Measured
+#             pins, three expensive synthetic full-mode scenarios, and the
+#             cli_full_mode_real_data_e2e binary (added by D14). Measured
 #             2026-08-01 after P10-perf: 980 tests, 85.9 s wall (was 963 tests
 #             / 72.8 s when the exclusion list held nine physics pins — P10-perf
 #             returned six of them, so the loop covers 17 more tests for 13 s).
-#             Excluding cli_full_mode_e2e whole-binary rather than naming its
-#             slow members keeps new e2e cases out of the inner loop by default.
+#             The cheap synthetic-fixture checks rejoined this profile under #69;
+#             any new test over 10 s must be named below after it is measured.
 #   full    = everything. scripts/check.sh and CI run this profile, so the
 #             slow tier stays CI-blocking: coverage moves out of the inner
 #             loop, it is never lost.
@@ -102,6 +102,31 @@ slow-timeout = { period = "10s" }
 # the real K=3 report still proves every fold score is finite. That removes another 26% of
 # sequential wall time without weakening a behavioral boundary.
 #
+# Re-measured 2026-09-05 for GitHub issue #69 with the same warmed debug build, nextest
+# `full` profile, and one-test-thread command shown above:
+#
+# Before: 7 tests, 103.605 s nextest summary / 104.03 s real / 618.86 s user.
+# After:  8 tests,  80.755 s nextest summary /  81.12 s real / 572.28 s user.
+#
+# The three real CLI scenarios and their full-grid premises are unchanged. Full-grid setup
+# fell from five generations to three: the two uncached determinism calls now exercise the
+# same ordered parallel generator on a heterogeneous 12-point grid, while the shared untuned
+# scenario owns the complete-grid dimensions/order, deep-sidelobe, and CLI measurement-count
+# assertions. The new constants-only fitter-capacity check derives knot counts and spacing
+# from `CorrectionSurfaceParams::shipped()` without computing gains. The binary's sequential
+# wall time fell another 22% even though it gained one test.
+#
+# Default-tier verification used the same warmed build and one test thread:
+#
+#   cargo nextest run -p calibrate --profile default --test cli_full_mode_e2e --test-threads 1
+#
+# Before: 0 tests from this binary (whole-binary exclusion).
+# After:  5 tests in 0.112 s nextest summary / 0.51 s real / 0.67 s user.
+#
+# Each rewritten check is individually under 0.1 s, well inside the 10 s fast-tier
+# policy. The three 10.080–57.807 s CLI scenarios remain excluded by name from `default` and
+# all eight tests remain selected by `profile.full`.
+#
 # Two things to know before quoting or re-measuring any figure in this file.
 #
 # 1. **Say whether a figure is standalone, sequential, or from a concurrent full run.** The
@@ -142,10 +167,10 @@ slow-timeout = { period = "10s" }
 # the machine for a 217 s test would cost far more than it could buy. If these ever do flake,
 # start here — the measurement above is the baseline to compare against.
 #
-# Updated 2026-09-05 for GitHub issue #68: the renamed untuned, K=3 validation, and tuned
-# scenario tests remain selected by this whole-binary exclusion. They take 11–67 s each in
-# the sequential measurement above, so they stay CI-blocking in `profile.full` without
-# silently rejoining the default developer tier.
+# Updated 2026-09-05 for GitHub issue #69: only the untuned, K=3 validation, and tuned
+# synthetic scenarios remain excluded. They take 11–67 s each in the sequential #68
+# measurement above, so they stay CI-blocking in `profile.full`; the five cheap fixture
+# checks in the same binary now run in the default developer tier.
 #
 # Added 2026-08-02 by roadmap unit D14, on review:
 #   binary_id(calibrate::cli_full_mode_real_data_e2e) — the real-anchored full-mode e2e. No
@@ -157,7 +182,9 @@ slow-timeout = { period = "10s" }
 #     reason `cli_full_mode_e2e` is: it keeps new e2e cases out of the inner loop by default.
 default-filter = """
 not (
-    binary_id(calibrate::cli_full_mode_e2e)
+    (binary_id(calibrate::cli_full_mode_e2e) & test(cli_untuned_scenario_preserves_artifact_correction_and_no_validation))
+  + (binary_id(calibrate::cli_full_mode_e2e) & test(cli_cv_three_folds_reports_finite_scores))
+  + (binary_id(calibrate::cli_full_mode_e2e) & test(cli_tuned_run_recovers_the_surface_rms_perturbation))
   + binary_id(calibrate::cli_full_mode_real_data_e2e)
   + test(p12_phi_cap_removed_steered_feed_matches_converged_reference)
   + test(p12_mode_path_radial_convergence_anchors)
