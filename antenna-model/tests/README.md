@@ -21,7 +21,7 @@ tests/
 │   ├── helpers.rs              # Test utilities (server, HTTP client, validators)
 │   ├── api_tests.rs            # API endpoint tests (30 tests)
 │   ├── partial_calibration_tests.rs  # Calibration status tests (17 tests)
-│   └── concurrent_tests.rs     # Concurrent access tests (9 tests)
+│   └── concurrent_tests.rs     # Concurrent access tests (8 tests)
 └── fixtures/
     ├── test_antennas.yaml      # Test antenna configuration
     ├── test_service.yaml       # Test service configuration
