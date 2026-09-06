@@ -177,6 +177,14 @@ on the first CI run and record the numbers here, the way the P10-perf note in
   pre-#74 measurement in `.config/nextest.toml` was taken against an unoptimized core, and
   the ones for physics-bound tests are 3-20x too high for today's build. The file now says so
   at the top; the D18 caveat about standalone vs contended figures still applies on top of it.
-* **Optimized code is harder to step through.** If a debugger session on core internals needs
-  it, drop the opt-level locally — the assertion script will fail the gate if it goes missing
-  from the committed manifest, which is the intended asymmetry.
+* **Interactive debugging of core internals gets worse; backtraces do not.** Measured, since
+  the first draft of this file asserted the vaguer claim: a probe `panic!` in
+  `aperture_integrand`, and a second in `azimuthal_mode_field_inner` on the mode path, produce
+  **byte-identical backtraces at opt-level 0 and 3** — the same five and seven `antenna_core`
+  frames, the same symbol names, the same `integration.rs:line:column`, closure frames
+  included, and 43 total frames either way. Only `opt-level` is overridden, so the dev
+  profile's `debug = true` still emits full DWARF and the symbolizer recovers inlined frames
+  from it. What does degrade is single-stepping and local-variable inspection under lldb,
+  where inlining and register allocation genuinely cost you (not measured — that is the
+  ordinary behaviour of optimized codegen). If a session needs it, drop the opt-level locally;
+  the assertion script fails the gate if it goes missing from the commit.

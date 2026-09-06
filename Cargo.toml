@@ -43,9 +43,14 @@ strip = true
 # Only `opt-level` is overridden, so `debug-assertions` and `overflow-checks` stay ON —
 # verified with `cargo build -p antenna-core --profile test -v` (`-C opt-level=3
 # -C debug-assertions=on`). Nothing about the checks these tests apply is weakened; the
-# same 1122 tests pass. Optimized code is harder to step through in a debugger; if you
-# need that for a core-internals session, drop opt-level LOCALLY rather than in this file
-# — `scripts/assert-numerical-certification.sh` fails the gate if it goes.
+# same 1122 tests pass. Panic backtraces are unaffected, which was checked rather than
+# assumed: a probe panic in `aperture_integrand` and one in `azimuthal_mode_field_inner`
+# produce byte-identical backtraces at opt-level 0 and 3 — same frames, same names, same
+# file:line:column, closures included — because only opt-level is overridden and the dev
+# profile's `debug = true` still applies. What does degrade is INTERACTIVE debugging:
+# inlining and register allocation make single-stepping and local-variable inspection in
+# lldb worse. If you need that for a core-internals session, drop opt-level LOCALLY rather
+# than in this file — `scripts/assert-numerical-certification.sh` fails the gate if it goes.
 #
 # Deliberately NOT `[profile.dev.package."*"]`: optimizing the dependency tree as well
 # closes very little (the cap test is 2.1 s here against 2.03 s in a fully optimized
