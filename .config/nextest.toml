@@ -2,7 +2,7 @@
 #
 #   default = the dev inner loop. Excludes the slow tail: three heavy physics
 #             pins, three expensive synthetic full-mode scenarios, and the
-#             cli_full_mode_real_data_e2e binary (added by D14). Measured
+#             consolidated real-data scenario. Measured
 #             2026-08-01 after P10-perf: 980 tests, 85.9 s wall (was 963 tests
 #             / 72.8 s when the exclusion list held nine physics pins — P10-perf
 #             returned six of them, so the loop covers 17 more tests for 13 s).
@@ -127,6 +127,34 @@ slow-timeout = { period = "10s" }
 # policy. The three 10.080–57.807 s CLI scenarios remain excluded by name from `default` and
 # all eight tests remain selected by `profile.full`.
 #
+# Re-measured 2026-09-05 for GitHub issue #70 with a warmed debug build and the same nextest
+# runner on both sides:
+#
+#   cargo nextest run -p calibrate --profile full \
+#     --test cli_full_mode_real_data_e2e --test-threads 1
+#
+# Before: 14 tests, 23.419 s nextest summary / 24.59 s real / 54.62 s user.
+# After:   2 tests,  7.615 s nextest summary /  7.98 s real / 11.55 s user.
+#
+# Under nextest, the old process-local `OnceLock` was instantiated once per test process: 14
+# real-grid generations and 15 CLI calibrations (the validated test ran both variants). The
+# consolidated scenario performs one 3,240-row generation, one unvalidated CLI calibration
+# consumed by every reconstruction/service assertion, and one directly requested validated
+# CLI calibration. It retains all 19 peak-envelope comparisons, five finite CV-fold scores,
+# source/generator pins, loadability/metadata, corrected RMSE, residual, boresight, feed-focus,
+# calibrated spillover, and angular-resolution checks. The standalone geometry guard invokes
+# the production serving transform directly and runs in 0.011 s. No comparison is made to the
+# historical 7.77 s serial-libtest figure: that is a different runner and cannot establish a
+# speedup.
+#
+# Default-tier verification used that same direct geometry test:
+#
+#   cargo nextest run -p calibrate --profile default \
+#     --test cli_full_mode_real_data_e2e request_geometry_lands_on_the_requested_angles
+#
+# Before: 0 tests (whole-binary exclusion). After: 1 test in 0.009 s; the 7.6 s consolidated
+# scenario remains excluded by exact name and selected by `profile.full`.
+#
 # Two things to know before quoting or re-measuring any figure in this file.
 #
 # 1. **Say whether a figure is standalone, sequential, or from a concurrent full run.** The
@@ -172,20 +200,16 @@ slow-timeout = { period = "10s" }
 # measurement above, so they stay CI-blocking in `profile.full`; the five cheap fixture
 # checks in the same binary now run in the default developer tier.
 #
-# Added 2026-08-02 by roadmap unit D14, on review:
-#   binary_id(calibrate::cli_full_mode_real_data_e2e) — the real-anchored full-mode e2e. No
-#     single test crosses the 10 s marker (measured 2.6–5.4 s, 7.6 s for the binary), so the
-#     per-test rule did not catch it, but the binary is process-per-test and every one of its
-#     10 tests re-runs the whole pipeline: generate a 3240-row grid, then a full `calibrate`
-#     run. That is ~48 s of CPU for one binary — the `OnceLock` in `pipeline()` shares the work
-#     under `cargo test` and shares nothing under nextest. Excluded whole-binary for the same
-#     reason `cli_full_mode_e2e` is: it keeps new e2e cases out of the inner loop by default.
+# Updated 2026-09-05 for GitHub issue #70: D14's whole-binary exclusion is narrowed to the
+# single consolidated scenario below. Its one generation plus unvalidated and validated CLI
+# calibrations remain slow-tier work; `request_geometry_lands_on_the_requested_angles` now
+# calls the production coordinate transform directly and rejoins the default developer tier.
 default-filter = """
 not (
     (binary_id(calibrate::cli_full_mode_e2e) & test(cli_untuned_scenario_preserves_artifact_correction_and_no_validation))
   + (binary_id(calibrate::cli_full_mode_e2e) & test(cli_cv_three_folds_reports_finite_scores))
   + (binary_id(calibrate::cli_full_mode_e2e) & test(cli_tuned_run_recovers_the_surface_rms_perturbation))
-  + binary_id(calibrate::cli_full_mode_real_data_e2e)
+  + (binary_id(calibrate::cli_full_mode_real_data_e2e) & test(real_data_scenario_preserves_generator_cli_artifact_and_service_contract))
   + test(p12_phi_cap_removed_steered_feed_matches_converged_reference)
   + test(p12_mode_path_radial_convergence_anchors)
   + test(mode_path_reports_a_radial_error_even_when_the_density_cap_binds)

@@ -23,6 +23,12 @@
 //!   entire clock dependence of the fitted correction surface (the modelled feed is
 //!   azimuthally symmetric, so every clock variation in the artifact came from measurements).
 //!
+//! Those same peaks therefore contribute to the generated fill's trend. The per-peak,
+//! in-sample RMSE, and service-path checks below prove reconstruction and pipeline consistency;
+//! they are **not held-out predictive validation against independent measurements**. The
+//! five-fold run holds out generated grid rows to test interpolation stability, not external
+//! predictive accuracy.
+//!
 //! # The defect this file found
 //!
 //! Nothing in the suite had ever served a full-mode artifact, and doing so immediately hit
@@ -30,7 +36,7 @@
 //! (`(0, 0, f)`) while the service adds that field to an already-vertex-origin steering
 //! position, so a full-mode artifact's feed landed at `z ≈ 2f`. On this geometry the phantom
 //! defocus cost **27.3 dB** of boresight gain (41.09 → 13.83 dBi). Fixed under this unit;
-//! `served_feed_sits_at_the_focus` below is the standing end-to-end guard, and the served
+//! `assert_served_feed_sits_at_the_focus` below is the standing end-to-end guard, and the served
 //! gain assertions would all fail loudly if it regressed.
 //!
 //! # The limitation this file measures
@@ -42,6 +48,7 @@
 //! the difference. That budget is a *measurement of a known limitation*, not an accuracy
 //! claim: see `docs/findings-2026-08-02-correction-surface-angular-resolution.md`.
 
+use antenna_core::model::coordinates_3d::compute_emitter_direction_with_attitude;
 use antenna_model::api::schemas::{GainRequest, GainResponse, Position3D};
 use antenna_model::data::repository::CalibrationRepository;
 use antenna_model::data::types::{AntennaCalibration, CalibrationStatus};
@@ -51,7 +58,6 @@ use antenna_model::service::compute_gain_from_request;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
 
 // ============================================================================
 // Identity of the run
@@ -66,7 +72,7 @@ const ANTENNA_CLASS: &str = "NASA_CR159703_1p22m";
 ///
 /// Restated from the generator rather than imported — a test binary cannot see another
 /// binary's constants — and therefore **pinned** against the summary JSON by
-/// `shared_constants_match_the_generator`. Every restated value in this block is.
+/// `assert_shared_constants_match_the_generator`. Every restated value in this block is.
 const ANCHOR_FREQUENCY_MHZ: f64 = 12100.0;
 
 /// The report's published gain for the modelled configuration, dBi (NASA CR-159703 p. 58).
@@ -190,33 +196,22 @@ const MIN_RMS_IMPROVEMENT_FACTOR: f64 = 3.0;
 const MIN_ANCHORS_IMPROVED: usize = 17;
 
 // ============================================================================
-// Running the pipeline: generator → calibrate → service loader
+// Scenario setup: generator → two calibrations → service loader
 // ============================================================================
 
-struct Pipeline {
-    /// The generated measurement grid, kept so the script's `--validate` argument set can be
-    /// exercised against the same data without regenerating it.
-    csv: PathBuf,
-    artifact: PathBuf,
+struct GeneratedGrid {
     summary: Value,
-    report: Value,
-    generator_output: String,
-    calibrate_output: String,
-    _dir: tempfile::TempDir,
+    output: String,
 }
 
-impl Pipeline {
-    /// Load through the **service's** loader, not calibrate's own round-trip code.
-    fn load(&self) -> AntennaCalibration {
-        antenna_model::data::loader::load_calibration_artifact(&self.artifact).unwrap_or_else(|e| {
-            panic!(
-                "the service loader must accept the full-mode artifact calibrate just wrote: \
-                 {e}\n{}",
-                self.calibrate_output
-            )
-        })
-    }
+struct CalibrationRun {
+    artifact: PathBuf,
+    report: Value,
+    metadata: Option<PathBuf>,
+    output: String,
+}
 
+impl GeneratedGrid {
     fn anchors(&self) -> Vec<Anchor> {
         self.summary["anchors"]
             .as_array()
@@ -233,6 +228,57 @@ impl Pipeline {
                 trend_db: number(a, "trend_db"),
             })
             .collect()
+    }
+}
+
+impl CalibrationRun {
+    /// Load through the **service's** loader, not calibrate's own round-trip code.
+    fn load(&self) -> AntennaCalibration {
+        antenna_model::data::loader::load_calibration_artifact(&self.artifact).unwrap_or_else(|e| {
+            panic!(
+                "the service loader must accept the full-mode artifact calibrate just wrote: \
+                 {e}\n{}",
+                self.output
+            )
+        })
+    }
+}
+
+struct RealDataScenario {
+    generated: GeneratedGrid,
+    unvalidated: CalibrationRun,
+    validated: CalibrationRun,
+    calibration: AntennaCalibration,
+    repository: CalibrationRepository,
+    _dir: tempfile::TempDir,
+}
+
+#[derive(Clone, Copy)]
+enum CalibrationExecution {
+    Unvalidated,
+    Validated,
+}
+
+struct CalibrationExecutionConfig {
+    stem: &'static str,
+    antenna_name: Option<&'static str>,
+    metadata: Option<PathBuf>,
+}
+
+impl CalibrationExecution {
+    fn config(self, dir: &Path) -> CalibrationExecutionConfig {
+        match self {
+            Self::Unvalidated => CalibrationExecutionConfig {
+                stem: "unvalidated",
+                antenna_name: Some("NASA CR-159703 1.22 m (real-anchored hybrid fill)"),
+                metadata: None,
+            },
+            Self::Validated => CalibrationExecutionConfig {
+                stem: "validated",
+                antenna_name: None,
+                metadata: Some(dir.join("validated_metadata.json")),
+            },
+        }
     }
 }
 
@@ -263,7 +309,7 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 /// The digitized peaks, as committed. Single source of truth: the generator reads this same
-/// file, and `summary_anchors_match_the_digitized_peaks` re-derives the anchors from it.
+/// file, and `assert_summary_anchors_match_the_digitized_peaks` re-derives the anchors from it.
 fn peaks_file() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -275,106 +321,118 @@ fn peaks_file() -> PathBuf {
         .join("nasa_cr159703_pattern_peaks.psv")
 }
 
-/// Generate the grid and calibrate it — **once** per test binary.
-///
-/// Both binaries are the real ones (`CARGO_BIN_EXE_*`), so this exercises argument parsing, the
-/// CSV round trip and the artifact writer the way `scripts/generate-cr159703-artifact.sh` does.
-/// It is **not** the script's exact argument set: this run omits `--validate` (and `--metadata`),
-/// because cross-validation costs five extra refits of a 960-coefficient system and nothing
-/// below reads it. The script's flags are covered separately, by
-/// `the_scripts_validated_run_produces_an_artifact` — without that, "the script is pinned by the
-/// tests" would be a claim about a code path no test runs.
-fn pipeline() -> &'static Pipeline {
-    static PIPELINE: OnceLock<Pipeline> = OnceLock::new();
-    PIPELINE.get_or_init(|| {
-        let dir = tempfile::tempdir().expect("temp dir");
-        let csv = dir.path().join("cr159703_grid.csv");
-        let summary_path = dir.path().join("cr159703_grid_summary.json");
-        let artifact = dir.path().join("cr159703_122m.bin");
-        let report_path = dir.path().join("report.json");
-        let classes_file = fixture("nasa_cr159703_122m_classes.yaml");
-
-        let generator = Command::new(env!("CARGO_BIN_EXE_cr159703_grid"))
-            .arg("--peaks")
-            .arg(peaks_file())
-            .arg("--classes-file")
-            .arg(&classes_file)
-            .args(["--antenna-class", ANTENNA_CLASS])
-            .arg("--output")
-            .arg(&csv)
-            .arg("--summary")
-            .arg(&summary_path)
-            .output()
-            .expect("run the cr159703_grid binary");
-        let generator_output = format!(
-            "--- cr159703_grid stdout ---\n{}\n--- stderr ---\n{}",
-            String::from_utf8_lossy(&generator.stdout),
-            String::from_utf8_lossy(&generator.stderr)
-        );
-        assert!(
-            generator.status.success(),
-            "the grid generator failed with {:?}\n{generator_output}",
-            generator.status.code()
-        );
-
-        let calibrate = Command::new(env!("CARGO_BIN_EXE_calibrate"))
-            .args(["--calibration-mode", "full"])
-            .arg("--input")
-            .arg(&csv)
-            .arg("--output")
-            .arg(&artifact)
-            .args(["--antenna-id", ANTENNA_ID])
-            .args(["--feed-id", FEED_ID])
-            .args(["--antenna-class", ANTENNA_CLASS])
-            .arg("--classes-file")
-            .arg(&classes_file)
-            .args([
-                "--antenna-name",
-                "NASA CR-159703 1.22 m (real-anchored hybrid fill)",
-            ])
-            .arg("--report")
-            .arg(&report_path)
-            .output()
-            .expect("run the calibrate binary");
-        let calibrate_output = format!(
-            "--- calibrate stdout ---\n{}\n--- stderr ---\n{}",
-            String::from_utf8_lossy(&calibrate.stdout),
-            String::from_utf8_lossy(&calibrate.stderr)
-        );
-        assert!(
-            calibrate.status.success(),
-            "calibrate failed with {:?}\n{calibrate_output}",
-            calibrate.status.code()
-        );
-
-        let summary = serde_json::from_str(
-            &std::fs::read_to_string(&summary_path).expect("read the generator summary"),
-        )
-        .expect("parse the generator summary as JSON");
-        let report = serde_json::from_str(
-            &std::fs::read_to_string(&report_path).expect("read the validation report"),
-        )
-        .expect("parse the validation report as JSON");
-
-        Pipeline {
-            csv,
-            artifact,
-            summary,
-            report,
-            generator_output,
-            calibrate_output,
-            _dir: dir,
-        }
-    })
+fn checked_subprocess_output(label: &str, result: std::process::Output) -> String {
+    let output = format!(
+        "--- {label} stdout ---\n{}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(
+        result.status.success(),
+        "{label} failed with {:?}\n{output}",
+        result.status.code()
+    );
+    output
 }
 
-fn repository() -> &'static CalibrationRepository {
-    static REPO: OnceLock<CalibrationRepository> = OnceLock::new();
-    REPO.get_or_init(|| {
-        let mut repo = CalibrationRepository::new();
-        repo.add_calibration(pipeline().load());
-        repo
-    })
+/// Generate the real-anchored grid without calibrating it.
+///
+/// The generator process is an imperative shell around a deterministic output. Its CSV remains
+/// inside the scenario's temporary directory and is consumed by both calibration runs.
+fn generate_grid(dir: &Path) -> (PathBuf, GeneratedGrid) {
+    let csv = dir.join("cr159703_grid.csv");
+    let summary_path = dir.join("cr159703_grid_summary.json");
+    let classes_file = fixture("nasa_cr159703_122m_classes.yaml");
+
+    let generator = Command::new(env!("CARGO_BIN_EXE_cr159703_grid"))
+        .arg("--peaks")
+        .arg(peaks_file())
+        .arg("--classes-file")
+        .arg(&classes_file)
+        .args(["--antenna-class", ANTENNA_CLASS])
+        .arg("--output")
+        .arg(&csv)
+        .arg("--summary")
+        .arg(&summary_path)
+        .output()
+        .expect("run the cr159703_grid binary");
+    let output = checked_subprocess_output("cr159703_grid", generator);
+
+    let summary = serde_json::from_str(
+        &std::fs::read_to_string(&summary_path).expect("read the generator summary"),
+    )
+    .expect("parse the generator summary as JSON");
+
+    (csv, GeneratedGrid { summary, output })
+}
+
+/// Run one useful calibration against an already-generated grid.
+///
+/// The unvalidated output supplies every reconstruction and service assertion. The validated
+/// output independently pins the exemplar script's `--validate --metadata` behavior; neither
+/// invocation creates a throwaway artifact before producing the output it owns.
+fn run_calibration(csv: &Path, dir: &Path, execution: CalibrationExecution) -> CalibrationRun {
+    let config = execution.config(dir);
+    let artifact = dir.join(format!("{}.bin", config.stem));
+    let report_path = dir.join(format!("{}_report.json", config.stem));
+    let classes_file = fixture("nasa_cr159703_122m_classes.yaml");
+
+    let mut command = Command::new(env!("CARGO_BIN_EXE_calibrate"));
+    command
+        .args(["--calibration-mode", "full"])
+        .arg("--input")
+        .arg(csv)
+        .arg("--output")
+        .arg(&artifact)
+        .args(["--antenna-id", ANTENNA_ID])
+        .args(["--feed-id", FEED_ID])
+        .args(["--antenna-class", ANTENNA_CLASS])
+        .arg("--classes-file")
+        .arg(&classes_file)
+        .arg("--report")
+        .arg(&report_path);
+
+    if let Some(antenna_name) = config.antenna_name {
+        command.args(["--antenna-name", antenna_name]);
+    }
+    if let Some(path) = &config.metadata {
+        command.arg("--validate").arg("--metadata").arg(path);
+    }
+
+    let result = command.output().expect("run the calibrate binary");
+    let output = checked_subprocess_output("calibrate", result);
+
+    let report = serde_json::from_str(
+        &std::fs::read_to_string(&report_path).expect("read the calibration report"),
+    )
+    .expect("parse the calibration report as JSON");
+
+    CalibrationRun {
+        artifact,
+        report,
+        metadata: config.metadata,
+        output,
+    }
+}
+
+/// One process-local owner for one generation and the two CLI executions issue #70 requires.
+fn run_real_data_scenario() -> RealDataScenario {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let (csv, generated) = generate_grid(dir.path());
+    let unvalidated = run_calibration(&csv, dir.path(), CalibrationExecution::Unvalidated);
+    let validated = run_calibration(&csv, dir.path(), CalibrationExecution::Validated);
+    let calibration = unvalidated.load();
+    let mut repository = CalibrationRepository::new();
+    repository.add_calibration(calibration.clone());
+
+    RealDataScenario {
+        generated,
+        unvalidated,
+        validated,
+        calibration,
+        repository,
+        _dir: dir,
+    }
 }
 
 // ============================================================================
@@ -461,10 +519,15 @@ fn request_for(cone_deg: f64, clock_deg: f64, frequency_mhz: f64) -> GainRequest
     }
 }
 
-fn serve(cone_deg: f64, clock_deg: f64, frequency_mhz: f64) -> GainResponse {
+fn serve(
+    scenario: &RealDataScenario,
+    cone_deg: f64,
+    clock_deg: f64,
+    frequency_mhz: f64,
+) -> GainResponse {
     compute_gain_from_request(
         &request_for(cone_deg, clock_deg, frequency_mhz),
-        repository(),
+        &scenario.repository,
     )
     .unwrap_or_else(|e| {
         panic!("serving cone {cone_deg}° clock {clock_deg}° at {frequency_mhz} MHz failed: {e}")
@@ -473,7 +536,12 @@ fn serve(cone_deg: f64, clock_deg: f64, frequency_mhz: f64) -> GainResponse {
 
 /// The served pattern's peak envelope near `cone_deg`, read exactly as the fill read the
 /// model's: `max` over `± ENVELOPE_HALF_WIDTH_DEG`.
-fn served_envelope_dbi(cone_deg: f64, clock_deg: f64, frequency_mhz: f64) -> f64 {
+fn served_envelope_dbi(
+    scenario: &RealDataScenario,
+    cone_deg: f64,
+    clock_deg: f64,
+    frequency_mhz: f64,
+) -> f64 {
     let lo = (cone_deg - ENVELOPE_HALF_WIDTH_DEG).max(0.0);
     let hi = cone_deg + ENVELOPE_HALF_WIDTH_DEG;
     let steps = ((hi - lo) / ENVELOPE_SAMPLE_STEP_DEG).round() as usize;
@@ -481,7 +549,7 @@ fn served_envelope_dbi(cone_deg: f64, clock_deg: f64, frequency_mhz: f64) -> f64
     (0..=steps)
         .map(|i| {
             let theta = lo + (i as f64) * ENVELOPE_SAMPLE_STEP_DEG;
-            serve(theta, clock_deg, frequency_mhz).gain_db
+            serve(scenario, theta, clock_deg, frequency_mhz).gain_db
         })
         .fold(f64::NEG_INFINITY, f64::max)
 }
@@ -494,6 +562,37 @@ fn correction_applied(response: &GainResponse) -> bool {
         .unwrap_or(false)
 }
 
+/// The complete expensive regression contract under one nextest process.
+///
+/// Scenario construction performs exactly one grid generation, one unvalidated calibration
+/// used by every reconstruction/service assertion, and one validated calibration used by the
+/// exemplar-script assertion. The published peaks contribute to the generated trend, so the
+/// peak and residual checks below are reconstruction/pipeline-consistency checks—not held-out
+/// predictive validation.
+#[test]
+fn real_data_scenario_preserves_generator_cli_artifact_and_service_contract() {
+    let scenario = run_real_data_scenario();
+
+    assert_summary_anchors_match_the_digitized_peaks(&scenario);
+    assert_shared_constants_match_the_generator(&scenario);
+    assert_full_mode_artifact_loads_and_presents_as_calibrated(&scenario);
+    assert_calibrate_and_the_generator_evaluate_the_same_model(&scenario);
+    assert_the_correction_surface_fits_the_fill(&scenario);
+    assert_the_served_correction_reproduces_the_injected_residual(&scenario);
+
+    let boresight = serve(&scenario, 0.0, 0.0, ANCHOR_FREQUENCY_MHZ);
+    assert_served_feed_sits_at_the_focus(&boresight);
+    assert_served_boresight_gain_reproduces_the_published_gain(&boresight);
+    assert_served_calibrated_pattern_reproduces_the_digitized_peaks(&scenario);
+    assert_the_correction_is_reached_across_the_calibrated_region(&scenario, &boresight);
+
+    assert_the_artifact_records_that_its_knots_cannot_resolve_this_antennas_lobe_structure(
+        &scenario,
+    );
+    assert_the_calibrate_run_warns_that_the_surface_cannot_resolve_the_lobe_structure(&scenario);
+    assert_the_scripts_validated_run_produces_an_artifact(&scenario);
+}
+
 // ============================================================================
 // The fill says what the report says
 // ============================================================================
@@ -501,8 +600,7 @@ fn correction_applied(response: &GainResponse) -> bool {
 /// Every anchor the generator used must be a row of the committed PSV, read independently
 /// here. The generator could otherwise pick up a different cut, a different frequency or a
 /// different dish and still produce a beautifully smooth fill.
-#[test]
-fn summary_anchors_match_the_digitized_peaks() {
+fn assert_summary_anchors_match_the_digitized_peaks(scenario: &RealDataScenario) {
     let path = peaks_file();
     let text =
         std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
@@ -541,11 +639,12 @@ fn summary_anchors_match_the_digitized_peaks() {
         })
         .collect();
 
-    let anchors = pipeline().anchors();
-    assert!(
-        !anchors.is_empty(),
-        "the generator summary carried no anchors\n{}",
-        pipeline().generator_output
+    let anchors = scenario.generated.anchors();
+    assert_eq!(
+        anchors.len(),
+        19,
+        "the generator summary must retain all 19 digitized peaks\n{}",
+        scenario.generated.output
     );
 
     for anchor in &anchors {
@@ -601,9 +700,8 @@ fn summary_anchors_match_the_digitized_peaks() {
 /// frequency decides which slice of a frequency-varying model is compared, and the absolute
 /// anchor is what "measured dBi" means. The generator writes all three into the summary JSON
 /// this file already parses, so the pin costs nothing.
-#[test]
-fn shared_constants_match_the_generator() {
-    let summary = &pipeline().summary;
+fn assert_shared_constants_match_the_generator(scenario: &RealDataScenario) {
+    let summary = &scenario.generated.summary;
 
     let checks = [
         (
@@ -638,10 +736,8 @@ fn shared_constants_match_the_generator() {
     }
 }
 
-#[test]
-fn full_mode_artifact_loads_and_presents_as_calibrated() {
-    let run = pipeline();
-    let calibration = run.load();
+fn assert_full_mode_artifact_loads_and_presents_as_calibrated(scenario: &RealDataScenario) {
+    let calibration = &scenario.calibration;
 
     assert_eq!(calibration.antenna_id, ANTENNA_ID);
     assert_eq!(calibration.feed_id, FEED_ID);
@@ -699,63 +795,45 @@ fn full_mode_artifact_loads_and_presents_as_calibrated() {
 /// without**. This grid is sized to clear it either way (3240 points, 2592 per training split,
 /// 960 coefficients) — that is the property being pinned.
 ///
-/// The cross-validation numbers used to be a known defect pinned as one — folds were
-/// contiguous slices of a grid-ordered file, so the edge folds held out a whole frequency slab
+/// This cross-validation holds out generated hybrid-fill rows, not independent published
+/// observations. It pins interpolation stability and the exemplar CLI flow; it is not evidence
+/// of held-out predictive accuracy. Its numbers used to be a known defect pinned as one — folds
+/// were contiguous slices of a grid-ordered file, so the edge folds held out a whole frequency slab
 /// and scored an extrapolation. **Roadmap D22 landed 2026-08-03 and the pin is inverted**, as
 /// its own comment instructed: strided folds put this artifact's five fold RMSEs at
 /// 0.0286 / 0.0312 / 0.0305 / 0.0602 / 0.0458 dB, where they were
 /// 10.0688 / 0.5600 / 0.1223 / 0.6436 / 10.8570. The worst fold went from **370× the in-sample
 /// RMSE to 2.2×**, which is what a cross-validation figure is supposed to look like on a
 /// surface that interpolates well.
-#[test]
-fn the_scripts_validated_run_produces_an_artifact() {
-    let run = pipeline();
-    let dir = tempfile::tempdir().expect("temp dir");
-    let artifact = dir.path().join("validated.bin");
-    let report_path = dir.path().join("validated_report.json");
-    let metadata_path = dir.path().join("validated_metadata.json");
-
-    let output = Command::new(env!("CARGO_BIN_EXE_calibrate"))
-        .args(["--calibration-mode", "full"])
-        .arg("--input")
-        .arg(&run.csv)
-        .arg("--output")
-        .arg(&artifact)
-        .args(["--antenna-id", ANTENNA_ID])
-        .args(["--feed-id", FEED_ID])
-        .args(["--antenna-class", ANTENNA_CLASS])
-        .arg("--classes-file")
-        .arg(fixture("nasa_cr159703_122m_classes.yaml"))
-        .arg("--validate")
-        .arg("--report")
-        .arg(&report_path)
-        .arg("--metadata")
-        .arg(&metadata_path)
-        .output()
-        .expect("run the calibrate binary with the script's flags");
-    let text = format!(
-        "--- stdout ---\n{}\n--- stderr ---\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(
-        output.status.success(),
-        "the script's own argument set failed with {:?}\n{text}",
-        output.status.code()
-    );
-
-    antenna_model::data::loader::load_calibration_artifact(&artifact)
-        .unwrap_or_else(|e| panic!("the validated run must still write a loadable artifact: {e}"));
+fn assert_the_scripts_validated_run_produces_an_artifact(scenario: &RealDataScenario) {
+    let run = &scenario.validated;
+    run.load();
+    let metadata_path = run
+        .metadata
+        .as_ref()
+        .expect("the validated execution must request a metadata sidecar");
     assert!(
         metadata_path.exists(),
         "--metadata must write the sidecar the script asks for"
     );
-
-    let report: Value = serde_json::from_str(
-        &std::fs::read_to_string(&report_path).expect("read the validated report"),
+    let metadata: Value = serde_json::from_str(
+        &std::fs::read_to_string(metadata_path).expect("read the validated metadata sidecar"),
     )
-    .expect("parse the validated report");
+    .expect("parse the validated metadata sidecar");
+    assert_eq!(
+        metadata["num_measurement_points"], 3_240,
+        "the validated sidecar must describe the complete generated grid"
+    );
+    assert_eq!(
+        metadata["parameters_tuned"], false,
+        "the exemplar validated run does not request parameter tuning"
+    );
+    assert!(
+        metadata["angular_resolution"].is_object(),
+        "the validated sidecar must expose the fitted surface's angular resolution"
+    );
 
+    let report = &run.report;
     let folds = report["cross_validation"]["fold_rmse_values"]
         .as_array()
         .unwrap_or_else(|| panic!("--validate must produce cross-validation; report:\n{report:#}"));
@@ -763,7 +841,17 @@ fn the_scripts_validated_run_produces_an_artifact() {
 
     let values: Vec<f64> = folds
         .iter()
-        .map(|v| v.as_f64().expect("fold RMSE"))
+        .enumerate()
+        .map(|(index, value)| {
+            let score = value
+                .as_f64()
+                .unwrap_or_else(|| panic!("fold {index} RMSE is not numeric: {value}"));
+            assert!(
+                score.is_finite(),
+                "fold {index} RMSE is not finite: {score}"
+            );
+            score
+        })
         .collect();
     let corrected = report["corrected_rmse"].as_f64().expect("corrected_rmse");
     let worst = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
@@ -820,9 +908,7 @@ fn the_scripts_validated_run_produces_an_artifact() {
 /// adds it to an already-vertex-origin steering position. `calibrate` wrote it vertex-relative
 /// until 2026-08-02, which put the feed at `z ≈ 2f` — 27.3 dB of boresight gain on this
 /// antenna. No test could see that, because none served a full-mode artifact.
-#[test]
-fn served_feed_sits_at_the_focus() {
-    let response = serve(0.0, 0.0, ANCHOR_FREQUENCY_MHZ);
+fn assert_served_feed_sits_at_the_focus(response: &GainResponse) {
     let offset = &response.geometry.physical_feed_offset_m;
 
     assert!(
@@ -850,21 +936,25 @@ fn request_geometry_lands_on_the_requested_angles() {
         (10.8, 180.0),
         (7.0, 270.0),
     ] {
-        let response = serve(cone_deg, clock_deg, ANCHOR_FREQUENCY_MHZ);
-        let geometry = &response.geometry;
+        let request = request_for(cone_deg, clock_deg, ANCHOR_FREQUENCY_MHZ);
+        let (actual_clock_deg, actual_cone_deg) = compute_emitter_direction_with_attitude(
+            &request.emitter_position,
+            &request.vehicle_position,
+            &request.reflector_boresight,
+            request.vehicle_attitude,
+        )
+        .expect("the serving coordinate transform must accept the constructed request geometry");
 
         assert!(
-            (geometry.emitter_elevation_deg - cone_deg).abs() < 1e-6,
-            "requested cone {cone_deg}°, served {}°",
-            geometry.emitter_elevation_deg
+            (actual_cone_deg - cone_deg).abs() < 1e-6,
+            "requested cone {cone_deg}°, transformed {actual_cone_deg}°"
         );
-        // Azimuth is degenerate at the pole, so it is only meaningful off boresight.
+        // Clock is degenerate at the pole, so it is only meaningful off boresight.
         if cone_deg > 0.0 {
-            let delta = (geometry.emitter_azimuth_deg - clock_deg).abs();
+            let delta = (actual_clock_deg - clock_deg).abs();
             assert!(
                 delta.min(360.0 - delta) < 1e-6,
-                "requested clock {clock_deg}°, served {}°",
-                geometry.emitter_azimuth_deg
+                "requested clock {clock_deg}°, transformed {actual_clock_deg}°"
             );
         }
     }
@@ -881,13 +971,11 @@ fn request_geometry_lands_on_the_requested_angles() {
 /// so calibrate's model-only RMSE has to equal the residual RMS the generator reports. This
 /// is roadmap D17's question — "do the two sides of the pipeline evaluate the same model?" —
 /// asked at the seam between calibrate and its input data.
-#[test]
-fn calibrate_and_the_generator_evaluate_the_same_model() {
-    let run = pipeline();
-    let injected = number(&run.summary, "injected_residual_rms_db");
-    let model_only = run.report["model_only_rmse"]
+fn assert_calibrate_and_the_generator_evaluate_the_same_model(scenario: &RealDataScenario) {
+    let injected = number(&scenario.generated.summary, "injected_residual_rms_db");
+    let model_only = scenario.unvalidated.report["model_only_rmse"]
         .as_f64()
-        .expect("model_only_rmse in the validation report");
+        .expect("model_only_rmse in the calibration report");
 
     println!(
         "injected residual RMS {injected:.4} dB, calibrate model-only RMSE {model_only:.4} dB"
@@ -897,17 +985,15 @@ fn calibrate_and_the_generator_evaluate_the_same_model() {
         "the generator injected a residual of RMS {injected:.6} dB but calibrate measured \
          {model_only:.6} dB against its own model: the two sides are no longer building the \
          same antenna from {ANTENNA_CLASS}\n{}",
-        run.calibrate_output
+        scenario.unvalidated.output
     );
 }
 
-#[test]
-fn the_correction_surface_fits_the_fill() {
-    let run = pipeline();
-    let corrected = run.report["corrected_rmse"]
+fn assert_the_correction_surface_fits_the_fill(scenario: &RealDataScenario) {
+    let corrected = scenario.unvalidated.report["corrected_rmse"]
         .as_f64()
-        .expect("corrected_rmse in the validation report");
-    let model_only = run.report["model_only_rmse"]
+        .expect("corrected_rmse in the calibration report");
+    let model_only = scenario.unvalidated.report["model_only_rmse"]
         .as_f64()
         .expect("model_only_rmse");
 
@@ -930,17 +1016,15 @@ fn the_correction_surface_fits_the_fill() {
 /// This is the file's tight assertion: no measurement uncertainty enters it, only the chain
 /// fill → CSV → fit → artifact → loader → 4D interpolator. Note the argument order — the 3D
 /// surface's clock/cone map onto the 4D surface's azimuth/elevation.
-#[test]
-fn the_served_correction_reproduces_the_injected_residual() {
-    let run = pipeline();
-    let calibration = run.load();
+fn assert_the_served_correction_reproduces_the_injected_residual(scenario: &RealDataScenario) {
+    let calibration = &scenario.calibration;
     let surface = calibration
         .correction_surface
         .as_ref()
         .expect("correction surface");
 
     let mut worst = 0.0_f64;
-    for anchor in run.anchors() {
+    for anchor in scenario.generated.anchors() {
         let correction = evaluate_correction(
             surface,
             anchor.clock_deg,
@@ -975,9 +1059,7 @@ fn the_served_correction_reproduces_the_injected_residual() {
 ///
 /// Unlike everything below, this one is not envelope-read and carries no lobe-scale
 /// structure — the main-beam apex is a single well-defined number on both sides.
-#[test]
-fn served_boresight_gain_reproduces_the_published_gain() {
-    let response = serve(0.0, 0.0, ANCHOR_FREQUENCY_MHZ);
+fn assert_served_boresight_gain_reproduces_the_published_gain(response: &GainResponse) {
     let delta = response.gain_db - PUBLISHED_GAIN_DBI;
 
     println!(
@@ -985,7 +1067,7 @@ fn served_boresight_gain_reproduces_the_published_gain() {
         response.gain_db
     );
     assert!(
-        correction_applied(&response),
+        correction_applied(response),
         "the correction must be reached at boresight; got warnings {:?}",
         response.warnings
     );
@@ -1004,10 +1086,8 @@ fn served_boresight_gain_reproduces_the_published_gain() {
 /// Read the budget in [`ANCHOR_STRUCTURE_ALLOWANCE_DB`] before changing anything here — its
 /// largest term is a *reported limitation of the shipped correction-surface resolution*, and
 /// widening it is not a way to make this pass.
-#[test]
-fn served_calibrated_pattern_reproduces_the_digitized_peaks() {
-    let run = pipeline();
-    let anchors = run.anchors();
+fn assert_served_calibrated_pattern_reproduces_the_digitized_peaks(scenario: &RealDataScenario) {
+    let anchors = scenario.generated.anchors();
 
     // Measure the whole table first, then assert: a per-anchor panic would hide the rest of
     // it, and the rest of it is what says whether a failure is one bad point or a broken
@@ -1015,8 +1095,12 @@ fn served_calibrated_pattern_reproduces_the_digitized_peaks() {
     let measured: Vec<(&Anchor, f64, f64, f64)> = anchors
         .iter()
         .map(|anchor| {
-            let served =
-                served_envelope_dbi(anchor.cone_deg, anchor.clock_deg, ANCHOR_FREQUENCY_MHZ);
+            let served = served_envelope_dbi(
+                scenario,
+                anchor.cone_deg,
+                anchor.clock_deg,
+                ANCHOR_FREQUENCY_MHZ,
+            );
             let corrected_error = served - anchor.measured_dbi;
             let uncorrected_error = anchor.model_envelope_dbi - anchor.measured_dbi;
             (anchor, served, corrected_error, uncorrected_error)
@@ -1088,22 +1172,13 @@ fn served_calibrated_pattern_reproduces_the_digitized_peaks() {
 ///
 /// The `sa_8002a` half of D13 makes the same point on the boresight path. Here it also covers
 /// the clock axis, which on this artifact carries only measured information.
-#[test]
-fn the_correction_is_reached_across_the_calibrated_region() {
-    // Interior probes only. The coverage edges themselves (cone 14°, clock 0/350°) are
-    // deliberately not probed: the served polar angle is recovered from the emitter geometry
-    // through `acos`, so a request aimed at exactly the edge lands a few ULP outside the
-    // inclusive bound and is served — correctly — as out of coverage.
-    for (cone_deg, clock_deg) in [
-        (0.0, 0.0),
-        (3.0, 45.0),
-        (7.0, 135.0),
-        (11.0, 225.0),
-        (13.5, 315.0),
-    ] {
-        let response = serve(cone_deg, clock_deg, ANCHOR_FREQUENCY_MHZ);
+fn assert_the_correction_is_reached_across_the_calibrated_region(
+    scenario: &RealDataScenario,
+    boresight: &GainResponse,
+) {
+    let assert_calibrated = |response: &GainResponse, cone_deg: f64, clock_deg: f64| {
         assert!(
-            correction_applied(&response),
+            correction_applied(response),
             "the correction was skipped at cone {cone_deg}° clock {clock_deg}°, inside the \
              artifact's own coverage; warnings {:?}",
             response.warnings
@@ -1122,6 +1197,18 @@ fn the_correction_is_reached_across_the_calibrated_region() {
             "an artifact carrying a correction surface is served with spillover off (the \
              correction absorbs it empirically)"
         );
+    };
+
+    // Reuse the boresight response already checked for focus and published gain.
+    assert_calibrated(boresight, 0.0, 0.0);
+
+    // Interior, non-principal-plane probes only. The coverage edges themselves (cone 14°,
+    // clock 0/350°) are deliberately not probed: the served polar angle is recovered from the
+    // emitter geometry through `acos`, so a request aimed exactly at the edge can land a few
+    // ULP outside the inclusive bound and is served—correctly—as out of coverage.
+    for (cone_deg, clock_deg) in [(3.0, 45.0), (7.0, 135.0), (11.0, 225.0), (13.5, 315.0)] {
+        let response = serve(scenario, cone_deg, clock_deg, ANCHOR_FREQUENCY_MHZ);
+        assert_calibrated(&response, cone_deg, clock_deg);
     }
 }
 
@@ -1159,9 +1246,10 @@ const CLOCK_KNOTS_PER_LOBE_PERIOD: f64 = 0.1193;
 /// ratio must differ from the cone ratio by the `sin θ` factor. A build that stamped a
 /// plausible fixed value would pass an equality check against one measured number and fail
 /// both of these.
-#[test]
-fn the_artifact_records_that_its_knots_cannot_resolve_this_antennas_lobe_structure() {
-    let calibration = pipeline().load();
+fn assert_the_artifact_records_that_its_knots_cannot_resolve_this_antennas_lobe_structure(
+    scenario: &RealDataScenario,
+) {
+    let calibration = &scenario.calibration;
     let resolution = calibration
         .metadata
         .angular_resolution
@@ -1235,9 +1323,10 @@ fn the_artifact_records_that_its_knots_cannot_resolve_this_antennas_lobe_structu
 /// The artifact metadata is for consumers; this is for whoever ran `calibrate` and read the
 /// 0.0272 dB in-sample RMSE two lines above it. That number cannot see this limitation — the
 /// grid is sampled no finer than the knots — so the run has to volunteer it.
-#[test]
-fn the_calibrate_run_warns_that_the_surface_cannot_resolve_the_lobe_structure() {
-    let output = &pipeline().calibrate_output;
+fn assert_the_calibrate_run_warns_that_the_surface_cannot_resolve_the_lobe_structure(
+    scenario: &RealDataScenario,
+) {
+    let output = &scenario.unvalidated.output;
     assert!(
         output.contains("cannot resolve this antenna's lobe structure"),
         "calibrate must warn on an under-resolved fit. Output:\n{output}"
