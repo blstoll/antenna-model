@@ -1,6 +1,6 @@
 # Test tiers — roadmap unit D18 (filed 2026-08-01).
 #
-#   default = the dev inner loop. Excludes the slow tail: three heavy physics
+#   default = the dev inner loop. Excludes the slow tail: two heavy physics
 #             pins, three expensive synthetic full-mode scenarios, and the
 #             consolidated real-data scenario. Measured
 #             2026-08-01 after P10-perf: 980 tests, 85.9 s wall (was 963 tests
@@ -36,16 +36,17 @@ slow-timeout = { period = "10s" }
 #   dsn34m_offset_feed_mode_count_converges                         -> 1.8 s
 #   p2_moderate_offset_exact_only_gain_pinned_and_routes_standard_po-> 1.8 s
 #   test_beam_steering_from_feed_displacement                       -> 1.8 s
-# The two that stay (three until 2026-08-15, when test_heavy_heatmap_times_out_with_504 left
-# the tier — see the "Removed from this list" note below):
-#   p12_mode_path_radial_convergence_anchors  7.3 s sequential, 9.1 s in a full run — under
-#     the 10 s marker, but it became the dev loop's single longest test and therefore its
-#     critical path: returning it took the loop from 72.8 s to 92.8 s, over D18's 90 s budget,
-#     for one test. Held back on tail-latency grounds rather than absolute cost; it is a
-#     candidate to return once D18 task 2 shrinks the integration-test class around it.
-#   p12_phi_cap_removed_steered_feed_matches_converged_reference  125 s -> 15.7 s
-#     (43 s under a contended full run) — it sweeps four steered angles against a converged
-#     reference, so it pays the steered cost four times over.
+# The one that stays (three until 2026-08-15, when test_heavy_heatmap_times_out_with_504 left
+# the tier, then two until issue #71 returned the radial anchors):
+#   p12_phi_cap_removed_steered_feed_matches_stored_anchors  125 s -> 15.7 s under
+#     P10-perf, then 7.58 s under #71 by deriving field level and convergence metadata from
+#     one production result at each of its three pinned angles. It remains over the 10 s
+#     marker on slower/contended runners.
+# Removed from this list 2026-09-05 (GitHub issue #71):
+#   p12_mode_path_radial_convergence_anchors — REJOINS the dev loop at 0.09 s after its four
+#     runtime dense references were replaced by fixed-axis, independently certified anchors.
+#     It was 14.52 s on this runner before reference substitution. The same four cases and
+#     0.05 dB threshold remain CI-blocking in profile.full.
 # Removed from this list 2026-08-15 (roadmap D18):
 #   test_heavy_heatmap_times_out_with_504 — REJOINS the dev loop at 1.2 s (was 16.3 s here,
 #     130.9 s in a full run). Its entry claimed "it exists to exhaust S3's wall-clock budget,
@@ -204,14 +205,17 @@ slow-timeout = { period = "10s" }
 # single consolidated scenario below. Its one generation plus unvalidated and validated CLI
 # calibrations remain slow-tier work; `request_geometry_lands_on_the_requested_angles` now
 # calls the production coordinate transform directly and rejoins the default developer tier.
+#
+# Updated 2026-09-05 for GitHub issue #71: `p12_mode_path_radial_convergence_anchors` rejoins
+# the default tier after falling to 0.09 s. The phi-cap regression remains excluded and all
+# retained numerical contracts continue to run in profile.full.
 default-filter = """
 not (
     (binary_id(calibrate::cli_full_mode_e2e) & test(cli_untuned_scenario_preserves_artifact_correction_and_no_validation))
   + (binary_id(calibrate::cli_full_mode_e2e) & test(cli_cv_three_folds_reports_finite_scores))
   + (binary_id(calibrate::cli_full_mode_e2e) & test(cli_tuned_run_recovers_the_surface_rms_perturbation))
   + (binary_id(calibrate::cli_full_mode_real_data_e2e) & test(real_data_scenario_preserves_generator_cli_artifact_and_service_contract))
-  + test(p12_phi_cap_removed_steered_feed_matches_converged_reference)
-  + test(p12_mode_path_radial_convergence_anchors)
+  + test(p12_phi_cap_removed_steered_feed_matches_stored_anchors)
   + test(mode_path_reports_a_radial_error_even_when_the_density_cap_binds)
 )
 """

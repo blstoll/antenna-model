@@ -12,7 +12,7 @@ Antenna Model Service is a high-performance REST API for parabolic dish antenna 
 ```bash
 cargo build --release          # both binaries
 
-# Dev inner loop. The default nextest profile EXCLUDES the slow tier (three heavy
+# Dev inner loop. The default nextest profile EXCLUDES the slow tier (two heavy
 # physics pins and four named calibration scenarios) — see .config/nextest.toml.
 cargo nextest run --workspace
 

@@ -56,7 +56,7 @@ fn coma_params() -> IntegrationParams {
 ///
 /// The expensive regime keeps dedicated coverage, at bounded angles:
 ///   * `served_n_phi_sizing_is_sufficient_on_every_asymmetric_geometry` (model/integration.rs)
-///   * `p12_phi_cap_removed_steered_feed_matches_converged_reference` (reference_validation.rs)
+///   * `p12_phi_cap_removed_steered_feed_matches_stored_anchors` (reference_validation.rs)
 ///
 /// A side benefit: at 3.4 m the beam is ≈0.73° wide, so a 0.1° peak search actually resolves
 /// it. On the 34 m dish HPBW is ≈0.06° and the same search was under-sampling the main lobe.
