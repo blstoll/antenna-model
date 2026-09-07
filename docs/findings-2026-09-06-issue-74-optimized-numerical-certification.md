@@ -158,15 +158,33 @@ Also considered and not taken: turning `debug-assertions` off in the certificati
 buys 0.32 s on the cap test (1.71 s vs 2.03 s) and would mean the numerical certification
 runs with weaker checks than the tier it replaced.
 
-## 4. What was not verified
+## 4. Confirmed on the real runner
 
-**CI behaviour is reasoned, not observed.** Every figure here is from the reference laptop;
-the branch has not been pushed, so no CI run exists for this change. The reasoning is that CI
-compiles one profile in one target directory either way, pays `antenna-core`'s extra codegen
-once per job, and gets the same test-time reduction — but the runner has 2-4 cores against
-this machine's 8, and the CPU columns above are the ones that map to wall time there. Confirm
-on the first CI run and record the numbers here, the way the P10-perf note in
-`.config/nextest.toml` confirmed its prediction against PR #49.
+The prediction above was that CI gains here rather than loses, because it compiles one profile
+in one target directory either way and pays `antenna-core`'s extra codegen once per job. PR #83
+(2026-09-07, run 34127745573, warm `Swatinem/rust-cache` restore) came in at **2m13s for the
+`clippy + test` job**, against the six preceding `main` runs of the same job:
+
+| commit | `clippy + test` |
+|---|---|
+| 905940a | 6m00s |
+| 10c1537 | 4m14s |
+| a13d9fe | 5m56s |
+| 7a274f7 | 6m10s |
+| 31c3c22 | 6m27s |
+| 3b5fb34 | 6m47s |
+| **this change (PR #83)** | **2m13s** |
+
+Its step breakdown: 38 s in the new numerical-certification step — which pays the debug build
+of every test binary, because `cargo nextest list --workspace` compiles them — then **46 s for
+all 1122 tests** on `--profile full`, and 1 s of doctests.
+
+Treat that as a direction with a wide error bar, not a 2.9x figure: the six baseline runs
+differ from each other by 2m33s, they include cache and runner variance, and this run's build
+cost sits in a different step than it used to. What it does establish is the sign — the extra
+codegen does not eat the win on a 2-4 core runner, which is what the CPU columns above
+predicted and what a per-cycle loss would have contradicted. Same discipline as the P10-perf
+note in `.config/nextest.toml`, which confirmed its own prediction against PR #49.
 
 ## 5. What to watch
 
