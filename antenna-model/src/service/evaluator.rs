@@ -74,10 +74,14 @@
 //! transformation, repository lookup, and converting `feed_pointing_location` (an aim
 //! point) into a feed steering displacement. Everything from beam squint onward — the
 //! rest of step 2, and steps 3 through 6 — is the **served-gain law**, which lives in
-//! [`crate::service::served_gain`] and is shared with `/h3-heatmap` (issue #61, parent
-//! #59). Read that module's docs for the authoritative ordering of squint, physics,
-//! correction, disposition, warnings, and the ideal reference. What remains here is
-//! request adaptation, response DTO construction, and response timing.
+//! `service::served_gain` (issue #61, parent #59). Read that module's docs for the
+//! authoritative ordering of squint, physics, correction, disposition, warnings, and the
+//! ideal reference. What remains here is request adaptation, response DTO construction,
+//! and response timing.
+//!
+//! (`served_gain` is crate-private, so the reference above is deliberately not an
+//! intra-doc link — linking a public module's docs to a private item is a rustdoc
+//! warning.)
 
 use crate::api::schemas::{
     CalibrationStatusInfo, ComputationMetadata, GainRequest, GainResponse, GeometryInfo, Vector3D,
@@ -152,10 +156,13 @@ pub fn compute_gain_from_request_with_budget(
     //
     // This now runs BEFORE the reflector is built, where it used to run after. The
     // precedence that matters — a coordinate fault beating `FeedNotFound` — is preserved
-    // above. The one pair this reorders is a request whose pointing geometry is invalid
-    // served by an artifact whose reflector cannot be built at all: that now reports the
-    // request fault (a 400) rather than the artifact fault (a 500). Reporting the caller's
-    // fault first is the better of the two, and no test pinned the old order.
+    // above, and the only pair this could reorder is unreachable on the served path:
+    // `data::loader` validates every artifact as it loads it (`AntennaCalibration::validate`
+    // → `ReflectorGeometry::validate`), rejecting non-positive diameter or focal length,
+    // negative surface RMS, and out-of-band f/D — a superset of what
+    // `model::ReflectorGeometry::new` can fail on. A loaded artifact therefore cannot fail
+    // reflector construction, so no request can reach a reflector error at all, in either
+    // order.
     let (steer_x, steer_y, steer_z) = compute_feed_position_from_pointing(
         &request.feed_pointing_location,
         &request.reflector_boresight,

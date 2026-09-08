@@ -914,12 +914,12 @@ pub(crate) fn rear_hemisphere_warning(
 /// Ray-tracing stub degraded-accuracy warning (roadmap unit P3, maintainer
 /// decision 2026-07-16: document + flag).
 ///
-/// Returns [`crate::model::pattern::RAY_TRACING_STUB_WARNING`] iff the antenna's
+/// Returns [`antenna_core::model::pattern::RAY_TRACING_STUB_WARNING`] iff the antenna's
 /// feed offset exceeds the severe threshold (> 0.5·f), i.e. the regime that the
 /// model routes to the acknowledged ray-tracing stub (`ray_trace.rs`). The gate
 /// mirrors the model's own `analyze_edge_cases` mode selection exactly: same
 /// `displacement_from_focus / focal_length` ratio, same
-/// [`crate::model::edge_cases::SEVERE_OFFSET_THRESHOLD`].
+/// [`antenna_core::model::edge_cases::SEVERE_OFFSET_THRESHOLD`].
 ///
 /// **Why this exists at the service layer.** For single gain / batch / rectangular
 /// heatmap the model pushes this warning itself (those paths call `compute_gain_db`

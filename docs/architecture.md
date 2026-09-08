@@ -306,9 +306,16 @@ Result: Uncalibrated loss accuracy (±2 dB) significantly better than absolute g
 #### 3.6.4 Service Layer Integration
 
 This is the **served-gain law**, and it lives in one module: `service/served_gain.rs`
-(issue #61). `/gain` adapts its request into a pre-squint direction and hands it over;
-`/h3-heatmap` does the same. Neither endpoint builds the physical-optics model, gates
-coverage, evaluates a correction surface, or decides which warnings a direction earns.
+(issue #61). `/gain` adapts its request into a pre-squint direction and hands it over, so
+it no longer builds the physical-optics model, gates coverage, evaluates a correction
+surface, or decides which warnings a direction earns; batch and rectangular heatmap
+inherit that through their delegation to single-gain evaluation.
+
+`/h3-heatmap` has **not** migrated yet. It borrows this module's coverage predicate and
+warning helpers, but still calls `compute_gain_db` around its physics cache and still
+gates and applies the correction surface itself (`service/h3_link_budget.rs`). Issue #62
+moves it onto the prepared value and deletes that copy; until then the two paths have to
+be kept in agreement by hand.
 
 **Coverage Checking:**
 ```rust
