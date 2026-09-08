@@ -305,6 +305,11 @@ Result: Uncalibrated loss accuracy (±2 dB) significantly better than absolute g
 
 #### 3.6.4 Service Layer Integration
 
+This is the **served-gain law**, and it lives in one module: `service/served_gain.rs`
+(issue #61). `/gain` adapts its request into a pre-squint direction and hands it over;
+`/h3-heatmap` does the same. Neither endpoint builds the physical-optics model, gates
+coverage, evaluates a correction surface, or decides which warnings a direction earns.
+
 **Coverage Checking:**
 ```rust
 fn is_in_coverage(
@@ -337,16 +342,25 @@ Correction surface is applied only when:
 1. Correction surface exists in calibration data
 2. Query is within calibrated coverage region
 
-```rust
-let correction_applied = calibration.correction_surface.is_some()
-    && is_in_coverage(&calibration.calibration_coverage, az, el, freq);
+Those two conditions produce a `CorrectionDisposition` — the sole authority for both
+"was correction applied" and "is this result extrapolated" (issue #61). Callers read the
+disposition; they never re-derive either boolean:
 
-let final_gain_db = if correction_applied {
-    physics_gain_db + interpolate_correction(...)
-} else {
-    physics_gain_db  // Physics model only
+```rust
+let (correction_db, disposition) = match &calibration.correction_surface {
+    None => (0.0, CorrectionDisposition::Unavailable),
+    Some(surface) if is_in_coverage(&calibration.calibration_coverage, az, e_cone, freq) => {
+        let result = evaluate_correction(surface, az, e_cone, freq, temperature_k)?;
+        (result.correction_db, CorrectionDisposition::Applied { extrapolated: result.extrapolated })
+    }
+    Some(_) => (0.0, CorrectionDisposition::OutsideCoverage),
 };
+
+let final_gain_db = physics_gain_db + correction_db;
 ```
+
+`Unavailable` is not extrapolated — there is no fitted surface to leave. `OutsideCoverage`
+is, and so is `Applied` when the B-spline itself extrapolated past its knot span.
 
 **Accuracy Adjustment:**
 For partially calibrated antennas, accuracy estimate varies by query location:
@@ -1397,7 +1411,8 @@ antenna-model/                       # Cargo workspace root (3 members, roadmap 
 │   │   │
 │   │   ├── service/                 # Business logic
 │   │   │   ├── mod.rs
-│   │   │   ├── evaluator.rs         # Evaluation orchestration
+│   │   │   ├── evaluator.rs         # `/gain` request adaptation + response assembly
+│   │   │   ├── served_gain.rs       # The served-gain law (one direction → served gain)
 │   │   │   ├── validator.rs         # Input validation
 │   │   │   ├── batch.rs             # Batch processing
 │   │   │   ├── cache.rs             # Result caching

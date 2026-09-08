@@ -256,7 +256,7 @@ fn compute_cell_gain(
     let mut correction_applied = false;
     let mut gain_db = physics_gain_db;
     if let Some(ref surface) = calibration.correction_surface {
-        if crate::service::evaluator::is_in_coverage(
+        if crate::service::served_gain::is_in_coverage(
             &calibration.calibration_coverage,
             az_deg,
             el_deg,
@@ -280,7 +280,7 @@ fn compute_cell_gain(
     // never cached, so it also surfaces on cache hits. The message is
     // constant per (antenna, frequency), so the caller's warning-set
     // aggregation deduplicates it across cells.
-    captured_warnings.extend(crate::service::evaluator::off_axis_unvalidated_warning(
+    captured_warnings.extend(crate::service::served_gain::off_axis_unvalidated_warning(
         calibration,
         el_deg,
         request.frequency_mhz,
@@ -289,7 +289,7 @@ fn compute_cell_gain(
     // Rear-hemisphere hard-invalidity warning (P10-tail): fires for θ>90° on ANY
     // antenna, calibrated or not. Constant per (antenna, frequency), so the
     // caller's warning-set aggregation deduplicates it across cells.
-    captured_warnings.extend(crate::service::evaluator::rear_hemisphere_warning(
+    captured_warnings.extend(crate::service::served_gain::rear_hemisphere_warning(
         calibration,
         el_deg,
         request.frequency_mhz,
@@ -301,7 +301,7 @@ fn compute_cell_gain(
     // miss closure (into `result.warnings` above), which the shared, persistent
     // `GainCache` would otherwise drop on a hit. On a miss both are present; the
     // caller's warning-set aggregation deduplicates them to one entry.
-    captured_warnings.extend(crate::service::evaluator::ray_trace_stub_warning(
+    captured_warnings.extend(crate::service::served_gain::ray_trace_stub_warning(
         antenna_config,
     ));
 

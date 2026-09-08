@@ -1664,37 +1664,47 @@ impl From<&CalibrationStatus> for CalibrationStatusInfo {
 
 ### 10.2 Correction Surface Application Logic
 
-**Service Layer** (`src/service/evaluator.rs`):
+**Service Layer** (`src/service/served_gain.rs` — the one home of the served-gain law
+since issue #61; `src/service/evaluator.rs` only adapts the `/gain` request into it):
 
 ```rust
-// Step 1: Compute physics model gain
+// Step 1: Beam squint FIRST — everything below uses the squint-corrected direction.
+let corrected = squint(pre_squint_direction);
+
+// Step 2: Compute physics model gain
 let physics_gain_db = compute_physics_model(
     &calibration.physical_config,
-    azimuth_deg,
-    elevation_deg,
+    corrected.e_clock_deg,
+    corrected.e_cone_deg,
     frequency_mhz,
 );
 
-// Step 2: Check if correction surface should be applied
-let correction_applied = calibration.correction_surface.is_some()
-    && is_in_coverage(&calibration.calibration_coverage, azimuth_deg, elevation_deg, frequency_mhz);
-
-// Step 3: Apply correction if applicable
-let final_gain_db = if correction_applied {
-    let correction_db = interpolate_correction_surface(
-        &calibration.correction_surface.unwrap(),
-        azimuth_deg,
-        elevation_deg,
+// Step 3: Apply the correction surface, and record WHY, in one move
+let (correction_db, disposition) = match &calibration.correction_surface {
+    None => (0.0, CorrectionDisposition::Unavailable),
+    Some(surface) if is_in_coverage(
+        &calibration.calibration_coverage,
+        corrected.e_clock_deg,
+        corrected.e_cone_deg,
         frequency_mhz,
-        temperature_k,
-    );
-    physics_gain_db + correction_db
-} else {
-    physics_gain_db
+    ) => {
+        let result = evaluate_correction(
+            surface,
+            corrected.e_clock_deg,
+            corrected.e_cone_deg,
+            frequency_mhz,
+            calibration.validity_ranges.temperature_const,
+        )?;
+        (result.correction_db, CorrectionDisposition::Applied { extrapolated: result.extrapolated })
+    }
+    Some(_) => (0.0, CorrectionDisposition::OutsideCoverage),
 };
 
-// Step 4: Update calibration status info
-calibration_status_info.correction_applied = correction_applied;
+let final_gain_db = physics_gain_db + correction_db;
+
+// Step 4: Report from the disposition — never from surface existence or calibration status
+calibration_status_info.correction_applied = disposition.applied();
+metadata.extrapolated = disposition.extrapolated();
 ```
 
 **Coverage Check:**
