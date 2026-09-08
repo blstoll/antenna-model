@@ -1,0 +1,38 @@
+# The numerical certification (GitHub issue #74).
+#
+# One line per test, in `cargo nextest list` output form: "<binary-id> <test-name>".
+# `scripts/assert-numerical-certification.sh` asserts that every line here is selected by the
+# CI-blocking `full` profile, that everything above the `[full-only]` marker is also in the
+# default dev loop, and that the optimization making them affordable is still configured
+# (see the profile comment in Cargo.toml, and §2 of
+# docs/findings-2026-09-06-issue-74-optimized-numerical-certification.md).
+#
+# Why a file and not a comment: these three are the numerical certification — the tests that
+# would let a wrong gain ship. Two of them were expensive enough to be excluded from the dev
+# loop until 2026-09-06, and the third was until issue #71; today, on an optimized core, they
+# cost 2.12 s, 0.43 s and 0.016 s (sequential, 2026-09-06 — do not compare those against the
+# pre-#74 figures elsewhere without saying which build each came from). "Selected by the gate"
+# is a property worth asserting rather than assuming: a rename, a move to another binary, or a
+# filter edit that drops one is otherwise invisible — the suite still passes, with less in it.
+#
+# What each one certifies:
+#   * the mode path reports a radial error estimate when the density cap actually binds —
+#     the only test that reaches the real 65,537-point cap with a real geometry
+#     (roadmap P13; docs/findings-2026-09-06-issue-72-radial-cap-control-seam.md);
+#   * radial convergence against the four fixed-axis anchors certified by issue #71;
+#   * the served pattern with the φ' cap removed, against three stored field-level anchors
+#     across a steered lobe (P12).
+#
+# Two sections. Tests listed below the `[full-only]` marker are asserted for `--profile full`
+# alone; everything above it is asserted for BOTH profiles. The marker exists because a test
+# can legitimately leave the dev loop again — D18's rule is that anything over 10 s does, and
+# the real-data calibrate scenario already sits at 9.6 s under contention on this runner. When
+# that happens, move the line rather than deleting it: the certification must stay CI-blocking
+# either way, and a deletion would silently give up both assertions.
+#
+# To add or rename a test here, update this file in the same commit. The script fails until
+# the manifest and the listings agree.
+antenna-core model::integration::tests::mode_path_reports_a_radial_error_even_when_the_density_cap_binds
+antenna-model::reference_validation p12_mode_path_radial_convergence_anchors
+antenna-model::reference_validation p12_phi_cap_removed_steered_feed_matches_stored_anchors
+[full-only]

@@ -78,6 +78,12 @@ jobs:
         # without --all-targets on purpose: --all-targets re-unifies features via the
         # dev-dependency antenna-model (same trap as the D4 dep-graph note above).
         run: cargo clippy -p calibrate --features s3-input -- -D warnings
+      - name: Numerical certification is selected and optimized
+        # Asserts that the numerical certification is still selected by the profiles that
+        # run it, and that antenna-core is still built optimized (GitHub issue #74). The
+        # same script scripts/check.sh runs, so the invariants have one home; its header
+        # says what they are. Neither failure is visible as a failing test.
+        run: ./scripts/assert-numerical-certification.sh
       - name: Test
         # full profile = both test tiers (see .config/nextest.toml, roadmap
         # unit D18). The default profile is the dev inner loop and excludes
