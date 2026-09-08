@@ -149,6 +149,13 @@ pub fn compute_gain_from_request_with_budget(
     // the feed is pointed at — not a physical feed coordinate (see
     // `docs/domain-contract.md`). Convert it into the steering displacement that
     // preparation combines with this feed's design offset.
+    //
+    // This now runs BEFORE the reflector is built, where it used to run after. The
+    // precedence that matters — a coordinate fault beating `FeedNotFound` — is preserved
+    // above. The one pair this reorders is a request whose pointing geometry is invalid
+    // served by an artifact whose reflector cannot be built at all: that now reports the
+    // request fault (a 400) rather than the artifact fault (a 500). Reporting the caller's
+    // fault first is the better of the two, and no test pinned the old order.
     let (steer_x, steer_y, steer_z) = compute_feed_position_from_pointing(
         &request.feed_pointing_location,
         &request.reflector_boresight,

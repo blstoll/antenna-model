@@ -36,7 +36,7 @@
 //! `/heatmap` and `/h3-heatmap` evaluate many points and aggregate the union of
 //! their warnings into one response-level array. Aggregation dedupes on the whole
 //! `ApiWarning` (code **and** message), which is why the per-antenna honesty
-//! warnings in `service::evaluator` are documented as "constant per (antenna,
+//! warnings in `service::served_gain` are documented as "constant per (antenna,
 //! frequency)" and must not interpolate the query angle: a message that varies
 //! per grid point would produce one array entry per point.
 //!
@@ -65,36 +65,36 @@ pub enum WarningCode {
 
     /// `out_of_coverage` — the query falls outside the azimuth/elevation region a
     /// partially calibrated antenna was measured over; the physics model is being
-    /// extrapolated into it. Producer: `service::evaluator`.
+    /// extrapolated into it. Producer: `service::served_gain`.
     OutOfCoverage,
 
     /// `correction_not_applied` — the antenna has a correction surface but it was
     /// not applied to this query (the query fell outside the recorded coverage).
-    /// The returned gain is raw physics. Producer: `service::evaluator`.
+    /// The returned gain is raw physics. Producer: `service::served_gain`.
     CorrectionNotApplied,
 
     /// `uncalibrated` — the antenna has no measurement-derived calibration and is
     /// modelled from design specifications; the message carries the accuracy
-    /// estimates. Producer: `service::evaluator`.
+    /// estimates. Producer: `service::served_gain`.
     Uncalibrated,
 
     /// `partially_calibrated` — the antenna's calibration covers only part of its
     /// operating envelope; the message carries the accuracy estimate.
-    /// Producer: `service::evaluator`.
+    /// Producer: `service::served_gain`.
     PartiallyCalibrated,
 
     /// `off_axis_unvalidated` — the query is more than 3 first-null angles off
     /// boresight on an antenna served with uncorrected physics, so the returned
     /// level is idealised physical optics plus the statistical sidelobe floor,
     /// not a calibrated-grade sidelobe prediction (roadmap units P8, P11).
-    /// Producer: `service::evaluator`.
+    /// Producer: `service::served_gain`.
     OffAxisUnvalidated,
 
     /// `rear_hemisphere_invalid` — the query is more than 90° off boresight, where
     /// the aperture-integration model has no physical validity (roadmap unit
     /// P10-tail). Fires for calibrated antennas too: a forward-hemisphere
     /// correction surface says nothing about back lobes.
-    /// Producer: `service::evaluator`.
+    /// Producer: `service::served_gain`.
     RearHemisphereInvalid,
 
     /// `non_convergence` — the aperture integration exhausted its iteration budget

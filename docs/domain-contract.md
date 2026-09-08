@@ -322,7 +322,7 @@ heatmap, h3-heatmap). Threshold: **3× the first-null angle**, with the first nu
 taken as **θ_null ≈ 1.6·λ/D radians** (tapered circular-aperture illumination;
 uniform would be 1.22·λ/D) — beamwidth-relative, never a fixed angle (a 34-m Ka
 beam is ~0.017° wide; a 3.7-m X-band beam ~0.9°). Implementation:
-`service/evaluator.rs::off_axis_unvalidated_warning` (constants
+`service/served_gain.rs::off_axis_unvalidated_warning` (constants
 `FIRST_NULL_COEFFICIENT = 1.6`, `OFF_AXIS_FIRST_NULL_MULTIPLE = 3.0`), called from
 the gain pipeline (batch/heatmap inherit) and from the H3 per-cell path. Design
 constraints honored: uncalibrated-only (calibrated/partially-calibrated
@@ -411,7 +411,7 @@ The served angular range is now governed by three explicit tiers:
    value **is the statistical sidelobe floor only** — the PO term is excluded, not merely
    suppressed. On antennas **with a correction surface**, PO is still computed and returned as
    a numerical extrapolation (unchanged from P10-tail). A **rear-hemisphere hard warning**
-   (`service/evaluator.rs::rear_hemisphere_warning`, wired into the gain pipeline and the H3
+   (`service/served_gain.rs::rear_hemisphere_warning`, wired into the gain pipeline and the H3
    per-cell path exactly like the off-axis warning) fires for **ANY** antenna — **including
    fully calibrated ones**, because a forward-hemisphere correction surface says nothing about
    back lobes — and its wording now branches on which of the two cases above applies. It is
@@ -498,7 +498,7 @@ above).
 **The warning reaches all four compute endpoints.** On `/gain`, `/gain/batch`, and `/heatmap` the
 model pushes it directly (those paths run the integrator per query/point). `/h3-heatmap` caches
 physics-only gain and runs the model only on a cache **miss**, so it re-emits the identical warning
-at the service layer (`service/evaluator.rs::ray_trace_stub_warning`) **outside** the gain-cache
+at the service layer (`service/served_gain.rs::ray_trace_stub_warning`) **outside** the gain-cache
 closure — exactly as the P8 off-axis and P10-tail rear-hemisphere warnings are re-emitted — so the
 warning survives cache **hits** too. The message is constant per antenna config, so heatmap/H3
 aggregation deduplicates it to a single entry. Pinned by

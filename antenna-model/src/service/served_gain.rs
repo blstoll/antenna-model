@@ -36,6 +36,11 @@
 //! [`CorrectionDisposition`] is the only source of "was correction applied" and "is this
 //! extrapolated" — callers cannot recreate an inconsistent boolean formula for either.
 //!
+//! That holds for code that goes *through* this module, which today is `/gain` (and, by
+//! delegation, batch and rectangular heatmap). `/h3-heatmap` still open-codes its own
+//! correction sequencing around the physics cache and only borrows this module's coverage
+//! and warning helpers; issue #62 moves it onto the prepared value and deletes that copy.
+//!
 //! # Ownership boundary
 //!
 //! Repository access, API DTO construction, response timing, and HTTP error mapping stay
@@ -401,14 +406,6 @@ impl PreparedServedGain {
         self.calibration.calibration_status.as_ref()
     }
 
-    /// The vertex-relative physical feed position: what physics integrates with, and what
-    /// cache identity is keyed on. Distinct from the reported focal-point-relative offset
-    /// on [`ServedGain`] — they differ by the focal length, which is why both exist.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(crate) fn physical_feed_position(&self) -> FeedPosition {
-        self.physical_feed_position
-    }
-
     /// Serve one direction by running the physics integration directly.
     ///
     /// This is the whole gain law for a single direction: squint, physics, correction,
@@ -665,6 +662,11 @@ struct PhysicsOutcome {
 /// ([`CalibrationCoverage::contains_direction`]) and the two must stay distinct —
 /// a query on the measured grid at an uncalibrated frequency gets no correction
 /// but is not outside the calibrated *region*.
+///
+/// **Visibility is interim.** This is `pub(crate)` only because `service::h3_link_budget`
+/// still calls it directly while it open-codes its own correction sequencing around the
+/// physics cache. Issue #62 moves that endpoint onto [`PreparedServedGain`], at which
+/// point the module's own `assemble` is the only caller and this becomes private.
 pub(crate) fn is_in_coverage(
     coverage: &Option<CalibrationCoverage>,
     azimuth_deg: f64,
@@ -1052,18 +1054,26 @@ mod tests {
         let mut calibration = create_test_calibration(uncalibrated_status());
         calibration.physical_config.feed.position = (0.10, -0.20, 0.30);
 
-        let prepared = PreparedServedGain::prepare(
+        let served = PreparedServedGain::prepare(
             calibration,
             FeedSteering::new(1.0, 2.0, 5.0),
             ServedFrequencies::new(TEST_FREQ_MHZ, None),
             Duration::from_secs(300),
         )
+        .unwrap()
+        .evaluate_direct(
+            PreSquintDirection::new(0.0, 0.0),
+            ReferenceGainRequest::Omit,
+        )
         .unwrap();
 
-        let position = prepared.physical_feed_position();
-        assert!((position.x - 1.10).abs() < 1e-12, "x: {}", position.x);
-        assert!((position.y - 1.80).abs() < 1e-12, "y: {}", position.y);
-        assert!((position.z - 5.30).abs() < 1e-12, "z: {}", position.z);
+        // Reported offset is focal-point-relative, and focal_length_m = 5.0, so the
+        // vertex-relative position this asserts is (1.10, 1.80, 5.30) — steering plus
+        // design offset on every axis.
+        let offset = served.physical_feed_offset;
+        assert!((offset.x_m - 1.10).abs() < 1e-12, "x: {}", offset.x_m);
+        assert!((offset.y_m - 1.80).abs() < 1e-12, "y: {}", offset.y_m);
+        assert!((offset.z_m - 0.30).abs() < 1e-12, "z: {}", offset.z_m);
     }
 
     /// The vertex-relative physical feed POSITION (what physics and cache identity use)
@@ -1072,12 +1082,9 @@ mod tests {
     /// would report a 5 m defocus for a perfectly focused feed.
     #[test]
     fn reported_feed_offset_is_focal_point_relative_not_vertex_relative() {
-        // focal_length_m = 5.0 on the canonical fixture; steering parks the feed there.
-        let prepared = prepare_unsteered(create_test_calibration(uncalibrated_status()));
-
-        assert!((prepared.physical_feed_position().z - 5.0).abs() < 1e-12);
-
-        let served = prepared
+        // focal_length_m = 5.0 on the canonical fixture, and the steering below parks the
+        // feed at z = 5.0 — the focus. A vertex-relative report would say "5 m of defocus".
+        let served = prepare_unsteered(create_test_calibration(uncalibrated_status()))
             .evaluate_direct(
                 PreSquintDirection::new(0.0, 0.0),
                 ReferenceGainRequest::Omit,
@@ -1342,7 +1349,7 @@ mod tests {
         let coverage = Some(
             CalibrationCoverage::builder()
                 .azimuth_range(0.0, 360.0)
-                .elevation_range(0.0, crate::data::types::BORESIGHT_COVERAGE_CONE_DEG)
+                .elevation_range(0.0, antenna_core::data::types::BORESIGHT_COVERAGE_CONE_DEG)
                 .frequency_range(3700.0, 6425.0)
                 .num_measurements(6)
                 .has_correction_surface(true)
@@ -1497,7 +1504,7 @@ mod tests {
         });
 
         // Add a dummy correction surface to trigger the "not applied" warning
-        calibration.correction_surface = Some(crate::data::types::BSplineModel4D {
+        calibration.correction_surface = Some(antenna_core::data::types::BSplineModel4D {
             coefficients: vec![0.0; 10],
             shape: [2, 2, 2, 1],
             knots_azimuth: vec![0.0, 360.0],
@@ -1537,7 +1544,7 @@ mod tests {
         });
 
         // Add a dummy correction surface
-        calibration.correction_surface = Some(crate::data::types::BSplineModel4D {
+        calibration.correction_surface = Some(antenna_core::data::types::BSplineModel4D {
             coefficients: vec![0.0; 10],
             shape: [2, 2, 2, 1],
             knots_azimuth: vec![0.0, 360.0],
@@ -1805,7 +1812,8 @@ mod tests {
         assert!(calibration.correction_surface.is_none());
         assert!(calibration.physics_is_uncorrected());
 
-        // (a) Spillover gate is ON (the same predicate drives it — evaluator.rs:222).
+        // (a) Spillover gate is ON (the same predicate drives it — see `prepare`'s
+        //     `with_uncorrected_physics_gates` call above).
         assert!(
             calibration.physics_is_uncorrected(),
             "spillover fold-in must be gated ON for surfaceless partial calibration"

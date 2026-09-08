@@ -51,7 +51,7 @@ pub const INTEGRATION_NONCONVERGENCE_WARNING: &str =
 /// feature F2). Extracted as a `pub` constant (roadmap unit P3) so the honest "not
 /// fully implemented" text stays byte-identical across the model dispatch that
 /// pushes it here and the service-layer re-emission that surfaces it on
-/// `/h3-heatmap` cache hits (`service::evaluator::ray_trace_stub_warning`).
+/// `/h3-heatmap` cache hits (`service::served_gain::ray_trace_stub_warning`).
 ///
 /// Prefer [`ray_trace_stub_warning`] over building the
 /// [`crate::warnings::ApiWarning`] by hand.
@@ -71,7 +71,7 @@ pub fn nonconvergence_warning() -> ApiWarning {
 /// The canonical ray-tracing-stub warning, code and message together.
 ///
 /// The single constructor for [`crate::warnings::WarningCode::RayTraceDegraded`];
-/// see `antenna-model`'s `service::evaluator::ray_trace_stub_warning` for the
+/// see `antenna-model`'s `service::served_gain::ray_trace_stub_warning` for the
 /// service-layer re-emission that keeps it alive across `/h3-heatmap` cache hits.
 pub fn ray_trace_stub_warning() -> ApiWarning {
     WarningCode::RayTraceDegraded.with(RAY_TRACING_STUB_WARNING)

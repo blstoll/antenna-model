@@ -6,7 +6,7 @@
 //! gated as feature F2). Results there carry an honest "not fully implemented;
 //! gain accuracy may be degraded" warning. P3 pins that this warning reaches
 //! ALL FOUR compute endpoints (`/gain`, `/gain/batch`, `/heatmap`,
-//! `/h3-heatmap`), and — via `evaluator::ray_trace_stub_warning` re-emitted
+//! `/h3-heatmap`), and — via `served_gain::ray_trace_stub_warning` re-emitted
 //! outside the H3 gain-cache closure — that it survives H3 cache HITS, not just
 //! the first (cold-cache) request.
 //!
@@ -220,7 +220,7 @@ async fn test_h3_heatmap_large_feed_offset_warns() {
 /// H3 cache-hit robustness (the P3 fix): the H3 gain cache stores physics-only
 /// gain and only runs the model — which pushes the stub warning — on a cache
 /// MISS. A second identical request is served entirely from the warm cache;
-/// `evaluator::ray_trace_stub_warning`, emitted outside the cache closure, must
+/// `served_gain::ray_trace_stub_warning`, emitted outside the cache closure, must
 /// keep the warning present on that warm-cache response too.
 #[tokio::test]
 async fn test_h3_heatmap_large_feed_offset_warns_on_cache_hit() {

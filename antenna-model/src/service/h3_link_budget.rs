@@ -250,9 +250,10 @@ fn compute_cell_gain(
         captured_warnings.push(nonconvergence_warning());
     }
 
-    // Apply correction surface (post-cache). Uses the same gating logic as
-    // `service::evaluator::compute_gain_from_request` (the calibration's
-    // `temperature_const`, `is_in_coverage` for optional-coverage gating).
+    // Apply correction surface (post-cache). This is a hand-rolled copy of the gating
+    // `service::served_gain` now owns (the calibration's `temperature_const`, and
+    // `is_in_coverage` for optional-coverage gating). Issue #62 replaces it with a call
+    // to the prepared value's cache-backed evaluation — until then the two must agree.
     let mut correction_applied = false;
     let mut gain_db = physics_gain_db;
     if let Some(ref surface) = calibration.correction_surface {

@@ -135,7 +135,7 @@ The service automatically evaluates the correction surface at query time:
    - Applied: `gain_final = gain_physics + correction(freq)`
 
 2. **Query off-axis**:
-   - `service::evaluator::is_in_coverage` finds the query outside the artifact's
+   - `service::served_gain::is_in_coverage` finds the query outside the artifact's
      boresight-only `calibration_coverage`, so no correction is applied
    - The response is flagged extrapolated and carries the partial-calibration warning
 
