@@ -236,6 +236,7 @@ fn compute_cell_gain(
                 .warnings
                 .iter()
                 .any(|w| w.is(WarningCode::NonConvergence)),
+            result.spillover_loss_db,
         ))
     })?;
     let physics_gain_db = cached.value;
@@ -252,8 +253,8 @@ fn compute_cell_gain(
 
     // Apply correction surface (post-cache). This is a hand-rolled copy of the gating
     // `service::served_gain` now owns (the calibration's `temperature_const`, and
-    // `is_in_coverage` for optional-coverage gating). Issue #62 replaces it with a call
-    // to the prepared value's cache-backed evaluation — until then the two must agree.
+    // `is_in_coverage` for optional-coverage gating). Issue #63 replaces it with a call to
+    // `PreparedServedGain::evaluate_cached` (built in #62) — until then the two must agree.
     let mut correction_applied = false;
     let mut gain_db = physics_gain_db;
     if let Some(ref surface) = calibration.correction_surface {
@@ -302,6 +303,11 @@ fn compute_cell_gain(
     // miss closure (into `result.warnings` above), which the shared, persistent
     // `GainCache` would otherwise drop on a hit. On a miss both are present; the
     // caller's warning-set aggregation deduplicates them to one entry.
+    //
+    // This gate is unconditional, so it also fires for an uncorrected rear-hemisphere
+    // cell, where `compute_gain`'s F7 floor-only early return never reaches the stub and
+    // the model emits nothing. `PreparedServedGain::reconstruct_physics_warnings` (#62)
+    // reproduces the model's silence there; #63 adopts that behaviour here.
     captured_warnings.extend(crate::service::served_gain::ray_trace_stub_warning(
         antenna_config,
     ));

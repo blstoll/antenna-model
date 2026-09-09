@@ -20,14 +20,20 @@
 //!   ├─ adaptive integration policy + P11 uncorrected-physics gates + per-integration budget
 //!   └─ operating vs pointing frequency
 //!
-//! evaluate_direct(pre-squint direction, reference policy)
-//!   ├─ 1. beam squint            ← BEFORE physics, coverage, and correction
-//!   ├─ 2. physical optics        (aperture integration)
+//! evaluate_direct / evaluate_cached(pre-squint direction, reference policy)
+//!   ├─ 1. beam squint            ← BEFORE the cache key, physics, coverage, and correction
+//!   ├─ 2. physical optics        (aperture integration, or the cached result of one)
 //!   ├─ 3. correction surface     ← ONLY after physics
 //!   ├─ 4. correction disposition ← sole authority for applied / extrapolated
 //!   ├─ 5. warnings               (fixed order, see `assemble`)
 //!   └─ 6. ideal reference gain   ← spillover matched to what the ACTUAL evaluation did
 //! ```
+//!
+//! The two evaluation operations differ in step 2 alone — everything from step 3 on is
+//! one shared implementation — so direct, cold-cache and hot-cache evaluation of the same
+//! direction return the same [`ServedGain`] (issue #62). The cache holds physics only:
+//! never a corrected gain, a correction disposition, a coverage outcome, or a warning
+//! collection.
 //!
 //! # What callers cannot do
 //!
@@ -39,7 +45,8 @@
 //! That holds for code that goes *through* this module, which today is `/gain` (and, by
 //! delegation, batch and rectangular heatmap). `/h3-heatmap` still open-codes its own
 //! correction sequencing around the physics cache and only borrows this module's coverage
-//! and warning helpers; issue #62 moves it onto the prepared value and deletes that copy.
+//! and warning helpers; issue #63 moves it onto [`PreparedServedGain::evaluate_cached`]
+//! and deletes that copy.
 //!
 //! # Ownership boundary
 //!
@@ -55,11 +62,13 @@ use std::time::Duration;
 use antenna_core::data::types::{AntennaCalibration, CalibrationCoverage, CalibrationStatus};
 use antenna_core::error::{AntennaModelError, Result};
 use antenna_core::model::{
-    compute_gain_db, evaluate_correction, squint_corrected_direction, AntennaConfiguration,
-    FeedParameters as ModelFeedParams, FeedPosition, IntegrationParams,
+    analyze_edge_cases, compute_gain_db, evaluate_correction, squint_corrected_direction,
+    AntennaConfiguration, FeedParameters as ModelFeedParams, FeedPosition, IntegrationParams,
     MeshParameters as ModelMeshParams, ReflectorGeometry as ModelReflector,
 };
 use antenna_core::warnings::{ApiWarning, WarningCode};
+
+use crate::service::cache::{CachedGain, GainCache, GainCacheKey};
 
 /// A direction in the antenna frame, **before** beam-squint correction.
 ///
@@ -423,6 +432,52 @@ impl PreparedServedGain {
         self.assemble(corrected, physics, reference)
     }
 
+    /// Serve one direction, taking the physics term from `cache` when it is already there
+    /// and running the integration only on a miss (issue #62).
+    ///
+    /// **Observationally identical to [`evaluate_direct`](Self::evaluate_direct)**, and
+    /// that identity is the point: direct, cold-cache and hot-cache evaluation of the same
+    /// direction return the same [`ServedGain`], field for field and warning for warning.
+    /// The two share [`assemble`](Self::assemble) verbatim — they differ only in how the
+    /// [`PhysicsOutcome`] was obtained — so correction gating, disposition, the reference,
+    /// and warning order cannot drift between them.
+    ///
+    /// What the cache holds is **physics only**. The correction surface is interpolated
+    /// after every lookup, so a warm cache never serves a stale correction; coverage,
+    /// calibration advisories, and the direction-derived warnings are likewise re-evaluated
+    /// per call. The one thing that cannot be re-derived — what the integration itself
+    /// learned — rides in the [`CachedGain`] payload: convergence and the spillover it
+    /// actually applied.
+    ///
+    /// Cache identity is `(antenna_id, feed_id)` from the **artifact**, keyed on the
+    /// squint-corrected direction, the operating frequency, and the vertex-relative
+    /// physical feed position. The artifact's own composite identifier is used rather than
+    /// a caller-supplied one because the repository stores each calibration under exactly
+    /// that pair — taking it from the value being evaluated makes a namespace/artifact
+    /// mismatch unrepresentable.
+    ///
+    /// That namespace assumes what the repository guarantees: one artifact per
+    /// `(antenna_id, feed_id)` at a time, with [`GainCache::invalidate`] called when it is
+    /// replaced. Two *different* artifacts for one identifier would share entries while
+    /// disagreeing about the P11 gates — which change the physics but are not part of the
+    /// key — so cached physics is only interchangeable for as long as that holds.
+    // No production caller yet: `/h3-heatmap` migrates onto this in issue #63, which
+    // removes this allow. Until then only this module's tests exercise it.
+    #[allow(dead_code)]
+    pub(crate) fn evaluate_cached(
+        &self,
+        direction: PreSquintDirection,
+        reference: ReferenceGainRequest,
+        cache: &GainCache,
+    ) -> Result<ServedGain> {
+        // Squint FIRST — before the cache key, for the same reason it precedes physics:
+        // the key must name the direction that was actually evaluated. Keying on the
+        // requested direction would serve one angle's gain for another.
+        let corrected = self.squint(direction);
+        let physics = self.physics_cached(&corrected, cache)?;
+        self.assemble(corrected, physics, reference)
+    }
+
     /// Apply beam squint. Depends on the actual feed displacement, which is why it can
     /// only happen after preparation has positioned the feed.
     fn squint(&self, direction: PreSquintDirection) -> SquintCorrectedDirection {
@@ -479,9 +534,108 @@ impl PreparedServedGain {
         })
     }
 
+    /// Obtain the physics term for one squint-corrected direction from the cache,
+    /// integrating only on a miss.
+    ///
+    /// The miss path stores the integration's value and provenance and then **discards its
+    /// warnings**, so that both the miss and every later hit build their warnings the same
+    /// way — through [`reconstruct_physics_warnings`](Self::reconstruct_physics_warnings).
+    /// Returning the model's own list on a miss would make cold-cache evaluation agree with
+    /// direct evaluation for free while leaving hot-cache evaluation the only path anything
+    /// tested; here a divergence in the reconstruction fails the direct-vs-cold comparison
+    /// too, which is the comparison a real physics change moves.
+    fn physics_cached(
+        &self,
+        corrected: &SquintCorrectedDirection,
+        cache: &GainCache,
+    ) -> Result<PhysicsOutcome> {
+        let key = GainCacheKey::new(
+            corrected.e_clock_deg,
+            corrected.e_cone_deg,
+            self.frequencies.operating_mhz,
+            self.physical_feed_position.x,
+            self.physical_feed_position.y,
+            self.physical_feed_position.z,
+        );
+
+        let cached = cache.get_or_compute(
+            &self.calibration.antenna_id,
+            &self.calibration.feed_id,
+            key,
+            || {
+                let physics = self.physics_direct(corrected)?;
+                Ok(CachedGain::new(
+                    physics.gain_db,
+                    !physics
+                        .warnings
+                        .iter()
+                        .any(|w| w.is(WarningCode::NonConvergence)),
+                    physics.spillover_loss_db,
+                ))
+            },
+        )?;
+
+        Ok(PhysicsOutcome {
+            gain_db: cached.value,
+            spillover_loss_db: cached.spillover_loss_db,
+            warnings: self.reconstruct_physics_warnings(corrected, cached.converged),
+        })
+    }
+
+    /// Rebuild the warnings `compute_gain_db` would have emitted for this direction.
+    ///
+    /// Every warning the model pushes from inside the integration is a deterministic
+    /// function of the antenna configuration, the direction, and the integration policy —
+    /// all of which the prepared value still holds — with exactly one exception:
+    /// convergence, which only the integration learns and which therefore rides in the
+    /// cached payload.
+    ///
+    /// The reconstruction mirrors `model::pattern::compute_gain`'s own structure and order:
+    ///
+    /// 1. `analyze_edge_cases` — the severe / moderate feed-offset band and the
+    ///    significant-spillover advisory. Called here rather than copied; it ignores
+    ///    `(theta, phi)`, so it is the configuration's verdict.
+    /// 2. The ray-tracing stub warning, iff the mode dispatch is actually reached and
+    ///    selects it. Mode selection goes through [`ray_trace_stub_warning`], this module's
+    ///    single mirror of it — expressing the same threshold a second time here is exactly
+    ///    how the two would come to disagree. What is added on top is the *reachability*
+    ///    question that helper cannot answer: the F7 floor-only rear path
+    ///    (`apply_sidelobe_floor` on, past 90°) returns *before* the dispatch, so a severe
+    ///    feed offset earns the severe-offset advisory there but **not** the degradation
+    ///    warning — the model never ran the stub, and claiming otherwise would be a
+    ///    fabricated diagnostic.
+    /// 3. Non-convergence, from the cached flag.
+    ///
+    /// The floor-only gate is the one model-internal condition this module restates, and
+    /// the direct-vs-cold-vs-hot equality tests are what hold it to the model's behaviour:
+    /// a gate that drifts fails them at the first affected geometry.
+    fn reconstruct_physics_warnings(
+        &self,
+        corrected: &SquintCorrectedDirection,
+        converged: bool,
+    ) -> Vec<ApiWarning> {
+        let theta_rad = corrected.e_cone_deg.to_radians();
+        let phi_rad = corrected.e_clock_deg.to_radians();
+
+        let analysis = analyze_edge_cases(&self.antenna_config, theta_rad, phi_rad);
+        let mut warnings = analysis.warnings;
+
+        let floor_only_rear = self.integration_params.apply_sidelobe_floor
+            && theta_rad.abs() > std::f64::consts::FRAC_PI_2;
+        if !floor_only_rear {
+            warnings.extend(ray_trace_stub_warning(&self.antenna_config));
+        }
+
+        if !converged {
+            warnings.push(antenna_core::model::pattern::nonconvergence_warning());
+        }
+
+        warnings
+    }
+
     /// The shared tail of every evaluation: correction, disposition, reference, warnings.
     ///
-    /// Direct and (from #62) cache-backed evaluation differ only in how [`PhysicsOutcome`]
+    /// Direct and cache-backed evaluation (issue #62) differ only in how [`PhysicsOutcome`]
     /// was obtained; from here on there is one implementation, so the two cannot drift.
     fn assemble(
         &self,
@@ -665,7 +819,7 @@ struct PhysicsOutcome {
 ///
 /// **Visibility is interim.** This is `pub(crate)` only because `service::h3_link_budget`
 /// still calls it directly while it open-codes its own correction sequencing around the
-/// physics cache. Issue #62 moves that endpoint onto [`PreparedServedGain`], at which
+/// physics cache. Issue #63 moves that endpoint onto [`PreparedServedGain`], at which
 /// point the module's own `assemble` is the only caller and this becomes private.
 pub(crate) fn is_in_coverage(
     coverage: &Option<CalibrationCoverage>,
@@ -931,6 +1085,13 @@ pub(crate) fn rear_hemisphere_warning(
 /// On a cache miss the model also emits the identical string; the H3 warning-set
 /// aggregation deduplicates the pair to a single entry.
 ///
+/// It is also this module's single expression of the model's mode selection, used by
+/// [`PreparedServedGain::reconstruct_physics_warnings`] to decide whether a cache hit
+/// earned the warning. That caller adds one condition this helper deliberately does not
+/// know about — whether the mode dispatch was reached at all, which the F7 floor-only rear
+/// path skips — because the threshold and the reachability question drift independently
+/// and only the threshold belongs to `analyze_edge_cases`.
+///
 /// Deliberately **not** gated on calibration status: the ray-tracing stub is a
 /// numerical/geometric limitation independent of whether a correction surface
 /// exists. The message is constant per antenna config, so heatmap/H3 aggregation
@@ -955,7 +1116,7 @@ mod tests {
     use super::*;
     use crate::service::test_support::{create_test_calibration, dummy_correction_surface};
 
-    /// The prepared value is shared across parallel grid workers (issue #62 onward), so
+    /// The prepared value is shared across parallel grid workers (issue #63 onward), so
     /// `Sync` is a structural requirement, not an accident of today's fields. Adding a
     /// `Cell`, `RefCell`, or non-atomic memoisation cache to memoise reference gain would
     /// break this line at compile time — which is the point.
@@ -1958,5 +2119,694 @@ mod tests {
         assert_eq!(msg.code, WarningCode::RearHemisphereInvalid);
         assert!(msg.message.contains("REAR HEMISPHERE"));
         assert!(msg.message.contains("numerical extrapolation"));
+    }
+
+    // ---------------------------------------------------------------------------------
+    // Cache-backed evaluation (issue #62).
+    //
+    // The invariant these pin is a three-way identity: DIRECT, COLD-cache (a miss that
+    // runs the integration) and HOT-cache (a hit that skips it) must return the same
+    // `ServedGain`, field for field and warning for warning. Two of those three can agree
+    // while the third drifts — pre-C10 the hot path silently dropped a non-convergence
+    // warning that both other paths carried — so every scenario below asserts all three.
+    // ---------------------------------------------------------------------------------
+
+    /// Prepare with an explicit feed steering, so a test can put the feed off-axis.
+    fn prepare_with_steering(
+        calibration: AntennaCalibration,
+        steering: FeedSteering,
+    ) -> PreparedServedGain {
+        PreparedServedGain::prepare(
+            calibration,
+            steering,
+            ServedFrequencies::new(TEST_FREQ_MHZ, None),
+            Duration::from_secs(300),
+        )
+        .expect("prepare must succeed for the canonical test artifact")
+    }
+
+    /// A feed displacement of 0.6·f — past
+    /// [`antenna_core::model::edge_cases::SEVERE_OFFSET_THRESHOLD`] (0.5·f), so the model
+    /// dispatches to the acknowledged ray-tracing stub. The fixture's focal length is 5 m,
+    /// so `z = 5.0` parks the feed at the focus and `x = 3.0` displaces it laterally by
+    /// 0.6·f.
+    fn severe_offset_steering() -> FeedSteering {
+        FeedSteering::new(3.0, 0.0, 5.0)
+    }
+
+    /// A constant correction surface whose ELEVATION knots stop at 2°, so a query further
+    /// off boresight lands outside the fitted span and earns the interpolator's
+    /// extrapolation warning while staying inside calibrated coverage. Everything else
+    /// matches [`constant_correction_surface`].
+    fn narrow_elevation_correction_surface(
+        correction_db: f64,
+    ) -> antenna_core::data::types::BSplineModel4D {
+        let mut surface = constant_correction_surface(correction_db);
+        surface.knots_elevation = vec![0.0, 0.0, 0.0, 1.0, 2.0, 2.0, 2.0];
+        surface
+    }
+
+    /// The cache key the prepared value builds for one squint-corrected direction.
+    ///
+    /// Deliberately rebuilt from the prepared value's own fields rather than exposed by
+    /// the module: a test that can ask the code under test for its key could not detect
+    /// the key being built from the wrong quantities.
+    fn cache_key_for(
+        prepared: &PreparedServedGain,
+        direction: &SquintCorrectedDirection,
+    ) -> GainCacheKey {
+        GainCacheKey::new(
+            direction.e_clock_deg,
+            direction.e_cone_deg,
+            prepared.frequencies.operating_mhz,
+            prepared.physical_feed_position.x,
+            prepared.physical_feed_position.y,
+            prepared.physical_feed_position.z,
+        )
+    }
+
+    /// Put a known physics payload into the cache under `prepared`'s namespace and key,
+    /// so a following evaluation that hits it is provably not integrating.
+    fn prime(
+        cache: &GainCache,
+        prepared: &PreparedServedGain,
+        direction: &SquintCorrectedDirection,
+        entry: CachedGain,
+    ) {
+        cache
+            .get_or_compute(
+                &prepared.calibration.antenna_id,
+                &prepared.calibration.feed_id,
+                cache_key_for(prepared, direction),
+                || Ok(entry),
+            )
+            .expect("priming the cache must not fail");
+    }
+
+    /// Assert the three-way identity for one prepared value and one direction.
+    fn assert_direct_cold_hot_agree(
+        prepared: &PreparedServedGain,
+        direction: PreSquintDirection,
+        reference: ReferenceGainRequest,
+    ) -> ServedGain {
+        let direct = prepared
+            .evaluate_direct(direction, reference)
+            .expect("direct evaluation");
+
+        let cache = GainCache::new(true, 128);
+        let cold = prepared
+            .evaluate_cached(direction, reference, &cache)
+            .expect("cold-cache evaluation");
+        let hot = prepared
+            .evaluate_cached(direction, reference, &cache)
+            .expect("hot-cache evaluation");
+
+        assert_eq!(direct, cold, "cold-cache evaluation must equal direct");
+        assert_eq!(cold, hot, "hot-cache evaluation must equal cold");
+        direct
+    }
+
+    /// Boresight on an uncorrected-physics antenna: the case where spillover IS folded
+    /// into the physics term, so this is what pins spillover provenance surviving the
+    /// cache. The reference gain is requested too, because it is derived from that
+    /// provenance and would drift with it.
+    #[test]
+    fn cached_evaluation_matches_direct_at_boresight_with_spillover_provenance() {
+        let prepared = prepare_unsteered(create_test_calibration(uncalibrated_status()));
+        let served = assert_direct_cold_hot_agree(
+            &prepared,
+            PreSquintDirection::new(0.0, 0.0),
+            ReferenceGainRequest::Include,
+        );
+        assert!(
+            served.spillover_loss_db.is_some(),
+            "fixture must actually apply spillover, or this pins nothing"
+        );
+        assert!(served.reference_gain_db.is_some());
+    }
+
+    /// Off-axis on an uncorrected-physics antenna: calibration advisory plus the P8
+    /// off-axis honesty warning, both reconstructed after a hit.
+    #[test]
+    fn cached_evaluation_matches_direct_off_axis_with_calibration_and_off_axis_warnings() {
+        let prepared = prepare_unsteered(create_test_calibration(uncalibrated_status()));
+        let served = assert_direct_cold_hot_agree(
+            &prepared,
+            PreSquintDirection::new(0.0, 5.0),
+            ReferenceGainRequest::Omit,
+        );
+        let codes: Vec<WarningCode> = served.warnings.iter().map(|w| w.code).collect();
+        assert!(codes.contains(&WarningCode::Uncalibrated), "{codes:?}");
+        assert!(
+            codes.contains(&WarningCode::OffAxisUnvalidated),
+            "{codes:?}"
+        );
+        // This geometry also happens to be a genuine non-convergence case, so the identity
+        // asserted above covers the canonical warning on a real integration rather than on
+        // a hand-planted flag. If the integrator ever converges here this assert fails
+        // loudly, which is the signal to re-point the case at a geometry that does not —
+        // not to drop it, because the cached-flag path would then go untested end to end.
+        assert!(
+            codes.contains(&WarningCode::NonConvergence),
+            "fixture must exercise the canonical non-convergence warning: {codes:?}"
+        );
+    }
+
+    /// Rear hemisphere on an uncorrected-physics antenna: the F7 floor-only path, which
+    /// returns before the mode dispatch and therefore before any integration at all.
+    #[test]
+    fn cached_evaluation_matches_direct_in_the_rear_hemisphere() {
+        let prepared = prepare_unsteered(create_test_calibration(uncalibrated_status()));
+        let served = assert_direct_cold_hot_agree(
+            &prepared,
+            PreSquintDirection::new(0.0, 120.0),
+            ReferenceGainRequest::Omit,
+        );
+        let codes: Vec<WarningCode> = served.warnings.iter().map(|w| w.code).collect();
+        assert!(
+            codes.contains(&WarningCode::RearHemisphereInvalid),
+            "{codes:?}"
+        );
+    }
+
+    /// A partially-calibrated antenna queried outside its coverage: the correction is not
+    /// applied, and the advisory pair (partial calibration, out of coverage) plus
+    /// `correction_not_applied` must all survive a hit.
+    #[test]
+    fn cached_evaluation_matches_direct_outside_calibrated_coverage() {
+        let coverage = CalibrationCoverage::builder()
+            .azimuth_range(0.0, 10.0)
+            .elevation_range(0.0, 1.0)
+            .frequency_range(8000.0, 9000.0)
+            .num_measurements(1000)
+            .has_correction_surface(true)
+            .build()
+            .unwrap();
+        let mut calibration = create_test_calibration(CalibrationStatus::PartiallyCalibrated {
+            accuracy_estimate_db: 1.5,
+            coverage,
+        });
+        calibration.correction_surface = Some(constant_correction_surface(2.0));
+
+        let prepared = prepare_unsteered(calibration);
+        let served = assert_direct_cold_hot_agree(
+            &prepared,
+            PreSquintDirection::new(0.0, 5.0),
+            ReferenceGainRequest::Omit,
+        );
+        assert_eq!(served.correction, CorrectionDisposition::OutsideCoverage);
+        let codes: Vec<WarningCode> = served.warnings.iter().map(|w| w.code).collect();
+        assert!(
+            codes.contains(&WarningCode::PartiallyCalibrated),
+            "{codes:?}"
+        );
+        assert!(codes.contains(&WarningCode::OutOfCoverage), "{codes:?}");
+        assert!(
+            codes.contains(&WarningCode::CorrectionNotApplied),
+            "{codes:?}"
+        );
+    }
+
+    /// A correction applied outside the fitted knot span: the interpolator's own
+    /// extrapolation warning is produced AFTER the cache lookup on every path, so it must
+    /// be identical on a hit.
+    #[test]
+    fn cached_evaluation_matches_direct_when_the_correction_extrapolates() {
+        let mut calibration = create_test_calibration(CalibrationStatus::FullyCalibrated {
+            accuracy_estimate_db: 1.0,
+        });
+        calibration.correction_surface = Some(narrow_elevation_correction_surface(2.0));
+
+        let prepared = prepare_unsteered(calibration);
+        let served = assert_direct_cold_hot_agree(
+            &prepared,
+            PreSquintDirection::new(0.0, 5.0),
+            ReferenceGainRequest::Omit,
+        );
+        assert_eq!(
+            served.correction,
+            CorrectionDisposition::Applied { extrapolated: true },
+            "fixture must actually extrapolate, or this pins nothing"
+        );
+        let codes: Vec<WarningCode> = served.warnings.iter().map(|w| w.code).collect();
+        assert!(codes.contains(&WarningCode::Extrapolated), "{codes:?}");
+    }
+
+    /// A severe feed offset in the FORWARD hemisphere routes to the ray-tracing stub, so
+    /// the canonical degraded-accuracy warning is part of the served result — on all three
+    /// paths. The model pushes it from inside the integration, which only a MISS runs;
+    /// the cache-backed path has to reconstruct it.
+    #[test]
+    fn severe_offset_forward_reports_ray_tracing_degradation_on_every_path() {
+        let prepared = prepare_with_steering(
+            create_test_calibration(uncalibrated_status()),
+            severe_offset_steering(),
+        );
+        let served = assert_direct_cold_hot_agree(
+            &prepared,
+            PreSquintDirection::new(0.0, 5.0),
+            ReferenceGainRequest::Omit,
+        );
+        let codes: Vec<WarningCode> = served.warnings.iter().map(|w| w.code).collect();
+        assert!(codes.contains(&WarningCode::SevereFeedOffset), "{codes:?}");
+        assert!(codes.contains(&WarningCode::RayTraceDegraded), "{codes:?}");
+    }
+
+    /// The same severe offset in the REAR hemisphere on an uncorrected-physics antenna
+    /// never reaches the stub: the F7 floor-only early return happens before the mode
+    /// dispatch. Emitting the degradation warning here would be a fabrication — the
+    /// reconstruction must reproduce the model's silence, while keeping the diagnostics
+    /// that DO apply.
+    #[test]
+    fn uncorrected_severe_offset_rear_omits_ray_tracing_degradation_on_every_path() {
+        let prepared = prepare_with_steering(
+            create_test_calibration(uncalibrated_status()),
+            severe_offset_steering(),
+        );
+        assert!(
+            prepared.integration_params.apply_sidelobe_floor,
+            "precondition: the F7 floor must be on, which is what skips the integration"
+        );
+        let served = assert_direct_cold_hot_agree(
+            &prepared,
+            PreSquintDirection::new(0.0, 120.0),
+            ReferenceGainRequest::Omit,
+        );
+        let codes: Vec<WarningCode> = served.warnings.iter().map(|w| w.code).collect();
+        assert!(
+            !codes.contains(&WarningCode::RayTraceDegraded),
+            "the floor-only rear path never reaches the ray-tracing stub: {codes:?}"
+        );
+        assert!(codes.contains(&WarningCode::SevereFeedOffset), "{codes:?}");
+        assert!(
+            codes.contains(&WarningCode::RearHemisphereInvalid),
+            "{codes:?}"
+        );
+    }
+
+    /// A CORRECTED antenna keeps the F7 floor off, so a rear-hemisphere query at the same
+    /// severe offset does reach the mode dispatch and the stub — and must keep the
+    /// warning. This is the counterpart that stops the test above from being satisfied by
+    /// a blanket "no stub warning behind the dish" rule.
+    #[test]
+    fn corrected_severe_offset_rear_retains_ray_tracing_degradation_on_every_path() {
+        let mut calibration = create_test_calibration(CalibrationStatus::FullyCalibrated {
+            accuracy_estimate_db: 1.0,
+        });
+        calibration.correction_surface = Some(constant_correction_surface(0.0));
+
+        let prepared = prepare_with_steering(calibration, severe_offset_steering());
+        assert!(
+            !prepared.integration_params.apply_sidelobe_floor,
+            "precondition: a corrected antenna keeps the floor off, so the stub is reached"
+        );
+        let served = assert_direct_cold_hot_agree(
+            &prepared,
+            PreSquintDirection::new(0.0, 120.0),
+            ReferenceGainRequest::Omit,
+        );
+        let codes: Vec<WarningCode> = served.warnings.iter().map(|w| w.code).collect();
+        assert!(codes.contains(&WarningCode::RayTraceDegraded), "{codes:?}");
+        assert!(
+            codes.contains(&WarningCode::RearHemisphereInvalid),
+            "{codes:?}"
+        );
+    }
+
+    /// A hit returns the CACHED physics term, not a fresh integration. Priming a value
+    /// no integration could produce is the only way to assert that without timing the
+    /// call: if the served gain is the sentinel, the aperture integral did not run.
+    #[test]
+    fn cache_hit_performs_no_integration() {
+        let prepared = prepare_unsteered(create_test_calibration(uncalibrated_status()));
+        let direction = PreSquintDirection::new(0.0, 5.0);
+        let corrected = prepared.squint(direction);
+
+        let cache = GainCache::new(true, 128);
+        const SENTINEL_DB: f64 = -12.5;
+        prime(
+            &cache,
+            &prepared,
+            &corrected,
+            CachedGain::new(SENTINEL_DB, true, None),
+        );
+
+        let served = prepared
+            .evaluate_cached(direction, ReferenceGainRequest::Omit, &cache)
+            .unwrap();
+        assert_eq!(
+            served.gain_db, SENTINEL_DB,
+            "a hit must serve the cached physics term; this artifact has no correction \
+             surface, so served gain IS that term"
+        );
+    }
+
+    /// The cache holds physics only: the correction surface is applied after every
+    /// lookup, so two artifacts differing ONLY in their surface constant serve gains that
+    /// differ by exactly that constant off one shared cached physics value.
+    ///
+    /// Both artifacts carry a surface, so `physics_is_uncorrected()` — and every P11 gate
+    /// with it — is identical; the physics term they would each compute is the same
+    /// number, which is what makes sharing a cache entry between them legitimate here.
+    #[test]
+    fn cache_hit_applies_the_current_correction_surface() {
+        let direction = PreSquintDirection::new(0.0, 5.0);
+        let with_constant = |correction_db: f64| {
+            let mut calibration = create_test_calibration(CalibrationStatus::FullyCalibrated {
+                accuracy_estimate_db: 1.0,
+            });
+            calibration.correction_surface = Some(constant_correction_surface(correction_db));
+            prepare_unsteered(calibration)
+        };
+
+        let cache = GainCache::new(true, 128);
+        let first = with_constant(1.0)
+            .evaluate_cached(direction, ReferenceGainRequest::Omit, &cache)
+            .unwrap();
+        let second = with_constant(4.0)
+            .evaluate_cached(direction, ReferenceGainRequest::Omit, &cache)
+            .unwrap();
+
+        assert!(first.correction.applied() && second.correction.applied());
+        assert!(
+            (second.gain_db - first.gain_db - 3.0).abs() < 1e-9,
+            "a hit must re-apply the CURRENT surface to the cached physics term: \
+             {} vs {}",
+            first.gain_db,
+            second.gain_db
+        );
+    }
+
+    /// Convergence is the one piece of provenance a hit cannot re-derive — only the
+    /// integration knows it, and a hit is precisely the case that skips the integration
+    /// (roadmap C10). A primed non-converged entry must therefore produce the canonical
+    /// warning, inserted where the model would have put it, and change nothing else.
+    #[test]
+    fn nonconvergence_rides_the_cache_into_the_served_warnings() {
+        let prepared = prepare_unsteered(create_test_calibration(uncalibrated_status()));
+        // Boresight, where this fixture's integration converges — so the warning under
+        // test can only have come from the cached flag.
+        let direction = PreSquintDirection::new(0.0, 0.0);
+        let corrected = prepared.squint(direction);
+
+        let direct = prepared
+            .evaluate_direct(direction, ReferenceGainRequest::Omit)
+            .unwrap();
+        assert!(
+            !direct
+                .warnings
+                .iter()
+                .any(|w| w.is(WarningCode::NonConvergence)),
+            "precondition: this geometry converges, so the flag under test is the cache's"
+        );
+
+        let cache = GainCache::new(true, 128);
+        prime(
+            &cache,
+            &prepared,
+            &corrected,
+            CachedGain::new(direct.gain_db, false, direct.spillover_loss_db),
+        );
+
+        let hot = prepared
+            .evaluate_cached(direction, ReferenceGainRequest::Omit, &cache)
+            .unwrap();
+
+        let canonical = antenna_core::model::pattern::nonconvergence_warning();
+        let mut without_flag = hot.warnings.clone();
+        let at = without_flag
+            .iter()
+            .position(|w| *w == canonical)
+            .expect("a non-converged cache entry must warn");
+        without_flag.remove(at);
+        assert_eq!(
+            without_flag, direct.warnings,
+            "the non-convergence warning is the ONLY difference a stale flag makes"
+        );
+        assert_eq!(
+            hot.gain_db, direct.gain_db,
+            "the flag must not move the served number"
+        );
+    }
+
+    /// Cache identity is scoped by (antenna, feed): a value primed for one composite
+    /// identifier must never be served for another. The two prepared values are otherwise
+    /// identical, so only the namespace can keep them apart.
+    #[test]
+    fn cache_identity_is_scoped_by_antenna_and_feed() {
+        let direction = PreSquintDirection::new(0.0, 5.0);
+        let mine = prepare_unsteered(create_test_calibration(uncalibrated_status()));
+        let corrected = mine.squint(direction);
+
+        let mut other_feed_artifact = create_test_calibration(uncalibrated_status());
+        other_feed_artifact.feed_id = "other_feed".to_string();
+        let other_feed = prepare_unsteered(other_feed_artifact);
+
+        let mut other_antenna_artifact = create_test_calibration(uncalibrated_status());
+        other_antenna_artifact.antenna_id = "other_antenna".to_string();
+        let other_antenna = prepare_unsteered(other_antenna_artifact);
+
+        let cache = GainCache::new(true, 128);
+        const SENTINEL_DB: f64 = -12.5;
+        prime(
+            &cache,
+            &mine,
+            &corrected,
+            CachedGain::new(SENTINEL_DB, true, None),
+        );
+
+        assert_eq!(
+            mine.evaluate_cached(direction, ReferenceGainRequest::Omit, &cache)
+                .unwrap()
+                .gain_db,
+            SENTINEL_DB,
+            "precondition: the priming key must be the one this value looks up"
+        );
+        for (label, neighbour) in [("feed", &other_feed), ("antenna", &other_antenna)] {
+            let served = neighbour
+                .evaluate_cached(direction, ReferenceGainRequest::Omit, &cache)
+                .unwrap();
+            assert_ne!(
+                served.gain_db, SENTINEL_DB,
+                "a different {label} must not read this cache entry"
+            );
+        }
+    }
+
+    /// Beam squint precedes cache-key construction. The key is built from the
+    /// SQUINT-CORRECTED direction, so a value primed at the pre-squint angles is a miss
+    /// and one primed at the corrected angles is a hit. Keying on the requested direction
+    /// instead would return the gain for an angle the service never evaluated.
+    #[test]
+    fn cache_key_is_built_from_the_squint_corrected_direction() {
+        let direction = PreSquintDirection::new(0.0, 3.0);
+        let mut calibration = create_test_calibration(CalibrationStatus::FullyCalibrated {
+            accuracy_estimate_db: 1.0,
+        });
+        calibration.correction_surface = Some(constant_correction_surface(0.0));
+        let prepared = PreparedServedGain::prepare(
+            calibration,
+            // A laterally displaced feed plus a pointing/operating frequency offset is
+            // what produces squint at all.
+            FeedSteering::new(0.4, 0.0, 5.0),
+            ServedFrequencies::new(TEST_FREQ_MHZ, Some(TEST_FREQ_MHZ * 0.85)),
+            Duration::from_secs(300),
+        )
+        .unwrap();
+
+        let corrected = prepared.squint(direction);
+        assert!(
+            (corrected.e_cone_deg - direction.e_cone_deg).abs() > 0.01,
+            "fixture must actually squint, got {corrected:?}"
+        );
+        let pre_squint = SquintCorrectedDirection {
+            e_clock_deg: direction.e_clock_deg,
+            e_cone_deg: direction.e_cone_deg,
+            squint_magnitude_deg: 0.0,
+        };
+
+        const SENTINEL_DB: f64 = -12.5;
+
+        let wrong_key = GainCache::new(true, 128);
+        prime(
+            &wrong_key,
+            &prepared,
+            &pre_squint,
+            CachedGain::new(SENTINEL_DB, true, None),
+        );
+        assert_ne!(
+            prepared
+                .evaluate_cached(direction, ReferenceGainRequest::Omit, &wrong_key)
+                .unwrap()
+                .gain_db,
+            SENTINEL_DB,
+            "an entry stored at the PRE-squint angles must not be served"
+        );
+
+        let right_key = GainCache::new(true, 128);
+        prime(
+            &right_key,
+            &prepared,
+            &corrected,
+            CachedGain::new(SENTINEL_DB, true, None),
+        );
+        assert_eq!(
+            prepared
+                .evaluate_cached(direction, ReferenceGainRequest::Omit, &right_key)
+                .unwrap()
+                .gain_db,
+            SENTINEL_DB,
+            "an entry stored at the squint-corrected angles must be served"
+        );
+    }
+
+    /// A physical feed position that quantizes to a different millimetre is a different
+    /// cache entry: the vertex-relative feed position is part of cache identity because
+    /// it changes the physics, and two steerings that share a key would serve each
+    /// other's gain.
+    #[test]
+    fn cache_identity_quantizes_the_vertex_relative_feed_position() {
+        let direction = PreSquintDirection::new(0.0, 5.0);
+        let steered = |x_m: f64| {
+            prepare_with_steering(
+                create_test_calibration(uncalibrated_status()),
+                FeedSteering::new(x_m, 0.0, 5.0),
+            )
+        };
+
+        let baseline = steered(0.0);
+        let corrected = baseline.squint(direction);
+        let cache = GainCache::new(true, 128);
+        const SENTINEL_DB: f64 = -12.5;
+        prime(
+            &cache,
+            &baseline,
+            &corrected,
+            CachedGain::new(SENTINEL_DB, true, None),
+        );
+
+        // Within the 1 mm quantum: the same entry, by design.
+        assert_eq!(
+            steered(0.0002)
+                .evaluate_cached(direction, ReferenceGainRequest::Omit, &cache)
+                .unwrap()
+                .gain_db,
+            SENTINEL_DB,
+            "sub-millimetre steering differences share a cache entry"
+        );
+        // Beyond it: a different entry, so a real integration runs.
+        assert_ne!(
+            steered(0.05)
+                .evaluate_cached(direction, ReferenceGainRequest::Omit, &cache)
+                .unwrap()
+                .gain_db,
+            SENTINEL_DB,
+            "a 50 mm steering difference must not read the baseline's entry"
+        );
+    }
+
+    /// The operating frequency is part of cache identity. It reaches the key directly (not
+    /// only through squint), because it changes the physics: two frequencies that shared an
+    /// entry would serve each other's gain on an antenna whose feed never moved.
+    #[test]
+    fn cache_identity_includes_the_operating_frequency() {
+        let direction = PreSquintDirection::new(0.0, 5.0);
+        let at = |operating_mhz: f64| {
+            PreparedServedGain::prepare(
+                create_test_calibration(uncalibrated_status()),
+                FeedSteering::new(0.0, 0.0, 5.0),
+                ServedFrequencies::new(operating_mhz, None),
+                Duration::from_secs(300),
+            )
+            .unwrap()
+        };
+
+        let baseline = at(TEST_FREQ_MHZ);
+        let corrected = baseline.squint(direction);
+        let cache = GainCache::new(true, 128);
+        const SENTINEL_DB: f64 = -12.5;
+        prime(
+            &cache,
+            &baseline,
+            &corrected,
+            CachedGain::new(SENTINEL_DB, true, None),
+        );
+
+        assert_eq!(
+            baseline
+                .evaluate_cached(direction, ReferenceGainRequest::Omit, &cache)
+                .unwrap()
+                .gain_db,
+            SENTINEL_DB,
+            "precondition: the priming key must be the one this value looks up"
+        );
+        assert_ne!(
+            at(TEST_FREQ_MHZ - 100.0)
+                .evaluate_cached(direction, ReferenceGainRequest::Omit, &cache)
+                .unwrap()
+                .gain_db,
+            SENTINEL_DB,
+            "a different operating frequency must not read this cache entry"
+        );
+    }
+
+    /// The moderate feed-offset band (0.3·f–0.5·f) is where "provenance, not policy" is
+    /// load-bearing: the P11 spillover gate is ON, and the model still applies none,
+    /// because `estimate_spillover` is not trusted past 0.3·f. A hit that re-derived
+    /// spillover from the gate instead of from the payload would report a loss the served
+    /// number never took, and bias `loss_db` against the ideal reference.
+    #[test]
+    fn cached_evaluation_matches_direct_in_the_moderate_offset_band() {
+        // Focal length 5 m, so a 2 m lateral displacement is 0.4·f: past the spillover
+        // ceiling, short of the severe threshold that would switch on ray tracing.
+        let prepared = prepare_with_steering(
+            create_test_calibration(uncalibrated_status()),
+            FeedSteering::new(2.0, 0.0, 5.0),
+        );
+        assert!(
+            prepared.integration_params.apply_spillover,
+            "precondition: the P11 gate must be ON, or the None below proves nothing"
+        );
+
+        let served = assert_direct_cold_hot_agree(
+            &prepared,
+            PreSquintDirection::new(0.0, 5.0),
+            ReferenceGainRequest::Include,
+        );
+        assert_eq!(
+            served.spillover_loss_db, None,
+            "the model applies no spillover past 0.3·f even with the gate on"
+        );
+        let codes: Vec<WarningCode> = served.warnings.iter().map(|w| w.code).collect();
+        assert!(
+            codes.contains(&WarningCode::FeedOffsetSpilloverUnmodeled),
+            "the moderate-band configuration warning must survive a hit: {codes:?}"
+        );
+        assert!(
+            !codes.contains(&WarningCode::RayTraceDegraded),
+            "0.4·f is below the severe threshold: {codes:?}"
+        );
+    }
+
+    /// With the cache disabled every evaluation integrates, and must still agree with
+    /// direct evaluation exactly — the disabled path is not a different gain law.
+    #[test]
+    fn disabled_cache_still_matches_direct_evaluation() {
+        let prepared = prepare_unsteered(create_test_calibration(uncalibrated_status()));
+        let direction = PreSquintDirection::new(0.0, 5.0);
+        let disabled = GainCache::new(false, 128);
+
+        let direct = prepared
+            .evaluate_direct(direction, ReferenceGainRequest::Omit)
+            .unwrap();
+        let first = prepared
+            .evaluate_cached(direction, ReferenceGainRequest::Omit, &disabled)
+            .unwrap();
+        let second = prepared
+            .evaluate_cached(direction, ReferenceGainRequest::Omit, &disabled)
+            .unwrap();
+
+        assert_eq!(direct, first);
+        assert_eq!(first, second);
     }
 }

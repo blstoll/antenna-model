@@ -18,8 +18,8 @@ use std::sync::{Arc, Mutex};
 
 type FeedCache = Mutex<LruCache<GainCacheKey, CachedGain>>;
 
-/// A cached physics-gain value together with the one piece of its provenance that
-/// cannot be re-derived without redoing the integration a cache hit exists to skip.
+/// A cached physics-gain value together with the provenance that cannot be re-derived
+/// without redoing the integration a cache hit exists to skip.
 ///
 /// The cache deliberately stores **only** what is specific to the cached
 /// `(az, el, freq, feed)` point. Warnings that are a pure function of the antenna
@@ -28,31 +28,50 @@ type FeedCache = Mutex<LruCache<GainCacheKey, CachedGain>>;
 /// swallow them (`analyze_edge_cases` ignores `(theta, phi)` outright, so they are
 /// identical at every point anyway).
 ///
-/// Convergence is the exception that forces this type to exist: it describes *this*
-/// number, produced by *this* integration, and it is exactly what a cache hit skips
-/// recomputing — so it has to ride along with the value. Before roadmap unit C10 it
-/// did not, and a warm `/h3-heatmap` served non-converged gains with no warning at
-/// all, silently breaking the "never silent" guarantee the P10 self-check exists to
-/// provide.
+/// Convergence and applied spillover are the exceptions that force this type to exist:
+/// each describes *this* number, produced by *this* integration, and each is exactly what
+/// a cache hit skips recomputing — so both have to ride along with the value. Before
+/// roadmap unit C10 convergence did not, and a warm `/h3-heatmap` served non-converged
+/// gains with no warning at all, silently breaking the "never silent" guarantee the P10
+/// self-check exists to provide.
+///
+/// What the cache must NOT hold (issue #62): corrected gain, the correction value, the
+/// correction disposition, the coverage outcome, or any warning collection. Those are
+/// evaluated or reconstructed after every lookup, hit or miss, so that a warm cache can
+/// never serve a stale correction surface or swallow a diagnostic.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CachedGain {
     /// Physics-only gain (dB) at the cached point.
     pub value: f64,
     /// `false` when the integrator's self-check did not converge at this point.
     pub converged: bool,
+    /// Spillover loss (dB) actually folded into `value`, or `None` when none was.
+    ///
+    /// Provenance, not policy (issue #62): the P11 gate can be ON and the model still
+    /// apply no spillover — behind the dish, or beyond the offset ratio where
+    /// `estimate_spillover` is trusted. Only the integration that produced `value` knows
+    /// which happened, and the ideal-reference gain is matched to it, so re-deriving this
+    /// from the gate on a hit would put a one-sided bias into `loss_db`.
+    pub spillover_loss_db: Option<f64>,
 }
 
 impl CachedGain {
-    /// A value whose integration converged — the ordinary case.
+    /// A value whose integration converged and folded in no spillover — the shape most
+    /// tests want.
     pub fn converged(value: f64) -> Self {
         Self {
             value,
             converged: true,
+            spillover_loss_db: None,
         }
     }
 
-    pub fn new(value: f64, converged: bool) -> Self {
-        Self { value, converged }
+    pub fn new(value: f64, converged: bool, spillover_loss_db: Option<f64>) -> Self {
+        Self {
+            value,
+            converged,
+            spillover_loss_db,
+        }
     }
 }
 
@@ -114,10 +133,11 @@ impl GainCache {
     /// Get a cached gain value, or compute and cache it.
     /// If cache is disabled, always calls compute.
     ///
-    /// The closure returns a [`CachedGain`] rather than a bare `f64` so that
-    /// convergence — which only the computation knows and only the *miss* path runs
-    /// — survives into every later hit. See [`CachedGain`] for why nothing else about
-    /// the computation belongs in here.
+    /// The closure returns a [`CachedGain`] rather than a bare `f64` so that the
+    /// provenance only the computation knows — convergence, and the spillover it
+    /// actually applied — survives into every later hit, since only the *miss* path
+    /// runs the closure. See [`CachedGain`] for why nothing else about the computation
+    /// belongs in here.
     pub fn get_or_compute<F>(
         &self,
         antenna_id: &str,
@@ -380,7 +400,7 @@ mod tests {
         // Prime with a NON-converged value.
         let primed: crate::error::Result<CachedGain> =
             cache.get_or_compute("ant1", "feed1", test_key(45.0), || {
-                Ok(CachedGain::new(12.5, false))
+                Ok(CachedGain::new(12.5, false, None))
             });
         assert!(!primed.unwrap().converged);
 
