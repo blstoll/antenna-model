@@ -7,9 +7,9 @@ use crate::api::error_response::{
 };
 use crate::api::schemas::{
     AntennaDetailsResponse, AntennaListResponse, BatchGainRequest, BatchGainResponse,
-    CalibrationStatusInfo, ErrorCode, ErrorResponse, GainRequest, GainResponse,
-    H3LinkBudgetRequest, H3LinkBudgetResponse, HealthResponse, HeatmapRequest, HeatmapResponse,
-    StatusResponse,
+    CalibrationStatusInfo, CorrectionApplication, ErrorCode, ErrorResponse, GainRequest,
+    GainResponse, H3LinkBudgetRequest, H3LinkBudgetResponse, HealthResponse, HeatmapRequest,
+    HeatmapResponse, StatusResponse,
 };
 use crate::api::AppState;
 use crate::service::{
@@ -303,6 +303,7 @@ Optionally computes reference gain (ideal case) and loss (reference - actual).",
                         "num_measurements": 25,
                         "is_boresight_only": true
                     },
+                    "correction_application": "none",
                     "correction_applied": false,
                     "parameters_source": "boresight_tuning"
                 }
@@ -326,6 +327,7 @@ Optionally computes reference gain (ideal case) and loss (reference - actual).",
                     "status": "uncalibrated",
                     "accuracy_estimate_db": 3.0,
                     "loss_accuracy_estimate_db": 2.0,
+                    "correction_application": "unavailable",
                     "correction_applied": false,
                     "parameters_source": "design_specifications"
                 }
@@ -1108,8 +1110,12 @@ pub async fn get_antenna_details(
     // Build calibration status info
     let calibration_status_info = calibration.calibration_status.as_ref().map(|cal_status| {
         let mut info = CalibrationStatusInfo::from(cal_status);
-        // For antenna details, indicate if correction surface is available
-        info.correction_applied = calibration.correction_surface.is_some();
+        // No direction is evaluated by this endpoint. Report capability distinctly from use.
+        info.set_correction_application(CorrectionApplication::summarize(
+            calibration.correction_surface.is_some(),
+            0,
+            0,
+        ));
         info
     });
 

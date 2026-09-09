@@ -218,6 +218,7 @@ For antennas with complete grid measurements and correction surface:
   "calibration_status": {
     "status": "fully_calibrated",
     "accuracy_estimate_db": 1.0,
+    "correction_application": "all",
     "correction_applied": true,
     "parameters_source": "measurement_tuned"
   },
@@ -232,7 +233,8 @@ For antennas with complete grid measurements and correction surface:
 **Key Fields:**
 - `status`: "fully_calibrated" - highest accuracy level
 - `accuracy_estimate_db`: 1.0 - expect ±1.0 dB accuracy
-- `correction_applied`: true - B-spline correction surface was used
+- `correction_application`: "all" - every successful direction used the B-spline correction surface
+- `correction_applied`: true - compatibility boolean; true for `partial` or `all`
 - `warnings`: Empty - no calibration warnings for fully calibrated antennas
 
 ### Partially Calibrated (Boresight) Response
@@ -249,6 +251,7 @@ For antennas calibrated with boresight measurements only:
   "calibration_status": {
     "status": "partially_calibrated",
     "accuracy_estimate_db": 1.5,
+    "correction_application": "unavailable",
     "correction_applied": false,
     "parameters_source": "boresight_tuned",
     "coverage": {
@@ -275,7 +278,8 @@ For antennas calibrated with boresight measurements only:
 **Key Fields:**
 - `status`: "partially_calibrated" - limited coverage
 - `accuracy_estimate_db`: 1.5 - ±1.5 dB at boresight
-- `correction_applied`: false - physics model only (no correction surface for boresight-only)
+- `correction_application`: "unavailable" - no correction surface exists
+- `correction_applied`: false - compatibility boolean
 - `coverage.is_boresight_only`: true - measurements on the boresight axis. Coverage is an
   on-axis **cone** (`elevation ≤ 0.01°`, azimuth unconstrained), not the point `(0, 0)`:
   boresight is the pole of the (azimuth, polar-angle) system, where azimuth is degenerate.
@@ -294,6 +298,7 @@ When query is outside the calibrated region:
   "calibration_status": {
     "status": "partially_calibrated",
     "accuracy_estimate_db": 2.5,
+    "correction_application": "none",
     "correction_applied": false,
     "parameters_source": "boresight_tuned",
     "coverage": {
@@ -341,6 +346,7 @@ For antennas using design specifications only (no measurements):
     "status": "uncalibrated",
     "accuracy_estimate_db": 4.0,
     "loss_accuracy_estimate_db": 2.0,
+    "correction_application": "unavailable",
     "correction_applied": false,
     "parameters_source": "design_specifications"
   },
@@ -362,6 +368,11 @@ For antennas using design specifications only (no measurements):
 - `accuracy_estimate_db`: 4.0 - ±3-5 dB absolute gain uncertainty
 - `loss_accuracy_estimate_db`: 2.0 - **better accuracy for loss (±2 dB)** due to error cancellation
 - `parameters_source`: "design_specifications"
+
+For aggregate heatmap and H3 responses, `correction_application` is computed from
+successful points/cells only. It is `partial` when correction was applied to some but not
+all successful directions. Failed directions do not change the denominator. The legacy
+`correction_applied` field remains `true` for both `partial` and `all`.
 
 **Important:** For uncalibrated antennas, **use loss values** for comparative analysis. Loss accuracy (±2 dB) is significantly better than absolute gain accuracy (±4 dB) because systematic parameter errors cancel when comparing two pointing directions.
 

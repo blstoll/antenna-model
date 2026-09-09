@@ -97,6 +97,7 @@ impl Modify for NoAuthDeclared {
         crate::api::schemas::PhysicalParametersInfo,
         crate::api::schemas::MeshInfo,
         crate::api::schemas::CalibrationStatusInfo,
+        crate::api::schemas::CorrectionApplication,
         crate::api::schemas::CoverageInfo,
         crate::api::schemas::HealthResponse,
         crate::api::schemas::StatusResponse,

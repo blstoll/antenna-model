@@ -421,6 +421,7 @@ from it. `loss_db` is referenced to that peak, so it is non-negative everywhere)
     "status": "uncalibrated",
     "accuracy_estimate_db": 3.0,
     "loss_accuracy_estimate_db": 2.0,
+    "correction_application": "unavailable",
     "correction_applied": false,
     "parameters_source": "design_specifications"
   }
@@ -548,11 +549,25 @@ Example response:
       "num_measurements": 25,
       "is_boresight_only": true
     },
+    "correction_application": "none",
     "correction_applied": false,
     "parameters_source": "boresight_tuning"
   }
 }
 ```
+
+`calibration_status.correction_application` reports the correction actually applied to
+successful directional evaluations (issue #64): `unavailable` means the antenna has no correction
+surface, `none` means a surface exists but corrected none of them, `partial` means it
+corrected some but not all, and `all` means it corrected every successful direction.
+Failed batch items omit `calibration_status`; failed grid points and H3 cells are excluded
+from aggregate denominators. The legacy `correction_applied` field remains for
+compatibility and is `true` exactly when
+`correction_application` is `partial` or `all`.
+
+For antenna-details responses there is no direction to evaluate. They therefore report
+capability conservatively: `none` when a correction surface exists and `unavailable`
+when it does not; `correction_applied` is always `false`.
 
 ## Error Handling
 

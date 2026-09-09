@@ -3,8 +3,8 @@
 //! Generates 2D loss heatmaps across antenna field of view.
 
 use crate::api::schemas::{
-    CalibrationStatusInfo, GainRequest, GridConfig, GridData, HeatmapMetadata, HeatmapRequest,
-    HeatmapResponse, Position3D, RangeConfig,
+    CalibrationStatusInfo, CorrectionApplication, GainRequest, GridConfig, GridData,
+    HeatmapMetadata, HeatmapRequest, HeatmapResponse, Position3D, RangeConfig,
 };
 use crate::data::repository::CalibrationRepository;
 use crate::error::{AntennaModelError, Result};
@@ -43,6 +43,14 @@ pub(crate) const NO_PEAK_GAIN_DB: f64 = -FAILED_POINT_LOSS_DB;
 /// - Vector of (azimuth, elevation) grid points in degrees
 /// - Tuple of (azimuth_values, elevation_values)
 type GridPoints = (Vec<(f64, f64)>, (Vec<f64>, Vec<f64>));
+
+/// One rectangular-grid directional outcome before response aggregation.
+struct GridPointResult {
+    gain_db: f64,
+    warnings: Vec<ApiWarning>,
+    failed: bool,
+    correction_applied: bool,
+}
 
 /// Generate a heatmap for the given request.
 ///
@@ -101,35 +109,30 @@ pub fn generate_heatmap_with_budget(
     }
 
     // Evaluate gain at each grid point (in parallel if large enough).
-    // Returns (az, el, gain_db, warnings, is_failed).
     // Failed points use f64::NEG_INFINITY as gain (never NaN to avoid serialization issues).
-    let results: Vec<(f64, f64, f64, Vec<ApiWarning>, bool)> =
-        if grid_points.len() >= PARALLEL_THRESHOLD {
-            grid_points
-                .par_iter()
-                .map(|(az, el)| evaluate_grid_point(request, repository, *az, *el, time_budget))
-                .collect()
-        } else {
-            grid_points
-                .iter()
-                .map(|(az, el)| evaluate_grid_point(request, repository, *az, *el, time_budget))
-                .collect()
-        };
+    let results: Vec<GridPointResult> = if grid_points.len() >= PARALLEL_THRESHOLD {
+        grid_points
+            .par_iter()
+            .map(|(az, el)| evaluate_grid_point(request, repository, *az, *el, time_budget))
+            .collect()
+    } else {
+        grid_points
+            .iter()
+            .map(|(az, el)| evaluate_grid_point(request, repository, *az, *el, time_budget))
+            .collect()
+    };
 
     // Count failed points
-    let failed_count = results
-        .iter()
-        .filter(|(_, _, _, _, failed)| *failed)
-        .count();
+    let failed_count = results.iter().filter(|result| result.failed).count();
 
     // Find peak gain (maximum across all successful points only).
     // With no successful point there is no peak: report the finite sentinel rather than
     // -inf, which would serialize to `null` under HTTP 200.
     let peak_gain_db = results
         .iter()
-        .filter(|(_, _, _, _, failed)| !failed)
-        .map(|(_, _, gain, _, _)| *gain)
-        .filter(|g| g.is_finite())
+        .filter(|result| !result.failed)
+        .map(|result| result.gain_db)
+        .filter(|gain| gain.is_finite())
         .fold(f64::NEG_INFINITY, f64::max);
     let peak_gain_db = if peak_gain_db.is_finite() {
         peak_gain_db
@@ -141,11 +144,11 @@ pub fn generate_heatmap_with_budget(
     // Failed points receive FAILED_POINT_LOSS_DB sentinel — never NaN.
     let losses: Vec<f64> = results
         .iter()
-        .map(|(_, _, gain, _, failed)| {
-            if *failed || !gain.is_finite() {
+        .map(|result| {
+            if result.failed || !result.gain_db.is_finite() {
                 FAILED_POINT_LOSS_DB
             } else {
-                peak_gain_db - gain
+                peak_gain_db - result.gain_db
             }
         })
         .collect();
@@ -153,7 +156,7 @@ pub fn generate_heatmap_with_budget(
     // Aggregate warnings (deduplicate on the whole warning, code and message).
     let all_warnings: HashSet<ApiWarning> = results
         .iter()
-        .flat_map(|(_, _, _, warnings, _)| warnings.clone())
+        .flat_map(|result| result.warnings.clone())
         .collect();
     let mut warnings: Vec<ApiWarning> = all_warnings.into_iter().collect();
     warnings.sort();
@@ -161,7 +164,7 @@ pub fn generate_heatmap_with_budget(
     // Count points whose gain was extrapolated rather than interpolated.
     let extrapolated_count = results
         .iter()
-        .filter(|(_, _, _, warns, _)| point_was_extrapolated(warns))
+        .filter(|result| point_was_extrapolated(&result.warnings))
         .count();
     if extrapolated_count > 0 {
         warnings.insert(
@@ -197,15 +200,23 @@ pub fn generate_heatmap_with_budget(
 
     let computation_time_ms = start.elapsed().as_secs_f64() * 1000.0;
 
-    // Get calibration status info from repository
+    // Derive aggregate correction state from successful point outcomes. Failed points
+    // do not count as uncorrected and therefore cannot turn `all` into `partial`.
+    let successful_count = results.len() - failed_count;
+    let corrected_count = results
+        .iter()
+        .filter(|result| !result.failed && result.correction_applied)
+        .count();
     let calibration_status_info = repository
         .get_calibration(&request.antenna_id, &request.feed_id)
-        .and_then(|cal| {
-            cal.calibration_status.as_ref().map(|status| {
-                // For heatmap, we don't track per-point correction application
-                // Set correction_applied to true if any correction surface exists
+        .and_then(|calibration| {
+            calibration.calibration_status.as_ref().map(|status| {
                 let mut info = CalibrationStatusInfo::from(status);
-                info.correction_applied = cal.correction_surface.is_some();
+                info.set_correction_application(CorrectionApplication::summarize(
+                    calibration.correction_surface.is_some(),
+                    successful_count,
+                    corrected_count,
+                ));
                 info
             })
         });
@@ -308,15 +319,14 @@ fn generate_rectangular_grid(
 
 /// Evaluate gain at a single grid point.
 ///
-/// Returns: `(azimuth, elevation, gain_db, warnings, is_failed)`.
-/// On failure, `gain_db` is `f64::NEG_INFINITY` (never NaN) and `is_failed` is `true`.
+/// On failure, `gain_db` is `f64::NEG_INFINITY` (never NaN) and `failed` is true.
 fn evaluate_grid_point(
     request: &HeatmapRequest,
     repository: &CalibrationRepository,
     azimuth_deg: f64,
     elevation_deg: f64,
     time_budget: Duration,
-) -> (f64, f64, f64, Vec<ApiWarning>, bool) {
+) -> GridPointResult {
     // Convert azimuth/elevation to emitter position using proper ECEF/ENU transformation
     let emitter_position = match compute_emitter_position_from_angles(
         &request.vehicle_position,
@@ -325,14 +335,13 @@ fn evaluate_grid_point(
     ) {
         Ok(pos) => pos,
         Err(_) => {
-            return (
-                azimuth_deg,
-                elevation_deg,
-                f64::NEG_INFINITY,
-                vec![WarningCode::PointComputationFailed
+            return GridPointResult {
+                gain_db: f64::NEG_INFINITY,
+                warnings: vec![WarningCode::PointComputationFailed
                     .with("Failed to compute emitter position for this point")],
-                true,
-            )
+                failed: true,
+                correction_applied: false,
+            };
         }
     };
 
@@ -352,20 +361,22 @@ fn evaluate_grid_point(
 
     // Evaluate gain at this point
     match compute_gain_from_request_with_budget(&gain_request, repository, time_budget) {
-        Ok(response) => (
-            azimuth_deg,
-            elevation_deg,
-            response.gain_db,
-            response.warnings,
-            false,
-        ),
-        Err(_) => (
-            azimuth_deg,
-            elevation_deg,
-            f64::NEG_INFINITY,
-            vec![WarningCode::PointComputationFailed.with("Computation failed for this point")],
-            true,
-        ),
+        Ok(response) => GridPointResult {
+            gain_db: response.gain_db,
+            warnings: response.warnings,
+            failed: false,
+            correction_applied: response
+                .calibration_status
+                .is_some_and(|status| status.correction_applied),
+        },
+        Err(_) => GridPointResult {
+            gain_db: f64::NEG_INFINITY,
+            warnings: vec![
+                WarningCode::PointComputationFailed.with("Computation failed for this point")
+            ],
+            failed: true,
+            correction_applied: false,
+        },
     }
 }
 
@@ -692,9 +703,10 @@ mod tests {
     /// Verify that a grid with partial failures returns a valid response without NaN values.
     #[test]
     fn test_partial_failures_no_nan_in_response() {
-        use crate::data::types::{
-            AntennaCalibration, CalibrationMetadata, CalibrationStatus, FeedParameters,
-            MeshParameters, PhysicalAntennaConfig, ReflectorGeometry, ValidityRanges,
+        use antenna_core::data::types::{
+            AntennaCalibration, BSplineModel4D, CalibrationMetadata, CalibrationStatus,
+            FeedParameters, MeshParameters, PhysicalAntennaConfig, ReflectorGeometry,
+            ValidityRanges,
         };
 
         // Build a minimal repository with a working antenna
@@ -709,7 +721,7 @@ mod tests {
             .num_measurements(10)
             .build()
             .unwrap();
-        let cal = AntennaCalibration::builder()
+        let mut cal = AntennaCalibration::builder()
             .antenna_id("test_antenna")
             .feed_id("test_feed")
             .metadata(metadata)
@@ -743,6 +755,15 @@ mod tests {
             })
             .build()
             .unwrap();
+        cal.correction_surface = Some(BSplineModel4D {
+            coefficients: vec![0.0; 16],
+            shape: [2, 2, 2, 2],
+            knots_azimuth: vec![0.0, 0.0, 360.0, 360.0],
+            knots_elevation: vec![0.0, 0.0, 90.0, 90.0],
+            knots_frequency: vec![8000.0, 8000.0, 9000.0, 9000.0],
+            knots_temperature: vec![280.0, 280.0, 300.0, 300.0],
+            spline_order: 2,
+        });
         repository.add_calibration(cal);
 
         // Request with antenna that doesn't exist → all points fail
@@ -750,7 +771,7 @@ mod tests {
             azimuth_range_deg: RangeConfig::new(0.0, 10.0, 5.0),
             elevation_range_deg: RangeConfig::new(0.0, 10.0, 5.0),
         };
-        let request = HeatmapRequest {
+        let mut request = HeatmapRequest {
             antenna_id: "nonexistent_antenna".to_string(),
             feed_id: "test_feed".to_string(),
             vehicle_position: Position3D::geodetic(0.0, 0.0, 0.0),
@@ -779,6 +800,168 @@ mod tests {
             for &val in row {
                 assert!(val.is_finite(), "Loss values must be finite, got {}", val);
             }
+        }
+
+        // With a known antenna and an available surface, a zero integration budget still
+        // fails every point. The aggregate is `none`, not `unavailable` or `partial`.
+        request.antenna_id = "test_antenna".to_string();
+        let timed_out =
+            generate_heatmap_with_budget(&request, &repository, Duration::ZERO).unwrap();
+        assert_eq!(
+            timed_out.metadata.failed_points,
+            timed_out.metadata.points_evaluated
+        );
+        let status = timed_out.calibration_status.as_ref().unwrap();
+        assert_eq!(status.correction_application, CorrectionApplication::None);
+        assert!(!status.correction_applied);
+    }
+
+    /// A rectangular grid that crosses calibration coverage reports the mixed basis
+    /// from actual successful point outcomes rather than surface existence.
+    #[test]
+    fn mixed_coverage_heatmap_reports_partial_correction() {
+        use antenna_core::data::types::{
+            AntennaCalibration, BSplineModel4D, CalibrationCoverage, CalibrationMetadata,
+            CalibrationStatus, FeedParameters, PhysicalAntennaConfig, ReflectorGeometry,
+            ValidityRanges,
+        };
+
+        let metadata = CalibrationMetadata::builder()
+            .antenna_name("Mixed Coverage Heatmap")
+            .calibration_date("2025-01-01T00:00:00Z")
+            .format_version("2.0")
+            .data_source("test")
+            .rmse_db(0.5)
+            .r_squared(0.99)
+            .num_measurements(10)
+            .build()
+            .unwrap();
+        let mut calibration = AntennaCalibration::builder()
+            .antenna_id("mixed_heatmap")
+            .feed_id("test_feed")
+            .metadata(metadata)
+            .physical_config(PhysicalAntennaConfig {
+                reflector: ReflectorGeometry {
+                    diameter_m: 1.0,
+                    focal_length_m: 0.5,
+                    f_over_d_ratio: 0.5,
+                    surface_rms_mm: 0.5,
+                },
+                feed: FeedParameters {
+                    position: (0.0, 0.0, 0.0),
+                    q_factor: 8.0,
+                    phase_center_offset_m: 0.0,
+                    axial_defocus_m: 0.0,
+                    asymmetry_factor: 1.0,
+                },
+                mesh: None,
+            })
+            .validity_ranges(ValidityRanges {
+                azimuth_min_max: (0.0, 360.0),
+                elevation_min_max: (0.0, 180.0),
+                frequency_min_max: (8000.0, 9000.0),
+                temperature_const: 290.0,
+            })
+            .calibration_status(CalibrationStatus::FullyCalibrated {
+                accuracy_estimate_db: 1.0,
+            })
+            .build()
+            .unwrap();
+        calibration.correction_surface = Some(BSplineModel4D {
+            coefficients: vec![1.0; 16],
+            shape: [2, 2, 2, 2],
+            knots_azimuth: vec![0.0, 0.0, 360.0, 360.0],
+            knots_elevation: vec![0.0, 0.0, 180.0, 180.0],
+            knots_frequency: vec![8000.0, 8000.0, 9000.0, 9000.0],
+            knots_temperature: vec![280.0, 280.0, 300.0, 300.0],
+            spline_order: 2,
+        });
+
+        let vehicle_position = Position3D::geodetic(0.0, 0.0, 0.0);
+        let boresight = Position3D::geodetic(0.0, 0.0, 400_000.0);
+        let frequency_mhz = 8400.0;
+
+        // Discover the exact antenna-frame direction corresponding to the 90° grid point,
+        // then make that inclusive singleton the only covered direction.
+        let emitter_position =
+            compute_emitter_position_from_angles(&vehicle_position, 0.0, 90.0).unwrap();
+        let mut discovery_repository = CalibrationRepository::new();
+        discovery_repository.add_calibration(calibration.clone());
+        let discovery = crate::service::evaluator::compute_gain_from_request(
+            &GainRequest {
+                antenna_id: "mixed_heatmap".to_string(),
+                feed_id: "test_feed".to_string(),
+                vehicle_position: vehicle_position.clone(),
+                reflector_boresight: boresight.clone(),
+                feed_pointing_location: boresight.clone(),
+                emitter_position,
+                frequency_mhz,
+                pointing_frequency_mhz: None,
+                include_reference: false,
+                vehicle_attitude: None,
+            },
+            &discovery_repository,
+        )
+        .unwrap();
+        let coverage = CalibrationCoverage {
+            azimuth_range: (
+                discovery.geometry.emitter_azimuth_deg,
+                discovery.geometry.emitter_azimuth_deg,
+            ),
+            elevation_range: (
+                discovery.geometry.emitter_elevation_deg,
+                discovery.geometry.emitter_elevation_deg,
+            ),
+            frequency_range: (frequency_mhz, frequency_mhz),
+            num_measurements: 1,
+            has_correction_surface: true,
+        };
+        calibration.calibration_status = Some(CalibrationStatus::PartiallyCalibrated {
+            accuracy_estimate_db: 1.5,
+            coverage: coverage.clone(),
+        });
+        calibration.calibration_coverage = Some(coverage);
+
+        let mut repository = CalibrationRepository::new();
+        repository.add_calibration(calibration);
+        let response = generate_heatmap(
+            &HeatmapRequest {
+                antenna_id: "mixed_heatmap".to_string(),
+                feed_id: "test_feed".to_string(),
+                vehicle_position,
+                reflector_boresight: boresight.clone(),
+                feed_pointing_location: boresight,
+                frequency_mhz,
+                pointing_frequency_mhz: None,
+                grid_config: GridConfig::Rectangular {
+                    azimuth_range_deg: RangeConfig::new(0.0, 0.0, 1.0),
+                    elevation_range_deg: RangeConfig::new(80.0, 90.0, 10.0),
+                },
+            },
+            &repository,
+        )
+        .unwrap();
+
+        assert_eq!(response.metadata.failed_points, 0);
+        let status = response.calibration_status.as_ref().unwrap();
+        assert_eq!(
+            status.correction_application,
+            CorrectionApplication::Partial
+        );
+        assert!(status.correction_applied);
+        for code in [
+            WarningCode::OutOfCoverage,
+            WarningCode::CorrectionNotApplied,
+        ] {
+            assert_eq!(
+                response
+                    .warnings
+                    .iter()
+                    .filter(|warning| warning.is(code))
+                    .count(),
+                1,
+                "{code:?} must be deduplicated across uncovered points"
+            );
         }
     }
 
