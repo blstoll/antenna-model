@@ -1144,6 +1144,12 @@ mod tests {
         }
     }
 
+    /// The served warning codes, in order. Order matters to several of these tests (it is
+    /// part of the `/gain` contract), so this keeps the sequence rather than a set.
+    fn warning_codes(served: &ServedGain) -> Vec<WarningCode> {
+        served.warnings.iter().map(|w| w.code).collect()
+    }
+
     /// Prepare with no feed steering, no pointing-frequency offset, and a budget generous
     /// enough that nothing times out.
     fn prepare_unsteered(calibration: AntennaCalibration) -> PreparedServedGain {
@@ -1406,7 +1412,7 @@ mod tests {
             )
             .unwrap();
 
-        let codes: Vec<WarningCode> = served.warnings.iter().map(|w| w.code).collect();
+        let codes = warning_codes(&served);
         let calibration_at = codes
             .iter()
             .position(|c| *c == WarningCode::Uncalibrated)
@@ -2255,7 +2261,7 @@ mod tests {
             PreSquintDirection::new(0.0, 5.0),
             ReferenceGainRequest::Omit,
         );
-        let codes: Vec<WarningCode> = served.warnings.iter().map(|w| w.code).collect();
+        let codes = warning_codes(&served);
         assert!(codes.contains(&WarningCode::Uncalibrated), "{codes:?}");
         assert!(
             codes.contains(&WarningCode::OffAxisUnvalidated),
@@ -2282,7 +2288,7 @@ mod tests {
             PreSquintDirection::new(0.0, 120.0),
             ReferenceGainRequest::Omit,
         );
-        let codes: Vec<WarningCode> = served.warnings.iter().map(|w| w.code).collect();
+        let codes = warning_codes(&served);
         assert!(
             codes.contains(&WarningCode::RearHemisphereInvalid),
             "{codes:?}"
@@ -2315,7 +2321,7 @@ mod tests {
             ReferenceGainRequest::Omit,
         );
         assert_eq!(served.correction, CorrectionDisposition::OutsideCoverage);
-        let codes: Vec<WarningCode> = served.warnings.iter().map(|w| w.code).collect();
+        let codes = warning_codes(&served);
         assert!(
             codes.contains(&WarningCode::PartiallyCalibrated),
             "{codes:?}"
@@ -2348,7 +2354,7 @@ mod tests {
             CorrectionDisposition::Applied { extrapolated: true },
             "fixture must actually extrapolate, or this pins nothing"
         );
-        let codes: Vec<WarningCode> = served.warnings.iter().map(|w| w.code).collect();
+        let codes = warning_codes(&served);
         assert!(codes.contains(&WarningCode::Extrapolated), "{codes:?}");
     }
 
@@ -2367,7 +2373,7 @@ mod tests {
             PreSquintDirection::new(0.0, 5.0),
             ReferenceGainRequest::Omit,
         );
-        let codes: Vec<WarningCode> = served.warnings.iter().map(|w| w.code).collect();
+        let codes = warning_codes(&served);
         assert!(codes.contains(&WarningCode::SevereFeedOffset), "{codes:?}");
         assert!(codes.contains(&WarningCode::RayTraceDegraded), "{codes:?}");
     }
@@ -2392,7 +2398,7 @@ mod tests {
             PreSquintDirection::new(0.0, 120.0),
             ReferenceGainRequest::Omit,
         );
-        let codes: Vec<WarningCode> = served.warnings.iter().map(|w| w.code).collect();
+        let codes = warning_codes(&served);
         assert!(
             !codes.contains(&WarningCode::RayTraceDegraded),
             "the floor-only rear path never reaches the ray-tracing stub: {codes:?}"
@@ -2425,7 +2431,7 @@ mod tests {
             PreSquintDirection::new(0.0, 120.0),
             ReferenceGainRequest::Omit,
         );
-        let codes: Vec<WarningCode> = served.warnings.iter().map(|w| w.code).collect();
+        let codes = warning_codes(&served);
         assert!(codes.contains(&WarningCode::RayTraceDegraded), "{codes:?}");
         assert!(
             codes.contains(&WarningCode::RearHemisphereInvalid),
@@ -2777,7 +2783,7 @@ mod tests {
             served.spillover_loss_db, None,
             "the model applies no spillover past 0.3·f even with the gate on"
         );
-        let codes: Vec<WarningCode> = served.warnings.iter().map(|w| w.code).collect();
+        let codes = warning_codes(&served);
         assert!(
             codes.contains(&WarningCode::FeedOffsetSpilloverUnmodeled),
             "the moderate-band configuration warning must survive a hit: {codes:?}"
