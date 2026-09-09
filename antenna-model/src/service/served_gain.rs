@@ -277,6 +277,8 @@ pub(crate) struct PreparedServedGain {
     calibration: AntennaCalibration,
     /// Physical-optics model built from the artifact plus the request's feed geometry.
     antenna_config: AntennaConfiguration,
+    /// Direction-independent edge-case advisories, computed once from `antenna_config`.
+    configuration_warnings: Vec<ApiWarning>,
     /// Adaptive policy, P11 uncorrected-physics gates, and the per-integration budget.
     integration_params: IntegrationParams,
     frequencies: ServedFrequencies,
@@ -362,6 +364,10 @@ impl PreparedServedGain {
         let antenna_config = config_builder.build().map_err(|e| {
             AntennaModelError::Generic(format!("Failed to build antenna configuration: {}", e))
         })?;
+        // Edge-case analysis currently ignores direction. Hoist it into preparation so one
+        // immutable warning set is shared by every evaluation and remains available to an
+        // aggregating endpoint even when every directional integration fails (#59, #63).
+        let configuration_warnings = analyze_edge_cases(&antenna_config, 0.0, 0.0).warnings;
 
         // Canonical served-path integration params. Radial density is derived adaptively
         // from (D/λ, θ), so this satisfies the <100ms target near boresight while remaining
@@ -397,6 +403,7 @@ impl PreparedServedGain {
         Ok(Self {
             calibration,
             antenna_config,
+            configuration_warnings,
             integration_params,
             frequencies,
             physical_feed_position,
@@ -414,6 +421,15 @@ impl PreparedServedGain {
     /// [`ServedGain::correction`], which is the authority.
     pub(crate) fn calibration_status(&self) -> Option<&CalibrationStatus> {
         self.calibration.calibration_status.as_ref()
+    }
+
+    /// Direction-independent advisories for an aggregating endpoint.
+    ///
+    /// Successful evaluations include these in their complete warning vectors. This view
+    /// lets a total grid response retain the same request-level advisories when no cell
+    /// succeeds, without making the endpoint reconstruct model warnings itself.
+    pub(crate) fn configuration_warnings(&self) -> &[ApiWarning] {
+        &self.configuration_warnings
     }
 
     /// Beam squint for endpoints that report it before evaluating a direction.
@@ -607,9 +623,9 @@ impl PreparedServedGain {
     ///
     /// The reconstruction mirrors `model::pattern::compute_gain`'s own structure and order:
     ///
-    /// 1. `analyze_edge_cases` — the severe / moderate feed-offset band and the
-    ///    significant-spillover advisory. Called here rather than copied; it ignores
-    ///    `(theta, phi)`, so it is the configuration's verdict.
+    /// 1. The preparation-time `analyze_edge_cases` result — the severe / moderate
+    ///    feed-offset band and the significant-spillover advisory. The analysis ignores
+    ///    `(theta, phi)`, so one retained vector is the configuration's verdict.
     /// 2. The ray-tracing stub warning, iff the mode dispatch is actually reached and
     ///    selects it. Mode selection goes through [`ray_trace_stub_warning`], this module's
     ///    single mirror of it — expressing the same threshold a second time here is exactly
@@ -630,10 +646,7 @@ impl PreparedServedGain {
         converged: bool,
     ) -> Vec<ApiWarning> {
         let theta_rad = corrected.e_cone_deg.to_radians();
-        let phi_rad = corrected.e_clock_deg.to_radians();
-
-        let analysis = analyze_edge_cases(&self.antenna_config, theta_rad, phi_rad);
-        let mut warnings = analysis.warnings;
+        let mut warnings = self.configuration_warnings.clone();
 
         let floor_only_rear = self.integration_params.apply_sidelobe_floor
             && theta_rad.abs() > std::f64::consts::FRAC_PI_2;

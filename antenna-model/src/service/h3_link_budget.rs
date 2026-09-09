@@ -44,8 +44,6 @@ enum CellTraversal {
     Automatic,
     #[cfg(test)]
     Sequential,
-    #[cfg(test)]
-    Parallel,
 }
 
 impl CellTraversal {
@@ -54,8 +52,6 @@ impl CellTraversal {
             Self::Automatic => cell_count >= PARALLEL_THRESHOLD,
             #[cfg(test)]
             Self::Sequential => false,
-            #[cfg(test)]
-            Self::Parallel => true,
         }
     }
 }
@@ -274,7 +270,11 @@ fn compute_h3_link_budget_with_traversal(
 
     // 7. Separate successes and failures; track whether correction was applied to any cell.
     let mut cell_gains: Vec<CellGain> = Vec::with_capacity(cells.len());
-    let mut warnings_set: HashSet<ApiWarning> = HashSet::new();
+    // Seed the aggregate with preparation-time advisories. Successful cell results carry
+    // the same whole objects and deduplicate into this set; seeding also preserves the
+    // pre-#63 endpoint behavior when every directional evaluation fails.
+    let mut warnings_set: HashSet<ApiWarning> =
+        prepared.configuration_warnings().iter().cloned().collect();
     let mut failed_count = 0usize;
     let mut any_correction_applied = false;
 
@@ -1232,22 +1232,25 @@ mod tests {
         }
     }
 
-    /// Issue #63: sequential and parallel traversal are observationally identical for the
-    /// same grid. Only wall-clock timing is normalized; cells, sorted warnings, correction
-    /// evidence, peak-relative losses, path loss, G/T, and failure counts compare exactly.
+    /// Issue #63: sequential and automatic parallel traversal are observationally
+    /// identical for the same 37-cell grid. The sequential pass fills the shared cache;
+    /// the zero-budget automatic pass can succeed only by taking concurrent cache hits.
+    /// Only wall-clock timing is normalized; cells, sorted warnings, correction evidence,
+    /// peak-relative losses, path loss, G/T, and failure counts compare exactly.
     #[test]
     fn sequential_and_parallel_traversals_are_equivalent() {
         let mut calibration = make_h3_test_calibration();
         calibration.correction_surface = Some(constant_surface_db(2.0));
 
         let mut request = make_h3_test_request();
-        request.n_rings = 2;
+        request.n_rings = 3;
         request.temperature_k = Some(290.0);
+        let cache = GainCache::new(true, 100);
 
         let mut sequential = compute_h3_link_budget_with_traversal(
             &request,
             &calibration,
-            &GainCache::new(false, 1),
+            &cache,
             std::time::Instant::now(),
             DEFAULT_INTEGRATION_BUDGET,
             CellTraversal::Sequential,
@@ -1256,17 +1259,83 @@ mod tests {
         let mut parallel = compute_h3_link_budget_with_traversal(
             &request,
             &calibration,
-            &GainCache::new(false, 1),
+            &cache,
             std::time::Instant::now(),
-            DEFAULT_INTEGRATION_BUDGET,
-            CellTraversal::Parallel,
+            Duration::ZERO,
+            CellTraversal::Automatic,
         )
         .unwrap();
 
+        assert_eq!(parallel.cells.len(), 37);
         sequential.metadata.computation_time_ms = 0.0;
         parallel.metadata.computation_time_ms = 0.0;
         assert_eq!(sequential, parallel);
         assert!(parallel.warnings.windows(2).all(|pair| pair[0] < pair[1]));
+
+        // Failure-count parity is non-vacuous: an empty cache and zero budget make every
+        // cell fail under both traversals, including the automatic Rayon branch.
+        let mut sequential_failures = compute_h3_link_budget_with_traversal(
+            &request,
+            &calibration,
+            &GainCache::new(false, 1),
+            std::time::Instant::now(),
+            Duration::ZERO,
+            CellTraversal::Sequential,
+        )
+        .unwrap();
+        let mut parallel_failures = compute_h3_link_budget_with_traversal(
+            &request,
+            &calibration,
+            &GainCache::new(false, 1),
+            std::time::Instant::now(),
+            Duration::ZERO,
+            CellTraversal::Automatic,
+        )
+        .unwrap();
+
+        assert_eq!(parallel_failures.metadata.failed_points, 37);
+        sequential_failures.metadata.computation_time_ms = 0.0;
+        parallel_failures.metadata.computation_time_ms = 0.0;
+        assert_eq!(sequential_failures, parallel_failures);
+    }
+
+    /// Issue #63: warnings intended to occur once per grid retain one constant message
+    /// across cells, so whole-object deduplication yields one entry for each warning code.
+    #[test]
+    fn grid_wide_advisory_messages_deduplicate_across_cells() {
+        let mut calibration = make_h3_test_calibration();
+        calibration.calibration_status = Some(CalibrationStatus::Uncalibrated {
+            accuracy_estimate_db: 3.0,
+            loss_accuracy_estimate_db: 2.0,
+        });
+        calibration.physical_config.feed.position = (3.0, 0.0, 0.0);
+
+        let mut request = make_h3_test_request();
+        request.n_rings = 1;
+        let response = compute_h3_link_budget(
+            &request,
+            &calibration,
+            &GainCache::new(true, 100),
+            std::time::Instant::now(),
+        )
+        .unwrap();
+
+        assert_eq!(response.cells.len(), 7);
+        for code in [
+            WarningCode::Uncalibrated,
+            WarningCode::SevereFeedOffset,
+            WarningCode::RayTraceDegraded,
+        ] {
+            assert_eq!(
+                response
+                    .warnings
+                    .iter()
+                    .filter(|warning| warning.is(code))
+                    .count(),
+                1,
+                "{code:?} must have one constant message across all cells"
+            );
+        }
     }
 
     /// Issue #63 regression: a severe feed offset normally selects the ray-tracing stub,
@@ -1493,7 +1562,8 @@ mod tests {
     /// serializing `peak_gain_db` as JSON `null`.
     #[test]
     fn h3_all_cells_failed_reports_a_finite_peak_sentinel() {
-        let calibration = make_h3_test_calibration();
+        let mut calibration = make_h3_test_calibration();
+        calibration.physical_config.feed.position = (3.0, 0.0, 0.0);
         let mut request = make_h3_test_request();
         request.n_rings = 1; // 7 cells
 
@@ -1522,6 +1592,13 @@ mod tests {
         assert_eq!(
             response.metadata.peak_gain_db,
             crate::service::heatmap::NO_PEAK_GAIN_DB
+        );
+        assert!(
+            response
+                .warnings
+                .iter()
+                .any(|warning| warning.is(WarningCode::SevereFeedOffset)),
+            "configuration advisories must survive when every directional evaluation fails"
         );
     }
 }
