@@ -289,7 +289,7 @@ fn boresight_coverage_is_written_as_an_on_axis_cone() {
 
     // `CalibrationCoverage::contains_direction_at_frequency` — the type's own range
     // test, on the azimuth a boresight-aimed query really produces. Since issue #60
-    // this IS what the served path runs: `service::evaluator::is_in_coverage` delegates
+    // this IS what the served path runs: `service::served_gain::is_in_coverage` delegates
     // here rather than carrying its own copy. The served path is asserted separately by
     // `evaluator::tests::a_boresight_aimed_query_gets_the_boresight_correction_applied`.
     assert!(

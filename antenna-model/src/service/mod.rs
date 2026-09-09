@@ -8,6 +8,7 @@ pub use cache::{CachedGain, GainCache, GainCacheKey};
 pub mod evaluator;
 pub mod h3_link_budget;
 pub mod heatmap;
+pub(crate) mod served_gain;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod validator;

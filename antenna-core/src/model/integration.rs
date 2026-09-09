@@ -323,7 +323,7 @@ impl IntegrationParams {
     /// Canonical parameters for the SERVED (production) path.
     ///
     /// This is the single constructor the service layer should use (see
-    /// `service::evaluator` and `service::h3_link_budget`). Since the P10
+    /// `service::served_gain` and `service::h3_link_budget`). Since the P10
     /// off-axis integrator landed, the number of radial samples is derived
     /// ADAPTIVELY from `(D/λ, θ)` by `radial_points_for` — roughly
     /// `N_ρ ≈ 4·(D/λ)·sinθ` — so the physical correctness of the off-axis
@@ -440,7 +440,7 @@ impl IntegrationParams {
     ///
     /// # The one place that deliberately does not use this
     ///
-    /// `service::evaluator`'s **ideal-reference** computation (the `loss_db` denominator)
+    /// `service::served_gain`'s **ideal-reference** computation (the `loss_db` denominator)
     /// sets `apply_spillover` alone, from `result.spillover_loss_db.is_some()` — the
     /// spillover the actual evaluation *applied*, not the predicate. That is correct and
     /// must stay: the model layer restricts spillover to `StandardPhysicalOptics`, so a

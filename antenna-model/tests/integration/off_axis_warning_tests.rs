@@ -13,7 +13,7 @@
 //!
 //! Calibrated / partially-calibrated antennas are excluded: out-of-coverage
 //! queries there already receive the extrapolation warning (no stacking) —
-//! that gate is pinned by unit tests in `service::evaluator`.
+//! that gate is pinned by unit tests in `service::served_gain`.
 
 use crate::integration::helpers::*;
 use antenna_model::api::schemas::*;
@@ -24,7 +24,7 @@ use antenna_model::model::coordinates_3d::geodetic_to_ecef;
 /// Previously a substring of the message ("beyond the validated main-beam
 /// region"), which coupled these tests to prose that P8, P10 and F7 each rewrote.
 /// The message wording itself is still pinned — deliberately, since the honesty
-/// claim is the point — but by the unit tests in `service::evaluator`, which own
+/// claim is the point — but by the unit tests in `service::served_gain`, which own
 /// it, rather than by every endpoint test.
 const OFF_AXIS_WARNING_CODE: WarningCode = WarningCode::OffAxisUnvalidated;
 

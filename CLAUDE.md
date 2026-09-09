@@ -122,8 +122,12 @@ Two things about this that the code will not tell you:
 3D Positions → Coordinate Transforms → Physics Model → Correction Surface → Final Gain
 ```
 
-`service/evaluator.rs` orchestrates this and its module docs carry the authoritative
-step-by-step diagram (including beam squint, G/T, and loss) — read those rather than a copy.
+`service/evaluator.rs` orchestrates the `/gain` request: coordinate transforms, repository
+lookup, and response assembly. The **served-gain law** — beam squint, physics, correction
+gating and sequencing, correction disposition, warning assembly, and the ideal reference —
+lives in `service/served_gain.rs` (issue #61). `/gain` runs through it today; `/h3-heatmap`
+uses its coverage and warning helpers and migrates onto the prepared value in #62. Both
+modules' docs carry the authoritative step-by-step diagram — read those rather than a copy.
 `AntennaCalibration` (`antenna-core/src/data/types.rs`) is loaded at startup from the `.bin`
 artifacts `antennas.yaml` names; see `.claude/rules/calibration.md` before touching it.
 

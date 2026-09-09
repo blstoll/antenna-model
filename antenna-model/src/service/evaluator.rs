@@ -67,19 +67,32 @@
 //! - Invalid coordinates → ValidationError
 //! - Computation failures → ComputationError with context
 //! - Out-of-range queries → Warning (not error)
+//!
+//! # Where each step lives
+//!
+//! This module owns step 1 and the *request adaptation* half of step 2: coordinate
+//! transformation, repository lookup, and converting `feed_pointing_location` (an aim
+//! point) into a feed steering displacement. Everything from beam squint onward — the
+//! rest of step 2, and steps 3 through 6 — is the **served-gain law**, which lives in
+//! `service::served_gain` (issue #61, parent #59). Read that module's docs for the
+//! authoritative ordering of squint, physics, correction, disposition, warnings, and the
+//! ideal reference. What remains here is request adaptation, response DTO construction,
+//! and response timing.
+//!
+//! (`served_gain` is crate-private, so the reference above is deliberately not an
+//! intra-doc link — linking a public module's docs to a private item is a rustdoc
+//! warning.)
 
 use crate::api::schemas::{
-    CalibrationStatusInfo, ComputationMetadata, GainRequest, GainResponse, GeometryInfo,
+    CalibrationStatusInfo, ComputationMetadata, GainRequest, GainResponse, GeometryInfo, Vector3D,
 };
 use crate::data::repository::CalibrationRepository;
-use crate::data::types::{CalibrationCoverage, CalibrationStatus};
 use crate::error::{AntennaModelError, Result};
 use crate::model::integration::DEFAULT_INTEGRATION_BUDGET;
-use crate::model::{
-    compute_emitter_direction_with_attitude, compute_feed_position_from_pointing, compute_gain_db,
-    evaluate_correction, squint_corrected_direction, AntennaConfiguration, IntegrationParams,
+use crate::model::{compute_emitter_direction_with_attitude, compute_feed_position_from_pointing};
+use crate::service::served_gain::{
+    FeedSteering, PreSquintDirection, PreparedServedGain, ReferenceGainRequest, ServedFrequencies,
 };
-use crate::warnings::{ApiWarning, WarningCode};
 use std::time::{Duration, Instant};
 
 /// Compute antenna gain from a gain request
@@ -116,8 +129,12 @@ pub fn compute_gain_from_request_with_budget(
     time_budget: Duration,
 ) -> Result<GainResponse> {
     let start = Instant::now();
-    let mut warnings = Vec::new();
 
+    // Coordinate transformation runs BEFORE the repository lookup. That ordering is
+    // observable: a request that is both geometrically invalid and names an unknown
+    // antenna reports the coordinate fault, not `FeedNotFound`. Keep it here — moving it
+    // behind the served-gain seam would silently reverse an established error precedence
+    // (#59, "single-gain coordinate errors retain their current precedence").
     let (emitter_az, emitter_el) = compute_emitter_direction_with_attitude(
         &request.emitter_position,
         &request.vehicle_position,
@@ -132,622 +149,93 @@ pub fn compute_gain_from_request_with_budget(
             feed_id: request.feed_id.clone(),
         })?;
 
-    // Build AntennaConfiguration from calibration data
-    // Convert data types to model geometry types
-    use crate::model::{
-        FeedParameters as ModelFeedParams, FeedPosition, MeshParameters as ModelMeshParams,
-        ReflectorGeometry as ModelReflector,
-    };
-
-    let focal_length_m = calibration.physical_config.reflector.focal_length_m;
-    let diameter_m = calibration.physical_config.reflector.diameter_m;
-
-    let reflector = ModelReflector::builder()
-        .diameter(diameter_m)
-        .focal_length(focal_length_m)
-        .surface_rms(calibration.physical_config.reflector.surface_rms_mm / 1000.0) // mm to m
-        .build()
-        .map_err(|e| AntennaModelError::Generic(format!("Failed to build reflector: {}", e)))?;
-
-    // Compute physical feed position from API steering parameters
-    // The API's feed_pointing_location specifies where the feed is aimed (Earth target location)
-    // This computes the corresponding physical feed position in the reflector frame
+    // Request adaptation: `feed_pointing_location` is an aim point — a location on Earth
+    // the feed is pointed at — not a physical feed coordinate (see
+    // `docs/domain-contract.md`). Convert it into the steering displacement that
+    // preparation combines with this feed's design offset.
+    //
+    // This now runs BEFORE the reflector is built, where it used to run after. The
+    // precedence that matters — a coordinate fault beating `FeedNotFound` — is preserved
+    // above, and the only pair this could reorder is unreachable on the served path:
+    // `data::loader` validates every artifact as it loads it (`AntennaCalibration::validate`
+    // → `ReflectorGeometry::validate`), rejecting non-positive diameter or focal length,
+    // negative surface RMS, and out-of-band f/D — a superset of what
+    // `model::ReflectorGeometry::new` can fail on. A loaded artifact therefore cannot fail
+    // reflector construction, so no request can reach a reflector error at all, in either
+    // order.
     let (steer_x, steer_y, steer_z) = compute_feed_position_from_pointing(
         &request.feed_pointing_location,
         &request.reflector_boresight,
         &request.vehicle_position,
-        focal_length_m,
-        diameter_m,
+        calibration.physical_config.reflector.focal_length_m,
+        calibration.physical_config.reflector.diameter_m,
         request.vehicle_attitude,
     )?;
 
-    // Combine steering-induced position with design feed offset
-    // The design position represents the physical offset of this feed from the optical axis
-    // (e.g., multi-feed antennas have feeds at different physical locations)
-    let design_pos = &calibration.physical_config.feed.position;
-    let feed_x = steer_x + design_pos.0;
-    let feed_y = steer_y + design_pos.1;
-    let feed_z = steer_z + design_pos.2;
-    let physical_feed_position = FeedPosition::new(feed_x, feed_y, feed_z);
-
-    // Physical feed offset from the focal point in the antenna frame (meters).
-    // feed_z is the z-position relative to the reflector vertex; subtracting focal_length_m
-    // gives the displacement from the focal point. For an on-axis feed (zero steering offset),
-    // this is (0, 0, 0). For a steered feed, x/y are the lateral displacement and z is
-    // the (small, second-order) defocus component.
-    let feed_offset = crate::api::schemas::Vector3D::new(feed_x, feed_y, feed_z - focal_length_m);
-
-    // Apply beam squint correction if pointing frequency differs from operating frequency.
-    // Must be done AFTER computing feed position since squint depends on actual displacement.
-    let pointing_freq = request
-        .pointing_frequency_mhz
-        .unwrap_or(request.frequency_mhz);
-
-    let (corrected_az, corrected_el, squint_magnitude_deg) = squint_corrected_direction(
-        emitter_az,
-        emitter_el,
-        request.frequency_mhz,
-        pointing_freq,
-        feed_x,
-        feed_y,
-        focal_length_m,
-    );
-
-    let feed = ModelFeedParams::builder()
-        .position(physical_feed_position)
-        .q_factor(calibration.physical_config.feed.q_factor)
-        .phase_center_offset(calibration.physical_config.feed.phase_center_offset_m)
-        .axial_defocus(calibration.physical_config.feed.axial_defocus_m)
-        // Roadmap D23: every field this builder can take must come from the artifact,
-        // never from the builder's own default. Omitting this one substituted a
-        // symmetric feed for an asymmetric one — worth up to 1.20 dB, and it also
-        // silently moved the evaluation from the azimuthal-mode integrator branch to
-        // the symmetric one.
-        .asymmetry_factor(calibration.physical_config.feed.asymmetry_factor)
-        .build()
-        .map_err(|e| AntennaModelError::Generic(format!("Failed to build feed: {}", e)))?;
-
-    let mut config_builder = AntennaConfiguration::builder()
-        .id(&calibration.antenna_id)
-        .name(&calibration.metadata.antenna_name)
-        .reflector(reflector)
-        .feed(feed);
-
-    // Add mesh if present
-    if let Some(ref mesh_data) = calibration.physical_config.mesh {
-        let mesh = ModelMeshParams::builder()
-            .spacing(mesh_data.mesh_spacing_mm / 1000.0) // mm to m
-            .wire_diameter(mesh_data.wire_diameter_mm / 1000.0) // mm to m
-            .build()
-            .map_err(|e| AntennaModelError::Generic(format!("Failed to build mesh: {}", e)))?;
-        config_builder = config_builder.mesh(mesh);
-    }
-
-    let antenna_config = config_builder.build().map_err(|e| {
-        AntennaModelError::Generic(format!("Failed to build antenna configuration: {}", e))
-    })?;
-
-    // Canonical served-path integration params. Radial density is derived adaptively
-    // from (D/λ, θ), so this satisfies the <100ms target near boresight while remaining
-    // numerically correct off-axis (P10).
-    //
-    // The two uncorrected-physics gates (P11) come from one shared setter, which
-    // `calibrate` calls with the same predicate for the artifact it writes — see
-    // `IntegrationParams::with_uncorrected_physics_gates` and roadmap D17. Setting either
-    // flag by hand here would reopen the calibrate/service split that unit closed.
-    //
-    // What the gates mean:
-    //   * spillover — a double-counting gate: physical spillover is folded in only when NO
-    //     correction surface exists (the surface otherwise absorbs it empirically). Note
-    //     the model layer further restricts spillover to StandardPhysicalOptics mode, so a
-    //     large feed offset may leave the flag on yet apply no spillover. The
-    //     ideal-reference computation below tracks the ACTUAL result's spillover state (not
-    //     this flag) so base spillover cancels in loss_db without a one-sided bias.
-    //   * sidelobe floor — F7 (redesign 2026-07-16): incoherent power sum forward,
-    //     floor-only behind the dish (see model::pattern::compute_gain). Calibrated
-    //     antennas keep it off for the same double-counting reason.
-    //
-    // Both are whole-antenna gates — never per query — so no discontinuity is introduced
-    // between covered and out-of-coverage queries on a calibrated antenna.
-    let mut integration_params = IntegrationParams::adaptive()
-        .with_uncorrected_physics_gates(calibration.physics_is_uncorrected());
-    // S3: bound each aperture integration to the configured wall-clock budget. Carried in
-    // IntegrationParams so `integrate_aperture`'s signature stays stable; both integrations
-    // behind this gain (off-axis + boresight anchor, and the ideal reference below) each get
-    // a fresh deadline of this duration.
-    integration_params.time_budget = Some(time_budget);
-
-    // Convert frequency from MHz to Hz for physics model
-    let frequency_hz = request.frequency_mhz * 1e6;
-
-    // PHYSICS MODEL: Compute gain using full aperture integration
-    // Note: theta and phi are in radians in spherical coordinates
-    // Our corrected_el uses the convention: elevation = 0° at boresight (Z-axis alignment)
-    // Physics model theta uses: theta = 0° at boresight (standard spherical coordinates)
-    // These conventions match, so direct conversion:
     tracing::debug!(
         emitter_az = %emitter_az,
         emitter_el = %emitter_el,
         "Computed emitter direction in antenna frame"
     );
-    tracing::debug!(
-        corrected_az = %corrected_az,
-        corrected_el = %corrected_el,
-        "Emitter direction after beam squint correction"
-    );
 
-    let theta_rad = corrected_el.to_radians();
-    let phi_rad = corrected_az.to_radians();
+    let prepared = PreparedServedGain::prepare(
+        calibration,
+        FeedSteering::new(steer_x, steer_y, steer_z),
+        ServedFrequencies::new(request.frequency_mhz, request.pointing_frequency_mhz),
+        time_budget,
+    )?;
 
-    tracing::debug!(
-        theta_rad = %theta_rad,
-        phi_rad = %phi_rad,
-        feed_x = %feed_x,
-        feed_y = %feed_y,
-        feed_z = %feed_z,
-        "Physics model inputs"
-    );
+    // Everything from here to the response DTO is the served-gain law, and it lives in
+    // `service::served_gain` — this endpoint no longer knows how to build the
+    // physical-optics model, gate coverage, evaluate a correction surface, or decide which
+    // warnings a direction earns.
+    let served = prepared.evaluate_direct(
+        PreSquintDirection::new(emitter_az, emitter_el),
+        if request.include_reference {
+            ReferenceGainRequest::Include
+        } else {
+            ReferenceGainRequest::Omit
+        },
+    )?;
 
-    let result = compute_gain_db(
-        theta_rad,
-        phi_rad,
-        &antenna_config,
-        frequency_hz,
-        &integration_params,
-    )?; // ComputationError automatically converts via #[from]
-    let gain_physics = result.gain;
-
-    // Collect edge case warnings from physics computation
-    warnings.extend(result.warnings);
-
-    // Apply correction surface (if available and in coverage)
-    // Use corrected angles for coverage check and interpolation
-    let mut correction_extrapolated = false;
-    let in_coverage = calibration.correction_surface.is_some()
-        && is_in_coverage(
-            &calibration.calibration_coverage,
-            corrected_az,
-            corrected_el,
-            request.frequency_mhz,
-        );
-    let (correction_db, correction_applied) = match &calibration.correction_surface {
-        Some(correction) if in_coverage => {
-            let result = evaluate_correction(
-                correction,
-                corrected_az,
-                corrected_el,
-                request.frequency_mhz,
-                calibration.validity_ranges.temperature_const,
-            )?;
-            correction_extrapolated = result.extrapolated;
-            warnings.extend(result.warnings);
-            (result.correction_db, true)
-        }
-        _ => (0.0, false),
-    };
-
-    // Determine whether this result was extrapolated:
-    // - Correction surface was applied but the query was outside its B-spline knot range, OR
-    // - Correction surface exists but was not applied because the query is outside coverage.
-    let out_of_coverage = calibration.correction_surface.is_some() && !correction_applied;
-    let extrapolated = correction_extrapolated || out_of_coverage;
-
-    let final_gain_db = gain_physics + correction_db;
-
-    // Compute reference gain if requested.
-    //
-    // The reference is the boresight gain of an IDEAL version of this antenna (feed at
-    // the focal point, perfect surface), evaluated through the SAME `compute_gain_db`
-    // pipeline as the actual gain. Because both numbers come from the identical
-    // aperture-directivity formula, `loss_db` has no built-in offset: it is purely the
-    // pointing/aberration loss (≈0 dB at boresight with a focused feed).
-    let (reference_gain_db, loss_db) = if request.include_reference {
-        let ideal_reflector = ModelReflector::new(diameter_m, focal_length_m, 0.0)
-            .map_err(|e| AntennaModelError::Generic(format!("ideal reflector: {e}")))?;
-        let ideal_feed = ModelFeedParams::new(
-            FeedPosition::at_focus(focal_length_m),
-            calibration.physical_config.feed.q_factor,
-            calibration.physical_config.feed.phase_center_offset_m,
-            1.0,
-        )
-        .map_err(|e| AntennaModelError::Generic(format!("ideal feed: {e}")))?;
-        let ideal_config = AntennaConfiguration::new(
-            format!("{}_ideal", calibration.antenna_id),
-            "ideal".into(),
-            ideal_reflector,
-            ideal_feed,
-            antenna_config.mesh.clone(),
-        )
-        .map_err(|e| AntennaModelError::Generic(format!("ideal config: {e}")))?;
-        // Match the reference's spillover to the ACTUAL path: if the actual was in a mode
-        // where spillover was folded in (StandardPhysicalOptics), apply it to the ideal
-        // reference too so the base spillover cancels in loss_db; if the actual did NOT get
-        // spillover (large offset / non-standard mode, or calibrated), the reference must
-        // not either, keeping loss_db free of a one-sided spillover bias.
-        //
-        // This is the ONE place that sets a P11-gated flag without going through
-        // `with_uncorrected_physics_gates`, and that is deliberate — the setter's docs name
-        // this exception. Routing this line through the setter would derive the flag from
-        // the *predicate* rather than from what the actual evaluation applied, reintroducing
-        // exactly the one-sided bias the paragraph above exists to prevent.
-        let mut reference_params = integration_params.clone();
-        reference_params.apply_spillover = result.spillover_loss_db.is_some();
-        // `apply_sidelobe_floor` is carried unchanged from the clone. For the ideal
-        // REFERENCE it is inert under the F7 power sum for two independent reasons: the
-        // ideal reflector has surface_rms = 0.0, so `sidelobe_floor_gain` is identically
-        // zero (adding zero changes nothing — exactly, not approximately), and the
-        // reference is evaluated at boresight (theta=0), which is forward-hemisphere.
-        let reference = compute_gain_db(0.0, 0.0, &ideal_config, frequency_hz, &reference_params)?;
-
-        // Loss is reference minus actual gain (final gain, including the
-        // correction surface when it was applied).
-        (Some(reference.gain), Some(reference.gain - final_gain_db))
-    } else {
-        (None, None)
-    };
-
-    // Generate warnings based on calibration status (use corrected angles)
-    let calibration_warnings =
-        generate_calibration_warnings(&calibration, corrected_az, corrected_el, correction_applied);
-    warnings.extend(calibration_warnings);
-
-    // Off-axis honesty warning (P8): corrected_el is the off-boresight angle
-    // (elevation = 0° at boresight in this pipeline's convention).
-    warnings.extend(off_axis_unvalidated_warning(
-        &calibration,
-        corrected_el,
-        request.frequency_mhz,
-    ));
-
-    // Rear-hemisphere hard-invalidity warning (P10-tail): fires for θ>90° on ANY
-    // antenna, calibrated or not — a forward-hemisphere correction surface says
-    // nothing about back lobes. Same off-boresight angle as the off-axis warning.
-    warnings.extend(rear_hemisphere_warning(
-        &calibration,
-        corrected_el,
-        request.frequency_mhz,
-    ));
-
-    // Build calibration status info
-    let calibration_status_info = calibration.calibration_status.as_ref().map(|status| {
+    // `correction_applied` comes from the served result's disposition, never from
+    // correction-surface existence or calibration status.
+    let calibration_status_info = prepared.calibration_status().map(|status| {
         let mut info = CalibrationStatusInfo::from(status);
-        info.correction_applied = correction_applied;
+        info.correction_applied = served.correction.applied();
         info
     });
 
     Ok(GainResponse {
         antenna_id: request.antenna_id.clone(),
         feed_id: request.feed_id.clone(),
-        gain_db: final_gain_db,
-        reference_gain_db,
-        loss_db,
+        gain_db: served.gain_db,
+        reference_gain_db: served.reference_gain_db,
+        loss_db: served.loss_db,
         geometry: GeometryInfo {
-            physical_feed_offset_m: feed_offset,
-            emitter_azimuth_deg: corrected_az,
-            emitter_elevation_deg: corrected_el,
-            beam_squint_deg: if squint_magnitude_deg > 0.001 {
-                Some(squint_magnitude_deg)
-            } else {
-                None
-            },
+            physical_feed_offset_m: Vector3D::new(
+                served.physical_feed_offset.x_m,
+                served.physical_feed_offset.y_m,
+                served.physical_feed_offset.z_m,
+            ),
+            emitter_azimuth_deg: served.direction.e_clock_deg,
+            emitter_elevation_deg: served.direction.e_cone_deg,
+            beam_squint_deg: served.reported_beam_squint_deg(),
         },
         // A single-gain failure is an HTTP error, never a 200 body carrying a
         // reason — only `service::batch` populates this field.
         error: None,
-        warnings,
         metadata: ComputationMetadata {
             computation_time_ms: start.elapsed().as_secs_f64() * 1000.0,
             coordinate_transform_ms: None,
             physics_model_ms: None,
             correction_surface_ms: None,
-            extrapolated,
-            spillover_loss_db: result.spillover_loss_db,
+            extrapolated: served.correction.extrapolated(),
+            spillover_loss_db: served.spillover_loss_db,
         },
+        warnings: served.warnings,
         calibration_status: calibration_status_info,
     })
-}
-
-/// Check if the query is within the calibrated coverage region.
-///
-/// This is the served correction-application gate. It owns exactly one decision
-/// the calibration artifact cannot make for itself — what an *absent* coverage
-/// record means — and delegates the range test to
-/// [`CalibrationCoverage::contains_direction_at_frequency`], which is the sole
-/// authority for it (issue #60). The service previously carried its own copy of
-/// that expression; the two agreed only by inspection, and the pole limitation
-/// documented on the core predicate had to be fixed in two places.
-///
-/// When no coverage restriction is recorded (`None`) the correction surface is
-/// treated as valid everywhere it has data — the query is considered in-coverage.
-/// Actual correction application is still gated separately on
-/// `correction_surface.is_some()`, so returning `true` here for `None` is safe.
-///
-/// This is the **full** coverage question: azimuth, E-cone, and frequency. The
-/// partial-calibration advisory asks the narrower spatial-only question
-/// ([`CalibrationCoverage::contains_direction`]) and the two must stay distinct —
-/// a query on the measured grid at an uncalibrated frequency gets no correction
-/// but is not outside the calibrated *region*.
-pub(crate) fn is_in_coverage(
-    coverage: &Option<CalibrationCoverage>,
-    azimuth_deg: f64,
-    elevation_deg: f64,
-    frequency_mhz: f64,
-) -> bool {
-    match coverage {
-        Some(cov) => cov.contains_direction_at_frequency(azimuth_deg, elevation_deg, frequency_mhz),
-        // No coverage restriction recorded (fully calibrated artifact):
-        // the correction surface applies everywhere it has data.
-        None => true,
-    }
-}
-
-/// Generate warnings based on calibration status and query parameters.
-///
-/// Returns a vector of warning messages to be included in the response.
-fn generate_calibration_warnings(
-    calibration: &crate::data::types::AntennaCalibration,
-    azimuth_deg: f64,
-    elevation_deg: f64,
-    correction_applied: bool,
-) -> Vec<ApiWarning> {
-    let mut warnings = Vec::new();
-
-    // Get calibration status (default to FullyCalibrated if not specified for backward compatibility)
-    let status = calibration.calibration_status.as_ref();
-
-    match status {
-        Some(CalibrationStatus::Uncalibrated {
-            accuracy_estimate_db,
-            loss_accuracy_estimate_db,
-        }) => {
-            warnings.push(WarningCode::Uncalibrated.with(format!(
-                "Antenna '{}' is uncalibrated (using design specifications). \
-                 Absolute gain accuracy: ±{:.1} dB, Loss accuracy: ±{:.1} dB",
-                calibration.antenna_id, accuracy_estimate_db, loss_accuracy_estimate_db
-            )));
-        }
-        Some(CalibrationStatus::PartiallyCalibrated {
-            accuracy_estimate_db,
-            coverage,
-        }) => {
-            warnings.push(WarningCode::PartiallyCalibrated.with(format!(
-                "Antenna '{}' is partially calibrated. Accuracy estimate: ±{:.1} dB",
-                calibration.antenna_id, accuracy_estimate_db
-            )));
-
-            // Whether the query left the measured *region*. Deliberately spatial
-            // only: this advisory reports direction, not band, so an in-grid query
-            // at an uncalibrated frequency gets `correction_not_applied` below
-            // without also claiming to be outside the calibrated region.
-            if !coverage.contains_direction(azimuth_deg, elevation_deg) {
-                warnings.push(WarningCode::OutOfCoverage.with(
-                    "Query is outside calibrated region - using physics model extrapolation",
-                ));
-            }
-        }
-        Some(CalibrationStatus::FullyCalibrated { .. }) | None => {
-            // No calibration warnings for fully calibrated antennas
-        }
-    }
-
-    // Warn if correction surface exists but wasn't applied
-    if !correction_applied && calibration.correction_surface.is_some() {
-        warnings.push(
-            WarningCode::CorrectionNotApplied
-                .with("Correction surface not applied (out of coverage)"),
-        );
-    }
-
-    warnings
-}
-
-/// First-null angle coefficient for tapered circular-aperture illumination:
-/// θ_null ≈ 1.6·λ/D radians (uniform illumination would be 1.22·λ/D; the
-/// taper widens the main lobe). See docs/domain-contract.md, "Off-axis
-/// pattern / sidelobe fidelity".
-const FIRST_NULL_COEFFICIENT: f64 = 1.6;
-
-/// The off-axis honesty warning fires beyond this many first-null angles off
-/// boresight. Inside ~3 first nulls the main beam and first sidelobe are the
-/// region the model is validated for (<1 dB).
-///
-/// Beyond it, the served value is now **numerically correct**: roadmap unit P10
-/// (LANDED 2026-07-15) replaced the aliasing fixed-density quadrature with the
-/// Hankel / azimuthal-mode integrator, which computes the physical-optics pattern
-/// to convergence at all angles (no more 20–35 dB-too-high aliasing, no gain that
-/// rises with angle). The remaining caveat is therefore **physical, not
-/// numerical**: the served value is *idealised* physical optics — it omits
-/// blockage, feed/strut scatter, and aperture-edge diffraction — so far-off-axis
-/// sidelobe *levels* are optimistic and not calibrated-grade (the pattern shape is
-/// validated; the absolute levels are not). Per the F7 redesign (landed
-/// 2026-07-16) the served path on uncorrected-physics antennas combines this
-/// idealised PO term with the F7 statistical sidelobe floor as an incoherent
-/// power sum, so far off-axis the returned value tracks a best-estimate MEDIAN
-/// wide-angle level rather than the raw PO number alone. The warning below
-/// states this physical caveat.
-const OFF_AXIS_FIRST_NULL_MULTIPLE: f64 = 3.0;
-
-/// Off-axis honesty warning for uncorrected-physics antennas (roadmap units P8, P11).
-///
-/// Returns a warning when a query on an antenna whose served gain is RAW
-/// (uncorrected) physics falls beyond the validated main-beam/near-in region
-/// (3× the first-null angle ≈ 1.6·λ/D — a beamwidth-relative threshold, not a
-/// fixed angle).
-///
-/// The gate is [`AntennaCalibration::physics_is_uncorrected`] — the SAME
-/// predicate that gates the spillover fold-in (roadmap P11). Any antenna that
-/// carries a correction surface stays silent (regardless of calibration
-/// status): out-of-coverage queries there already receive the extrapolation
-/// warning, so stacking a second warning was explicitly ruled out (P8 design
-/// constraint 1), and that constraint is preserved exactly by keying on surface
-/// presence. Conversely a `PartiallyCalibrated` antenna produced with NO
-/// frequency correction (see `calibrate/boresight_calibration.rs`) has no
-/// surface to extrapolate and DOES warn — closing the pre-P11 honesty gap where
-/// such an antenna had its physics modified (spillover) yet served no off-axis
-/// honesty warning.
-///
-/// The message is intentionally constant per (antenna, frequency) — it must
-/// not embed the query angle, so that heatmap/H3 warning aggregation
-/// deduplicates it to a single entry across grid points. Aggregation dedupes on
-/// `(code, message)`, so this remains load-bearing after C8 stage 3 typed the
-/// warning: a per-angle message would yield one array entry per grid point even
-/// though every entry carried the same code.
-///
-/// Carries [`WarningCode::OffAxisUnvalidated`] (typed by C8 stage 3,
-/// 2026-07-27).
-pub(crate) fn off_axis_unvalidated_warning(
-    calibration: &crate::data::types::AntennaCalibration,
-    off_boresight_deg: f64,
-    frequency_mhz: f64,
-) -> Option<ApiWarning> {
-    if !calibration.physics_is_uncorrected() {
-        return None;
-    }
-
-    let diameter_m = calibration.physical_config.reflector.diameter_m;
-    if diameter_m <= 0.0 || frequency_mhz <= 0.0 {
-        return None;
-    }
-
-    let wavelength_m = crate::model::wavelength_from_frequency(frequency_mhz * 1e6);
-    let threshold_deg = (OFF_AXIS_FIRST_NULL_MULTIPLE * FIRST_NULL_COEFFICIENT * wavelength_m
-        / diameter_m)
-        .to_degrees();
-
-    if off_boresight_deg.abs() <= threshold_deg {
-        return None;
-    }
-
-    Some(WarningCode::OffAxisUnvalidated.with(format!(
-        "Antenna '{}' is uncalibrated and this query is more than {:.2}° off boresight \
-         (3× the first-null angle ≈ 1.6·λ/D at {:.0} MHz) — beyond the validated main-beam \
-         region. The off-axis gain returned here is numerically converged (the P10 Hankel / \
-         azimuthal-mode integrator computes the physical-optics pattern correctly at all \
-         angles), but the physical-optics term is IDEALISED: it omits blockage, feed/strut \
-         scatter, and aperture-edge diffraction. The value includes the statistical Ruze \
-         sidelobe floor as an incoherent power sum — a best-estimate MEDIAN wide-angle \
-         level tracking measured earth-station statistics (NTIA 84-164), not a precise \
-         per-antenna prediction. For sidelobe, interference, off-axis-EIRP, or \
-         adjacent-satellite analysis, use calibration data or a regulatory envelope such \
-         as the ITU-R S.580 mask.",
-        calibration.antenna_id, threshold_deg, frequency_mhz
-    )))
-}
-
-/// Rear-hemisphere hard-invalidity warning (roadmap unit P10-tail, maintainer
-/// decision 2026-07-15).
-///
-/// Fires iff the observation direction has ANY backward component, i.e.
-/// `|off_boresight_deg| > 90.0`. The aperture-integration formulation is a
-/// forward-radiating model: the moment θ crosses 90° the returned value is a
-/// numerical extrapolation of an idealised UNSHADOWED aperture field with no
-/// physical validity behind the reflector — the far-field conversion carries the
-/// Huygens obliquity factor (F7, 2026-07-16), but there is still no rim
-/// diffraction, dish shadowing, feed spillover, or mesh leakage modeled (those,
-/// not the aperture field, set real rear levels). The value is numerically
-/// converged in the forward hemisphere but categorically meaningless here, so
-/// per the maintainer decision it is still returned (grid totality on
-/// `/heatmap` and `/h3-heatmap` must be preserved) but carries this harder
-/// warning. What value is actually served behind the dish depends on
-/// calibration status: uncorrected-physics antennas serve the statistical
-/// sidelobe floor only (rear integration skipped, F7 redesign 2026-07-16);
-/// corrected antennas still serve the raw physical-optics extrapolation.
-///
-/// Unlike [`off_axis_unvalidated_warning`], this is **NOT** gated on calibration
-/// status: a correction surface fitted from forward-hemisphere measurements says
-/// nothing about back lobes, so it fires for calibrated antennas too and takes
-/// no calibration/status argument for the gate. The warning fires for every
-/// antenna (a forward-hemisphere correction surface says nothing about back
-/// lobes); only the WORDING branches on `physics_is_uncorrected()` —
-/// uncorrected-physics antennas serve the statistical floor (F7 redesign
-/// 2026-07-16), corrected antennas still serve the raw PO extrapolation.
-///
-/// The message is intentionally constant per (antenna, frequency) — it embeds no
-/// query angle — so heatmap/H3 warning aggregation deduplicates it to a single
-/// entry across grid points (the P8 convention).
-///
-/// Carries [`WarningCode::RearHemisphereInvalid`] (typed by C8 stage 3,
-/// 2026-07-27). Both wording branches share the one code: the distinction they
-/// draw — statistical floor vs raw PO extrapolation — is *what was served*, which
-/// a client reads from `calibration_status`, not a different reason to distrust
-/// the number.
-pub(crate) fn rear_hemisphere_warning(
-    calibration: &crate::data::types::AntennaCalibration,
-    off_boresight_deg: f64,
-    frequency_mhz: f64,
-) -> Option<ApiWarning> {
-    // Gate at exactly θ=90°: the aperture formulation is meaningless the moment
-    // the observation direction has a backward component.
-    if off_boresight_deg.abs() <= 90.0 {
-        return None;
-    }
-
-    if calibration.physics_is_uncorrected() {
-        // F7 redesign (2026-07-16): on uncorrected-physics antennas the rear value IS
-        // the statistical floor (PO excluded behind the dish).
-        Some(WarningCode::RearHemisphereInvalid.with(format!(
-            "Antenna '{}' query at {:.0} MHz is in the REAR HEMISPHERE (more than 90° off \
-             boresight). The returned value is the statistical sidelobe floor ONLY — a \
-             best-estimate median wide-angle level (NTIA 84-164) scaled by this antenna's \
-             surface quality; the aperture-integration model has no physical validity \
-             behind the reflector, so its term is excluded there. Real rear-hemisphere \
-             levels are set by feed spillover past the rim, aperture-edge diffraction, and \
-             mesh leakage — none of which are modeled individually. Use measured data or a \
-             regulatory envelope (e.g. an ITU-R rear-lobe mask) for any rear-hemisphere \
-             analysis.",
-            calibration.antenna_id, frequency_mhz
-        )))
-    } else {
-        Some(WarningCode::RearHemisphereInvalid.with(format!(
-            "Antenna '{}' query at {:.0} MHz is in the REAR HEMISPHERE (more than 90° off \
-             boresight). The aperture-integration model has NO physical validity behind the \
-             reflector: the returned value is a numerical extrapolation of an idealised, \
-             unshadowed aperture field, not a prediction. Real rear-hemisphere levels are set \
-             by feed spillover past the rim, aperture-edge diffraction, and mesh leakage — none \
-             of which are modeled here. Use measured data or a regulatory envelope (e.g. an \
-             ITU-R rear-lobe mask) for any rear-hemisphere analysis.",
-            calibration.antenna_id, frequency_mhz
-        )))
-    }
-}
-
-/// Ray-tracing stub degraded-accuracy warning (roadmap unit P3, maintainer
-/// decision 2026-07-16: document + flag).
-///
-/// Returns [`crate::model::pattern::RAY_TRACING_STUB_WARNING`] iff the antenna's
-/// feed offset exceeds the severe threshold (> 0.5·f), i.e. the regime that the
-/// model routes to the acknowledged ray-tracing stub (`ray_trace.rs`). The gate
-/// mirrors the model's own `analyze_edge_cases` mode selection exactly: same
-/// `displacement_from_focus / focal_length` ratio, same
-/// [`crate::model::edge_cases::SEVERE_OFFSET_THRESHOLD`].
-///
-/// **Why this exists at the service layer.** For single gain / batch / rectangular
-/// heatmap the model pushes this warning itself (those paths call `compute_gain_db`
-/// directly per query/point). The `/h3-heatmap` path instead caches PHYSICS-ONLY
-/// gain and only runs `compute_gain_db` on a cache MISS, so the model-pushed
-/// warning is lost on cache hits. This helper is re-emitted OUTSIDE the cache
-/// closure in `compute_cell_gain`, exactly like [`off_axis_unvalidated_warning`]
-/// and [`rear_hemisphere_warning`], so the honesty warning survives cache hits.
-/// On a cache miss the model also emits the identical string; the H3 warning-set
-/// aggregation deduplicates the pair to a single entry.
-///
-/// Deliberately **not** gated on calibration status: the ray-tracing stub is a
-/// numerical/geometric limitation independent of whether a correction surface
-/// exists. The message is constant per antenna config, so heatmap/H3 aggregation
-/// deduplicates it to a single entry.
-pub(crate) fn ray_trace_stub_warning(
-    config: &crate::model::geometry::AntennaConfiguration,
-) -> Option<ApiWarning> {
-    let focal_length = config.reflector.focal_length;
-    if focal_length <= 0.0 {
-        return None;
-    }
-    let offset_ratio = config.feed.position.displacement_from_focus(focal_length) / focal_length;
-    if offset_ratio > crate::model::edge_cases::SEVERE_OFFSET_THRESHOLD {
-        Some(crate::model::pattern::ray_trace_stub_warning())
-    } else {
-        None
-    }
 }
 
 #[cfg(test)]
@@ -758,8 +246,12 @@ mod tests {
         AntennaCalibration, CalibrationCoverage, CalibrationMetadata, CalibrationStatus,
         FeedParameters, MeshParameters, PhysicalAntennaConfig, ReflectorGeometry, ValidityRanges,
     };
+    use crate::model::{compute_gain_db, AntennaConfiguration, IntegrationParams};
+    use crate::service::test_support::{create_test_calibration, dummy_correction_surface};
+    use crate::warnings::WarningCode;
 
-    /// The warning codes [`generate_calibration_warnings`] can emit.
+    /// The calibration-status warning codes the served-gain law can emit
+    /// (`service::served_gain::generate_calibration_warnings`).
     ///
     /// Tests that assert "this response carries no calibration-status warnings"
     /// select on this set. Before C8 stage 3 they instead *excluded* the two known
@@ -771,78 +263,6 @@ mod tests {
         WarningCode::OutOfCoverage,
         WarningCode::CorrectionNotApplied,
     ];
-
-    fn create_test_calibration(status: CalibrationStatus) -> AntennaCalibration {
-        let metadata = CalibrationMetadata::builder()
-            .antenna_name("Test Antenna")
-            .calibration_date("2025-01-01T00:00:00Z")
-            .format_version("2.0")
-            .data_source("test")
-            .rmse_db(0.5)
-            .r_squared(0.99)
-            .num_measurements(1000)
-            .build()
-            .unwrap();
-
-        let mut builder = AntennaCalibration::builder()
-            .antenna_id("test_antenna")
-            .feed_id("test_feed")
-            .metadata(metadata)
-            .physical_config(PhysicalAntennaConfig {
-                reflector: ReflectorGeometry {
-                    diameter_m: 10.0,
-                    focal_length_m: 5.0,
-                    f_over_d_ratio: 0.5,
-                    surface_rms_mm: 0.5,
-                },
-                feed: FeedParameters {
-                    // Feed at focal point - zero offset from optical axis
-                    position: (0.0, 0.0, 0.0),
-                    q_factor: 8.0,
-                    phase_center_offset_m: 0.0,
-                    axial_defocus_m: 0.0,
-                    asymmetry_factor: 1.0,
-                },
-                mesh: Some(MeshParameters {
-                    mesh_spacing_mm: 5.0,
-                    wire_diameter_mm: 0.5,
-                }),
-            })
-            .validity_ranges(ValidityRanges {
-                azimuth_min_max: (0.0, 360.0),
-                elevation_min_max: (0.0, 90.0),
-                frequency_min_max: (1000.0, 10000.0),
-                temperature_const: 290.0,
-            });
-
-        builder = builder.calibration_status(status.clone());
-
-        // Add coverage for partially calibrated
-        if let CalibrationStatus::PartiallyCalibrated { ref coverage, .. } = status {
-            builder = builder.calibration_coverage(coverage.clone());
-        }
-
-        builder.build().unwrap()
-    }
-
-    /// A valid, evaluable correction surface for tests that need to represent
-    /// "corrected physics" (surface present ⇒ off-axis warning silent, spillover
-    /// off). All coefficients are zero, so it contributes 0 dB wherever it is
-    /// evaluated; its clamped knot vectors span the full validity range so an
-    /// end-to-end query does not extrapolate. Only its PRESENCE matters for the
-    /// P11 predicate, but making it evaluable lets it also be used in the
-    /// end-to-end `compute_gain` tests.
-    fn dummy_correction_surface() -> crate::data::types::BSplineModel4D {
-        crate::data::types::BSplineModel4D {
-            coefficients: vec![0.0; 2 * 2 * 2],
-            shape: [2, 2, 2, 1],
-            knots_azimuth: vec![0.0, 0.0, 0.0, 360.0, 360.0, 360.0],
-            knots_elevation: vec![0.0, 0.0, 0.0, 90.0, 90.0, 90.0],
-            knots_frequency: vec![1000.0, 1000.0, 1000.0, 10000.0, 10000.0, 10000.0],
-            knots_temperature: vec![290.0, 290.0, 290.0, 290.0, 290.0, 290.0],
-            spline_order: 3,
-        }
-    }
 
     fn create_test_request() -> GainRequest {
         // Emitter is a LEO satellite at 400 km geodetic altitude.
@@ -859,641 +279,6 @@ mod tests {
             include_reference: false,
             vehicle_attitude: None,
         }
-    }
-
-    #[test]
-    fn test_is_in_coverage_fully_covered() {
-        let coverage = Some(
-            CalibrationCoverage::builder()
-                .azimuth_range(0.0, 360.0)
-                .elevation_range(0.0, 90.0)
-                .frequency_range(8000.0, 9000.0)
-                .num_measurements(1000)
-                .has_correction_surface(true)
-                .build()
-                .unwrap(),
-        );
-
-        assert!(is_in_coverage(&coverage, 180.0, 45.0, 8400.0));
-    }
-
-    /// A boresight artifact's coverage must accept a boresight query whatever its
-    /// azimuth reads, because azimuth is degenerate at the pole (`atan2` on float
-    /// noise). This is the gate that silently skipped the boresight frequency
-    /// correction while the encoding was `azimuth_range = (0, 0)`.
-    #[test]
-    fn boresight_cone_coverage_accepts_a_pole_query_at_any_azimuth() {
-        let coverage = Some(
-            CalibrationCoverage::builder()
-                .azimuth_range(0.0, 360.0)
-                .elevation_range(0.0, crate::data::types::BORESIGHT_COVERAGE_CONE_DEG)
-                .frequency_range(3700.0, 6425.0)
-                .num_measurements(6)
-                .has_correction_surface(true)
-                .build()
-                .unwrap(),
-        );
-
-        // 63.43° is the azimuth measured for a query aimed exactly at the boresight
-        // point on a realistic ECEF geometry; 0.0 and 359.9 are equally valid there.
-        for az in [0.0, 63.43, 180.0, 359.9] {
-            assert!(
-                is_in_coverage(&coverage, az, 0.0, 4000.0),
-                "boresight coverage rejected a boresight query at azimuth {az}"
-            );
-        }
-
-        // Outside the cone is genuinely off-axis, whatever the azimuth.
-        assert!(!is_in_coverage(&coverage, 63.43, 5.0, 4000.0));
-    }
-
-    /// The encoding this replaced, kept as an explicit record of the defect: a
-    /// zero-width azimuth range rejects the point it is meant to cover.
-    #[test]
-    fn legacy_degenerate_boresight_coverage_rejects_its_own_point() {
-        let legacy = Some(
-            CalibrationCoverage::builder()
-                .azimuth_range(0.0, 0.0)
-                .elevation_range(0.0, 0.0)
-                .frequency_range(3700.0, 6425.0)
-                .num_measurements(6)
-                .has_correction_surface(true)
-                .build()
-                .unwrap(),
-        );
-
-        assert!(
-            !is_in_coverage(&legacy, 63.43, 0.0, 4000.0),
-            "if this now passes, the azimuth clause has been made pole-aware — good, \
-             but update CalibrationCoverage::contains_direction_at_frequency's doc \
-             comment and the roadmap item it points at"
-        );
-    }
-
-    #[test]
-    fn test_is_in_coverage_outside_azimuth() {
-        let coverage = Some(
-            CalibrationCoverage::builder()
-                .azimuth_range(0.0, 90.0)
-                .elevation_range(0.0, 90.0)
-                .frequency_range(8000.0, 9000.0)
-                .num_measurements(100)
-                .has_correction_surface(true)
-                .build()
-                .unwrap(),
-        );
-
-        assert!(!is_in_coverage(&coverage, 180.0, 45.0, 8400.0));
-    }
-
-    #[test]
-    fn test_is_in_coverage_outside_elevation() {
-        let coverage = Some(
-            CalibrationCoverage::builder()
-                .azimuth_range(0.0, 360.0)
-                .elevation_range(0.0, 30.0)
-                .frequency_range(8000.0, 9000.0)
-                .num_measurements(100)
-                .has_correction_surface(true)
-                .build()
-                .unwrap(),
-        );
-
-        assert!(!is_in_coverage(&coverage, 180.0, 45.0, 8400.0));
-    }
-
-    #[test]
-    fn test_is_in_coverage_outside_frequency() {
-        let coverage = Some(
-            CalibrationCoverage::builder()
-                .azimuth_range(0.0, 360.0)
-                .elevation_range(0.0, 90.0)
-                .frequency_range(9000.0, 10000.0)
-                .num_measurements(100)
-                .has_correction_surface(true)
-                .build()
-                .unwrap(),
-        );
-
-        assert!(!is_in_coverage(&coverage, 180.0, 45.0, 8400.0));
-    }
-
-    #[test]
-    fn test_is_in_coverage_none_means_unrestricted() {
-        // No coverage restriction recorded (fully calibrated artifact) → always in coverage.
-        assert!(is_in_coverage(&None, 180.0, 45.0, 8400.0));
-    }
-
-    #[test]
-    fn test_generate_warnings_uncalibrated() {
-        let calibration = create_test_calibration(CalibrationStatus::Uncalibrated {
-            accuracy_estimate_db: 3.0,
-            loss_accuracy_estimate_db: 2.0,
-        });
-
-        let warnings = generate_calibration_warnings(&calibration, 180.0, 45.0, false);
-
-        assert_eq!(warnings.len(), 1);
-        assert_eq!(warnings[0].code, WarningCode::Uncalibrated);
-        // The accuracy figures are interpolated into the message, so they stay
-        // message assertions — the code says *which* warning, not what it carries.
-        assert!(warnings[0].message.contains("±3.0 dB"));
-        assert!(warnings[0].message.contains("±2.0 dB"));
-    }
-
-    #[test]
-    fn test_generate_warnings_partially_calibrated_in_coverage() {
-        let coverage = CalibrationCoverage::builder()
-            .azimuth_range(0.0, 360.0)
-            .elevation_range(0.0, 90.0)
-            .frequency_range(8000.0, 9000.0)
-            .num_measurements(500)
-            .has_correction_surface(true)
-            .build()
-            .unwrap();
-
-        let calibration = create_test_calibration(CalibrationStatus::PartiallyCalibrated {
-            accuracy_estimate_db: 1.5,
-            coverage: coverage.clone(),
-        });
-
-        let warnings = generate_calibration_warnings(&calibration, 180.0, 45.0, true);
-
-        assert_eq!(warnings.len(), 1);
-        assert_eq!(warnings[0].code, WarningCode::PartiallyCalibrated);
-        assert!(warnings[0].message.contains("±1.5 dB"));
-    }
-
-    #[test]
-    fn test_generate_warnings_partially_calibrated_out_of_coverage() {
-        let coverage = CalibrationCoverage::builder()
-            .azimuth_range(0.0, 90.0)
-            .elevation_range(0.0, 30.0)
-            .frequency_range(8000.0, 9000.0)
-            .num_measurements(100)
-            .has_correction_surface(true)
-            .build()
-            .unwrap();
-
-        let mut calibration = create_test_calibration(CalibrationStatus::PartiallyCalibrated {
-            accuracy_estimate_db: 1.5,
-            coverage: coverage.clone(),
-        });
-
-        // Add a dummy correction surface to trigger the "not applied" warning
-        calibration.correction_surface = Some(crate::data::types::BSplineModel4D {
-            coefficients: vec![0.0; 10],
-            shape: [2, 2, 2, 1],
-            knots_azimuth: vec![0.0, 360.0],
-            knots_elevation: vec![0.0, 90.0],
-            knots_frequency: vec![8000.0, 9000.0],
-            knots_temperature: vec![290.0],
-            spline_order: 3,
-        });
-
-        let warnings = generate_calibration_warnings(&calibration, 180.0, 45.0, false);
-
-        assert_eq!(
-            warnings.iter().map(|w| w.code).collect::<Vec<_>>(),
-            vec![
-                WarningCode::PartiallyCalibrated,
-                WarningCode::OutOfCoverage,
-                WarningCode::CorrectionNotApplied,
-            ]
-        );
-    }
-
-    #[test]
-    fn test_generate_warnings_fully_calibrated() {
-        let calibration = create_test_calibration(CalibrationStatus::FullyCalibrated {
-            accuracy_estimate_db: 1.0,
-        });
-
-        let warnings = generate_calibration_warnings(&calibration, 180.0, 45.0, true);
-
-        assert_eq!(warnings.len(), 0);
-    }
-
-    #[test]
-    fn test_generate_warnings_correction_not_applied() {
-        let mut calibration = create_test_calibration(CalibrationStatus::FullyCalibrated {
-            accuracy_estimate_db: 1.0,
-        });
-
-        // Add a dummy correction surface
-        calibration.correction_surface = Some(crate::data::types::BSplineModel4D {
-            coefficients: vec![0.0; 10],
-            shape: [2, 2, 2, 1],
-            knots_azimuth: vec![0.0, 360.0],
-            knots_elevation: vec![0.0, 90.0],
-            knots_frequency: vec![8000.0, 9000.0],
-            knots_temperature: vec![290.0],
-            spline_order: 3,
-        });
-
-        let warnings = generate_calibration_warnings(&calibration, 180.0, 45.0, false);
-
-        assert_eq!(warnings.len(), 1);
-        assert_eq!(warnings[0].code, WarningCode::CorrectionNotApplied);
-    }
-
-    /// The two coverage questions are deliberately different, and centralizing
-    /// them on `CalibrationCoverage` (issue #60) must not merge them.
-    ///
-    /// A query on the calibrated grid but at an uncalibrated FREQUENCY fails full
-    /// coverage, so no correction is applied and `correction_not_applied` fires.
-    /// It is still inside the measured spatial region, so `out_of_coverage` — the
-    /// partial-calibration advisory, which reports only that the *direction* left
-    /// the measured region — must stay silent.
-    #[test]
-    fn frequency_outside_the_band_does_not_report_out_of_spatial_coverage() {
-        let coverage = CalibrationCoverage::builder()
-            .azimuth_range(0.0, 360.0)
-            .elevation_range(0.0, 30.0)
-            .frequency_range(8000.0, 9000.0)
-            .num_measurements(500)
-            .has_correction_surface(true)
-            .build()
-            .unwrap();
-
-        let mut calibration = create_test_calibration(CalibrationStatus::PartiallyCalibrated {
-            accuracy_estimate_db: 1.5,
-            coverage: coverage.clone(),
-        });
-        calibration.correction_surface = Some(dummy_correction_surface());
-
-        // 12 GHz is far outside the calibrated band; (45°, 15°) is inside the grid.
-        assert!(!is_in_coverage(
-            &calibration.calibration_coverage,
-            45.0,
-            15.0,
-            12_000.0
-        ));
-
-        let warnings = generate_calibration_warnings(&calibration, 45.0, 15.0, false);
-
-        assert_eq!(
-            warnings.iter().map(|w| w.code).collect::<Vec<_>>(),
-            vec![
-                WarningCode::PartiallyCalibrated,
-                WarningCode::CorrectionNotApplied,
-            ],
-            "frequency alone must not raise the spatial out-of-coverage advisory"
-        );
-    }
-
-    /// The served predicate is the calibration-coverage authority plus the
-    /// `None` (unrestricted) case — nothing else.
-    ///
-    /// This asserts *agreement*, not semantics: `CalibrationCoverage`'s own tests
-    /// own what the bounds mean. What this guards is a service-local copy of the
-    /// range test growing back, and such a copy is only visible **at the
-    /// boundary** — a clearly-inside and a clearly-outside probe agree even with
-    /// a copy that has `>` where the authority has `>=`. So the probes walk every
-    /// bound, derived from the coverage's own ranges rather than restated, and a
-    /// coarser in/out set would not be a cheaper version of this test.
-    #[test]
-    fn is_in_coverage_agrees_with_the_calibration_coverage_authority() {
-        let coverage = CalibrationCoverage::builder()
-            .azimuth_range(10.0, 350.0)
-            .elevation_range(5.0, 60.0)
-            .frequency_range(8000.0, 9000.0)
-            .num_measurements(500)
-            .has_correction_surface(true)
-            .build()
-            .unwrap();
-
-        /// One step outside a bound, in degrees and in MHz.
-        const STEP: f64 = 0.1;
-
-        let (az_lo, az_hi) = coverage.azimuth_range;
-        let (el_lo, el_hi) = coverage.elevation_range;
-        let (f_lo, f_hi) = coverage.frequency_range;
-        let (az_mid, el_mid, f_mid) = (
-            f64::midpoint(az_lo, az_hi),
-            f64::midpoint(el_lo, el_hi),
-            f64::midpoint(f_lo, f_hi),
-        );
-
-        let probes = [
-            // Plainly inside, then both extreme corners of the closed box.
-            (az_mid, el_mid, f_mid),
-            (az_lo, el_lo, f_lo),
-            (az_hi, el_hi, f_hi),
-            // One step outside each bound, one axis at a time.
-            (az_lo - STEP, el_mid, f_mid),
-            (az_hi + STEP, el_mid, f_mid),
-            (az_mid, el_lo - STEP, f_mid),
-            (az_mid, el_hi + STEP, f_mid),
-            (az_mid, el_mid, f_lo - STEP),
-            (az_mid, el_mid, f_hi + STEP),
-        ];
-
-        for (az, el, freq) in probes {
-            assert_eq!(
-                is_in_coverage(&Some(coverage.clone()), az, el, freq),
-                coverage.contains_direction_at_frequency(az, el, freq),
-                "served coverage diverged from CalibrationCoverage at ({az}, {el}, {freq})"
-            );
-        }
-
-        // The one decision the service owns rather than delegates: an absent
-        // coverage record is unrestricted, so every probe above is in coverage.
-        for (az, el, freq) in probes {
-            assert!(
-                is_in_coverage(&None, az, el, freq),
-                "absent coverage must be unrestricted at ({az}, {el}, {freq})"
-            );
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // Off-axis honesty warning (roadmap unit P8)
-    //
-    // Test fixture geometry: 10 m dish. At 8400 MHz, λ ≈ 0.0357 m, so the
-    // first-null angle ≈ 1.6·λ/D ≈ 0.327° and the warning threshold
-    // (3× first null) ≈ 0.98°.
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn test_off_axis_warning_fires_beyond_threshold_for_uncalibrated() {
-        let calibration = create_test_calibration(CalibrationStatus::Uncalibrated {
-            accuracy_estimate_db: 3.0,
-            loss_accuracy_estimate_db: 2.0,
-        });
-
-        let warning = off_axis_unvalidated_warning(&calibration, 2.0, 8400.0);
-        let warning = warning.expect("2.0° off boresight > ~0.98° threshold must warn");
-        assert_eq!(warning.code, WarningCode::OffAxisUnvalidated);
-        // The rest of this test pins the honest *wording*, which is the point of the
-        // P8/F7 warning — the code alone would not catch a message that regressed to
-        // a stale or dishonest claim.
-        let msg = &warning.message;
-        assert!(msg.contains("beyond the validated main-beam region"));
-        assert!(msg.contains("ITU-R S.580"));
-        // Post-P10 honesty (2026-07-15): the P10 integrator landed, so the
-        // off-axis value is now numerically converged/correct. The remaining
-        // caveat is PHYSICAL — idealised PO omits blockage/strut/edge diffraction.
-        assert!(
-            msg.contains("IDEALISED"),
-            "message must describe idealised physical optics: {msg}"
-        );
-        // F7 redesign (2026-07-16): the served value now includes the statistical
-        // Ruze sidelobe floor as an incoherent power sum — a best-estimate median,
-        // not a precise per-antenna prediction. It no longer claims the floor is
-        // "intentionally off".
-        assert!(
-            msg.contains("incoherent power sum"),
-            "message must describe the power-sum floor: {msg}"
-        );
-        assert!(
-            msg.contains("best-estimate MEDIAN"),
-            "message must state the floor is a best-estimate median: {msg}"
-        );
-        assert!(
-            !msg.contains("intentionally off"),
-            "stale D-2 wording (floor intentionally off) must not return: {msg}"
-        );
-        // The stale D-3 interim wording (numerical invalidity / aliasing) must be gone.
-        assert!(
-            !msg.contains("NUMERICALLY INVALID"),
-            "stale interim wording must not return: {msg}"
-        );
-    }
-
-    #[test]
-    fn test_off_axis_warning_silent_inside_main_beam() {
-        let calibration = create_test_calibration(CalibrationStatus::Uncalibrated {
-            accuracy_estimate_db: 3.0,
-            loss_accuracy_estimate_db: 2.0,
-        });
-
-        assert!(off_axis_unvalidated_warning(&calibration, 0.0, 8400.0).is_none());
-        assert!(off_axis_unvalidated_warning(&calibration, 0.5, 8400.0).is_none());
-    }
-
-    #[test]
-    fn test_off_axis_warning_uses_absolute_angle() {
-        let calibration = create_test_calibration(CalibrationStatus::Uncalibrated {
-            accuracy_estimate_db: 3.0,
-            loss_accuracy_estimate_db: 2.0,
-        });
-
-        assert!(off_axis_unvalidated_warning(&calibration, -2.0, 8400.0).is_some());
-    }
-
-    /// Antennas whose served gain is CORRECTED physics (a correction surface is
-    /// present) must NOT get the off-axis warning, regardless of calibration
-    /// status: out-of-coverage queries there already receive the extrapolation
-    /// warning, and stacking a second warning was explicitly ruled out (P8
-    /// design constraint 1). Roadmap P11 keys this on surface presence
-    /// (`physics_is_uncorrected()`), so this test attaches a surface to each
-    /// fixture to pin the true invariant "surface present ⇒ silent".
-    #[test]
-    fn test_off_axis_warning_silent_when_correction_surface_present() {
-        let mut fully = create_test_calibration(CalibrationStatus::FullyCalibrated {
-            accuracy_estimate_db: 1.0,
-        });
-        fully.correction_surface = Some(dummy_correction_surface());
-        assert!(off_axis_unvalidated_warning(&fully, 45.0, 8400.0).is_none());
-
-        let coverage = CalibrationCoverage::builder()
-            .azimuth_range(0.0, 90.0)
-            .elevation_range(0.0, 30.0)
-            .frequency_range(8000.0, 9000.0)
-            .num_measurements(100)
-            .has_correction_surface(true)
-            .build()
-            .unwrap();
-        let mut partial = create_test_calibration(CalibrationStatus::PartiallyCalibrated {
-            accuracy_estimate_db: 1.5,
-            coverage,
-        });
-        partial.correction_surface = Some(dummy_correction_surface());
-        assert!(off_axis_unvalidated_warning(&partial, 45.0, 8400.0).is_none());
-
-        // Status None is treated as fully calibrated (backward compatibility);
-        // with a surface present it must stay silent.
-        let mut unspecified = create_test_calibration(CalibrationStatus::FullyCalibrated {
-            accuracy_estimate_db: 1.0,
-        });
-        unspecified.calibration_status = None;
-        unspecified.correction_surface = Some(dummy_correction_surface());
-        assert!(off_axis_unvalidated_warning(&unspecified, 45.0, 8400.0).is_none());
-    }
-
-    /// P11 mismatch case (roadmap P11, from
-    /// `docs/findings-2026-07-13-off-axis-integration-aliasing.md` §7): a
-    /// `PartiallyCalibrated` antenna produced with NO correction surface (the
-    /// no-frequency-correction path in `calibrate/boresight_calibration.rs`) has
-    /// UNCORRECTED physics. Both uncorrected-physics behaviors must engage: the
-    /// spillover fold-in gate is ON, and the off-axis honesty warning fires
-    /// beyond threshold. Pre-P11 this antenna had spillover applied yet served no
-    /// off-axis warning — the silent honesty gap this unit closes.
-    #[test]
-    fn test_partially_calibrated_without_surface_is_uncorrected_physics() {
-        let coverage = CalibrationCoverage::builder()
-            .azimuth_range(0.0, 0.0)
-            .elevation_range(0.0, 0.0)
-            .frequency_range(8000.0, 9000.0)
-            .num_measurements(50)
-            .has_correction_surface(false)
-            .build()
-            .unwrap();
-        let calibration = create_test_calibration(CalibrationStatus::PartiallyCalibrated {
-            accuracy_estimate_db: 1.5,
-            coverage,
-        });
-
-        // No correction surface ⇒ uncorrected physics.
-        assert!(calibration.correction_surface.is_none());
-        assert!(calibration.physics_is_uncorrected());
-
-        // (a) Spillover gate is ON (the same predicate drives it — evaluator.rs:222).
-        assert!(
-            calibration.physics_is_uncorrected(),
-            "spillover fold-in must be gated ON for surfaceless partial calibration"
-        );
-
-        // (b) Off-axis honesty warning fires beyond threshold (~0.98° at 8400 MHz).
-        let warning = off_axis_unvalidated_warning(&calibration, 2.0, 8400.0);
-        let warning = warning.expect(
-            "surfaceless PartiallyCalibrated antenna must get the off-axis honesty warning",
-        );
-        assert_eq!(warning.code, WarningCode::OffAxisUnvalidated);
-        assert!(warning
-            .message
-            .contains("beyond the validated main-beam region"));
-
-        // And stays silent inside the main beam (gate is the same, threshold intact).
-        assert!(off_axis_unvalidated_warning(&calibration, 0.0, 8400.0).is_none());
-    }
-
-    /// The threshold is beamwidth-relative (λ/D), not a fixed angle: the same
-    /// off-boresight angle warns for an electrically large antenna (narrow
-    /// beam) and stays silent for an electrically small one (wide beam).
-    #[test]
-    fn test_off_axis_threshold_scales_with_wavelength_over_diameter() {
-        let calibration = create_test_calibration(CalibrationStatus::Uncalibrated {
-            accuracy_estimate_db: 3.0,
-            loss_accuracy_estimate_db: 2.0,
-        });
-
-        // 0.6° at 2000 MHz: threshold ≈ 4.1° → silent.
-        assert!(off_axis_unvalidated_warning(&calibration, 0.6, 2000.0).is_none());
-        // 0.6° at 30000 MHz: threshold ≈ 0.27° → warns.
-        assert!(off_axis_unvalidated_warning(&calibration, 0.6, 30000.0).is_some());
-    }
-
-    /// P10-tail: the rear-hemisphere warning fires for θ>90° and is gated at
-    /// exactly 90° (frequency-independent — the gate is purely geometric).
-    #[test]
-    fn test_rear_hemisphere_warning_fires_beyond_90_degrees() {
-        let calibration = create_test_calibration(CalibrationStatus::Uncalibrated {
-            accuracy_estimate_db: 3.0,
-            loss_accuracy_estimate_db: 2.0,
-        });
-
-        // Silent up to and including exactly 90°.
-        assert!(rear_hemisphere_warning(&calibration, 0.0, 8400.0).is_none());
-        assert!(rear_hemisphere_warning(&calibration, 45.0, 8400.0).is_none());
-        assert!(rear_hemisphere_warning(&calibration, 90.0, 8400.0).is_none());
-
-        // Fires the moment there is any backward component (and uses |angle|).
-        let warning =
-            rear_hemisphere_warning(&calibration, 90.001, 8400.0).expect("just past 90° must warn");
-        assert_eq!(warning.code, WarningCode::RearHemisphereInvalid);
-        let msg = &warning.message;
-        assert!(msg.contains("REAR HEMISPHERE"));
-        assert!(msg.contains("no physical validity") || msg.contains("NO physical validity"));
-        assert!(rear_hemisphere_warning(&calibration, 120.0, 8400.0).is_some());
-        assert!(rear_hemisphere_warning(&calibration, 180.0, 8400.0).is_some());
-        // Absolute angle: negative backward angles warn too.
-        assert!(rear_hemisphere_warning(&calibration, -163.0, 8400.0).is_some());
-    }
-
-    /// P10-tail: UNLIKE the off-axis warning, the rear-hemisphere warning is NOT
-    /// gated on calibration status — a correction surface fitted from
-    /// forward-hemisphere measurements says nothing about back lobes, so it fires
-    /// for a FullyCalibrated antenna too.
-    #[test]
-    fn test_rear_hemisphere_warning_fires_for_calibrated_antenna() {
-        let mut fully = create_test_calibration(CalibrationStatus::FullyCalibrated {
-            accuracy_estimate_db: 1.0,
-        });
-        // Corrected physics ⇒ a correction surface is present (P11 predicate gate).
-        fully.correction_surface = Some(dummy_correction_surface());
-        // The off-axis warning stays silent for a calibrated antenna even far off-axis...
-        assert!(off_axis_unvalidated_warning(&fully, 120.0, 8400.0).is_none());
-        // ...but the rear-hemisphere warning fires regardless of calibration status.
-        assert!(rear_hemisphere_warning(&fully, 120.0, 8400.0).is_some());
-
-        // Status None (treated as fully calibrated) also gets the rear warning.
-        let mut unspecified = create_test_calibration(CalibrationStatus::FullyCalibrated {
-            accuracy_estimate_db: 1.0,
-        });
-        unspecified.calibration_status = None;
-        assert!(rear_hemisphere_warning(&unspecified, 120.0, 8400.0).is_some());
-    }
-
-    /// P10-tail: the message is constant per (antenna, frequency) — it embeds no
-    /// query angle — so heatmap/H3 warning-set aggregation deduplicates it to a
-    /// single entry across a grid of rear-hemisphere cells (the P8 convention).
-    #[test]
-    fn test_rear_hemisphere_warning_dedups_across_grid() {
-        let calibration = create_test_calibration(CalibrationStatus::FullyCalibrated {
-            accuracy_estimate_db: 1.0,
-        });
-        let mut set = std::collections::HashSet::new();
-        for angle in [95.0_f64, 110.0, 130.0, 163.0, 179.9] {
-            if let Some(msg) = rear_hemisphere_warning(&calibration, angle, 8400.0) {
-                set.insert(msg);
-            }
-        }
-        assert_eq!(
-            set.len(),
-            1,
-            "rear-hemisphere warning must dedup to one entry across a rear grid"
-        );
-    }
-
-    /// F7 redesign (2026-07-16): on an uncorrected-physics antenna (no
-    /// correction surface — `physics_is_uncorrected()` true) the rear-hemisphere
-    /// value IS the statistical sidelobe floor, since the PO term is excluded
-    /// behind the dish. The wording must say so, and must still carry the
-    /// pinned `REAR HEMISPHERE` marker.
-    #[test]
-    fn test_rear_hemisphere_warning_uncorrected_physics_states_floor_only() {
-        let calibration = create_test_calibration(CalibrationStatus::Uncalibrated {
-            accuracy_estimate_db: 3.0,
-            loss_accuracy_estimate_db: 2.0,
-        });
-        assert!(calibration.physics_is_uncorrected());
-
-        let msg = rear_hemisphere_warning(&calibration, 120.0, 8400.0)
-            .expect("rear hemisphere must warn on uncorrected-physics antennas");
-        assert_eq!(msg.code, WarningCode::RearHemisphereInvalid);
-        assert!(msg.message.contains("REAR HEMISPHERE"));
-        assert!(msg.message.contains("statistical sidelobe floor ONLY"));
-    }
-
-    /// F7 redesign (2026-07-16): an antenna WITH a correction surface
-    /// (`physics_is_uncorrected()` false) keeps the pre-existing extrapolation
-    /// wording — a forward-hemisphere fit says nothing about back lobes, so no
-    /// statistical floor is served there.
-    #[test]
-    fn test_rear_hemisphere_warning_corrected_physics_keeps_extrapolation_wording() {
-        let mut calibration = create_test_calibration(CalibrationStatus::FullyCalibrated {
-            accuracy_estimate_db: 1.0,
-        });
-        calibration.correction_surface = Some(dummy_correction_surface());
-        assert!(!calibration.physics_is_uncorrected());
-
-        let msg = rear_hemisphere_warning(&calibration, 120.0, 8400.0)
-            .expect("rear hemisphere must warn regardless of calibration status");
-        assert_eq!(msg.code, WarningCode::RearHemisphereInvalid);
-        assert!(msg.message.contains("REAR HEMISPHERE"));
-        assert!(msg.message.contains("numerical extrapolation"));
     }
 
     /// The correction surface must be evaluated at the calibration's

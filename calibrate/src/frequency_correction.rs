@@ -48,7 +48,7 @@ use crate::artifact_export::flat_axis;
 ///
 /// The claim that this correction is only *measured* at boresight is carried by
 /// the artifact's `calibration_coverage`, which is where
-/// `service::evaluator::is_in_coverage` enforces it — not by pinching these knot
+/// `service::served_gain::is_in_coverage` enforces it — not by pinching these knot
 /// spans. That coverage is an on-axis **cone**, not a point: boresight is the pole
 /// of the (azimuth, polar-angle) system, so azimuth is degenerate there and
 /// coverage constrains elevation alone, to
