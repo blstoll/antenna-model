@@ -42,11 +42,9 @@
 //! [`CorrectionDisposition`] is the only source of "was correction applied" and "is this
 //! extrapolated" — callers cannot recreate an inconsistent boolean formula for either.
 //!
-//! That holds for code that goes *through* this module, which today is `/gain` (and, by
-//! delegation, batch and rectangular heatmap). `/h3-heatmap` still open-codes its own
-//! correction sequencing around the physics cache and only borrows this module's coverage
-//! and warning helpers; issue #63 moves it onto [`PreparedServedGain::evaluate_cached`]
-//! and deletes that copy.
+//! That holds for every served-gain consumer: `/gain` (and, by delegation, batch and
+//! rectangular heatmap) uses direct evaluation, while `/h3-heatmap` prepares one value and
+//! shares its cache-backed evaluation across cell workers (issue #63).
 //!
 //! # Ownership boundary
 //!
@@ -115,6 +113,13 @@ pub(crate) struct SquintCorrectedDirection {
     pub(crate) e_cone_deg: f64,
     /// Magnitude of the applied squint, degrees; `0.0` when no correction applied.
     pub(crate) squint_magnitude_deg: f64,
+}
+
+impl SquintCorrectedDirection {
+    /// Beam squint as reported to clients: omit values below the 0.001° threshold.
+    fn reported_beam_squint_deg(&self) -> Option<f64> {
+        (self.squint_magnitude_deg > 0.001).then_some(self.squint_magnitude_deg)
+    }
 }
 
 /// Operating frequency versus pointing frequency.
@@ -254,11 +259,7 @@ impl ServedGain {
     /// Beam squint as it is reported to clients: `None` below the 0.001° reporting
     /// threshold, so an unsquinted request does not carry a field full of float noise.
     pub(crate) fn reported_beam_squint_deg(&self) -> Option<f64> {
-        if self.direction.squint_magnitude_deg > 0.001 {
-            Some(self.direction.squint_magnitude_deg)
-        } else {
-            None
-        }
+        self.direction.reported_beam_squint_deg()
     }
 }
 
@@ -276,6 +277,8 @@ pub(crate) struct PreparedServedGain {
     calibration: AntennaCalibration,
     /// Physical-optics model built from the artifact plus the request's feed geometry.
     antenna_config: AntennaConfiguration,
+    /// Direction-independent edge-case advisories, computed once from `antenna_config`.
+    configuration_warnings: Vec<ApiWarning>,
     /// Adaptive policy, P11 uncorrected-physics gates, and the per-integration budget.
     integration_params: IntegrationParams,
     frequencies: ServedFrequencies,
@@ -361,6 +364,10 @@ impl PreparedServedGain {
         let antenna_config = config_builder.build().map_err(|e| {
             AntennaModelError::Generic(format!("Failed to build antenna configuration: {}", e))
         })?;
+        // Edge-case analysis currently ignores direction. Hoist it into preparation so one
+        // immutable warning set is shared by every evaluation and remains available to an
+        // aggregating endpoint even when every directional integration fails (#59, #63).
+        let configuration_warnings = analyze_edge_cases(&antenna_config, 0.0, 0.0).warnings;
 
         // Canonical served-path integration params. Radial density is derived adaptively
         // from (D/λ, θ), so this satisfies the <100ms target near boresight while remaining
@@ -396,6 +403,7 @@ impl PreparedServedGain {
         Ok(Self {
             calibration,
             antenna_config,
+            configuration_warnings,
             integration_params,
             frequencies,
             physical_feed_position,
@@ -413,6 +421,24 @@ impl PreparedServedGain {
     /// [`ServedGain::correction`], which is the authority.
     pub(crate) fn calibration_status(&self) -> Option<&CalibrationStatus> {
         self.calibration.calibration_status.as_ref()
+    }
+
+    /// Direction-independent advisories for an aggregating endpoint.
+    ///
+    /// Successful evaluations include these in their complete warning vectors. This view
+    /// lets a total grid response retain the same request-level advisories when no cell
+    /// succeeds, without making the endpoint reconstruct model warnings itself.
+    pub(crate) fn configuration_warnings(&self) -> &[ApiWarning] {
+        &self.configuration_warnings
+    }
+
+    /// Beam squint for endpoints that report it before evaluating a direction.
+    ///
+    /// Squint magnitude is constant for a prepared request, so the zero direction is only
+    /// a neutral carrier used to obtain it through the same squint operation as evaluation.
+    pub(crate) fn reported_beam_squint_deg(&self) -> Option<f64> {
+        self.compute_squint_corrected_direction(PreSquintDirection::new(0.0, 0.0))
+            .reported_beam_squint_deg()
     }
 
     /// Serve one direction by running the physics integration directly.
@@ -461,9 +487,6 @@ impl PreparedServedGain {
     /// replaced. Two *different* artifacts for one identifier would share entries while
     /// disagreeing about the P11 gates — which change the physics but are not part of the
     /// key — so cached physics is only interchangeable for as long as that holds.
-    // No production caller yet: `/h3-heatmap` migrates onto this in issue #63, which
-    // removes this allow. Until then only this module's tests exercise it.
-    #[allow(dead_code)]
     pub(crate) fn evaluate_cached(
         &self,
         direction: PreSquintDirection,
@@ -481,6 +504,19 @@ impl PreparedServedGain {
     /// Apply beam squint. Depends on the actual feed displacement, which is why it can
     /// only happen after preparation has positioned the feed.
     fn squint(&self, direction: PreSquintDirection) -> SquintCorrectedDirection {
+        let corrected = self.compute_squint_corrected_direction(direction);
+        tracing::debug!(
+            corrected_az = %corrected.e_clock_deg,
+            corrected_el = %corrected.e_cone_deg,
+            "Emitter direction after beam squint correction"
+        );
+        corrected
+    }
+
+    fn compute_squint_corrected_direction(
+        &self,
+        direction: PreSquintDirection,
+    ) -> SquintCorrectedDirection {
         let (e_clock_deg, e_cone_deg, squint_magnitude_deg) = squint_corrected_direction(
             direction.e_clock_deg,
             direction.e_cone_deg,
@@ -489,11 +525,6 @@ impl PreparedServedGain {
             self.physical_feed_position.x,
             self.physical_feed_position.y,
             self.focal_length_m,
-        );
-        tracing::debug!(
-            corrected_az = %e_clock_deg,
-            corrected_el = %e_cone_deg,
-            "Emitter direction after beam squint correction"
         );
         SquintCorrectedDirection {
             e_clock_deg,
@@ -592,9 +623,9 @@ impl PreparedServedGain {
     ///
     /// The reconstruction mirrors `model::pattern::compute_gain`'s own structure and order:
     ///
-    /// 1. `analyze_edge_cases` — the severe / moderate feed-offset band and the
-    ///    significant-spillover advisory. Called here rather than copied; it ignores
-    ///    `(theta, phi)`, so it is the configuration's verdict.
+    /// 1. The preparation-time `analyze_edge_cases` result — the severe / moderate
+    ///    feed-offset band and the significant-spillover advisory. The analysis ignores
+    ///    `(theta, phi)`, so one retained vector is the configuration's verdict.
     /// 2. The ray-tracing stub warning, iff the mode dispatch is actually reached and
     ///    selects it. Mode selection goes through [`ray_trace_stub_warning`], this module's
     ///    single mirror of it — expressing the same threshold a second time here is exactly
@@ -615,10 +646,7 @@ impl PreparedServedGain {
         converged: bool,
     ) -> Vec<ApiWarning> {
         let theta_rad = corrected.e_cone_deg.to_radians();
-        let phi_rad = corrected.e_clock_deg.to_radians();
-
-        let analysis = analyze_edge_cases(&self.antenna_config, theta_rad, phi_rad);
-        let mut warnings = analysis.warnings;
+        let mut warnings = self.configuration_warnings.clone();
 
         let floor_only_rear = self.integration_params.apply_sidelobe_floor
             && theta_rad.abs() > std::f64::consts::FRAC_PI_2;
@@ -817,11 +845,9 @@ struct PhysicsOutcome {
 /// a query on the measured grid at an uncalibrated frequency gets no correction
 /// but is not outside the calibrated *region*.
 ///
-/// **Visibility is interim.** This is `pub(crate)` only because `service::h3_link_budget`
-/// still calls it directly while it open-codes its own correction sequencing around the
-/// physics cache. Issue #63 moves that endpoint onto [`PreparedServedGain`], at which
-/// point the module's own `assemble` is the only caller and this becomes private.
-pub(crate) fn is_in_coverage(
+/// This remains private to the served-gain law; endpoints consume the resulting
+/// [`CorrectionDisposition`] rather than repeating this predicate.
+fn is_in_coverage(
     coverage: &Option<CalibrationCoverage>,
     azimuth_deg: f64,
     elevation_deg: f64,
@@ -949,7 +975,7 @@ const OFF_AXIS_FIRST_NULL_MULTIPLE: f64 = 3.0;
 ///
 /// Carries [`WarningCode::OffAxisUnvalidated`] (typed by C8 stage 3,
 /// 2026-07-27).
-pub(crate) fn off_axis_unvalidated_warning(
+fn off_axis_unvalidated_warning(
     calibration: &antenna_core::data::types::AntennaCalibration,
     off_boresight_deg: f64,
     frequency_mhz: f64,
@@ -1025,7 +1051,7 @@ pub(crate) fn off_axis_unvalidated_warning(
 /// draw — statistical floor vs raw PO extrapolation — is *what was served*, which
 /// a client reads from `calibration_status`, not a different reason to distrust
 /// the number.
-pub(crate) fn rear_hemisphere_warning(
+fn rear_hemisphere_warning(
     calibration: &antenna_core::data::types::AntennaCalibration,
     off_boresight_deg: f64,
     frequency_mhz: f64,
@@ -1075,17 +1101,9 @@ pub(crate) fn rear_hemisphere_warning(
 /// `displacement_from_focus / focal_length` ratio, same
 /// [`antenna_core::model::edge_cases::SEVERE_OFFSET_THRESHOLD`].
 ///
-/// **Why this exists at the service layer.** For single gain / batch / rectangular
-/// heatmap the model pushes this warning itself (those paths call `compute_gain_db`
-/// directly per query/point). The `/h3-heatmap` path instead caches PHYSICS-ONLY
-/// gain and only runs `compute_gain_db` on a cache MISS, so the model-pushed
-/// warning is lost on cache hits. This helper is re-emitted OUTSIDE the cache
-/// closure in `compute_cell_gain`, exactly like [`off_axis_unvalidated_warning`]
-/// and [`rear_hemisphere_warning`], so the honesty warning survives cache hits.
-/// On a cache miss the model also emits the identical string; the H3 warning-set
-/// aggregation deduplicates the pair to a single entry.
-///
-/// It is also this module's single expression of the model's mode selection, used by
+/// **Why this exists at the service layer.** A cached served evaluation may skip
+/// `compute_gain_db`, so a model-pushed warning alone would disappear on a hit. This is
+/// the module's single expression of the model's mode selection, used by
 /// [`PreparedServedGain::reconstruct_physics_warnings`] to decide whether a cache hit
 /// earned the warning. That caller adds one condition this helper deliberately does not
 /// know about — whether the mode dispatch was reached at all, which the F7 floor-only rear
@@ -1096,7 +1114,7 @@ pub(crate) fn rear_hemisphere_warning(
 /// numerical/geometric limitation independent of whether a correction surface
 /// exists. The message is constant per antenna config, so heatmap/H3 aggregation
 /// deduplicates it to a single entry.
-pub(crate) fn ray_trace_stub_warning(
+fn ray_trace_stub_warning(
     config: &antenna_core::model::geometry::AntennaConfiguration,
 ) -> Option<ApiWarning> {
     let focal_length = config.reflector.focal_length;

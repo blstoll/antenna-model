@@ -8,8 +8,9 @@
 //! 1. Resolve H3 resolution from request (or derive from frequency)
 //! 2. Find center H3 cell from feed pointing location lat/lon
 //! 3. Generate grid disk of N rings around center cell
-//! 4. Build antenna configuration from calibration data
-//! 5. For each cell (parallel): compute az/el, look up gain via cache, compute FSPL
+//! 4. Prepare one immutable served-gain evaluator from calibration and request geometry
+//! 5. For each cell (sequentially or in parallel): adapt its geometry, evaluate served gain
+//!    via cache, compute FSPL
 //! 6. Take the peak gain over the cells actually evaluated, then fill each cell's
 //!    `loss_db` / `total_path_loss_db` relative to it (roadmap C9 — the same rule
 //!    `service::heatmap` applies)
@@ -19,23 +20,41 @@ use crate::api::schemas::{
     CalibrationStatusInfo, H3CellResult, H3LinkBudgetRequest, H3LinkBudgetResponse,
     HeatmapMetadata, Position3D,
 };
-use crate::data::types::AntennaCalibration;
 use crate::error::{AntennaModelError, Result};
-use crate::model::compute_gain_db;
 use crate::model::integration::DEFAULT_INTEGRATION_BUDGET;
-use crate::model::pattern::nonconvergence_warning;
 use crate::model::{
-    analyze_edge_cases, compute_emitter_direction_with_attitude,
-    compute_feed_position_from_pointing, ecef_to_geodetic, evaluate_correction, geodetic_to_ecef,
-    squint_corrected_direction, AntennaConfiguration, FeedParameters as ModelFeedParams,
-    FeedPosition, IntegrationParams, MeshParameters as ModelMeshParams,
-    ReflectorGeometry as ModelReflector,
+    compute_emitter_direction_with_attitude, compute_feed_position_from_pointing, ecef_to_geodetic,
+    geodetic_to_ecef,
 };
-use crate::service::{CachedGain, GainCache, GainCacheKey};
+use crate::service::served_gain::{
+    FeedSteering, PreSquintDirection, PreparedServedGain, ReferenceGainRequest, ServedFrequencies,
+};
+use crate::service::GainCache;
 use crate::warnings::{ApiWarning, WarningCode};
+use antenna_core::data::types::AntennaCalibration;
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::time::Duration;
+
+/// Grids at or above this size use Rayon; smaller grids avoid parallel overhead.
+const PARALLEL_THRESHOLD: usize = 20;
+
+#[derive(Debug, Clone, Copy)]
+enum CellTraversal {
+    Automatic,
+    #[cfg(test)]
+    Sequential,
+}
+
+impl CellTraversal {
+    fn is_parallel(self, cell_count: usize) -> bool {
+        match self {
+            Self::Automatic => cell_count >= PARALLEL_THRESHOLD,
+            #[cfg(test)]
+            Self::Sequential => false,
+        }
+    }
+}
 
 /// Select H3 resolution from frequency (MHz):
 /// - < 2000 MHz → 6
@@ -73,251 +92,36 @@ fn pos_to_ecef(pos: &Position3D) -> Result<(f64, f64, f64)> {
     }
 }
 
-/// Build the antenna configuration from calibration data and feed pointing.
+/// Adapt one H3 cell centre into the prepared served-gain operation.
 ///
-/// Returns `(AntennaConfiguration, feed_x, feed_y, feed_z)` where feed_xyz are
-/// the physical feed position used for cache keying.
-fn build_antenna_config(
-    calibration: &AntennaCalibration,
-    request: &H3LinkBudgetRequest,
-) -> Result<(AntennaConfiguration, f64, f64, f64)> {
-    let focal_length_m = calibration.physical_config.reflector.focal_length_m;
-    let diameter_m = calibration.physical_config.reflector.diameter_m;
-
-    let reflector = ModelReflector::builder()
-        .diameter(diameter_m)
-        .focal_length(focal_length_m)
-        .surface_rms(calibration.physical_config.reflector.surface_rms_mm / 1000.0)
-        .build()
-        .map_err(|e| AntennaModelError::Generic(format!("Failed to build reflector: {}", e)))?;
-
-    // Compute physical feed position from pointing target
-    let (steer_x, steer_y, steer_z) = compute_feed_position_from_pointing(
-        &request.feed_pointing_location,
-        &request.reflector_boresight,
-        &request.vehicle_position,
-        focal_length_m,
-        diameter_m,
-        request.vehicle_attitude,
-    )?;
-
-    let design_pos = &calibration.physical_config.feed.position;
-    let feed_x = steer_x + design_pos.0;
-    let feed_y = steer_y + design_pos.1;
-    let feed_z = steer_z + design_pos.2;
-    let physical_feed_position = FeedPosition::new(feed_x, feed_y, feed_z);
-
-    let feed = ModelFeedParams::builder()
-        .position(physical_feed_position)
-        .q_factor(calibration.physical_config.feed.q_factor)
-        .phase_center_offset(calibration.physical_config.feed.phase_center_offset_m)
-        .axial_defocus(calibration.physical_config.feed.axial_defocus_m)
-        // Roadmap D23 — see the matching call in `evaluator::compute_gain_from_request`.
-        .asymmetry_factor(calibration.physical_config.feed.asymmetry_factor)
-        .build()
-        .map_err(|e| AntennaModelError::Generic(format!("Failed to build feed: {}", e)))?;
-
-    let mut config_builder = AntennaConfiguration::builder()
-        .id(&calibration.antenna_id)
-        .name(&calibration.metadata.antenna_name)
-        .reflector(reflector)
-        .feed(feed);
-
-    if let Some(ref mesh_data) = calibration.physical_config.mesh {
-        let mesh = ModelMeshParams::builder()
-            .spacing(mesh_data.mesh_spacing_mm / 1000.0)
-            .wire_diameter(mesh_data.wire_diameter_mm / 1000.0)
-            .build()
-            .map_err(|e| AntennaModelError::Generic(format!("Failed to build mesh: {}", e)))?;
-        config_builder = config_builder.mesh(mesh);
-    }
-
-    let antenna_config = config_builder.build().map_err(|e| {
-        AntennaModelError::Generic(format!("Failed to build antenna configuration: {}", e))
-    })?;
-
-    Ok((antenna_config, feed_x, feed_y, feed_z))
-}
-
-/// Compute the gain (dB) for a cell position using the cache.
-///
-/// Cell center is provided as ECEF for consistent az/el derivation.
-/// Returns `(gain_db, az_deg, el_deg, warnings, correction_applied)` so the caller can use the
-/// az/el values directly for reporting without a second `compute_emitter_direction` call.
-///
-/// The `GainCache` stores only the **physics-only** scalar gain value, not the
-/// correction-adjusted value. The correction surface is applied AFTER the cache
-/// lookup so that the cache key space remains consistent regardless of whether a
-/// correction surface is present.
-///
-/// Every warning this returns is reachable on a cache HIT as well as a miss
-/// (roadmap C10) — see the comment on the `get_or_compute` call below for how each
-/// class gets there. The one warning class that is *not* returned here is the
-/// configuration-derived set (spillover, feed-offset band), which the caller emits
-/// once per request because it is identical at every cell.
-#[allow(clippy::too_many_arguments)]
+/// H3 owns only the cell geometry: the prepared value owns squint, cache identity,
+/// physical optics, correction disposition, and directional warnings (#63).
 fn compute_cell_gain(
     cell_ecef: (f64, f64, f64),
     request: &H3LinkBudgetRequest,
-    calibration: &AntennaCalibration,
-    antenna_config: &AntennaConfiguration,
-    feed_x: f64,
-    feed_y: f64,
-    feed_z: f64,
+    prepared: &PreparedServedGain,
     cache: &GainCache,
-    integration_params: &IntegrationParams,
-    frequency_hz: f64,
 ) -> Result<(f64, f64, f64, Vec<ApiWarning>, bool)> {
-    // The cell centre, in ECEF.
     let cell_pos = Position3D::ecef(cell_ecef.0, cell_ecef.1, cell_ecef.2);
-
-    // Compute az/el once; the result is returned to the caller so that
-    // `compute_cell_result` does not need to call `compute_emitter_direction` again.
-    let (az_deg, el_deg) = compute_emitter_direction_with_attitude(
+    let (e_clock_deg, e_cone_deg) = compute_emitter_direction_with_attitude(
         &cell_pos,
         &request.vehicle_position,
         &request.reflector_boresight,
         request.vehicle_attitude,
     )?;
 
-    // Apply beam squint (honors pointing_frequency_mhz). Corrected angles are used for
-    // BOTH the cache key and the gain evaluation so cached values match the angle used.
-    let pointing_freq = request
-        .pointing_frequency_mhz
-        .unwrap_or(request.frequency_mhz);
-    let focal_length_m = calibration.physical_config.reflector.focal_length_m;
-    let (az_deg, el_deg, _squint_deg) = squint_corrected_direction(
-        az_deg,
-        el_deg,
-        request.frequency_mhz,
-        pointing_freq,
-        feed_x,
-        feed_y,
-        focal_length_m,
-    );
-
-    let cache_key = GainCacheKey::new(
-        az_deg,
-        el_deg,
-        request.frequency_mhz,
-        feed_x,
-        feed_y,
-        feed_z,
-    );
-
-    let theta_rad = el_deg.to_radians();
-    let phi_rad = az_deg.to_radians();
-
-    // IMPORTANT: the cache stores PHYSICS-ONLY gain. The correction surface must
-    // be applied after this call, never inside the closure.
-    //
-    // Nothing from `result.warnings` is smuggled out of the closure (roadmap C10).
-    // The closure runs on a MISS only, so anything captured there is lost on every
-    // later hit — which is exactly what used to happen. Instead each warning is
-    // re-derived on the path that can always reach it:
-    //   * convergence rides with the cached value (only the integration knows it,
-    //     and a hit is precisely the case that skips the integration);
-    //   * configuration-derived warnings (spillover, feed-offset band) are emitted
-    //     once per request by the caller — `analyze_edge_cases` ignores (θ, φ), so
-    //     they are identical at every cell;
-    //   * geometry-derived warnings (off-axis, rear-hemisphere, ray-tracing stub)
-    //     are re-derived below, outside the closure.
-    let cached = cache.get_or_compute(&request.antenna_id, &request.feed_id, cache_key, || {
-        let result = compute_gain_db(
-            theta_rad,
-            phi_rad,
-            antenna_config,
-            frequency_hz,
-            integration_params,
-        )?;
-        Ok(CachedGain::new(
-            result.gain,
-            !result
-                .warnings
-                .iter()
-                .any(|w| w.is(WarningCode::NonConvergence)),
-            result.spillover_loss_db,
-        ))
-    })?;
-    let physics_gain_db = cached.value;
-
-    let mut captured_warnings: Vec<ApiWarning> = Vec::new();
-
-    // Non-convergence of the aperture integral that produced this number. Derived
-    // from the cached flag rather than from the closure's warnings, so it surfaces
-    // identically on a hit and a miss — a served value whose integration did not
-    // converge is never silent (the P10 self-check's whole purpose).
-    if !cached.converged {
-        captured_warnings.push(nonconvergence_warning());
-    }
-
-    // Apply correction surface (post-cache). This is a hand-rolled copy of the gating
-    // `service::served_gain` now owns (the calibration's `temperature_const`, and
-    // `is_in_coverage` for optional-coverage gating). Issue #63 replaces it with a call to
-    // `PreparedServedGain::evaluate_cached` (built in #62) — until then the two must agree.
-    let mut correction_applied = false;
-    let mut gain_db = physics_gain_db;
-    if let Some(ref surface) = calibration.correction_surface {
-        if crate::service::served_gain::is_in_coverage(
-            &calibration.calibration_coverage,
-            az_deg,
-            el_deg,
-            request.frequency_mhz,
-        ) {
-            let corr = evaluate_correction(
-                surface,
-                az_deg,
-                el_deg,
-                request.frequency_mhz,
-                calibration.validity_ranges.temperature_const,
-            )?;
-            gain_db += corr.correction_db;
-            captured_warnings.extend(corr.warnings);
-            correction_applied = true;
-        }
-    }
-
-    // Off-axis honesty warning (P8): el_deg is the off-boresight angle
-    // (elevation = 0° at boresight). Computed fresh on every call (cheap),
-    // never cached, so it also surfaces on cache hits. The message is
-    // constant per (antenna, frequency), so the caller's warning-set
-    // aggregation deduplicates it across cells.
-    captured_warnings.extend(crate::service::served_gain::off_axis_unvalidated_warning(
-        calibration,
-        el_deg,
-        request.frequency_mhz,
-    ));
-
-    // Rear-hemisphere hard-invalidity warning (P10-tail): fires for θ>90° on ANY
-    // antenna, calibrated or not. Constant per (antenna, frequency), so the
-    // caller's warning-set aggregation deduplicates it across cells.
-    captured_warnings.extend(crate::service::served_gain::rear_hemisphere_warning(
-        calibration,
-        el_deg,
-        request.frequency_mhz,
-    ));
-
-    // Ray-tracing stub degraded-accuracy warning (P3): fires when the feed offset
-    // exceeds 0.5·f. Emitted here, OUTSIDE the cache closure, so it surfaces on
-    // cache hits too — the model pushes the identical warning only inside the
-    // miss closure (into `result.warnings` above), which the shared, persistent
-    // `GainCache` would otherwise drop on a hit. On a miss both are present; the
-    // caller's warning-set aggregation deduplicates them to one entry.
-    //
-    // This gate is unconditional, so it also fires for an uncorrected rear-hemisphere
-    // cell, where `compute_gain`'s F7 floor-only early return never reaches the stub and
-    // the model emits nothing. `PreparedServedGain::reconstruct_physics_warnings` (#62)
-    // reproduces the model's silence there; #63 adopts that behaviour here.
-    captured_warnings.extend(crate::service::served_gain::ray_trace_stub_warning(
-        antenna_config,
-    ));
+    let served = prepared.evaluate_cached(
+        PreSquintDirection::new(e_clock_deg, e_cone_deg),
+        ReferenceGainRequest::Omit,
+        cache,
+    )?;
 
     Ok((
-        gain_db,
-        az_deg,
-        el_deg,
-        captured_warnings,
-        correction_applied,
+        served.gain_db,
+        served.direction.e_clock_deg,
+        served.direction.e_cone_deg,
+        served.warnings,
+        served.correction.applied(),
     ))
 }
 
@@ -354,6 +158,24 @@ pub fn compute_h3_link_budget_with_budget(
     start_time: std::time::Instant,
     time_budget: Duration,
 ) -> Result<H3LinkBudgetResponse> {
+    compute_h3_link_budget_with_traversal(
+        request,
+        calibration,
+        cache,
+        start_time,
+        time_budget,
+        CellTraversal::Automatic,
+    )
+}
+
+fn compute_h3_link_budget_with_traversal(
+    request: &H3LinkBudgetRequest,
+    calibration: &AntennaCalibration,
+    cache: &GainCache,
+    start_time: std::time::Instant,
+    time_budget: Duration,
+    traversal: CellTraversal,
+) -> Result<H3LinkBudgetResponse> {
     // 1. Resolve H3 resolution
     let resolution = request
         .h3_resolution
@@ -381,44 +203,27 @@ pub fn compute_h3_link_budget_with_budget(
     // 3. Generate grid disk
     let cells: Vec<h3o::CellIndex> = center_cell.grid_disk(request.n_rings);
 
-    // 4. Build antenna configuration
-    // P11 unified predicate for BOTH uncorrected-physics behaviors (spillover fold-in and
-    // the F7 sidelobe floor), through the one shared setter `calibrate` also calls for the
-    // artifact it writes (roadmap D17) — matching the evaluator gain path exactly, so the
-    // /gain, heatmap, and h3 endpoints agree on an uncalibrated antenna's gain. Shared by
-    // both `compute_gain_db` call sites below (boresight reference and per-cell).
-    // Whole-antenna gate — never per query.
-    let mut integration_params = IntegrationParams::adaptive()
-        .with_uncorrected_physics_gates(calibration.physics_is_uncorrected());
-    // S3: bound each per-cell aperture integration to the configured wall-clock budget
-    // (carried in IntegrationParams; shared by both compute_gain_db call sites below).
-    integration_params.time_budget = Some(time_budget);
-    let frequency_hz = request.frequency_mhz * 1e6;
-
-    let (antenna_config, feed_x, feed_y, feed_z) = build_antenna_config(calibration, request)?;
-
-    // Squint magnitude is constant per request: it is the freq-shift ratio times the
-    // feed-displacement ratio, independent of which (az, el) the squint is applied to.
-    // Evaluate at (0.0, 0.0) to extract that magnitude without a real direction, once,
-    // for the response field.
-    let pointing_freq = request
-        .pointing_frequency_mhz
-        .unwrap_or(request.frequency_mhz);
+    // 4. Prepare the immutable served-gain value once, before either traversal branch.
+    // Rayon workers borrow this one `Sync` value; every direction-dependent operation then
+    // goes through `evaluate_cached` rather than being reconstructed in H3 (#63).
     let focal_length_m = calibration.physical_config.reflector.focal_length_m;
-    let (_, _, squint_magnitude_deg) = squint_corrected_direction(
-        0.0,
-        0.0,
-        request.frequency_mhz,
-        pointing_freq,
-        feed_x,
-        feed_y,
+    let diameter_m = calibration.physical_config.reflector.diameter_m;
+    let (steer_x, steer_y, steer_z) = compute_feed_position_from_pointing(
+        &request.feed_pointing_location,
+        &request.reflector_boresight,
+        &request.vehicle_position,
         focal_length_m,
-    );
-    let beam_squint_deg = if squint_magnitude_deg > 0.001 {
-        Some(squint_magnitude_deg)
-    } else {
-        None
-    };
+        diameter_m,
+        request.vehicle_attitude,
+    )?;
+    let prepared = PreparedServedGain::prepare(
+        calibration.clone(),
+        FeedSteering::new(steer_x, steer_y, steer_z),
+        ServedFrequencies::new(request.frequency_mhz, request.pointing_frequency_mhz),
+        time_budget,
+    )?;
+    let beam_squint_deg = prepared.reported_beam_squint_deg();
+    let frequency_hz = request.frequency_mhz * 1e6;
 
     // 5. Compute vehicle ECEF for distance calculations
     let (vehicle_ex, vehicle_ey, vehicle_ez) = pos_to_ecef(&request.vehicle_position)?;
@@ -428,23 +233,16 @@ pub fn compute_h3_link_budget_with_budget(
     //    FSPL, G/T. `loss_db` / `total_path_loss_db` are filled in pass 2 (step 8), once the
     //    peak over the evaluated cells is known (roadmap C9). There is deliberately no
     //    separate boresight reference evaluation any more: the reference is one of the cells.
-    const PARALLEL_THRESHOLD: usize = 20;
-
     let results: Vec<Result<(CellGain, Vec<ApiWarning>, bool)>> =
-        if cells.len() >= PARALLEL_THRESHOLD {
+        if traversal.is_parallel(cells.len()) {
             cells
                 .par_iter()
                 .map(|&cell| {
                     compute_cell_result(
                         cell,
                         request,
-                        calibration,
-                        &antenna_config,
-                        feed_x,
-                        feed_y,
-                        feed_z,
+                        &prepared,
                         cache,
-                        &integration_params,
                         frequency_hz,
                         vehicle_ex,
                         vehicle_ey,
@@ -459,13 +257,8 @@ pub fn compute_h3_link_budget_with_budget(
                     compute_cell_result(
                         cell,
                         request,
-                        calibration,
-                        &antenna_config,
-                        feed_x,
-                        feed_y,
-                        feed_z,
+                        &prepared,
                         cache,
-                        &integration_params,
                         frequency_hz,
                         vehicle_ex,
                         vehicle_ey,
@@ -477,20 +270,13 @@ pub fn compute_h3_link_budget_with_budget(
 
     // 7. Separate successes and failures; track whether correction was applied to any cell.
     let mut cell_gains: Vec<CellGain> = Vec::with_capacity(cells.len());
-    let mut warnings_set: HashSet<ApiWarning> = HashSet::new();
+    // Seed the aggregate with preparation-time advisories. Successful cell results carry
+    // the same whole objects and deduplicate into this set; seeding also preserves the
+    // pre-#63 endpoint behavior when every directional evaluation fails.
+    let mut warnings_set: HashSet<ApiWarning> =
+        prepared.configuration_warnings().iter().cloned().collect();
     let mut failed_count = 0usize;
     let mut any_correction_applied = false;
-
-    // Configuration-derived warnings (spillover fraction, feed-offset band), emitted
-    // once per request rather than gathered from the cells (roadmap C10).
-    // `analyze_edge_cases` takes (θ, φ) but ignores both, so its warnings are identical
-    // at every cell and the set below is exactly what the per-cell path used to produce.
-    // Emitting them here removes their dependence on the gain cache: they used to be
-    // captured only inside the cache-MISS closure, so a repeated identical request came
-    // back missing them entirely.
-    for warning in analyze_edge_cases(&antenna_config, 0.0, 0.0).warnings {
-        warnings_set.insert(warning);
-    }
 
     for result in results {
         match result {
@@ -572,7 +358,7 @@ pub fn compute_h3_link_budget_with_budget(
     // `correction_applied` reflects whether the correction surface was actually
     // applied to at least one cell (gated on coverage), not merely whether a surface
     // exists — matching the truthful reporting in `service::evaluator`.
-    let calibration_status = calibration.calibration_status.as_ref().map(|status| {
+    let calibration_status = prepared.calibration_status().map(|status| {
         let mut info = CalibrationStatusInfo::from(status);
         info.correction_applied = any_correction_applied;
         info
@@ -620,13 +406,8 @@ struct CellGain {
 fn compute_cell_result(
     cell: h3o::CellIndex,
     request: &H3LinkBudgetRequest,
-    calibration: &AntennaCalibration,
-    antenna_config: &AntennaConfiguration,
-    feed_x: f64,
-    feed_y: f64,
-    feed_z: f64,
+    prepared: &PreparedServedGain,
     cache: &GainCache,
-    integration_params: &IntegrationParams,
     frequency_hz: f64,
     vehicle_ex: f64,
     vehicle_ey: f64,
@@ -651,18 +432,7 @@ fn compute_cell_result(
     // avoid a redundant second call to `compute_emitter_direction` for reporting.
     // `correction_applied` indicates whether the correction surface was applied.
     let (gain_db, azimuth_deg, elevation_deg, cell_warnings, correction_applied) =
-        compute_cell_gain(
-            (cell_ex, cell_ey, cell_ez),
-            request,
-            calibration,
-            antenna_config,
-            feed_x,
-            feed_y,
-            feed_z,
-            cache,
-            integration_params,
-            frequency_hz,
-        )?;
+        compute_cell_gain((cell_ex, cell_ey, cell_ez), request, prepared, cache)?;
 
     // Free-space path loss is peak-independent, so it is computed here. `loss_db` and
     // `total_path_loss_db` are filled by the caller's second pass, against the grid peak.
@@ -694,10 +464,13 @@ fn compute_cell_result(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::types::{
-        AntennaCalibration, BSplineModel4D, CalibrationMetadata, CalibrationStatus, FeedParameters,
-        MeshParameters, PhysicalAntennaConfig, ReflectorGeometry, ValidityRanges,
+    use antenna_core::data::types::{
+        AntennaCalibration, BSplineModel4D, CalibrationCoverage, CalibrationMetadata,
+        CalibrationStatus, FeedParameters, MeshParameters, PhysicalAntennaConfig,
+        ReflectorGeometry, ValidityRanges,
     };
+
+    use crate::api::schemas::GainRequest;
     use crate::model::evaluate_correction;
 
     /// Build a minimal `AntennaCalibration` suitable for H3 link-budget tests.
@@ -776,6 +549,38 @@ mod tests {
             h3_resolution: Some(7),
             temperature_k: None,
             vehicle_attitude: None,
+        }
+    }
+
+    /// Reconstruct the exact H3 centre-cell emitter position for a matching `/gain` call.
+    fn center_cell_position(request: &H3LinkBudgetRequest) -> Position3D {
+        let resolution = request
+            .h3_resolution
+            .unwrap_or_else(|| h3_resolution_from_frequency(request.frequency_mhz));
+        let h3_res = h3o::Resolution::try_from(resolution).unwrap();
+        let (feed_x, feed_y, feed_z) = pos_to_ecef(&request.feed_pointing_location).unwrap();
+        let (feed_lon, feed_lat, _) = ecef_to_geodetic(feed_x, feed_y, feed_z).unwrap();
+        let center = h3o::LatLng::new(feed_lat, feed_lon)
+            .unwrap()
+            .to_cell(h3_res);
+        let center_latlng = h3o::LatLng::from(center);
+        let (cell_x, cell_y, cell_z) =
+            geodetic_to_ecef(center_latlng.lng(), center_latlng.lat(), 0.0).unwrap();
+        Position3D::ecef(cell_x, cell_y, cell_z)
+    }
+
+    fn center_cell_gain_request(request: &H3LinkBudgetRequest) -> GainRequest {
+        GainRequest {
+            antenna_id: request.antenna_id.clone(),
+            feed_id: request.feed_id.clone(),
+            vehicle_position: request.vehicle_position.clone(),
+            reflector_boresight: request.reflector_boresight.clone(),
+            feed_pointing_location: request.feed_pointing_location.clone(),
+            emitter_position: center_cell_position(request),
+            frequency_mhz: request.frequency_mhz,
+            pointing_frequency_mhz: request.pointing_frequency_mhz,
+            include_reference: false,
+            vehicle_attitude: request.vehicle_attitude,
         }
     }
 
@@ -1205,7 +1010,6 @@ mod tests {
     /// within numerical noise.
     #[test]
     fn test_h3_consistent_with_gain_endpoint_for_uncalibrated_antenna() {
-        use crate::api::schemas::GainRequest;
         use crate::data::repository::CalibrationRepository;
         use crate::service::evaluator::compute_gain_from_request;
 
@@ -1229,38 +1033,7 @@ mod tests {
         );
         let cell = &h3_response.cells[0];
 
-        // Reconstruct the exact emitter ECEF position h3 used for the center cell:
-        // same resolution-selection logic, same feed lat/lon -> H3 cell -> ECEF at alt 0.
-        let resolution = request
-            .h3_resolution
-            .unwrap_or_else(|| h3_resolution_from_frequency(request.frequency_mhz));
-        let h3_res = h3o::Resolution::try_from(resolution).expect("valid H3 resolution");
-        let (feed_ex, feed_ey, feed_ez) =
-            pos_to_ecef(&request.feed_pointing_location).expect("feed pointing location to ECEF");
-        let (feed_lon_deg, feed_lat_deg, _) =
-            ecef_to_geodetic(feed_ex, feed_ey, feed_ez).expect("feed ECEF to geodetic");
-        let center_latlng =
-            h3o::LatLng::new(feed_lat_deg, feed_lon_deg).expect("valid feed lat/lon");
-        let center_cell = center_latlng.to_cell(h3_res);
-        let cell_latlng = h3o::LatLng::from(center_cell);
-        let (cell_ex, cell_ey, cell_ez) =
-            geodetic_to_ecef(cell_latlng.lng(), cell_latlng.lat(), 0.0)
-                .expect("cell lat/lon to ECEF");
-
-        let emitter_position = Position3D::ecef(cell_ex, cell_ey, cell_ez);
-
-        let gain_request = GainRequest {
-            antenna_id: request.antenna_id.clone(),
-            feed_id: request.feed_id.clone(),
-            vehicle_position: request.vehicle_position.clone(),
-            reflector_boresight: request.reflector_boresight.clone(),
-            feed_pointing_location: request.feed_pointing_location.clone(),
-            emitter_position,
-            frequency_mhz: request.frequency_mhz,
-            pointing_frequency_mhz: request.pointing_frequency_mhz,
-            include_reference: false,
-            vehicle_attitude: request.vehicle_attitude,
-        };
+        let gain_request = center_cell_gain_request(&request);
 
         let mut repo = CalibrationRepository::new();
         repo.add_calibration(calibration);
@@ -1281,6 +1054,395 @@ mod tests {
             cell.gain_db,
             gain_response.gain_db
         );
+    }
+
+    /// Issue #63: the H3 adapter and `/gain` must consume the same final served result for
+    /// geometrically identical one-cell requests. The scenarios cover the three calibration
+    /// states, a real beam-squint offset, correction application, and full-coverage rejection
+    /// at an uncalibrated frequency. Warning comparison is set-wise because H3 deliberately
+    /// sorts its grid aggregate while `/gain` preserves served-law assembly order.
+    #[test]
+    fn one_cell_h3_matches_gain_for_all_calibration_states() {
+        use crate::data::repository::CalibrationRepository;
+        use crate::service::evaluator::compute_gain_from_request;
+
+        let full_coverage = CalibrationCoverage::builder()
+            .azimuth_range(0.0, 360.0)
+            .elevation_range(0.0, 180.0)
+            .frequency_range(8000.0, 9000.0)
+            .num_measurements(1000)
+            .has_correction_surface(true)
+            .build()
+            .unwrap();
+        let partial_coverage = CalibrationCoverage::builder()
+            .azimuth_range(0.0, 360.0)
+            .elevation_range(0.0, 180.0)
+            .frequency_range(8000.0, 8300.0)
+            .num_measurements(100)
+            .has_correction_surface(true)
+            .build()
+            .unwrap();
+        let spatially_disjoint_coverage = CalibrationCoverage::builder()
+            .azimuth_range(0.0, 360.0)
+            .elevation_range(80.0, 90.0)
+            .frequency_range(8000.0, 9000.0)
+            .num_measurements(100)
+            .has_correction_surface(true)
+            .build()
+            .unwrap();
+
+        let mut uncalibrated = make_h3_test_calibration();
+        uncalibrated.calibration_status = Some(CalibrationStatus::Uncalibrated {
+            accuracy_estimate_db: 3.0,
+            loss_accuracy_estimate_db: 2.0,
+        });
+
+        let mut calibrated = make_h3_test_calibration();
+        calibrated.correction_surface = Some(constant_surface_db(2.0));
+        calibrated.calibration_coverage = Some(full_coverage);
+
+        let mut partial = make_h3_test_calibration();
+        partial.calibration_status = Some(CalibrationStatus::PartiallyCalibrated {
+            accuracy_estimate_db: 1.5,
+            coverage: partial_coverage.clone(),
+        });
+        partial.correction_surface = Some(constant_surface_db(2.0));
+        partial.calibration_coverage = Some(partial_coverage);
+
+        let mut spatially_outside = make_h3_test_calibration();
+        spatially_outside.calibration_status = Some(CalibrationStatus::PartiallyCalibrated {
+            accuracy_estimate_db: 1.5,
+            coverage: spatially_disjoint_coverage.clone(),
+        });
+        spatially_outside.correction_surface = Some(constant_surface_db(2.0));
+        spatially_outside.calibration_coverage = Some(spatially_disjoint_coverage);
+
+        for (name, calibration, with_squint, correction_applied, warning_codes) in [
+            (
+                "uncalibrated",
+                uncalibrated,
+                false,
+                false,
+                vec![WarningCode::Uncalibrated],
+            ),
+            ("calibrated", calibrated, true, true, vec![]),
+            (
+                "partially calibrated outside frequency coverage",
+                partial,
+                true,
+                false,
+                vec![
+                    WarningCode::PartiallyCalibrated,
+                    WarningCode::CorrectionNotApplied,
+                ],
+            ),
+            (
+                "partially calibrated outside spatial coverage",
+                spatially_outside,
+                true,
+                false,
+                vec![
+                    WarningCode::PartiallyCalibrated,
+                    WarningCode::OutOfCoverage,
+                    WarningCode::CorrectionNotApplied,
+                ],
+            ),
+        ] {
+            let mut request = make_h3_test_request();
+            if with_squint {
+                request.feed_pointing_location = Position3D::geodetic(
+                    request.reflector_boresight.x + 0.05,
+                    request.reflector_boresight.y,
+                    request.reflector_boresight.z,
+                );
+                request.pointing_frequency_mhz = Some(request.frequency_mhz * 1.4);
+            }
+
+            let cache = GainCache::new(true, 100);
+            let h3 =
+                compute_h3_link_budget(&request, &calibration, &cache, std::time::Instant::now())
+                    .unwrap_or_else(|error| panic!("{name}: H3 failed: {error}"));
+            assert_eq!(h3.cells.len(), 1, "{name}: expected one H3 cell");
+
+            let gain_request = center_cell_gain_request(&request);
+            let mut repository = CalibrationRepository::new();
+            repository.add_calibration(calibration);
+            let gain = compute_gain_from_request(&gain_request, &repository)
+                .unwrap_or_else(|error| panic!("{name}: /gain failed: {error}"));
+
+            assert_eq!(h3.cells[0].gain_db, gain.gain_db, "{name}: final gain");
+            assert_eq!(
+                h3.cells[0].azimuth_deg, gain.geometry.emitter_azimuth_deg,
+                "{name}: corrected E-clock"
+            );
+            assert_eq!(
+                h3.cells[0].elevation_deg, gain.geometry.emitter_elevation_deg,
+                "{name}: corrected E-cone"
+            );
+            assert_eq!(
+                h3.beam_squint_deg, gain.geometry.beam_squint_deg,
+                "{name}: squint"
+            );
+            assert_eq!(
+                h3.calibration_status
+                    .as_ref()
+                    .map(|status| status.correction_applied),
+                gain.calibration_status
+                    .as_ref()
+                    .map(|status| status.correction_applied),
+                "{name}: correction evidence"
+            );
+            assert_eq!(
+                h3.calibration_status
+                    .as_ref()
+                    .map(|status| status.correction_applied),
+                Some(correction_applied),
+                "{name}: expected correction disposition"
+            );
+            for code in warning_codes {
+                assert!(
+                    h3.warnings.iter().any(|warning| warning.is(code)),
+                    "{name}: missing {code:?} advisory"
+                );
+            }
+
+            let mut gain_warnings = gain.warnings;
+            gain_warnings.sort();
+            assert_eq!(h3.warnings, gain_warnings, "{name}: served warnings");
+
+            let hot = compute_h3_link_budget(
+                &request,
+                &repository
+                    .get_calibration(&request.antenna_id, &request.feed_id)
+                    .unwrap(),
+                &cache,
+                std::time::Instant::now(),
+            )
+            .unwrap_or_else(|error| panic!("{name}: hot-cache H3 failed: {error}"));
+            assert_eq!(hot.cells, h3.cells, "{name}: hot-cache cell results");
+            assert_eq!(hot.warnings, h3.warnings, "{name}: hot-cache warnings");
+            assert_eq!(
+                hot.calibration_status, h3.calibration_status,
+                "{name}: hot-cache correction evidence"
+            );
+            assert_eq!(
+                hot.beam_squint_deg, h3.beam_squint_deg,
+                "{name}: hot-cache squint"
+            );
+        }
+    }
+
+    /// Issue #63: sequential and automatic parallel traversal are observationally
+    /// identical for the same 37-cell grid. The sequential pass fills the shared cache;
+    /// the zero-budget automatic pass can succeed only by taking concurrent cache hits.
+    /// Only wall-clock timing is normalized; cells, sorted warnings, correction evidence,
+    /// peak-relative losses, path loss, G/T, and failure counts compare exactly.
+    #[test]
+    fn sequential_and_parallel_traversals_are_equivalent() {
+        let mut calibration = make_h3_test_calibration();
+        calibration.correction_surface = Some(constant_surface_db(2.0));
+
+        let mut request = make_h3_test_request();
+        request.n_rings = 3;
+        request.temperature_k = Some(290.0);
+        let cache = GainCache::new(true, 100);
+
+        let mut sequential = compute_h3_link_budget_with_traversal(
+            &request,
+            &calibration,
+            &cache,
+            std::time::Instant::now(),
+            DEFAULT_INTEGRATION_BUDGET,
+            CellTraversal::Sequential,
+        )
+        .unwrap();
+        let mut parallel = compute_h3_link_budget_with_traversal(
+            &request,
+            &calibration,
+            &cache,
+            std::time::Instant::now(),
+            Duration::ZERO,
+            CellTraversal::Automatic,
+        )
+        .unwrap();
+
+        assert_eq!(parallel.cells.len(), 37);
+        sequential.metadata.computation_time_ms = 0.0;
+        parallel.metadata.computation_time_ms = 0.0;
+        assert_eq!(sequential, parallel);
+        assert!(parallel.warnings.windows(2).all(|pair| pair[0] < pair[1]));
+
+        // Failure-count parity is non-vacuous: an empty cache and zero budget make every
+        // cell fail under both traversals, including the automatic Rayon branch.
+        let mut sequential_failures = compute_h3_link_budget_with_traversal(
+            &request,
+            &calibration,
+            &GainCache::new(false, 1),
+            std::time::Instant::now(),
+            Duration::ZERO,
+            CellTraversal::Sequential,
+        )
+        .unwrap();
+        let mut parallel_failures = compute_h3_link_budget_with_traversal(
+            &request,
+            &calibration,
+            &GainCache::new(false, 1),
+            std::time::Instant::now(),
+            Duration::ZERO,
+            CellTraversal::Automatic,
+        )
+        .unwrap();
+
+        assert_eq!(parallel_failures.metadata.failed_points, 37);
+        sequential_failures.metadata.computation_time_ms = 0.0;
+        parallel_failures.metadata.computation_time_ms = 0.0;
+        assert_eq!(sequential_failures, parallel_failures);
+    }
+
+    /// Issue #63: warnings intended to occur once per grid retain one constant message
+    /// across cells, so whole-object deduplication yields one entry for each warning code.
+    #[test]
+    fn grid_wide_advisory_messages_deduplicate_across_cells() {
+        let mut calibration = make_h3_test_calibration();
+        calibration.calibration_status = Some(CalibrationStatus::Uncalibrated {
+            accuracy_estimate_db: 3.0,
+            loss_accuracy_estimate_db: 2.0,
+        });
+        calibration.physical_config.feed.position = (3.0, 0.0, 0.0);
+
+        let mut request = make_h3_test_request();
+        request.n_rings = 1;
+        let response = compute_h3_link_budget(
+            &request,
+            &calibration,
+            &GainCache::new(true, 100),
+            std::time::Instant::now(),
+        )
+        .unwrap();
+
+        assert_eq!(response.cells.len(), 7);
+        for code in [
+            WarningCode::Uncalibrated,
+            WarningCode::SevereFeedOffset,
+            WarningCode::RayTraceDegraded,
+        ] {
+            assert_eq!(
+                response
+                    .warnings
+                    .iter()
+                    .filter(|warning| warning.is(code))
+                    .count(),
+                1,
+                "{code:?} must have one constant message across all cells"
+            );
+        }
+    }
+
+    /// Issue #63 regression: a severe feed offset normally selects the ray-tracing stub,
+    /// but an uncorrected rear-hemisphere direction takes the floor-only shortcut before
+    /// that dispatch. H3 must consume the served warning set and therefore must not restore
+    /// the ray-trace warning that the skipped operation never earned.
+    #[test]
+    fn h3_rear_floor_shortcut_does_not_invent_ray_trace_warning() {
+        use crate::data::repository::CalibrationRepository;
+        use crate::service::evaluator::compute_gain_from_request;
+
+        let mut calibration = make_h3_test_calibration();
+        calibration.calibration_status = Some(CalibrationStatus::Uncalibrated {
+            accuracy_estimate_db: 3.0,
+            loss_accuracy_estimate_db: 2.0,
+        });
+
+        let mut request = make_h3_test_request();
+        request.vehicle_position = Position3D::geodetic(0.0, 0.0, 400_000.0);
+        request.reflector_boresight = Position3D::geodetic(20.0, 0.0, 0.0);
+        request.feed_pointing_location = Position3D::geodetic(-20.0, 0.0, 0.0);
+
+        let cache = GainCache::new(true, 100);
+        let h3 = compute_h3_link_budget(&request, &calibration, &cache, std::time::Instant::now())
+            .unwrap();
+        assert!(h3.cells[0].elevation_deg > 90.0);
+        assert!(h3
+            .warnings
+            .iter()
+            .any(|warning| warning.is(WarningCode::RearHemisphereInvalid)));
+        assert!(h3
+            .warnings
+            .iter()
+            .any(|warning| warning.is(WarningCode::SevereFeedOffset)));
+        assert!(!h3
+            .warnings
+            .iter()
+            .any(|warning| warning.is(WarningCode::RayTraceDegraded)));
+
+        let mut repository = CalibrationRepository::new();
+        repository.add_calibration(calibration);
+        let gain_request = center_cell_gain_request(&request);
+        let gain = compute_gain_from_request(&gain_request, &repository).unwrap();
+        let mut gain_warnings = gain.warnings;
+        gain_warnings.sort();
+        assert_eq!(h3.warnings, gain_warnings);
+
+        let forward = compute_gain_from_request(
+            &GainRequest {
+                emitter_position: request.reflector_boresight.clone(),
+                ..gain_request
+            },
+            &repository,
+        )
+        .unwrap();
+        assert!(
+            forward
+                .warnings
+                .iter()
+                .any(|warning| warning.is(WarningCode::RayTraceDegraded)),
+            "the forward direction proves this request's feed offset is severe"
+        );
+
+        // A forward H3 request whose artifact supplies the severe offset reaches the stub;
+        // its warning is reconstructed on the second request's cache hit.
+        let mut forward_calibration = make_h3_test_calibration();
+        forward_calibration.physical_config.feed.position = (3.0, 0.0, 0.0);
+        let forward_request = make_h3_test_request();
+        let forward_cache = GainCache::new(true, 100);
+        for pass in ["cold", "hot"] {
+            let response = compute_h3_link_budget(
+                &forward_request,
+                &forward_calibration,
+                &forward_cache,
+                std::time::Instant::now(),
+            )
+            .unwrap_or_else(|error| panic!("{pass} forward H3 failed: {error}"));
+            assert!(
+                response
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.is(WarningCode::RayTraceDegraded)),
+                "{pass} forward H3 must retain ray_trace_degraded"
+            );
+        }
+
+        // A corrected rear direction does not take the uncorrected floor-only shortcut,
+        // so it also reaches the stub and retains the warning on a cache hit.
+        let mut corrected_rear = make_h3_test_calibration();
+        corrected_rear.correction_surface = Some(constant_surface_db(2.0));
+        let corrected_cache = GainCache::new(true, 100);
+        for pass in ["cold", "hot"] {
+            let response = compute_h3_link_budget(
+                &request,
+                &corrected_rear,
+                &corrected_cache,
+                std::time::Instant::now(),
+            )
+            .unwrap_or_else(|error| panic!("{pass} corrected-rear H3 failed: {error}"));
+            assert!(
+                response
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.is(WarningCode::RayTraceDegraded)),
+                "{pass} corrected-rear H3 must retain ray_trace_degraded"
+            );
+        }
     }
 
     /// C9 regression: `loss_db` is referenced to the **grid peak**, not the grid centre.
@@ -1364,13 +1526,44 @@ mod tests {
         );
     }
 
+    /// Issue #63: once every cell's physics term is cached, a zero integration budget
+    /// cannot make the repeated request fail. This proves H3 cache hits skip integration;
+    /// the neighbouring all-miss test proves the same budget still applies independently
+    /// to every cache miss.
+    #[test]
+    fn h3_hot_cache_skips_integration_even_with_zero_budget() {
+        let calibration = make_h3_test_calibration();
+        let mut request = make_h3_test_request();
+        request.n_rings = 1;
+        let cache = GainCache::new(true, 100);
+
+        let cold =
+            compute_h3_link_budget(&request, &calibration, &cache, std::time::Instant::now())
+                .unwrap();
+        assert_eq!(cold.metadata.failed_points, 0);
+
+        let hot = compute_h3_link_budget_with_budget(
+            &request,
+            &calibration,
+            &cache,
+            std::time::Instant::now(),
+            Duration::ZERO,
+        )
+        .unwrap();
+        assert_eq!(hot.metadata.failed_points, 0);
+        assert_eq!(hot.cells, cold.cells);
+        assert_eq!(hot.warnings, cold.warnings);
+        assert_eq!(hot.calibration_status, cold.calibration_status);
+    }
+
     /// C9 degenerate case: when *no* cell yields a finite gain there is no peak to
     /// reference. The pre-C9 code fell back to the separate boresight evaluation, which no
     /// longer exists. Assert the response stays finite and self-describing rather than
     /// serializing `peak_gain_db` as JSON `null`.
     #[test]
     fn h3_all_cells_failed_reports_a_finite_peak_sentinel() {
-        let calibration = make_h3_test_calibration();
+        let mut calibration = make_h3_test_calibration();
+        calibration.physical_config.feed.position = (3.0, 0.0, 0.0);
         let mut request = make_h3_test_request();
         request.n_rings = 1; // 7 cells
 
@@ -1399,6 +1592,13 @@ mod tests {
         assert_eq!(
             response.metadata.peak_gain_db,
             crate::service::heatmap::NO_PEAK_GAIN_DB
+        );
+        assert!(
+            response
+                .warnings
+                .iter()
+                .any(|warning| warning.is(WarningCode::SevereFeedOffset)),
+            "configuration advisories must survive when every directional evaluation fails"
         );
     }
 }
