@@ -81,49 +81,34 @@ pub fn free_space_path_loss_db(d_m: f64, freq_hz: f64) -> f64 {
     20.0 * (4.0 * std::f64::consts::PI * d_m * freq_hz / C).log10()
 }
 
-/// Convert a Position3D to ECEF (x, y, z) in meters.
-///
-/// A position declared geodetic is converted via `geodetic_to_ecef`; one declared ECEF
-/// is returned directly.
-fn pos_to_ecef(pos: &Position3D) -> Result<(f64, f64, f64)> {
-    if pos.is_ecef() {
-        Ok((pos.x, pos.y, pos.z))
-    } else {
-        geodetic_to_ecef(pos.x, pos.y, pos.z)
+/// An ECEF point whose coordinates are meters from Earth's center.
+#[derive(Clone, Copy)]
+struct EcefPoint {
+    x_m: f64,
+    y_m: f64,
+    z_m: f64,
+}
+
+impl From<(f64, f64, f64)> for EcefPoint {
+    fn from((x_m, y_m, z_m): (f64, f64, f64)) -> Self {
+        Self { x_m, y_m, z_m }
     }
 }
 
-/// Adapt one H3 cell centre into the prepared served-gain operation.
+/// Convert a Position3D to ECEF meters.
 ///
-/// H3 owns only the cell geometry: the prepared value owns squint, cache identity,
-/// physical optics, correction disposition, and directional warnings (#63).
-fn compute_cell_gain(
-    cell_ecef: (f64, f64, f64),
-    request: &H3LinkBudgetRequest,
-    prepared: &PreparedServedGain,
-    cache: &GainCache,
-) -> Result<(f64, f64, f64, Vec<ApiWarning>, CorrectionDisposition)> {
-    let cell_pos = Position3D::ecef(cell_ecef.0, cell_ecef.1, cell_ecef.2);
-    let (e_clock_deg, e_cone_deg) = compute_emitter_direction_with_attitude(
-        &cell_pos,
-        &request.vehicle_position,
-        &request.reflector_boresight,
-        request.vehicle_attitude,
-    )?;
-
-    let served = prepared.evaluate_cached(
-        PreSquintDirection::new(e_clock_deg, e_cone_deg),
-        ReferenceGainRequest::Omit,
-        cache,
-    )?;
-
-    Ok((
-        served.gain_db,
-        served.direction.e_clock_deg,
-        served.direction.e_cone_deg,
-        served.warnings,
-        served.correction,
-    ))
+/// A position declared geodetic is converted via `geodetic_to_ecef`; one declared ECEF
+/// is copied directly into the frame-specific result type.
+fn pos_to_ecef(pos: &Position3D) -> Result<EcefPoint> {
+    if pos.is_ecef() {
+        Ok(EcefPoint {
+            x_m: pos.x,
+            y_m: pos.y,
+            z_m: pos.z,
+        })
+    } else {
+        geodetic_to_ecef(pos.x, pos.y, pos.z).map(EcefPoint::from)
+    }
 }
 
 /// Compute H3 link budget for a request.
@@ -188,8 +173,9 @@ fn compute_h3_link_budget_with_traversal(
 
     // 2. Find center cell from the feed pointing location
     // Use feed_pointing_location to determine where on Earth we're centering the grid
-    let (feed_ex, feed_ey, feed_ez) = pos_to_ecef(&request.feed_pointing_location)?;
-    let (feed_lon_deg, feed_lat_deg, _) = ecef_to_geodetic(feed_ex, feed_ey, feed_ez)?;
+    let feed_ecef = pos_to_ecef(&request.feed_pointing_location)?;
+    let (feed_lon_deg, feed_lat_deg, _) =
+        ecef_to_geodetic(feed_ecef.x_m, feed_ecef.y_m, feed_ecef.z_m)?;
 
     let center_latlng = h3o::LatLng::new(feed_lat_deg, feed_lon_deg).map_err(|e| {
         AntennaModelError::Generic(format!(
@@ -227,49 +213,31 @@ fn compute_h3_link_budget_with_traversal(
     let frequency_hz = request.frequency_mhz * 1e6;
 
     // 5. Compute vehicle ECEF for distance calculations
-    let (vehicle_ex, vehicle_ey, vehicle_ez) = pos_to_ecef(&request.vehicle_position)?;
+    let vehicle_ecef = pos_to_ecef(&request.vehicle_position)?;
 
     // 6. Process each cell in parallel.
     //    Pass 1 computes everything that does not need the grid peak: az/el, gain, distance,
     //    FSPL, G/T. `loss_db` / `total_path_loss_db` are filled in pass 2 (step 8), once the
     //    peak over the evaluated cells is known (roadmap C9). There is deliberately no
     //    separate boresight reference evaluation any more: the reference is one of the cells.
-    let results: Vec<Result<(CellGain, Vec<ApiWarning>)>> = if traversal.is_parallel(cells.len()) {
+    let results: Vec<Result<PeakIndependentCell>> = if traversal.is_parallel(cells.len()) {
         cells
             .par_iter()
             .map(|&cell| {
-                compute_cell_result(
-                    cell,
-                    request,
-                    &prepared,
-                    cache,
-                    frequency_hz,
-                    vehicle_ex,
-                    vehicle_ey,
-                    vehicle_ez,
-                )
+                compute_cell_result(cell, request, &prepared, cache, frequency_hz, vehicle_ecef)
             })
             .collect()
     } else {
         cells
             .iter()
             .map(|&cell| {
-                compute_cell_result(
-                    cell,
-                    request,
-                    &prepared,
-                    cache,
-                    frequency_hz,
-                    vehicle_ex,
-                    vehicle_ey,
-                    vehicle_ez,
-                )
+                compute_cell_result(cell, request, &prepared, cache, frequency_hz, vehicle_ecef)
             })
             .collect()
     };
 
     // 7. Separate successes and failures; aggregate authoritative correction dispositions.
-    let mut cell_gains: Vec<CellGain> = Vec::with_capacity(cells.len());
+    let mut cell_gains: Vec<PeakIndependentCell> = Vec::with_capacity(cells.len());
     // Seed the aggregate with preparation-time advisories. Successful cell results carry
     // the same whole objects and deduplicate into this set; seeding also preserves the
     // pre-#63 endpoint behavior when every directional evaluation fails.
@@ -280,12 +248,10 @@ fn compute_h3_link_budget_with_traversal(
 
     for result in results {
         match result {
-            Ok((cell_gain, cell_warnings)) => {
+            Ok(cell_gain) => {
                 corrected_count += usize::from(cell_gain.correction.applied());
+                warnings_set.extend(cell_gain.warnings.iter().cloned());
                 cell_gains.push(cell_gain);
-                for w in cell_warnings {
-                    warnings_set.insert(w);
-                }
             }
             Err(e) => {
                 failed_count += 1;
@@ -392,7 +358,7 @@ fn compute_h3_link_budget_with_traversal(
 /// referenced to the peak gain over the whole grid, which cannot be known until every cell
 /// has been evaluated. Keeping them out of this struct makes the second pass mandatory —
 /// `H3CellResult` is constructed only there, so a cell cannot escape with an unfilled loss.
-struct CellGain {
+struct PeakIndependentCell {
     cell_id: String,
     center_lon: f64,
     center_lat: f64,
@@ -403,65 +369,64 @@ struct CellGain {
     free_space_path_loss_db: f64,
     g_over_t_db: Option<f64>,
     correction: CorrectionDisposition,
+    /// The complete successful-direction warning vector returned by the prepared evaluator.
+    /// H3 only aggregates it; it never rebuilds or filters these warnings.
+    warnings: Vec<ApiWarning>,
 }
 
-/// Compute the peak-independent link budget quantities for a single H3 cell.
-#[allow(clippy::too_many_arguments)]
+/// Adapt one H3 cell into the prepared served-gain operation, then compute only the
+/// peak-independent quantities owned by the H3 endpoint.
 fn compute_cell_result(
     cell: h3o::CellIndex,
     request: &H3LinkBudgetRequest,
     prepared: &PreparedServedGain,
     cache: &GainCache,
     frequency_hz: f64,
-    vehicle_ex: f64,
-    vehicle_ey: f64,
-    vehicle_ez: f64,
-) -> Result<(CellGain, Vec<ApiWarning>)> {
-    // Get cell center lat/lon
+    vehicle_ecef: EcefPoint,
+) -> Result<PeakIndependentCell> {
     let latlng = h3o::LatLng::from(cell);
     let lat_deg = latlng.lat();
     let lon_deg = latlng.lng();
-
-    // Convert cell center to ECEF at altitude 0m
     let (cell_ex, cell_ey, cell_ez) = geodetic_to_ecef(lon_deg, lat_deg, 0.0)?;
 
-    // Distance from vehicle to cell center
-    let dx = cell_ex - vehicle_ex;
-    let dy = cell_ey - vehicle_ey;
-    let dz = cell_ez - vehicle_ez;
+    let dx = cell_ex - vehicle_ecef.x_m;
+    let dy = cell_ey - vehicle_ecef.y_m;
+    let dz = cell_ez - vehicle_ecef.z_m;
     let distance_m = (dx * dx + dy * dy + dz * dz).sqrt();
-    let distance_km = distance_m / 1000.0;
 
-    // Compute gain together with az/el; az/el are returned directly so we
-    // avoid a redundant second call to `compute_emitter_direction` for reporting.
-    let (gain_db, azimuth_deg, elevation_deg, cell_warnings, correction) =
-        compute_cell_gain((cell_ex, cell_ey, cell_ez), request, prepared, cache)?;
+    // H3 adapts cell geometry to the prepared interface and consumes its named result.
+    // Squint, physics/cache identity, correction sequencing, and warnings remain hidden.
+    let cell_position = Position3D::ecef(cell_ex, cell_ey, cell_ez);
+    let (e_clock_deg, e_cone_deg) = compute_emitter_direction_with_attitude(
+        &cell_position,
+        &request.vehicle_position,
+        &request.reflector_boresight,
+        request.vehicle_attitude,
+    )?;
+    let served = prepared.evaluate_cached(
+        PreSquintDirection::new(e_clock_deg, e_cone_deg),
+        ReferenceGainRequest::Omit,
+        cache,
+    )?;
 
-    // Free-space path loss is peak-independent, so it is computed here. `loss_db` and
-    // `total_path_loss_db` are filled by the caller's second pass, against the grid peak.
-    let fspl = free_space_path_loss_db(distance_m, frequency_hz);
+    let free_space_path_loss_db = free_space_path_loss_db(distance_m, frequency_hz);
+    let g_over_t_db = request.temperature_k.map(|temperature| {
+        crate::model::pattern::g_over_t_from_gain_db(served.gain_db, temperature)
+    });
 
-    // G/T computation (if temperature provided) — shared formula, see
-    // `pattern::g_over_t_from_gain_db`. T is a user-supplied passthrough (F4).
-    let g_over_t_db = request
-        .temperature_k
-        .map(|t| crate::model::pattern::g_over_t_from_gain_db(gain_db, t));
-
-    Ok((
-        CellGain {
-            cell_id: format!("{}", cell),
-            center_lon: lon_deg,
-            center_lat: lat_deg,
-            azimuth_deg,
-            elevation_deg,
-            distance_km,
-            gain_db,
-            free_space_path_loss_db: fspl,
-            g_over_t_db,
-            correction,
-        },
-        cell_warnings,
-    ))
+    Ok(PeakIndependentCell {
+        cell_id: format!("{}", cell),
+        center_lon: lon_deg,
+        center_lat: lat_deg,
+        azimuth_deg: served.direction.e_clock_deg,
+        elevation_deg: served.direction.e_cone_deg,
+        distance_km: distance_m / 1000.0,
+        gain_db: served.gain_db,
+        free_space_path_loss_db,
+        g_over_t_db,
+        correction: served.correction,
+        warnings: served.warnings,
+    })
 }
 
 #[cfg(test)]
@@ -474,7 +439,6 @@ mod tests {
     };
 
     use crate::api::schemas::GainRequest;
-    use crate::model::evaluate_correction;
 
     /// Build a minimal `AntennaCalibration` suitable for H3 link-budget tests.
     ///
@@ -561,8 +525,9 @@ mod tests {
             .h3_resolution
             .unwrap_or_else(|| h3_resolution_from_frequency(request.frequency_mhz));
         let h3_res = h3o::Resolution::try_from(resolution).unwrap();
-        let (feed_x, feed_y, feed_z) = pos_to_ecef(&request.feed_pointing_location).unwrap();
-        let (feed_lon, feed_lat, _) = ecef_to_geodetic(feed_x, feed_y, feed_z).unwrap();
+        let feed_ecef = pos_to_ecef(&request.feed_pointing_location).unwrap();
+        let (feed_lon, feed_lat, _) =
+            ecef_to_geodetic(feed_ecef.x_m, feed_ecef.y_m, feed_ecef.z_m).unwrap();
         let center = h3o::LatLng::new(feed_lat, feed_lon)
             .unwrap()
             .to_cell(h3_res);
@@ -617,26 +582,6 @@ mod tests {
             .validate()
             .expect("constant_surface_db: BSplineModel4D failed validate()");
         surface
-    }
-
-    /// Verify the constant surface helper actually evaluates to the expected constant.
-    ///
-    /// This is a pre-flight check ensuring the test fixture is non-vacuous before
-    /// using it in `test_h3_applies_correction_surface`.
-    #[test]
-    fn test_constant_surface_evaluates_to_constant() {
-        let surface = constant_surface_db(2.0);
-        let result = evaluate_correction(&surface, 45.0, 30.0, 8400.0, 290.0)
-            .expect("evaluate_correction failed on constant surface");
-        assert!(
-            !result.extrapolated,
-            "query (45°, 30°, 8400 MHz, 290 K) should be in range"
-        );
-        assert!(
-            (result.correction_db - 2.0).abs() < 1e-9,
-            "constant surface should evaluate to 2.0 dB everywhere, got {}",
-            result.correction_db
-        );
     }
 
     /// Core correctness test: a constant +2 dB correction surface must shift
@@ -831,92 +776,6 @@ mod tests {
             compute_h3_link_budget(&request_no_t, &cal, &cache2, std::time::Instant::now())
                 .expect("H3 run without temperature failed");
         assert!(result_no_t.cells.iter().all(|c| c.g_over_t_db.is_none()));
-    }
-
-    /// SERVED h3 PATH — F7 floor ON (redesign 2026-07-16). The h3 per-cell path
-    /// sets `apply_sidelobe_floor = calibration.physics_is_uncorrected()` — the
-    /// same P11 predicate as the evaluator — so for an uncalibrated antenna every
-    /// off-axis ring cell carries the statistical floor: forward cells report the
-    /// incoherent power sum (raw PO + floor), which can never dip BELOW the floor,
-    /// and any rear cell reports the floor alone. This pins that the floor IS
-    /// applied on the h3 served path: no uncalibrated cell falls below the pedestal.
-    ///
-    /// Geometry mirrors the P8 off-axis h3 test: a low-altitude vehicle so the
-    /// n_rings=2 ground cells fan out tens of degrees off boresight, deep in the
-    /// sidelobes. The Ruze floor is diameter-independent, but it DOES scale with
-    /// mesh transmission, so `floor_cfg` mirrors the antenna's mesh to reproduce
-    /// `floor_db` exactly.
-    #[test]
-    fn test_h3_sidelobe_floor_on_for_uncorrected_physics() {
-        use crate::model::{
-            wavelength_from_frequency, AntennaConfiguration, FeedParameters as ModelFeedParams,
-            FeedPosition, MeshParameters as ModelMeshParams, ReflectorGeometry as ModelReflector,
-        };
-
-        let geo = |lon: f64, lat: f64, alt: f64| Position3D::geodetic(lon, lat, alt);
-        let request = H3LinkBudgetRequest {
-            antenna_id: "h3_test_antenna".to_string(),
-            feed_id: "h3_test_feed".to_string(),
-            vehicle_position: geo(-118.1234, 34.5678, 100.0),
-            reflector_boresight: geo(-118.1234, 34.5679, 110.0),
-            feed_pointing_location: geo(-118.1234, 34.5679, 110.0), // feed aimed at boresight → at focus
-            frequency_mhz: 8400.0,
-            pointing_frequency_mhz: None,
-            n_rings: 2,
-            h3_resolution: Some(7),
-            temperature_k: None,
-            vehicle_attitude: None,
-        };
-
-        // High surface RMS (3 mm) so the Ruze pedestal (which saturates at
-        // 4π/Ω_scatter ≈ +8 dBi as η_ruze → 0) is a clearly nonzero pedestal to
-        // compare against. The floor is diameter-independent, but scales with mesh
-        // transmission, so `floor_cfg` carries the same 3 mm RMS AND the same mesh
-        // (5 mm / 0.5 mm) as `make_h3_test_calibration` to reproduce `floor_db`
-        // exactly.
-        const SURFACE_RMS_MM: f64 = 3.0;
-        let wavelength = wavelength_from_frequency(8400.0e6);
-        let floor_cfg = AntennaConfiguration::new(
-            "floor_ref".into(),
-            "floor_ref".into(),
-            ModelReflector::new(10.0, 5.0, SURFACE_RMS_MM / 1000.0).unwrap(),
-            ModelFeedParams::new(FeedPosition::at_focus(5.0), 8.0, 0.0, 1.0).unwrap(),
-            Some(
-                ModelMeshParams::builder()
-                    .spacing(0.005)
-                    .wire_diameter(0.0005)
-                    .build()
-                    .unwrap(),
-            ),
-        )
-        .unwrap();
-        let floor_db =
-            10.0 * crate::model::pattern::sidelobe_floor_gain(&floor_cfg, wavelength).log10();
-
-        // Uncalibrated: no correction surface → floor ON. Every off-axis ring cell
-        // is the power sum (raw PO + floor), so none can fall below the pedestal.
-        let mut cal_unc = make_h3_test_calibration();
-        cal_unc.physical_config.reflector.surface_rms_mm = SURFACE_RMS_MM;
-        assert!(cal_unc.correction_surface.is_none());
-        let cache_unc = GainCache::new(false, 1);
-        let uncal =
-            compute_h3_link_budget(&request, &cal_unc, &cache_unc, std::time::Instant::now())
-                .expect("uncalibrated h3 run failed");
-        assert!(
-            uncal.cells.len() > 1,
-            "need ring cells to exercise the off-axis path"
-        );
-
-        let min_uncal = uncal
-            .cells
-            .iter()
-            .map(|c| c.gain_db)
-            .fold(f64::INFINITY, f64::min);
-        assert!(
-            min_uncal >= floor_db - 1e-6,
-            "F7 floor ON: no uncalibrated off-axis cell may fall below the Ruze floor \
-             {floor_db} dB (power sum forward / floor-only rear), got min {min_uncal}"
-        );
     }
 
     #[test]

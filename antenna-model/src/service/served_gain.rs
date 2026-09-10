@@ -1138,7 +1138,6 @@ mod tests {
     /// `Sync` is a structural requirement, not an accident of today's fields. Adding a
     /// `Cell`, `RefCell`, or non-atomic memoisation cache to memoise reference gain would
     /// break this line at compile time — which is the point.
-    #[allow(dead_code)]
     fn assert_prepared_is_sync<T: Sync>() {}
     #[test]
     fn prepared_served_gain_is_sync() {

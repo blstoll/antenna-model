@@ -253,7 +253,6 @@ mod tests {
         AntennaCalibration, CalibrationCoverage, CalibrationMetadata, CalibrationStatus,
         FeedParameters, MeshParameters, PhysicalAntennaConfig, ReflectorGeometry, ValidityRanges,
     };
-    use crate::model::{compute_gain_db, AntennaConfiguration, IntegrationParams};
     use crate::service::test_support::{create_test_calibration, dummy_correction_surface};
     use crate::warnings::WarningCode;
 
@@ -1206,341 +1205,84 @@ mod tests {
         );
     }
 
-    // ========================================================================
-    // Served-path F7 sidelobe floor: ON for uncorrected-physics antennas
-    // (redesign 2026-07-16), gated by `physics_is_uncorrected()`. The model
-    // layer combines the floor as an incoherent power sum forward (gain + floor)
-    // and floor-only behind the dish (theta > 90 deg). These tests pin that the
-    // floor IS applied via the evaluator/batch served paths for uncalibrated
-    // antennas, and stays OFF when a correction surface exists (double-counting
-    // gate, same P11 predicate as spillover). The floor FUNCTION itself is also
-    // validated at the model layer (`model::pattern` tests) and in
-    // `tests/reference_validation.rs`.
-    // ========================================================================
+    // Served-path tests below stay at the service/API boundary. The physical floor formula,
+    // ideal-reference construction, and model projection are owned and tested below that seam.
 
-    /// Shared helper building a minimal antenna configuration for
-    /// cross-checking `sidelobe_floor_gain` independently of the endpoint
-    /// under test. The floor depends on `reflector.surface_rms`, the wavelength,
-    /// AND the mesh transmission (`sidelobe_floor_gain` multiplies by `η_mesh` —
-    /// see `model::pattern::sidelobe_floor_gain`), so this mirrors the mesh
-    /// (spacing 5 mm, wire 0.5 mm) that `create_test_calibration` puts on the
-    /// served antennas; without it the proxy floor would be `η_mesh` too high and
-    /// the exact-equality assertions below would miss by the mesh loss. The feed
-    /// here is an arbitrary valid placeholder.
-    fn floor_check_config(surface_rms_m: f64) -> AntennaConfiguration {
-        use crate::model::{
-            FeedParameters as ModelFeedParams, FeedPosition, MeshParameters as ModelMeshParams,
-            ReflectorGeometry as ModelReflector,
-        };
-        let reflector = ModelReflector::new(10.0, 5.0, surface_rms_m).unwrap();
-        let feed = ModelFeedParams::new(FeedPosition::at_focus(5.0), 8.0, 0.0, 1.0).unwrap();
-        let mesh = ModelMeshParams::builder()
-            .spacing(0.005)
-            .wire_diameter(0.0005)
-            .build()
-            .unwrap();
-        AntennaConfiguration::new(
-            "floor_check".into(),
-            "floor_check".into(),
-            reflector,
-            feed,
-            Some(mesh),
-        )
-        .unwrap()
-    }
-
-    /// SERVED PATH — F7 floor ON (redesign 2026-07-16), FORWARD-hemisphere seam.
-    /// `create_deep_offaxis_request` places the emitter ~69 deg off boresight —
-    /// FORWARD hemisphere (theta < 90 deg) — so for an uncalibrated antenna (no
-    /// correction surface) the served value is the incoherent POWER SUM of the raw
-    /// physical-optics sidelobe and the statistical floor (see
-    /// model::pattern::compute_gain). At this deep a sidelobe the raw PO sits ~50 dB
-    /// below the floor, so the sum is dominated by (but never below) the floor. The
-    /// separate `served_rear_hemisphere_...` test pins the floor-ONLY rear seam.
+    /// The public service seam must preserve the uncorrected-physics preparation policy. A
+    /// zero-dB correction surface changes no interpolation value; its presence disables the
+    /// floor and spillover terms that a real correction surface empirically absorbs. Their
+    /// individual formulas are tested by `antenna-core/src/model/pattern.rs` symbols
+    /// `compute_gain` and `sidelobe_floor_gain`.
     #[test]
-    fn served_deep_offaxis_uncalibrated_includes_statistical_floor() {
-        let mut repo = CalibrationRepository::new();
-        let mut calibration = create_test_calibration(CalibrationStatus::Uncalibrated {
+    fn served_uncorrected_physics_policy_changes_deep_offaxis_gain() {
+        let mut uncorrected_repository = CalibrationRepository::new();
+        let mut uncorrected = create_test_calibration(CalibrationStatus::Uncalibrated {
             accuracy_estimate_db: 3.0,
             loss_accuracy_estimate_db: 2.0,
         });
-        // Nonzero surface RMS so the floor is a clearly nonzero pedestal.
-        calibration.physical_config.reflector.surface_rms_mm = 1.5;
-        assert!(calibration.correction_surface.is_none());
-        repo.add_calibration(calibration);
+        uncorrected.physical_config.reflector.surface_rms_mm = 1.5;
+        uncorrected_repository.add_calibration(uncorrected.clone());
 
-        let request = create_deep_offaxis_request();
-        let response = compute_gain_from_request(&request, &repo).unwrap();
-
-        // Self-checking premise: this vehicle geometry is FORWARD hemisphere.
-        assert!(
-            response.geometry.emitter_elevation_deg.abs() <= 90.0,
-            "deep-offaxis premise broken: expected forward hemisphere, got \
-             el={} deg",
-            response.geometry.emitter_elevation_deg
-        );
-
-        let wavelength = crate::model::wavelength_from_frequency(request.frequency_mhz * 1e6);
-        let floor_db = 10.0
-            * crate::model::pattern::sidelobe_floor_gain(&floor_check_config(0.0015), wavelength)
-                .log10();
-        assert!(
-            floor_db > -20.0,
-            "floor should be a meaningful pedestal, got {floor_db} dB"
-        );
-        // Power sum forward: the served value can never dip below the floor, and here
-        // the raw sidelobe is so deep the sum is the floor to within a hair.
-        assert!(
-            response.gain_db >= floor_db - 1e-9,
-            "forward power-sum served gain {} dBi must be >= floor {floor_db} dBi",
-            response.gain_db
-        );
-        assert!(
-            response.gain_db - floor_db < 1e-3,
-            "deep forward sidelobe should be swamped by the floor: served {} dBi vs \
-             floor {floor_db} dBi",
-            response.gain_db
-        );
-    }
-
-    /// SERVED PATH — F7 floor ON, REAR-hemisphere seam. `test_support::rear_hemisphere_request`
-    /// places the emitter beyond 90 deg off boresight — BEHIND the dish — where the
-    /// model excludes the (fictitious, converged) rear PO backlobe and serves the
-    /// statistical floor ALONE (see model::pattern::compute_gain). For an uncalibrated
-    /// antenna the served value is therefore EXACTLY the floor.
-    #[test]
-    fn served_rear_hemisphere_uncalibrated_returns_statistical_floor() {
-        use crate::service::test_support;
-
-        let repo = test_support::create_uncalibrated_repository();
-        let request = test_support::rear_hemisphere_request();
-        let response = compute_gain_from_request(&request, &repo).unwrap();
-
-        // Frame-safety precondition: this MUST be a rear-hemisphere query, else we
-        // would be silently testing the wrong seam (CLAUDE.md coordinate-frame trap).
-        assert!(
-            response.geometry.emitter_elevation_deg.abs() > 90.0,
-            "rear-hemisphere premise broken: expected >90 deg off boresight, got \
-             el={} deg",
-            response.geometry.emitter_elevation_deg
-        );
-
-        let wavelength = crate::model::wavelength_from_frequency(request.frequency_mhz * 1e6);
-        let floor_db = 10.0
-            * crate::model::pattern::sidelobe_floor_gain(&floor_check_config(0.0015), wavelength)
-                .log10();
-        assert!(
-            floor_db > -20.0,
-            "floor should be a meaningful pedestal, got {floor_db} dB"
-        );
-        assert!(
-            (response.gain_db - floor_db).abs() < 1e-6,
-            "rear-hemisphere served gain {} dBi must be exactly the statistical floor \
-             {floor_db} dBi (floor-only behind the dish)",
-            response.gain_db
-        );
-    }
-
-    /// Closes the test/production integrator gap that hid the original off-axis
-    /// aliasing bug: the SERVED path (`compute_gain_from_request`) and a DIRECT
-    /// `compute_gain_db` call with the canonical `IntegrationParams::adaptive()`
-    /// params must produce the identical off-axis gain (<1e-9). Uses an
-    /// uncalibrated antenna so the response gain is purely the physics value (no
-    /// correction-surface term), and reconstructs the exact config + angles the
-    /// evaluator fed the integrator (feed offset and corrected az/el are echoed
-    /// back in the response geometry).
-    #[test]
-    fn served_offaxis_matches_direct_compute_gain_db() {
-        use crate::model::{
-            FeedParameters as ModelFeedParams, FeedPosition, MeshParameters as ModelMeshParams,
-            ReflectorGeometry as ModelReflector,
-        };
-
-        let mut repo = CalibrationRepository::new();
-        let calibration = create_test_calibration(CalibrationStatus::Uncalibrated {
-            accuracy_estimate_db: 3.0,
-            loss_accuracy_estimate_db: 2.0,
+        let mut corrected_repository = CalibrationRepository::new();
+        let mut corrected = uncorrected;
+        corrected.calibration_status = Some(CalibrationStatus::FullyCalibrated {
+            accuracy_estimate_db: 1.0,
         });
-        assert!(calibration.correction_surface.is_none());
-        let phys = calibration.physical_config.clone();
-        repo.add_calibration(calibration);
+        corrected.correction_surface = Some(dummy_correction_surface());
+        corrected_repository.add_calibration(corrected);
 
         let request = create_deep_offaxis_request();
-        let response = compute_gain_from_request(&request, &repo).unwrap();
-
-        // Rebuild the exact model config the evaluator constructed.
-        let focal = phys.reflector.focal_length_m;
-        let reflector = ModelReflector::new(
-            phys.reflector.diameter_m,
-            focal,
-            phys.reflector.surface_rms_mm / 1000.0,
-        )
-        .unwrap();
-        // The evaluator's physical feed position: `physical_feed_offset_m` echoes
-        // (feed_x, feed_y, feed_z - focal), so feed_z = offset.z + focal reproduces it.
-        let fo = &response.geometry.physical_feed_offset_m;
-        let feed = ModelFeedParams::builder()
-            .position(FeedPosition::new(fo.x, fo.y, fo.z + focal))
-            .q_factor(phys.feed.q_factor)
-            .phase_center_offset(phys.feed.phase_center_offset_m)
-            .axial_defocus(phys.feed.axial_defocus_m)
-            .asymmetry_factor(phys.feed.asymmetry_factor)
-            .build()
-            .unwrap();
-        let mut cfg_builder = AntennaConfiguration::builder()
-            .id("test_antenna")
-            .name("Test Antenna")
-            .reflector(reflector)
-            .feed(feed);
-        if let Some(m) = phys.mesh.as_ref() {
-            let mesh = ModelMeshParams::builder()
-                .spacing(m.mesh_spacing_mm / 1000.0)
-                .wire_diameter(m.wire_diameter_mm / 1000.0)
-                .build()
-                .unwrap();
-            cfg_builder = cfg_builder.mesh(mesh);
-        }
-        let config = cfg_builder.build().unwrap();
-
-        // Corrected az/el (echoed in the response) become phi/theta, exactly as the
-        // evaluator does: theta = corrected_el, phi = corrected_az.
-        let theta_rad = response.geometry.emitter_elevation_deg.to_radians();
-        let phi_rad = response.geometry.emitter_azimuth_deg.to_radians();
-
-        // Canonical served params: adaptive density, spillover ON, F7 floor ON
-        // (uncalibrated) — matching `compute_gain_from_request`.
-        let mut params = IntegrationParams::adaptive();
-        params.apply_spillover = true;
-        params.apply_sidelobe_floor = true;
-
-        let direct = compute_gain_db(
-            theta_rad,
-            phi_rad,
-            &config,
-            request.frequency_mhz * 1e6,
-            &params,
-        )
-        .unwrap()
-        .gain;
+        let uncorrected_response =
+            compute_gain_from_request(&request, &uncorrected_repository).unwrap();
+        let corrected_response =
+            compute_gain_from_request(&request, &corrected_repository).unwrap();
 
         assert!(
-            (direct - response.gain_db).abs() < 1e-9,
-            "served path {} dBi and direct compute_gain_db {} dBi must agree (<1e-9): \
-             same integrator, same canonical params",
-            response.gain_db,
-            direct
+            uncorrected_response.geometry.emitter_elevation_deg.abs() <= 90.0,
+            "deep-offaxis premise broken: expected forward hemisphere"
+        );
+        assert!(
+            uncorrected_response.gain_db - corrected_response.gain_db > 1.0,
+            "the uncorrected-physics policy must materially raise deep-off-axis gain: \
+             uncorrected={} dBi, corrected={} dBi",
+            uncorrected_response.gain_db,
+            corrected_response.gain_db
         );
     }
 
-    /// **Roadmap D23, the served half.** An artifact's `asymmetry_factor` must reach the
-    /// model the service evaluates — the exit criterion this unit exists for.
-    ///
-    /// Structure mirrors `served_offaxis_matches_direct_compute_gain_db` above, with the
-    /// artifact carrying a **non-unity** factor: reconstruct the model twice, once with the
-    /// artifact's asymmetry and once with the symmetric default the service used to
-    /// substitute, and require the served gain to match the first and *not* the second. The
-    /// second assertion is the whole test. Without it this would pass on a build that
-    /// ignores the field entirely, since 1.1 and 1.0 agree at boresight to 0.0003 dB — which
-    /// is precisely how the defect survived C13's pass over the same function.
-    ///
-    /// The producer halves are `calibrate::main::exported_asymmetry_factor_is_the_class_
-    /// value_not_a_symmetric_default`, `boresight_artifact_carries_the_design_spec_
-    /// asymmetry_factor`, and `repository::declared_asymmetry_factor_reaches_the_loaded_
-    /// calibration`.
+    /// **Roadmap D23, the served half.** Distinct artifact asymmetry factors must produce
+    /// distinct results through the public service seam. This catches substitution of the
+    /// symmetric default without rebuilding the model that `PreparedServedGain` owns.
     #[test]
     fn served_gain_uses_the_artifacts_asymmetry_factor() {
-        use crate::model::{
-            FeedParameters as ModelFeedParams, FeedPosition, MeshParameters as ModelMeshParams,
-            ReflectorGeometry as ModelReflector,
+        let repository_for = |asymmetry_factor| {
+            let mut repository = CalibrationRepository::new();
+            let mut calibration = create_test_calibration(CalibrationStatus::Uncalibrated {
+                accuracy_estimate_db: 3.0,
+                loss_accuracy_estimate_db: 2.0,
+            });
+            calibration.physical_config.feed.asymmetry_factor = asymmetry_factor;
+            repository.add_calibration(calibration);
+            repository
         };
-
-        let mut repo = CalibrationRepository::new();
-        let mut calibration = create_test_calibration(CalibrationStatus::Uncalibrated {
-            accuracy_estimate_db: 3.0,
-            loss_accuracy_estimate_db: 2.0,
-        });
-        calibration.physical_config.feed.asymmetry_factor = 1.1;
-        let phys = calibration.physical_config.clone();
-        repo.add_calibration(calibration);
 
         let request = create_deep_offaxis_request();
-        let response = compute_gain_from_request(&request, &repo).unwrap();
-
-        let focal = phys.reflector.focal_length_m;
-        let fo = &response.geometry.physical_feed_offset_m;
-        let rebuild = |asymmetry: f64| {
-            let reflector = ModelReflector::new(
-                phys.reflector.diameter_m,
-                focal,
-                phys.reflector.surface_rms_mm / 1000.0,
-            )
-            .unwrap();
-            let feed = ModelFeedParams::builder()
-                .position(FeedPosition::new(fo.x, fo.y, fo.z + focal))
-                .q_factor(phys.feed.q_factor)
-                .phase_center_offset(phys.feed.phase_center_offset_m)
-                .axial_defocus(phys.feed.axial_defocus_m)
-                .asymmetry_factor(asymmetry)
-                .build()
-                .unwrap();
-            let mut cfg_builder = AntennaConfiguration::builder()
-                .id("test_antenna")
-                .name("Test Antenna")
-                .reflector(reflector)
-                .feed(feed);
-            if let Some(m) = phys.mesh.as_ref() {
-                cfg_builder = cfg_builder.mesh(
-                    ModelMeshParams::builder()
-                        .spacing(m.mesh_spacing_mm / 1000.0)
-                        .wire_diameter(m.wire_diameter_mm / 1000.0)
-                        .build()
-                        .unwrap(),
-                );
-            }
-            let config = cfg_builder.build().unwrap();
-
-            let mut params = IntegrationParams::adaptive();
-            params.apply_spillover = true;
-            params.apply_sidelobe_floor = true;
-
-            compute_gain_db(
-                response.geometry.emitter_elevation_deg.to_radians(),
-                response.geometry.emitter_azimuth_deg.to_radians(),
-                &config,
-                request.frequency_mhz * 1e6,
-                &params,
-            )
-            .unwrap()
-            .gain
-        };
-
-        let with_artifact_value = rebuild(1.1);
-        let with_symmetric_default = rebuild(1.0);
+        let asymmetric = compute_gain_from_request(&request, &repository_for(1.1)).unwrap();
+        let symmetric = compute_gain_from_request(&request, &repository_for(1.0)).unwrap();
 
         assert!(
-            (with_artifact_value - response.gain_db).abs() < 1e-9,
-            "served gain {} dBi must equal the model built with the artifact's \
-             asymmetry_factor 1.1 ({} dBi)",
-            response.gain_db,
-            with_artifact_value
-        );
-        assert!(
-            (with_symmetric_default - response.gain_db).abs() > 1e-6,
-            "negative control failed: the symmetric-default model gives {} dBi and the \
-             served gain is {} dBi, so this geometry cannot tell the two apart and the \
-             assertion above proves nothing. Pick an angle where asymmetry matters.",
-            with_symmetric_default,
-            response.gain_db
+            (asymmetric.gain_db - symmetric.gain_db).abs() > 1e-6,
+            "negative control failed: asymmetry factors 1.1 and 1.0 produced indistinguishable \
+             served gains ({} and {} dBi)",
+            asymmetric.gain_db,
+            symmetric.gain_db
         );
     }
 
-    /// Endpoint coverage: the batch path delegates every item to
-    /// `compute_gain_from_request`, so the served F7-floor-ON behavior reaches it
-    /// unchanged — a deep-off-axis (FORWARD, ~69 deg) uncalibrated batch item
-    /// returns the power sum of the raw sidelobe and the floor (dominated by the
-    /// floor at this depth), matching the single-gain path exactly.
+    /// Endpoint coverage: the batch path must preserve the single-gain result instead of
+    /// reconstructing any part of the served-gain law.
     #[test]
-    fn served_deep_offaxis_batch_includes_statistical_floor() {
+    fn batch_matches_single_gain_for_deep_offaxis_query() {
         use crate::api::schemas::BatchGainRequest;
         use crate::service::batch::evaluate_batch;
 
@@ -1567,131 +1309,10 @@ mod tests {
         let response = evaluate_batch(&request, &repo).unwrap();
         assert_eq!(response.results.len(), 1);
 
-        let wavelength = crate::model::wavelength_from_frequency(8400.0 * 1e6);
-        let floor_db = 10.0
-            * crate::model::pattern::sidelobe_floor_gain(&floor_check_config(0.0015), wavelength)
-                .log10();
-        // Batch delegates to the single-gain path → identical value, floor ON.
         assert!(
             (response.results[0].gain_db - single).abs() < 1e-12,
             "batch item {} must equal the single-path gain {single}",
             response.results[0].gain_db
-        );
-        // Forward power sum: never below the floor, and swamped by it at this depth.
-        assert!(
-            response.results[0].gain_db >= floor_db - 1e-9
-                && response.results[0].gain_db - floor_db < 1e-3,
-            "batch deep-off-axis (forward) uncalibrated item {} dBi must be the floor-dominated \
-             power sum near {floor_db} dBi (F7 floor ON)",
-            response.results[0].gain_db
-        );
-    }
-
-    /// The boresight-reference computation must be unaffected by
-    /// `apply_sidelobe_floor`. Under the F7 power sum the floor is combined
-    /// additively in the linear domain (gain + floor), so for the reference it is
-    /// inert for two independent reasons: the reference is always computed on an
-    /// IDEAL antenna (feed at focus, `surface_rms = 0.0` — see the
-    /// `ideal_reflector` construction in `compute_gain_from_request`), so
-    /// `sidelobe_floor_gain` is identically zero and adding it changes nothing —
-    /// exactly, not approximately; and separately, the reference is evaluated at
-    /// boresight (θ=0), a forward-hemisphere direction where the main beam vastly
-    /// exceeds any plausible floor anyway. This test proves the reference is
-    /// unperturbed by reconstructing the same ideal-boresight computation
-    /// independently with the floor explicitly off and asserting equality.
-    #[test]
-    fn test_sidelobe_floor_does_not_perturb_boresight_reference() {
-        use crate::model::{
-            FeedParameters as ModelFeedParams, FeedPosition, MeshParameters as ModelMeshParams,
-            ReflectorGeometry as ModelReflector,
-        };
-
-        let mut boresight_request = create_test_request();
-        boresight_request.emitter_position = boresight_request.reflector_boresight.clone();
-        boresight_request.feed_pointing_location = boresight_request.reflector_boresight.clone();
-        boresight_request.include_reference = true;
-
-        let mut repo = CalibrationRepository::new();
-        let mut calibration = create_test_calibration(CalibrationStatus::Uncalibrated {
-            accuracy_estimate_db: 3.0,
-            loss_accuracy_estimate_db: 2.0,
-        });
-        calibration.physical_config.reflector.surface_rms_mm = 1.5;
-        assert!(calibration.correction_surface.is_none());
-        repo.add_calibration(calibration);
-
-        let response = compute_gain_from_request(&boresight_request, &repo).unwrap();
-        let actual_reference = response.reference_gain_db.expect("reference requested");
-
-        // Independently reconstruct the SAME ideal-boresight computation the
-        // evaluator performs (ideal reflector, feed at focus, same mesh, same
-        // spillover state as the actual), but with the floor explicitly off,
-        // to prove the flag being (in principle) on for the reference path
-        // made no difference to its output.
-        let ideal_reflector = ModelReflector::new(10.0, 5.0, 0.0).unwrap();
-        let ideal_feed = ModelFeedParams::new(FeedPosition::at_focus(5.0), 8.0, 0.0, 1.0).unwrap();
-        let mesh = ModelMeshParams::builder()
-            .spacing(0.005)
-            .wire_diameter(0.0005)
-            .build()
-            .unwrap();
-        let ideal_config = AntennaConfiguration::new(
-            "ideal_check".into(),
-            "ideal".into(),
-            ideal_reflector,
-            ideal_feed,
-            Some(mesh),
-        )
-        .unwrap();
-        // Must be `adaptive()` — the preset the evaluator itself uses. It was `fast()` until
-        // P12 (2026-07-31), which passed only because the two presets were field-for-field
-        // identical; D-B then raised `adaptive()`'s `min_rho_points` 16 → 32 and they diverged,
-        // failing this test on a 0.0003 dB preset difference that has nothing to do with the
-        // sidelobe floor it exists to isolate. At θ=0 the radial budget is zero cycles, so
-        // `min_rho_points` is the ONLY thing setting the density — this test is unusually
-        // sensitive to that field.
-        let mut params_off = IntegrationParams::adaptive();
-        params_off.apply_sidelobe_floor = false;
-        // Match the actual's spillover state so this isolates the floor only.
-        params_off.apply_spillover = response.metadata.spillover_loss_db.is_some();
-        let expected = compute_gain_db(0.0, 0.0, &ideal_config, 8400.0e6, &params_off).unwrap();
-
-        assert!(
-            (actual_reference - expected.gain).abs() < 1e-9,
-            "reference gain must be unperturbed by apply_sidelobe_floor: got {actual_reference}, \
-             expected {}",
-            expected.gain
-        );
-    }
-
-    /// Floor gate: an antenna WITH a correction surface serves floor-OFF physics —
-    /// same double-counting rule as spillover, same P11 predicate
-    /// (`physics_is_uncorrected()` is false, so `apply_sidelobe_floor` stays false and
-    /// a rear-hemisphere query is NOT clamped to the floor pedestal).
-    #[test]
-    fn served_floor_off_for_antenna_with_correction_surface() {
-        let mut repo = CalibrationRepository::new();
-        let mut calibration = create_test_calibration(CalibrationStatus::FullyCalibrated {
-            accuracy_estimate_db: 1.0,
-        });
-        calibration.physical_config.reflector.surface_rms_mm = 1.5;
-        calibration.correction_surface = Some(dummy_correction_surface());
-        assert!(!calibration.physics_is_uncorrected());
-        repo.add_calibration(calibration);
-
-        let request = create_deep_offaxis_request();
-        let response = compute_gain_from_request(&request, &repo).unwrap();
-
-        let wavelength = crate::model::wavelength_from_frequency(request.frequency_mhz * 1e6);
-        let floor_db = 10.0
-            * crate::model::pattern::sidelobe_floor_gain(&floor_check_config(0.0015), wavelength)
-                .log10();
-        // Floor OFF => the rear value is the raw PO extrapolation (+ correction term),
-        // which sits far below the floor pedestal — NOT clamped to it.
-        assert!(
-            (response.gain_db - floor_db).abs() > 1.0,
-            "calibrated antenna must not serve the floor pedestal: gain {} vs floor {floor_db}",
-            response.gain_db
         );
     }
 }
