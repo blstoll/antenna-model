@@ -1329,7 +1329,7 @@ components:
 
         Failed directions do not contribute to this summary. A grid with a correction
         surface but no successful directions therefore reports `none`; its failure count
-        remains the signal that no direction succeeded.
+        remains the signal that no direction succeeded (issue #64).
       enum:
       - unavailable
       - none
