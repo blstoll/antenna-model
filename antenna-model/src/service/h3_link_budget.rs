@@ -17,8 +17,8 @@
 //! 7. Return H3LinkBudgetResponse with per-cell results and metadata
 
 use crate::api::schemas::{
-    CalibrationStatusInfo, H3CellResult, H3LinkBudgetRequest, H3LinkBudgetResponse,
-    HeatmapMetadata, Position3D,
+    CalibrationStatusInfo, CorrectionApplication, H3CellResult, H3LinkBudgetRequest,
+    H3LinkBudgetResponse, HeatmapMetadata, Position3D,
 };
 use crate::error::{AntennaModelError, Result};
 use crate::model::integration::DEFAULT_INTEGRATION_BUDGET;
@@ -27,7 +27,8 @@ use crate::model::{
     geodetic_to_ecef,
 };
 use crate::service::served_gain::{
-    FeedSteering, PreSquintDirection, PreparedServedGain, ReferenceGainRequest, ServedFrequencies,
+    CorrectionDisposition, FeedSteering, PreSquintDirection, PreparedServedGain,
+    ReferenceGainRequest, ServedFrequencies,
 };
 use crate::service::GainCache;
 use crate::warnings::{ApiWarning, WarningCode};
@@ -101,7 +102,7 @@ fn compute_cell_gain(
     request: &H3LinkBudgetRequest,
     prepared: &PreparedServedGain,
     cache: &GainCache,
-) -> Result<(f64, f64, f64, Vec<ApiWarning>, bool)> {
+) -> Result<(f64, f64, f64, Vec<ApiWarning>, CorrectionDisposition)> {
     let cell_pos = Position3D::ecef(cell_ecef.0, cell_ecef.1, cell_ecef.2);
     let (e_clock_deg, e_cone_deg) = compute_emitter_direction_with_attitude(
         &cell_pos,
@@ -121,7 +122,7 @@ fn compute_cell_gain(
         served.direction.e_clock_deg,
         served.direction.e_cone_deg,
         served.warnings,
-        served.correction.applied(),
+        served.correction,
     ))
 }
 
@@ -233,42 +234,41 @@ fn compute_h3_link_budget_with_traversal(
     //    FSPL, G/T. `loss_db` / `total_path_loss_db` are filled in pass 2 (step 8), once the
     //    peak over the evaluated cells is known (roadmap C9). There is deliberately no
     //    separate boresight reference evaluation any more: the reference is one of the cells.
-    let results: Vec<Result<(CellGain, Vec<ApiWarning>, bool)>> =
-        if traversal.is_parallel(cells.len()) {
-            cells
-                .par_iter()
-                .map(|&cell| {
-                    compute_cell_result(
-                        cell,
-                        request,
-                        &prepared,
-                        cache,
-                        frequency_hz,
-                        vehicle_ex,
-                        vehicle_ey,
-                        vehicle_ez,
-                    )
-                })
-                .collect()
-        } else {
-            cells
-                .iter()
-                .map(|&cell| {
-                    compute_cell_result(
-                        cell,
-                        request,
-                        &prepared,
-                        cache,
-                        frequency_hz,
-                        vehicle_ex,
-                        vehicle_ey,
-                        vehicle_ez,
-                    )
-                })
-                .collect()
-        };
+    let results: Vec<Result<(CellGain, Vec<ApiWarning>)>> = if traversal.is_parallel(cells.len()) {
+        cells
+            .par_iter()
+            .map(|&cell| {
+                compute_cell_result(
+                    cell,
+                    request,
+                    &prepared,
+                    cache,
+                    frequency_hz,
+                    vehicle_ex,
+                    vehicle_ey,
+                    vehicle_ez,
+                )
+            })
+            .collect()
+    } else {
+        cells
+            .iter()
+            .map(|&cell| {
+                compute_cell_result(
+                    cell,
+                    request,
+                    &prepared,
+                    cache,
+                    frequency_hz,
+                    vehicle_ex,
+                    vehicle_ey,
+                    vehicle_ez,
+                )
+            })
+            .collect()
+    };
 
-    // 7. Separate successes and failures; track whether correction was applied to any cell.
+    // 7. Separate successes and failures; aggregate authoritative correction dispositions.
     let mut cell_gains: Vec<CellGain> = Vec::with_capacity(cells.len());
     // Seed the aggregate with preparation-time advisories. Successful cell results carry
     // the same whole objects and deduplicate into this set; seeding also preserves the
@@ -276,16 +276,16 @@ fn compute_h3_link_budget_with_traversal(
     let mut warnings_set: HashSet<ApiWarning> =
         prepared.configuration_warnings().iter().cloned().collect();
     let mut failed_count = 0usize;
-    let mut any_correction_applied = false;
+    let mut corrected_count = 0usize;
 
     for result in results {
         match result {
-            Ok((cell_gain, cell_warnings, correction_applied)) => {
+            Ok((cell_gain, cell_warnings)) => {
+                corrected_count += usize::from(cell_gain.correction.applied());
                 cell_gains.push(cell_gain);
                 for w in cell_warnings {
                     warnings_set.insert(w);
                 }
-                any_correction_applied |= correction_applied;
             }
             Err(e) => {
                 failed_count += 1;
@@ -354,13 +354,16 @@ fn compute_h3_link_budget_with_traversal(
     let computation_time_ms = start_time.elapsed().as_secs_f64() * 1000.0;
     let points_evaluated = cells.len();
 
-    // Build calibration status info.
-    // `correction_applied` reflects whether the correction surface was actually
-    // applied to at least one cell (gated on coverage), not merely whether a surface
-    // exists — matching the truthful reporting in `service::evaluator`.
+    // Build calibration status from successful directional dispositions only.
+    // Failed cells never dilute an otherwise-all summary; an all-failed grid with a
+    // surface reports `none`, with `failed_points` carrying the reason.
     let calibration_status = prepared.calibration_status().map(|status| {
         let mut info = CalibrationStatusInfo::from(status);
-        info.correction_applied = any_correction_applied;
+        info.set_correction_application(CorrectionApplication::summarize(
+            calibration.correction_surface.is_some(),
+            cell_results.len(),
+            corrected_count,
+        ));
         info
     });
 
@@ -399,6 +402,7 @@ struct CellGain {
     gain_db: f64,
     free_space_path_loss_db: f64,
     g_over_t_db: Option<f64>,
+    correction: CorrectionDisposition,
 }
 
 /// Compute the peak-independent link budget quantities for a single H3 cell.
@@ -412,7 +416,7 @@ fn compute_cell_result(
     vehicle_ex: f64,
     vehicle_ey: f64,
     vehicle_ez: f64,
-) -> Result<(CellGain, Vec<ApiWarning>, bool)> {
+) -> Result<(CellGain, Vec<ApiWarning>)> {
     // Get cell center lat/lon
     let latlng = h3o::LatLng::from(cell);
     let lat_deg = latlng.lat();
@@ -430,8 +434,7 @@ fn compute_cell_result(
 
     // Compute gain together with az/el; az/el are returned directly so we
     // avoid a redundant second call to `compute_emitter_direction` for reporting.
-    // `correction_applied` indicates whether the correction surface was applied.
-    let (gain_db, azimuth_deg, elevation_deg, cell_warnings, correction_applied) =
+    let (gain_db, azimuth_deg, elevation_deg, cell_warnings, correction) =
         compute_cell_gain((cell_ex, cell_ey, cell_ez), request, prepared, cache)?;
 
     // Free-space path loss is peak-independent, so it is computed here. `loss_db` and
@@ -455,9 +458,9 @@ fn compute_cell_result(
             gain_db,
             free_space_path_loss_db: fspl,
             g_over_t_db,
+            correction,
         },
         cell_warnings,
-        correction_applied,
     ))
 }
 
@@ -696,13 +699,14 @@ mod tests {
             );
         }
 
-        // correction_applied must be true when a (non-degenerate) surface was applied.
+        // Every successful cell used the available surface.
+        let corrected_status = corrected.calibration_status.as_ref().unwrap();
+        assert_eq!(
+            corrected_status.correction_application,
+            CorrectionApplication::All
+        );
         assert!(
-            corrected
-                .calibration_status
-                .as_ref()
-                .map(|s| s.correction_applied)
-                .unwrap_or(false),
+            corrected_status.correction_applied,
             "correction_applied should be true when correction surface was applied"
         );
 
@@ -715,14 +719,78 @@ mod tests {
         let uncalibrated =
             compute_h3_link_budget(&request, &cal_no_corr, &cache3, std::time::Instant::now())
                 .expect("uncalibrated H3 run failed");
+        let uncalibrated_status = uncalibrated.calibration_status.as_ref().unwrap();
+        assert_eq!(
+            uncalibrated_status.correction_application,
+            CorrectionApplication::Unavailable
+        );
         assert!(
-            !uncalibrated
-                .calibration_status
-                .as_ref()
-                .map(|s| s.correction_applied)
-                .unwrap_or(true),
+            !uncalibrated_status.correction_applied,
             "correction_applied should be false when no correction surface"
         );
+    }
+
+    /// A grid crossing the inclusive calibration boundary reports a mixed basis.
+    #[test]
+    fn h3_mixed_coverage_reports_partial_correction() {
+        let mut calibration = make_h3_test_calibration();
+        calibration.correction_surface = Some(constant_surface_db(2.0));
+        calibration.calibration_coverage = None;
+
+        let mut request = make_h3_test_request();
+        request.n_rings = 1;
+
+        // Discover one deterministic successful cell direction with unrestricted coverage,
+        // then narrow coverage to exactly that point. The repeated geometry calculation is
+        // deterministic, so one cell remains corrected while the others are excluded.
+        let baseline = compute_h3_link_budget(
+            &request,
+            &calibration,
+            &GainCache::new(false, 1),
+            std::time::Instant::now(),
+        )
+        .unwrap();
+        let covered = &baseline.cells[0];
+        let coverage = CalibrationCoverage {
+            azimuth_range: (covered.azimuth_deg, covered.azimuth_deg),
+            elevation_range: (covered.elevation_deg, covered.elevation_deg),
+            frequency_range: (request.frequency_mhz, request.frequency_mhz),
+            num_measurements: 1,
+            has_correction_surface: true,
+        };
+        calibration.calibration_status = Some(CalibrationStatus::PartiallyCalibrated {
+            accuracy_estimate_db: 1.5,
+            coverage: coverage.clone(),
+        });
+        calibration.calibration_coverage = Some(coverage);
+
+        let response = compute_h3_link_budget(
+            &request,
+            &calibration,
+            &GainCache::new(false, 1),
+            std::time::Instant::now(),
+        )
+        .unwrap();
+        let status = response.calibration_status.as_ref().unwrap();
+        assert_eq!(
+            status.correction_application,
+            CorrectionApplication::Partial
+        );
+        assert!(status.correction_applied);
+        for code in [
+            WarningCode::OutOfCoverage,
+            WarningCode::CorrectionNotApplied,
+        ] {
+            assert_eq!(
+                response
+                    .warnings
+                    .iter()
+                    .filter(|warning| warning.is(code))
+                    .count(),
+                1,
+                "{code:?} must be deduplicated across uncovered cells"
+            );
+        }
     }
 
     /// Pin the h3 G/T output (P5): for a known temperature, every cell's
@@ -1294,6 +1362,12 @@ mod tests {
         .unwrap();
 
         assert_eq!(parallel_failures.metadata.failed_points, 37);
+        let failed_status = parallel_failures.calibration_status.as_ref().unwrap();
+        assert_eq!(
+            failed_status.correction_application,
+            CorrectionApplication::None
+        );
+        assert!(!failed_status.correction_applied);
         sequential_failures.metadata.computation_time_ms = 0.0;
         parallel_failures.metadata.computation_time_ms = 0.0;
         assert_eq!(sequential_failures, parallel_failures);

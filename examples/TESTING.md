@@ -129,6 +129,7 @@ All examples have been tested against the running service:
     "status": "uncalibrated",
     "accuracy_estimate_db": 3.0,
     "loss_accuracy_estimate_db": 2.0,
+    "correction_application": "unavailable",
     "correction_applied": false,
     "parameters_source": "design_specifications"
   }

@@ -849,6 +849,51 @@ pub struct MeshInfo {
 // Calibration Status Information (v2.0 - Partial Calibration Support)
 // ============================================================================
 
+/// Summary of correction-surface application across successful evaluations.
+///
+/// Failed directions do not contribute to this summary. A grid with a correction
+/// surface but no successful directions therefore reports `none`; its failure count
+/// remains the signal that no direction succeeded (issue #64).
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CorrectionApplication {
+    /// The antenna/feed has no correction surface.
+    Unavailable,
+    /// A correction surface exists, but no successful direction used it.
+    None,
+    /// Correction was used for some, but not all, successful directions.
+    Partial,
+    /// At least one direction succeeded and every successful direction used correction.
+    All,
+}
+
+impl CorrectionApplication {
+    /// Aggregate authoritative directional outcomes into the public response state.
+    pub(crate) fn summarize(
+        surface_available: bool,
+        successful_directions: usize,
+        corrected_directions: usize,
+    ) -> Self {
+        debug_assert!(corrected_directions <= successful_directions);
+        debug_assert!(surface_available || corrected_directions == 0);
+
+        if !surface_available {
+            Self::Unavailable
+        } else if corrected_directions == 0 {
+            Self::None
+        } else if corrected_directions == successful_directions {
+            Self::All
+        } else {
+            Self::Partial
+        }
+    }
+
+    /// Compatibility value for the legacy `correction_applied` field.
+    pub(crate) fn applied(self) -> bool {
+        matches!(self, Self::Partial | Self::All)
+    }
+}
+
 /// Calibration status information included in API responses.
 ///
 /// Indicates the level of calibration data available and expected accuracy
@@ -877,11 +922,23 @@ pub struct CalibrationStatusInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub coverage: Option<CoverageInfo>,
 
-    /// Whether correction surface was applied to this result
+    /// Correction-surface use across successful evaluated directions.
+    pub correction_application: CorrectionApplication,
+
+    /// Compatibility field: true when correction was applied to at least one
+    /// successfully evaluated direction (`partial` or `all`).
     pub correction_applied: bool,
 
     /// Source of physical parameters: "measurement_tuned", "design_specifications", or "factory_calibrated"
     pub parameters_source: String,
+}
+
+impl CalibrationStatusInfo {
+    /// Set both correction fields from one authoritative summary.
+    pub(crate) fn set_correction_application(&mut self, application: CorrectionApplication) {
+        self.correction_application = application;
+        self.correction_applied = application.applied();
+    }
 }
 
 impl From<&CalibrationStatus> for CalibrationStatusInfo {
@@ -894,6 +951,7 @@ impl From<&CalibrationStatus> for CalibrationStatusInfo {
                 accuracy_estimate_db: *accuracy_estimate_db,
                 loss_accuracy_estimate_db: None,
                 coverage: None,
+                correction_application: CorrectionApplication::Unavailable,
                 correction_applied: false, // Will be updated by service layer
                 parameters_source: "measurement_tuned".to_string(),
             },
@@ -905,6 +963,7 @@ impl From<&CalibrationStatus> for CalibrationStatusInfo {
                 accuracy_estimate_db: *accuracy_estimate_db,
                 loss_accuracy_estimate_db: None,
                 coverage: Some(CoverageInfo::from(coverage)),
+                correction_application: CorrectionApplication::Unavailable,
                 correction_applied: false, // Will be updated by service layer
                 parameters_source: "measurement_tuned".to_string(),
             },
@@ -916,6 +975,7 @@ impl From<&CalibrationStatus> for CalibrationStatusInfo {
                 accuracy_estimate_db: *accuracy_estimate_db,
                 loss_accuracy_estimate_db: Some(*loss_accuracy_estimate_db),
                 coverage: None,
+                correction_application: CorrectionApplication::Unavailable,
                 correction_applied: false,
                 parameters_source: "design_specifications".to_string(),
             },
@@ -1762,6 +1822,10 @@ mod tests {
         assert_eq!(info.accuracy_estimate_db, 1.0);
         assert_eq!(info.loss_accuracy_estimate_db, None);
         assert_eq!(info.coverage, None);
+        assert_eq!(
+            info.correction_application,
+            CorrectionApplication::Unavailable
+        );
         assert!(!info.correction_applied);
         assert_eq!(info.parameters_source, "measurement_tuned");
     }
@@ -1789,6 +1853,10 @@ mod tests {
         assert_eq!(info.accuracy_estimate_db, 1.5);
         assert_eq!(info.loss_accuracy_estimate_db, None);
         assert!(info.coverage.is_some());
+        assert_eq!(
+            info.correction_application,
+            CorrectionApplication::Unavailable
+        );
         assert!(!info.correction_applied);
         assert_eq!(info.parameters_source, "measurement_tuned");
 
@@ -1815,6 +1883,10 @@ mod tests {
         assert_eq!(info.accuracy_estimate_db, 3.0);
         assert_eq!(info.loss_accuracy_estimate_db, Some(2.0));
         assert_eq!(info.coverage, None);
+        assert_eq!(
+            info.correction_application,
+            CorrectionApplication::Unavailable
+        );
         assert!(!info.correction_applied);
         assert_eq!(info.parameters_source, "design_specifications");
     }
@@ -1834,6 +1906,7 @@ mod tests {
         assert!(json.contains("\"accuracy_estimate_db\":1.0"));
         assert!(!json.contains("loss_accuracy_estimate_db")); // Should be omitted
         assert!(!json.contains("coverage")); // Should be omitted
+        assert!(json.contains("\"correction_application\":\"unavailable\""));
         assert!(json.contains("\"correction_applied\":false"));
         assert!(json.contains("\"parameters_source\":\"measurement_tuned\""));
 
@@ -1896,6 +1969,36 @@ mod tests {
         // Test deserialization
         let deserialized: CalibrationStatusInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized, info);
+    }
+
+    #[test]
+    fn correction_application_aggregates_successful_directions() {
+        let cases = [
+            (false, 0, 0, CorrectionApplication::Unavailable, false),
+            (false, 2, 0, CorrectionApplication::Unavailable, false),
+            (true, 0, 0, CorrectionApplication::None, false),
+            (true, 2, 0, CorrectionApplication::None, false),
+            (true, 2, 1, CorrectionApplication::Partial, true),
+            (true, 1, 1, CorrectionApplication::All, true),
+        ];
+
+        for (surface, succeeded, corrected, expected, compatibility) in cases {
+            let actual = CorrectionApplication::summarize(surface, succeeded, corrected);
+            assert_eq!(actual, expected);
+            assert_eq!(actual.applied(), compatibility);
+            assert_eq!(
+                serde_json::to_string(&actual).unwrap(),
+                format!(
+                    "\"{}\"",
+                    match expected {
+                        CorrectionApplication::Unavailable => "unavailable",
+                        CorrectionApplication::None => "none",
+                        CorrectionApplication::Partial => "partial",
+                        CorrectionApplication::All => "all",
+                    }
+                )
+            );
+        }
     }
 
     #[test]

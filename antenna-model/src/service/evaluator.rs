@@ -84,14 +84,16 @@
 //! warning.)
 
 use crate::api::schemas::{
-    CalibrationStatusInfo, ComputationMetadata, GainRequest, GainResponse, GeometryInfo, Vector3D,
+    CalibrationStatusInfo, ComputationMetadata, CorrectionApplication, GainRequest, GainResponse,
+    GeometryInfo, Vector3D,
 };
 use crate::data::repository::CalibrationRepository;
 use crate::error::{AntennaModelError, Result};
 use crate::model::integration::DEFAULT_INTEGRATION_BUDGET;
 use crate::model::{compute_emitter_direction_with_attitude, compute_feed_position_from_pointing};
 use crate::service::served_gain::{
-    FeedSteering, PreSquintDirection, PreparedServedGain, ReferenceGainRequest, ServedFrequencies,
+    CorrectionDisposition, FeedSteering, PreSquintDirection, PreparedServedGain,
+    ReferenceGainRequest, ServedFrequencies,
 };
 use std::time::{Duration, Instant};
 
@@ -198,11 +200,16 @@ pub fn compute_gain_from_request_with_budget(
         },
     )?;
 
-    // `correction_applied` comes from the served result's disposition, never from
-    // correction-surface existence or calibration status.
+    // Issue #64: both public correction fields come from the served result's authoritative
+    // disposition, never from calibration status or an open-coded surface predicate.
     let calibration_status_info = prepared.calibration_status().map(|status| {
         let mut info = CalibrationStatusInfo::from(status);
-        info.correction_applied = served.correction.applied();
+        let application = match served.correction {
+            CorrectionDisposition::Unavailable => CorrectionApplication::Unavailable,
+            CorrectionDisposition::OutsideCoverage => CorrectionApplication::None,
+            CorrectionDisposition::Applied { .. } => CorrectionApplication::All,
+        };
+        info.set_correction_application(application);
         info
     });
 
@@ -338,6 +345,10 @@ mod tests {
         assert_eq!(status.status, "uncalibrated");
         assert_eq!(status.accuracy_estimate_db, 3.0);
         assert_eq!(status.loss_accuracy_estimate_db, Some(2.0));
+        assert_eq!(
+            status.correction_application,
+            CorrectionApplication::Unavailable
+        );
         assert!(!status.correction_applied);
 
         // Should have warning about uncalibrated
@@ -749,6 +760,9 @@ mod tests {
 
         // Surface exists but wasn't applied here (out of coverage → extrapolated).
         assert!(response.metadata.extrapolated);
+        let status = response.calibration_status.as_ref().unwrap();
+        assert_eq!(status.correction_application, CorrectionApplication::None);
+        assert!(!status.correction_applied);
         // Whole-antenna gate: presence of a surface suppresses spillover regardless.
         assert!(
             response.metadata.spillover_loss_db.is_none(),
@@ -780,6 +794,8 @@ mod tests {
         let status = response.calibration_status.unwrap();
         assert_eq!(status.status, "fully_calibrated");
         assert_eq!(status.accuracy_estimate_db, 1.0);
+        assert_eq!(status.correction_application, CorrectionApplication::All);
+        assert!(status.correction_applied);
 
         // Should NOT have calibration-related warnings (fully calibrated).
         // Integration convergence warnings are acceptable and unrelated to
@@ -867,6 +883,7 @@ mod tests {
             .calibration_status
             .as_ref()
             .expect("partially calibrated artifact must report status");
+        assert_eq!(status.correction_application, CorrectionApplication::All);
         assert!(
             status.correction_applied,
             "the boresight correction was silently skipped — the coverage gate is \

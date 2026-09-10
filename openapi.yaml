@@ -192,6 +192,7 @@ paths:
                     antenna_id: antenna_2
                     calibration_status:
                       accuracy_estimate_db: 1.5
+                      correction_application: none
                       correction_applied: false
                       coverage:
                         azimuth_range_deg:
@@ -233,6 +234,7 @@ paths:
                     antenna_id: antenna_3
                     calibration_status:
                       accuracy_estimate_db: 3.0
+                      correction_application: unavailable
                       correction_applied: false
                       loss_accuracy_estimate_db: 2.0
                       parameters_source: design_specifications
@@ -1230,6 +1232,7 @@ components:
       required:
       - status
       - accuracy_estimate_db
+      - correction_application
       - correction_applied
       - parameters_source
       properties:
@@ -1253,9 +1256,14 @@ components:
           - type: 'null'
           - $ref: '#/components/schemas/CoverageInfo'
             description: Measurement coverage information (only for partially calibrated antennas)
+        correction_application:
+          $ref: '#/components/schemas/CorrectionApplication'
+          description: Correction-surface use across successful evaluated directions.
         correction_applied:
           type: boolean
-          description: Whether correction surface was applied to this result
+          description: |-
+            Compatibility field: true when correction was applied to at least one
+            successfully evaluated direction (`partial` or `all`).
         parameters_source:
           type: string
           description: 'Source of physical parameters: "measurement_tuned", "design_specifications", or "factory_calibrated"'
@@ -1314,6 +1322,19 @@ components:
       enum:
       - ecef
       - geodetic
+    CorrectionApplication:
+      type: string
+      description: |-
+        Summary of correction-surface application across successful evaluations.
+
+        Failed directions do not contribute to this summary. A grid with a correction
+        surface but no successful directions therefore reports `none`; its failure count
+        remains the signal that no direction succeeded (issue #64).
+      enum:
+      - unavailable
+      - none
+      - partial
+      - all
     CoverageInfo:
       type: object
       description: |-

@@ -262,6 +262,7 @@ curl -X POST http://localhost:3000/api/v1/gain \
     "status": "uncalibrated",
     "accuracy_estimate_db": 4.0,
     "loss_accuracy_estimate_db": 2.0,
+    "correction_application": "unavailable",
     "correction_applied": false,
     "parameters_source": "design_specifications"
   },
@@ -562,6 +563,7 @@ curl -X POST http://localhost:3000/api/v1/gain \
   "calibration_status": {
     "status": "partially_calibrated",
     "accuracy_estimate_db": 1.5,
+    "correction_application": "unavailable",
     "correction_applied": false,
     "parameters_source": "boresight_tuned",
     "coverage": {
@@ -877,6 +879,7 @@ and to the `--metadata` sidecar, so a consumer can read them without re-running 
   "calibration_status": {
     "status": "fully_calibrated",
     "accuracy_estimate_db": 1.0,
+    "correction_application": "all",
     "correction_applied": true,
     "parameters_source": "measurement_tuned"
   }
@@ -884,7 +887,8 @@ and to the `--metadata` sidecar, so a consumer can read them without re-running 
 ```
 
 **Key Differences from Boresight:**
-- `"correction_applied": true` (B-spline correction surface used)
+- `"correction_application": "all"` (every successful direction used the B-spline correction surface)
+- `"correction_applied": true` (compatibility field; true for `partial` or `all`)
 - No coverage warnings (full field of view calibrated)
 - No extrapolation warnings (everywhere in-coverage)
 
@@ -1021,6 +1025,7 @@ INFO  Service ready on http://localhost:3000
   "calibration_status": {
     "status": "fully_calibrated",
     "accuracy_estimate_db": 1.0,
+    "correction_application": "all",
     "correction_applied": true,
     "parameters_source": "measurement_tuned"
   }
@@ -1030,7 +1035,8 @@ INFO  Service ready on http://localhost:3000
 **Interpretation:**
 - `status`: "fully_calibrated" - highest accuracy level
 - `accuracy_estimate_db`: 1.0 - expect ±1.0 dB error
-- `correction_applied`: true - B-spline correction surface was used
+- `correction_application`: "all" - every successful direction used the B-spline correction surface
+- `correction_applied`: true - compatibility field; true for `partial` or `all`
 - No warnings - query is within calibrated coverage
 
 **Partially Calibrated (In-Coverage):**
@@ -1040,6 +1046,7 @@ INFO  Service ready on http://localhost:3000
   "calibration_status": {
     "status": "partially_calibrated",
     "accuracy_estimate_db": 1.5,
+    "correction_application": "unavailable",
     "correction_applied": false,
     "coverage": {
       "azimuth_range_deg": [0.0, 360.0],
@@ -1089,6 +1096,7 @@ INFO  Service ready on http://localhost:3000
     "status": "uncalibrated",
     "accuracy_estimate_db": 4.0,
     "loss_accuracy_estimate_db": 2.0,
+    "correction_application": "unavailable",
     "correction_applied": false,
     "parameters_source": "design_specifications"
   },
@@ -1603,7 +1611,7 @@ Optimization complete!
 
 ### 10.1 CalibrationStatusInfo Structure
 
-API responses include calibration status via `CalibrationStatusInfo`:
+API responses include calibration status via `CalibrationStatusInfo` (issue #64):
 
 ```rust
 pub struct CalibrationStatusInfo {
@@ -1611,7 +1619,8 @@ pub struct CalibrationStatusInfo {
     pub accuracy_estimate_db: f64,               // Expected accuracy
     pub loss_accuracy_estimate_db: Option<f64>,  // For uncalibrated only
     pub coverage: Option<CoverageInfo>,          // For partially calibrated only
-    pub correction_applied: bool,                // Whether correction surface was used
+    pub correction_application: CorrectionApplication, // Actual use across successful directions
+    pub correction_applied: bool,                // Compatibility: partial or all
     pub parameters_source: String,               // "measurement_tuned", "design_specifications"
 }
 ```
@@ -1627,6 +1636,7 @@ impl From<&CalibrationStatus> for CalibrationStatusInfo {
                     accuracy_estimate_db: *accuracy_estimate_db,
                     loss_accuracy_estimate_db: None,
                     coverage: None,
+                    correction_application: CorrectionApplication::Unavailable, // Updated during evaluation
                     correction_applied: false,  // Updated during evaluation
                     parameters_source: "measurement_tuned".to_string(),
                 }
@@ -1638,6 +1648,7 @@ impl From<&CalibrationStatus> for CalibrationStatusInfo {
                     accuracy_estimate_db: *accuracy_estimate_db,
                     loss_accuracy_estimate_db: None,
                     coverage: Some(coverage.into()),
+                    correction_application: CorrectionApplication::Unavailable,
                     correction_applied: false,
                     parameters_source: if coverage.is_boresight_only() {
                         "boresight_tuned".to_string()
@@ -1653,6 +1664,7 @@ impl From<&CalibrationStatus> for CalibrationStatusInfo {
                     accuracy_estimate_db: *accuracy_estimate_db,
                     loss_accuracy_estimate_db: Some(*loss_accuracy_estimate_db),
                     coverage: None,
+                    correction_application: CorrectionApplication::Unavailable,
                     correction_applied: false,
                     parameters_source: "design_specifications".to_string(),
                 }
@@ -1703,7 +1715,13 @@ let (correction_db, disposition) = match &calibration.correction_surface {
 let final_gain_db = physics_gain_db + correction_db;
 
 // Step 4: Report from the disposition — never from surface existence or calibration status
-calibration_status_info.correction_applied = disposition.applied();
+let application = match disposition {
+    CorrectionDisposition::Unavailable => CorrectionApplication::Unavailable,
+    CorrectionDisposition::OutsideCoverage => CorrectionApplication::None,
+    CorrectionDisposition::Applied { .. } => CorrectionApplication::All,
+};
+calibration_status_info.correction_application = application;
+calibration_status_info.correction_applied = application.applied();
 metadata.extrapolated = disposition.extrapolated();
 ```
 

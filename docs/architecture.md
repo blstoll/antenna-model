@@ -408,7 +408,8 @@ pub struct CalibrationStatusInfo {
     pub accuracy_estimate_db: f64,               // Expected accuracy for this query
     pub loss_accuracy_estimate_db: Option<f64>,  // For uncalibrated only
     pub coverage: Option<CoverageInfo>,          // For partially calibrated only
-    pub correction_applied: bool,                // Whether correction surface was used
+    pub correction_application: CorrectionApplication, // Actual use across successful directions
+    pub correction_applied: bool,                // Compatibility: partial or all
     pub parameters_source: String,               // "measurement_tuned", "boresight_tuned", "design_specifications"
 }
 ```
@@ -416,7 +417,8 @@ pub struct CalibrationStatusInfo {
 **Field Presence:**
 - `loss_accuracy_estimate_db`: Only for uncalibrated (loss is more accurate than absolute)
 - `coverage`: Only for partially calibrated (describes measurement coverage)
-- `correction_applied`: Updated during evaluation based on actual application
+- `correction_application`: `unavailable`, `none`, `partial`, or `all` across successful evaluations (issue #64)
+- `correction_applied`: Compatibility field; true for `partial` or `all`
 
 **Backward Compatibility:**
 - `calibration_status` field is `Option<CalibrationStatusInfo>` in responses
@@ -779,6 +781,7 @@ There is no magnitude-based auto-detection; the pre-2026-07-27 heuristic is desc
       "num_measurements": 25,
       "is_boresight_only": true
     },
+    "correction_application": "unavailable",
     "correction_applied": false,
     "parameters_source": "boresight_tuning"
   }
@@ -808,6 +811,7 @@ There is no magnitude-based auto-detection; the pre-2026-07-27 heuristic is desc
     "status": "uncalibrated",
     "accuracy_estimate_db": 3.0,
     "loss_accuracy_estimate_db": 2.0,
+    "correction_application": "unavailable",
     "correction_applied": false,
     "parameters_source": "design_specifications"
   }
