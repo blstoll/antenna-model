@@ -60,7 +60,6 @@ antennas:
     # Metadata (informational)
     description: "Large deep space antenna with complete calibration"
     location: "Goldstone, CA"
-    commissioning_date: "2024-03-15"
 
   # ============================================================================
   # PARTIALLY CALIBRATED - BORESIGHT ONLY (Priority Use Case)
@@ -79,13 +78,6 @@ antennas:
     # (docs/calibration-workflow-guide.md §3), then flip this to true.
     enabled: false
 
-    # Calibration coverage metadata
-    calibration_coverage:
-      azimuth_range: [0.0, 0.0]      # Single point
-      elevation_range: [0.0, 0.0]    # Single point
-      frequency_range: [7100.0, 8500.0]  # X-band
-      num_measurements: 28            # Frequency samples at boresight
-
     description: "Small ground station with X-band boresight calibration"
     location: "Test Facility A"
 
@@ -101,12 +93,6 @@ antennas:
     # To make it real: produce dsn_13m_boresight.bin with `calibrate
     # --calibration-mode boresight`, once per feed, then flip this to true.
     enabled: false
-
-    calibration_coverage:
-      azimuth_range: [0.0, 0.0]
-      elevation_range: [0.0, 0.0]
-      frequency_range: [7145.0, 27000.0]  # X-band and Ka-band
-      num_measurements: 85  # Multiple feeds, multiple frequencies
 
     description: "Medium DSN antenna with X/Ka boresight calibration"
     location: "DSN Site"
@@ -127,12 +113,6 @@ antennas:
     # flip this to true. A partial grid still has to clear the coefficient count
     # its knots declare (roadmap D20), not merely be non-empty.
     enabled: false
-
-    calibration_coverage:
-      azimuth_range: [0.0, 360.0]     # Full azimuth
-      elevation_range: [30.0, 60.0]   # Limited elevation (typical operational range)
-      frequency_range: [2000.0, 2300.0]  # S-band
-      num_measurements: 324  # 18 az × 6 el × 3 freq
 
     description: "Small ground station with partial S-band grid"
     location: "Test Facility B"
@@ -179,13 +159,6 @@ antennas:
         mesh_spacing_mm: 5.0
         wire_diameter_mm: 0.5
 
-    # Validity ranges (conservative - full hemisphere)
-    validity_ranges:
-      azimuth_range: [0.0, 360.0]
-      elevation_range: [0.0, 90.0]
-      frequency_range: [2000.0, 8500.0]  # Union of feed ranges
-      temperature_k: 290.0  # Assume room temperature
-
     description: "Small ground station using design specifications"
     location: "New Installation Site"
 
@@ -228,12 +201,6 @@ antennas:
 
       mesh: null  # Solid reflector
 
-    validity_ranges:
-      azimuth_range: [0.0, 360.0]
-      elevation_range: [0.0, 90.0]
-      frequency_range: [7145.0, 27000.0]
-      temperature_k: 290.0
-
     description: "Medium DSN antenna using design specifications"
     location: "DSN Complex"
 
@@ -274,12 +241,6 @@ antennas:
 
       mesh: null
 
-    validity_ranges:
-      azimuth_range: [0.0, 360.0]
-      elevation_range: [0.0, 90.0]
-      frequency_range: [2200.0, 32300.0]
-      temperature_k: 290.0
-
     description: "Large DSN antenna using design specifications"
     location: "Goldstone, CA"
 
@@ -316,12 +277,6 @@ antennas:
 
       mesh: null
 
-    validity_ranges:
-      azimuth_range: [0.0, 360.0]
-      elevation_range: [0.0, 90.0]
-      frequency_range: [8400.0, 8500.0]
-      temperature_k: 290.0
-
     description: "DSN 70m design specs; ref: TDA PR 42-97 (1989) 74.18 dBi / eta 0.687 at X-band"
     location: "Goldstone / Canberra / Madrid"
 
@@ -352,12 +307,6 @@ antennas:
           frequency_range: [40000.0, 48000.0]
 
       mesh: null
-
-    validity_ranges:
-      azimuth_range: [0.0, 360.0]
-      elevation_range: [0.0, 90.0]
-      frequency_range: [1000.0, 48000.0]
-      temperature_k: 290.0
 
     description: "GBT 100m offset Gregorian, axisymmetric approx; ref: eta 0.65 @1.4 GHz, 0.55-0.60 @43 GHz"
     location: "Green Bank, WV"
@@ -395,12 +344,6 @@ antennas:
 
       mesh: null
 
-    validity_ranges:
-      azimuth_range: [0.0, 360.0]
-      elevation_range: [0.0, 90.0]
-      frequency_range: [8000.0, 8500.0]
-      temperature_k: 290.0
-
     description: "Simple test antenna for development and testing"
     location: "Development Environment"
 
@@ -428,7 +371,8 @@ antennas:
 # 3. Update this file:
 #    - Change calibration_status to "partially_calibrated"
 #    - Set calibration_file to the .bin file
-#    - Add calibration_coverage metadata
+#      (the artifact carries its own coverage and validity ranges; there is no
+#       config block for either — see #56)
 #
 # 4. Restart service (or use hot-reload endpoint in future)
 #

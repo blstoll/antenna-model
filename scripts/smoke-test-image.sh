@@ -118,10 +118,11 @@ print(enabled[0]["id"])
 #
 # Prefer a feed whose declared range covers the example's frequency, so the
 # request keeps the example's physics; fall back to the midpoint of the first
-# feed's range. Note the service currently reports the ANTENNA-level validity
-# range as every feed's frequency_range_mhz (handlers.rs builds FeedInfo from
-# cal.validity_ranges), so today every feed looks like it covers 8400 MHz. This
-# stays correct if that is narrowed to the real per-feed band.
+# feed's range. Since #56 `frequency_range_mhz` is the feed's own band — the
+# design band for an uncalibrated antenna, the measured extent for a calibrated
+# one — so this pick now discriminates. Before that it did not: every feed
+# reported the antenna-level union, so a Ka-band feed looked like it covered
+# 8400 MHz and the smoke test drove it at X-band.
 example_frequency=$(python3 -c '
 import json
 ex = json.load(open("examples/api_requests.json"))["examples"]

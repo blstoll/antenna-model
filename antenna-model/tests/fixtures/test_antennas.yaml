@@ -13,12 +13,6 @@ antennas:
     calibration_file: "tests/fixtures/calibration_data/test_uncalibrated_xband_boresight.bin"
     enabled: true
 
-    calibration_coverage:
-      azimuth_range: [0.0, 0.0]
-      elevation_range: [0.0, 0.0]
-      frequency_range: [7100.0, 8500.0]
-      num_measurements: 15
-
     description: "Test antenna with X-band boresight calibration (PartiallyCalibrated status)"
 
   # ==========================================================================
@@ -29,12 +23,6 @@ antennas:
     calibration_status: "partially_calibrated"
     calibration_file: "tests/fixtures/calibration_data/test_uncalibrated_sband_boresight.bin"
     enabled: true
-
-    calibration_coverage:
-      azimuth_range: [0.0, 0.0]
-      elevation_range: [0.0, 0.0]
-      frequency_range: [2000.0, 2300.0]
-      num_measurements: 7
 
     description: "Test antenna with S-band boresight calibration (PartiallyCalibrated status)"
 
@@ -71,12 +59,6 @@ antennas:
         mesh_spacing_mm: 5.0
         wire_diameter_mm: 0.5
 
-    validity_ranges:
-      azimuth_range: [0.0, 360.0]
-      elevation_range: [0.0, 90.0]
-      frequency_range: [2000.0, 8500.0]
-      temperature_k: 290.0
-
     description: "Test antenna using design specifications only"
 
   # ==========================================================================
@@ -102,12 +84,6 @@ antennas:
           frequency_range: [8000.0, 8500.0]
 
       mesh: null  # Solid reflector
-
-    validity_ranges:
-      azimuth_range: [0.0, 360.0]
-      elevation_range: [0.0, 90.0]
-      frequency_range: [8000.0, 8500.0]
-      temperature_k: 290.0
 
     description: "Simple solid reflector for basic testing"
 
@@ -141,11 +117,5 @@ antennas:
           frequency_range: [25500.0, 27000.0]
 
       mesh: null
-
-    validity_ranges:
-      azimuth_range: [0.0, 360.0]
-      elevation_range: [0.0, 90.0]
-      frequency_range: [7145.0, 27000.0]
-      temperature_k: 290.0
 
     description: "Large antenna with multiple feeds for testing"

@@ -91,13 +91,6 @@ antennas:
     # Optional: Partial calibration artifact with tuned parameters
     calibration_file: "antenna_2_boresight.bin"
 
-    # Metadata about calibration coverage
-    calibration_coverage:
-      azimuth_range: [0.0, 0.0]      # Single point
-      elevation_range: [0.0, 0.0]    # Single point
-      frequency_range: [2000.0, 2300.0]  # MHz
-      num_measurements: 25            # Frequency samples at boresight
-
     enabled: true
 
   # ==== Partially Calibrated - Limited Coverage ====
@@ -105,12 +98,6 @@ antennas:
     name: "Ground Station 3 - Limited Calibration"
     calibration_status: "partially_calibrated"
     calibration_file: "antenna_3_limited.bin"
-
-    calibration_coverage:
-      azimuth_range: [0.0, 360.0]
-      elevation_range: [30.0, 60.0]  # Limited elevation range
-      frequency_range: [7100.0, 8500.0]
-      num_measurements: 450
 
     enabled: true
 
@@ -149,13 +136,6 @@ antennas:
         mesh_spacing_mm: 5.0
         wire_diameter_mm: 0.5
 
-    # Validity ranges (conservative estimates)
-    validity_ranges:
-      azimuth_range: [0.0, 360.0]
-      elevation_range: [0.0, 90.0]
-      frequency_range: [2000.0, 8500.0]  # Union of feed ranges
-      temperature_k: 290.0  # Assume room temperature
-
     enabled: true
 ```
 
@@ -167,10 +147,19 @@ antennas:
 | `name` | Yes | Human-readable name |
 | `calibration_status` | No | "fully_calibrated" (default), "partially_calibrated", "uncalibrated" |
 | `calibration_file` | Conditional | Required for fully/partially calibrated; absent for uncalibrated |
-| `calibration_coverage` | No | Metadata about measurement coverage (for partial calibration) |
 | `design_specs` | Conditional | Required for uncalibrated; optional for others (fallback defaults) |
-| `validity_ranges` | No | Override default validity ranges |
+| `description` | No | Free-text note |
+| `location` | No | Free-text site name |
 | `enabled` | Yes | Whether antenna is available for queries |
+
+That table is exhaustive: `AntennaConfigEntry` sets `deny_unknown_fields`, so any other key
+fails at startup and names itself. The `calibration_coverage` and `validity_ranges` blocks
+this design originally put here were removed in #56 — nothing read them. A calibrated
+antenna's coverage and validity ranges come from its `.bin` artifact; an uncalibrated feed's
+validity frequency range is that feed's own `frequency_range`, with azimuth `0-360`,
+elevation `0-90` and 290 K as fixed conservative defaults. The identically-named
+`ValidityRanges` and `CalibrationCoverage` types on `AntennaCalibration` below are the
+artifact's, and are unaffected.
 
 ---
 
@@ -913,8 +902,10 @@ curl -X POST http://service/api/v1/admin/reload
 **Task 6.x.2:** Configuration schema support
 - Update `antennas.yaml` parsing to support new fields
 - Add `design_specs` parsing
-- Add `calibration_coverage` parsing
 - Update configuration validation
+
+(The `calibration_coverage` config parsing this task added was removed again in #56; the
+artifact carries the real coverage.)
 
 ### Phase 2: Uncalibrated Antenna Support (Sprint 6, 2-3 days)
 
