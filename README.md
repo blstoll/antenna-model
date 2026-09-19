@@ -249,11 +249,6 @@ antennas:
 
       mesh: null                      # or mesh_spacing_mm / wire_diameter_mm
 
-    validity_ranges:
-      azimuth_range: [0.0, 360.0]
-      elevation_range: [0.0, 90.0]
-      frequency_range: [7100.0, 8500.0]
-      temperature_k: 290.0
 ```
 
 Note `feeds[].position` is the feed's design offset **from the focal point**, not

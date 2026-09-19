@@ -620,40 +620,15 @@ pub struct MeshConfig {
     pub wire_diameter_mm: f64,
 }
 
-/// Calibration coverage configuration for partially calibrated antennas
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CalibrationCoverageConfig {
-    /// Azimuth range [min, max] in degrees
-    pub azimuth_range: [f64; 2],
-
-    /// Elevation range [min, max] in degrees
-    pub elevation_range: [f64; 2],
-
-    /// Frequency range [min, max] in MHz
-    pub frequency_range: [f64; 2],
-
-    /// Number of measurement points
-    pub num_measurements: usize,
-}
-
-/// Validity ranges configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ValidityRangesConfig {
-    /// Azimuth range [min, max] in degrees
-    pub azimuth_range: [f64; 2],
-
-    /// Elevation range [min, max] in degrees
-    pub elevation_range: [f64; 2],
-
-    /// Frequency range [min, max] in MHz
-    pub frequency_range: [f64; 2],
-
-    /// Reference temperature in Kelvin
-    pub temperature_k: f64,
-}
-
 /// Antenna configuration entry (v2.0 - extended for partial calibration support)
+///
+/// `deny_unknown_fields` is load-bearing (#56). The `validity_ranges` and
+/// `calibration_coverage` blocks were removed from this schema because nothing read them;
+/// without the attribute an operator's stale file would keep them and the loader would drop
+/// them in silence — the very failure the removal exists to end. A surplus or misspelled key
+/// must fail at startup and name itself.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AntennaConfigEntry {
     /// Unique identifier for the antenna
     pub id: String,
@@ -672,17 +647,9 @@ pub struct AntennaConfigEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub calibration_file: Option<String>,
 
-    /// Calibration coverage metadata (for partially calibrated antennas)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub calibration_coverage: Option<CalibrationCoverageConfig>,
-
     /// Design specifications (required for uncalibrated antennas)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub design_specs: Option<DesignSpecsConfig>,
-
-    /// Validity ranges (optional - overrides ranges from calibration file)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub validity_ranges: Option<ValidityRangesConfig>,
 
     /// Description of the antenna (optional)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -740,16 +707,6 @@ impl AntennaConfigEntry {
                     ),
                 });
             }
-        }
-
-        // Validate calibration coverage if present
-        if let Some(ref coverage) = self.calibration_coverage {
-            coverage.validate(&self.id)?;
-        }
-
-        // Validate validity ranges if present
-        if let Some(ref ranges) = self.validity_ranges {
-            ranges.validate(&self.id)?;
         }
 
         Ok(())
@@ -910,82 +867,6 @@ impl MeshConfig {
     }
 }
 
-impl CalibrationCoverageConfig {
-    /// Validate calibration coverage configuration
-    fn validate(&self, antenna_id: &str) -> Result<(), ConfigError> {
-        if self.azimuth_range[0] > self.azimuth_range[1] {
-            return Err(ConfigError::InvalidValue {
-                key: format!("antenna.{}.calibration_coverage.azimuth_range", antenna_id),
-                reason: "min must be <= max".to_string(),
-            });
-        }
-
-        if self.elevation_range[0] > self.elevation_range[1] {
-            return Err(ConfigError::InvalidValue {
-                key: format!(
-                    "antenna.{}.calibration_coverage.elevation_range",
-                    antenna_id
-                ),
-                reason: "min must be <= max".to_string(),
-            });
-        }
-
-        if self.frequency_range[0] > self.frequency_range[1] {
-            return Err(ConfigError::InvalidValue {
-                key: format!(
-                    "antenna.{}.calibration_coverage.frequency_range",
-                    antenna_id
-                ),
-                reason: "min must be <= max".to_string(),
-            });
-        }
-
-        Ok(())
-    }
-}
-
-impl ValidityRangesConfig {
-    /// Validate validity ranges configuration
-    fn validate(&self, antenna_id: &str) -> Result<(), ConfigError> {
-        if self.azimuth_range[0] > self.azimuth_range[1] {
-            return Err(ConfigError::InvalidValue {
-                key: format!("antenna.{}.validity_ranges.azimuth_range", antenna_id),
-                reason: "min must be <= max".to_string(),
-            });
-        }
-
-        if self.elevation_range[0] > self.elevation_range[1] {
-            return Err(ConfigError::InvalidValue {
-                key: format!("antenna.{}.validity_ranges.elevation_range", antenna_id),
-                reason: "min must be <= max".to_string(),
-            });
-        }
-
-        if self.elevation_range[0] < 0.0 || self.elevation_range[1] > 90.0 {
-            return Err(ConfigError::InvalidValue {
-                key: format!("antenna.{}.validity_ranges.elevation_range", antenna_id),
-                reason: "elevation must be between 0 and 90 degrees".to_string(),
-            });
-        }
-
-        if self.frequency_range[0] > self.frequency_range[1] {
-            return Err(ConfigError::InvalidValue {
-                key: format!("antenna.{}.validity_ranges.frequency_range", antenna_id),
-                reason: "min must be <= max".to_string(),
-            });
-        }
-
-        if self.temperature_k <= 0.0 {
-            return Err(ConfigError::InvalidValue {
-                key: format!("antenna.{}.validity_ranges.temperature_k", antenna_id),
-                reason: "temperature must be positive".to_string(),
-            });
-        }
-
-        Ok(())
-    }
-}
-
 fn default_enabled() -> bool {
     true
 }
@@ -1057,6 +938,14 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    /// Parse an antenna config from YAML text through the real file loader, so the test
+    /// exercises the same path the service startup does.
+    fn parse_antenna_config(yaml_content: &str) -> Result<AntennaConfig, ConfigError> {
+        let mut temp_file = NamedTempFile::new().unwrap();
+        temp_file.write_all(yaml_content.as_bytes()).unwrap();
+        AntennaConfig::from_file(temp_file.path().to_str().unwrap())
+    }
 
     #[test]
     fn test_service_config_defaults() {
@@ -1272,9 +1161,7 @@ antennas:
                     name: "Antenna 1".to_string(),
                     calibration_status: None, // Defaults to fully_calibrated
                     calibration_file: Some("antenna_1.bin".to_string()),
-                    calibration_coverage: None,
                     design_specs: None,
-                    validity_ranges: None,
                     description: None,
                     location: None,
                     enabled: true,
@@ -1284,9 +1171,7 @@ antennas:
                     name: "Antenna 1 Duplicate".to_string(),
                     calibration_status: None,
                     calibration_file: Some("antenna_1_dup.bin".to_string()),
-                    calibration_coverage: None,
                     design_specs: None,
-                    validity_ranges: None,
                     description: None,
                     location: None,
                     enabled: true,
@@ -1453,8 +1338,11 @@ antennas:
         assert_eq!(feed.axial_defocus_m, 0.05);
     }
 
+    /// The `calibration_coverage` block was removed from the config schema (#56): no code
+    /// path ever read it, and the real coverage always comes from the `.bin` artifact. A
+    /// stale block in an operator's file must fail loudly rather than be dropped in silence.
     #[test]
-    fn test_partially_calibrated_antenna_with_coverage() {
+    fn test_removed_calibration_coverage_block_is_rejected() {
         let yaml_content = r#"
 antennas:
   - id: "partial_antenna"
@@ -1469,23 +1357,40 @@ antennas:
       num_measurements: 28
 "#;
 
-        let mut temp_file = NamedTempFile::new().unwrap();
-        temp_file.write_all(yaml_content.as_bytes()).unwrap();
-        let path = temp_file.path().to_str().unwrap();
-
-        let config = AntennaConfig::from_file(path).unwrap();
-        let antenna = &config.antennas[0];
-
-        assert_eq!(antenna.get_calibration_status(), "partially_calibrated");
-        assert!(antenna.calibration_coverage.is_some());
-
-        let coverage = antenna.calibration_coverage.as_ref().unwrap();
-        assert_eq!(coverage.azimuth_range, [0.0, 0.0]);
-        assert_eq!(coverage.num_measurements, 28);
+        let message = parse_antenna_config(yaml_content).unwrap_err().to_string();
+        assert!(
+            message.contains("calibration_coverage"),
+            "the error must name the stale key, got: {message}"
+        );
     }
 
+    /// The same entry minus the stale block still loads and still reports its declared
+    /// status. Removing `calibration_coverage` took nothing else with it.
     #[test]
-    fn test_antenna_with_validity_ranges() {
+    fn test_partially_calibrated_antenna_without_the_removed_block_still_loads() {
+        let config = parse_antenna_config(
+            r#"
+antennas:
+  - id: "partial_antenna"
+    name: "Partially Calibrated Antenna"
+    calibration_status: "partially_calibrated"
+    calibration_file: "partial.bin"
+    enabled: true
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.antennas[0].get_calibration_status(),
+            "partially_calibrated"
+        );
+    }
+
+    /// The `validity_ranges` block was removed from the config schema (#56): it published an
+    /// antenna-level frequency range under a per-feed field name, and its angle and
+    /// temperature fields were read by nothing. Same silent-drop hazard, same loud failure.
+    #[test]
+    fn test_removed_validity_ranges_block_is_rejected() {
         let yaml_content = r#"
 antennas:
   - id: "antenna_with_ranges"
@@ -1499,16 +1404,51 @@ antennas:
       temperature_k: 290.0
 "#;
 
-        let mut temp_file = NamedTempFile::new().unwrap();
-        temp_file.write_all(yaml_content.as_bytes()).unwrap();
-        let path = temp_file.path().to_str().unwrap();
+        let message = parse_antenna_config(yaml_content).unwrap_err().to_string();
+        assert!(
+            message.contains("validity_ranges"),
+            "the error must name the stale key, got: {message}"
+        );
+    }
 
-        let config = AntennaConfig::from_file(path).unwrap();
-        let antenna = &config.antennas[0];
+    /// Live control for the two tests above: they only prove the removal is enforced while
+    /// `deny_unknown_fields` rejects *any* surplus key. A misspelled key that parses is the
+    /// silent drop the removal exists to prevent.
+    #[test]
+    fn test_misspelled_antenna_key_is_rejected() {
+        let yaml_content = r#"
+antennas:
+  - id: "typo_antenna"
+    name: "Typo Antenna"
+    calibration_file: "test.bin"
+    enabled: true
+    descriptoin: "note the typo"
+"#;
 
-        assert!(antenna.validity_ranges.is_some());
-        let ranges = antenna.validity_ranges.as_ref().unwrap();
-        assert_eq!(ranges.temperature_k, 290.0);
+        let message = parse_antenna_config(yaml_content).unwrap_err().to_string();
+        assert!(
+            message.contains("descriptoin"),
+            "the error must name the surplus key, got: {message}"
+        );
+    }
+
+    /// The control's control: the same entry with every key spelled correctly loads, so a
+    /// blanket parse failure cannot pass for key rejection.
+    #[test]
+    fn test_well_formed_antenna_entry_still_loads() {
+        let config = parse_antenna_config(
+            r#"
+antennas:
+  - id: "typo_antenna"
+    name: "Typo Antenna"
+    calibration_file: "test.bin"
+    enabled: true
+    description: "no typo"
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.antennas[0].description.as_deref(), Some("no typo"));
     }
 
     #[test]

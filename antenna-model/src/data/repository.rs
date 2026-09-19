@@ -288,8 +288,8 @@ impl CalibrationRepository {
                 angular_resolution: None,
             };
 
-            // Build validity ranges (use config override or default from design)
-            let validity_ranges = build_validity_ranges(entry, feed_spec);
+            // Each feed declares its own design band (#56).
+            let validity_ranges = build_validity_ranges(feed_spec);
 
             // Build calibration with Uncalibrated status
             let calibration = AntennaCalibration {
@@ -464,35 +464,25 @@ impl Default for CalibrationRepository {
     }
 }
 
-/// Build validity ranges for an uncalibrated antenna feed
+/// Build validity ranges for an uncalibrated antenna feed.
 ///
-/// Uses config override if present, otherwise constructs from design specs.
-fn build_validity_ranges(entry: &AntennaConfigEntry, feed_spec: &FeedSpecConfig) -> ValidityRanges {
-    if let Some(ref validity_config) = entry.validity_ranges {
-        // Use explicit validity ranges from config
-        ValidityRanges {
-            azimuth_min_max: (
-                validity_config.azimuth_range[0],
-                validity_config.azimuth_range[1],
-            ),
-            elevation_min_max: (
-                validity_config.elevation_range[0],
-                validity_config.elevation_range[1],
-            ),
-            frequency_min_max: (
-                validity_config.frequency_range[0],
-                validity_config.frequency_range[1],
-            ),
-            temperature_const: validity_config.temperature_k,
-        }
-    } else {
-        // Default validity ranges from feed frequency range
-        ValidityRanges {
-            azimuth_min_max: (0.0, 360.0),
-            elevation_min_max: (0.0, 90.0),
-            frequency_min_max: (feed_spec.frequency_range[0], feed_spec.frequency_range[1]),
-            temperature_const: 290.0, // Assume room temperature
-        }
+/// A design-spec antenna has no measurements, so the only range it can honestly declare is
+/// the feed's own design band; the angles and reference temperature are fixed conservative
+/// defaults. `elevation_min_max` is the **polar angle from boresight** (0° = boresight), not
+/// horizon elevation — `docs/domain-contract.md`, far-field row — so `(0.0, 90.0)` is the
+/// forward hemisphere, not "10° to 80° above the horizon". Misreading it that way is half of
+/// why the config block below was removed rather than fixed.
+/// There is no antenna-level override — the `validity_ranges` config block was
+/// removed in #56 because its frequency field was published verbatim under the per-feed
+/// `FeedInfo.frequency_range_mhz`, making a Ka-band feed claim X-band coverage, and its other
+/// three fields were read by nothing. `AntennaConfigEntry` denies unknown fields, so a stale
+/// block fails at startup rather than reappearing here.
+fn build_validity_ranges(feed_spec: &FeedSpecConfig) -> ValidityRanges {
+    ValidityRanges {
+        azimuth_min_max: (0.0, 360.0),
+        elevation_min_max: (0.0, 90.0),
+        frequency_min_max: (feed_spec.frequency_range[0], feed_spec.frequency_range[1]),
+        temperature_const: 290.0, // Assume room temperature
     }
 }
 
@@ -1171,8 +1161,71 @@ antennas:
         assert_eq!(mesh.wire_diameter_mm, 0.5);
     }
 
+    /// After #56 there is no antenna-level override: each feed's validity frequency range is
+    /// its own design band, and the angles and temperature are the fixed conservative
+    /// defaults. A stale `validity_ranges` block is rejected at parse, so it cannot come back
+    /// as a silent antenna-wide range published under a per-feed field name.
     #[test]
-    fn test_load_uncalibrated_antenna_with_validity_ranges() {
+    fn test_uncalibrated_validity_ranges_come_from_the_feed() {
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path();
+
+        let antenna_config_yaml = r#"
+antennas:
+  - id: "two_band"
+    name: "Two Band Antenna"
+    calibration_status: "uncalibrated"
+    enabled: true
+    design_specs:
+      diameter_m: 4.0
+      focal_length_m: 1.6
+      f_over_d_ratio: 0.4
+      surface_rms_mm: 1.0
+      feeds:
+        - id: "x_band"
+          name: "X Band"
+          position: [0.0, 0.0, 0.0]
+          q_factor: 2.04
+          phase_center_offset_m: 0.0
+          frequency_range: [7145.0, 7235.0]
+        - id: "ka_band"
+          name: "Ka Band"
+          position: [0.05, 0.0, 0.0]
+          q_factor: 2.04
+          phase_center_offset_m: 0.0
+          frequency_range: [25500.0, 27000.0]
+"#;
+        let config_path = data_dir.join("antennas.yaml");
+        std::fs::write(&config_path, antenna_config_yaml).unwrap();
+
+        let calibration_config = CalibrationConfig {
+            data_directory: data_dir.to_path_buf(),
+            antenna_config_file: config_path,
+            fail_fast: true,
+        };
+
+        let repo = CalibrationRepository::load_from_config(&calibration_config).unwrap();
+
+        let x_band = repo.get_calibration("two_band", "x_band").unwrap();
+        let ka_band = repo.get_calibration("two_band", "ka_band").unwrap();
+
+        // Each feed reports its own design band — no antenna-wide union.
+        assert_eq!(x_band.validity_ranges.frequency_min_max, (7145.0, 7235.0));
+        assert_eq!(
+            ka_band.validity_ranges.frequency_min_max,
+            (25500.0, 27000.0)
+        );
+
+        // The remaining three fields are the fixed defaults for every uncalibrated feed.
+        assert_eq!(x_band.validity_ranges.azimuth_min_max, (0.0, 360.0));
+        assert_eq!(x_band.validity_ranges.elevation_min_max, (0.0, 90.0));
+        assert_eq!(x_band.validity_ranges.temperature_const, 290.0);
+    }
+
+    /// Live control for the test above: the antenna-level block that used to override those
+    /// per-feed ranges is now rejected outright rather than ignored.
+    #[test]
+    fn test_uncalibrated_antenna_with_stale_validity_ranges_is_rejected() {
         let temp_dir = TempDir::new().unwrap();
         let data_dir = temp_dir.path();
 
@@ -1191,7 +1244,7 @@ antennas:
         - id: "feed1"
           name: "Feed 1"
           position: [0.0, 0.0, 0.0]
-          q_factor: 8.0
+          q_factor: 2.04
           phase_center_offset_m: 0.0
           frequency_range: [8000.0, 9000.0]
     validity_ranges:
@@ -1209,15 +1262,14 @@ antennas:
             fail_fast: true,
         };
 
-        let repo = CalibrationRepository::load_from_config(&calibration_config).unwrap();
-
-        let cal = repo.get_calibration("custom_ranges", "feed1").unwrap();
-
-        // Verify custom validity ranges override defaults
-        assert_eq!(cal.validity_ranges.azimuth_min_max, (0.0, 180.0));
-        assert_eq!(cal.validity_ranges.elevation_min_max, (10.0, 80.0));
-        assert_eq!(cal.validity_ranges.frequency_min_max, (7500.0, 9500.0));
-        assert_eq!(cal.validity_ranges.temperature_const, 300.0);
+        let message = match CalibrationRepository::load_from_config(&calibration_config) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("a stale validity_ranges block must not load"),
+        };
+        assert!(
+            message.contains("validity_ranges"),
+            "the error must name the stale key, got: {message}"
+        );
     }
 
     #[test]

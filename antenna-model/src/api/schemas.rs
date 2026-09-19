@@ -753,7 +753,19 @@ pub struct FeedInfo {
     /// `GeometryInfo.physical_feed_offset_m`.
     pub design_feed_offset_m: Vector3D,
 
-    /// Frequency range in MHz
+    /// The range in MHz over which the model's answer for **this feed** is valid — not
+    /// the band the hardware serves. For a calibrated feed it is the measured extent from
+    /// the `.bin` artifact; for an uncalibrated one it is the feed's design band from
+    /// `antennas.yaml`. It is never an antenna-wide union: before #56 the antenna-level
+    /// `validity_ranges.frequency_range` was published here for every feed, so a Ka-band
+    /// feed claimed X-band coverage.
+    ///
+    /// One feed means one *continuous* range. A `(min, max)` tuple cannot express a gap, so
+    /// a feed valid in two separate bands must be registered as two feed entries — otherwise
+    /// this range silently covers the gap between them.
+    ///
+    /// A design band and a measured extent do not carry the same confidence, and this type
+    /// does not say which one it is; `calibration_status` on the antenna responses does.
     pub frequency_range_mhz: (f64, f64),
 
     /// Feed pattern q-factor

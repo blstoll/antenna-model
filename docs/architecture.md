@@ -613,11 +613,6 @@ antennas:
       name: "Ground Station - Boresight Calibrated"
       calibration_file: "antenna_2_boresight.bin"
       calibration_status: "partially_calibrated"
-      calibration_coverage:
-        azimuth_range: [0.0, 0.0]      # Single point
-        elevation_range: [0.0, 0.0]    # Single point
-        frequency_range: [7100.0, 8500.0]
-        num_measurements: 25
       enabled: true
 
     # Uncalibrated antenna (design specs only, no .bin file)
@@ -646,13 +641,17 @@ antennas:
         mesh:
           mesh_spacing_mm: 5.0
           wire_diameter_mm: 0.5
-      validity_ranges:
-        azimuth_range: [0.0, 360.0]
-        elevation_range: [0.0, 90.0]
-        frequency_range: [2000.0, 8500.0]
-        temperature_k: 290.0
       enabled: true
 ```
+
+The entry carries no `validity_ranges` or `calibration_coverage` block, and the schema
+rejects one (#56). A calibrated antenna's coverage and validity ranges come from its `.bin`
+artifact; an uncalibrated feed's frequency range is the `frequency_range` on that feed, with
+azimuth `0-360`, elevation `0-90` and 290 K as fixed conservative defaults. That elevation is
+the **polar angle from boresight** (0° = boresight), not horizon elevation — see the far-field
+row of `docs/domain-contract.md` — so `0-90` is the forward hemisphere. `AntennaConfigEntry`
+sets `deny_unknown_fields`, so a stale block — or a misspelled key — fails at startup and names
+itself rather than being dropped in silence.
 
 ### 4.3 API Request/Response Schemas
 
@@ -1198,7 +1197,7 @@ aws s3 cp s3://bucket/antenna_2_boresight.csv ./measurements/
 # 3. Update configuration
 # Edit calibration_data/antennas.yaml:
 #   - Set calibration_status: "partially_calibrated"
-#   - Add calibration_coverage metadata
+#   - Set calibration_file to the .bin (it carries its own coverage; #56)
 
 # 4. Commit artifacts
 git add calibration_data/
@@ -1514,7 +1513,7 @@ web stack; `scripts/check.sh` asserts both halves (roadmap D4).
 
 ### 12.4 Calibration Status Support (NEW - Sprint 6 ✅)
 - ✅ Data model extensions (CalibrationStatus enum, CalibrationCoverage struct)
-- ✅ Configuration parsing (design_specs, calibration_coverage)
+- ✅ Configuration parsing (design_specs; the `calibration_coverage` config block was removed in #56 — the artifact carries the real coverage)
 - ✅ Uncalibrated antenna loading from design specs
 - ✅ Service layer handling all calibration statuses
 - ✅ API schemas with calibration_status field

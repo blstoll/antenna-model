@@ -489,6 +489,61 @@ async fn test_list_feeds() {
     server.shutdown().await;
 }
 
+/// The defect #56 was filed on, at the layer it was reported on.
+///
+/// `curl .../antennas/dsn_13m_uncalibrated/feeds` used to return `[7145, 27000]` for all
+/// three feeds — the antenna-level `validity_ranges.frequency_range`, published verbatim
+/// under a per-feed field name, so the Ka-band feed claimed 7.1 GHz and the X-band feeds
+/// claimed 27 GHz. `test_large` has the same shape. The repository unit tests cover
+/// `build_validity_ranges`; this one covers the three `FeedInfo` construction sites in
+/// `handlers.rs` that publish it.
+#[tokio::test]
+async fn each_feed_reports_its_own_frequency_range() {
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
+
+    let response: FeedListResponse = server
+        .get("/api/v1/antennas/test_large/feeds")
+        .await
+        .expect("Feed list failed");
+
+    let band = |id: &str| {
+        response
+            .feeds
+            .iter()
+            .find(|f| f.id == id)
+            .unwrap_or_else(|| panic!("test_large must serve a {id} feed"))
+            .frequency_range_mhz
+    };
+
+    assert_eq!(band("x_band"), (7145.0, 7235.0));
+    assert_eq!(band("ka_band"), (25500.0, 27000.0));
+
+    // The union the old antenna-level block published would make both of these pass as one
+    // range; they are the assertion that the two feeds are still told apart.
+    assert_ne!(band("x_band"), band("ka_band"));
+
+    server.shutdown().await;
+}
+
+/// Same contract through the single-feed endpoint, which builds `FeedInfo` at a third site.
+#[tokio::test]
+async fn a_single_feed_lookup_reports_that_feed_s_range() {
+    let server = TestServer::start()
+        .await
+        .expect("Failed to start test server");
+
+    let ka_band: FeedInfo = server
+        .get("/api/v1/antennas/test_large/feeds/ka_band")
+        .await
+        .expect("Feed details failed");
+
+    assert_eq!(ka_band.frequency_range_mhz, (25500.0, 27000.0));
+
+    server.shutdown().await;
+}
+
 /// Test feed details endpoint
 #[tokio::test]
 async fn test_get_feed_details() {
