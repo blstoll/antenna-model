@@ -468,7 +468,11 @@ impl Default for CalibrationRepository {
 ///
 /// A design-spec antenna has no measurements, so the only range it can honestly declare is
 /// the feed's own design band; the angles and reference temperature are fixed conservative
-/// defaults. There is no antenna-level override — the `validity_ranges` config block was
+/// defaults. `elevation_min_max` is the **polar angle from boresight** (0° = boresight), not
+/// horizon elevation — `docs/domain-contract.md`, far-field row — so `(0.0, 90.0)` is the
+/// forward hemisphere, not "10° to 80° above the horizon". Misreading it that way is half of
+/// why the config block below was removed rather than fixed.
+/// There is no antenna-level override — the `validity_ranges` config block was
 /// removed in #56 because its frequency field was published verbatim under the per-feed
 /// `FeedInfo.frequency_range_mhz`, making a Ka-band feed claim X-band coverage, and its other
 /// three fields were read by nothing. `AntennaConfigEntry` denies unknown fields, so a stale

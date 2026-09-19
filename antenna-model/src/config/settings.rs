@@ -1364,6 +1364,28 @@ antennas:
         );
     }
 
+    /// The same entry minus the stale block still loads and still reports its declared
+    /// status. Removing `calibration_coverage` took nothing else with it.
+    #[test]
+    fn test_partially_calibrated_antenna_without_the_removed_block_still_loads() {
+        let config = parse_antenna_config(
+            r#"
+antennas:
+  - id: "partial_antenna"
+    name: "Partially Calibrated Antenna"
+    calibration_status: "partially_calibrated"
+    calibration_file: "partial.bin"
+    enabled: true
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.antennas[0].get_calibration_status(),
+            "partially_calibrated"
+        );
+    }
+
     /// The `validity_ranges` block was removed from the config schema (#56): it published an
     /// antenna-level frequency range under a per-feed field name, and its angle and
     /// temperature fields were read by nothing. Same silent-drop hazard, same loud failure.

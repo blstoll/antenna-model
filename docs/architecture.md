@@ -647,7 +647,9 @@ antennas:
 The entry carries no `validity_ranges` or `calibration_coverage` block, and the schema
 rejects one (#56). A calibrated antenna's coverage and validity ranges come from its `.bin`
 artifact; an uncalibrated feed's frequency range is the `frequency_range` on that feed, with
-azimuth `0-360`, elevation `0-90` and 290 K as fixed conservative defaults. `AntennaConfigEntry`
+azimuth `0-360`, elevation `0-90` and 290 K as fixed conservative defaults. That elevation is
+the **polar angle from boresight** (0° = boresight), not horizon elevation — see the far-field
+row of `docs/domain-contract.md` — so `0-90` is the forward hemisphere. `AntennaConfigEntry`
 sets `deny_unknown_fields`, so a stale block — or a misspelled key — fails at startup and names
 itself rather than being dropped in silence.
 

@@ -157,7 +157,10 @@ fails at startup and names itself. The `calibration_coverage` and `validity_rang
 this design originally put here were removed in #56 — nothing read them. A calibrated
 antenna's coverage and validity ranges come from its `.bin` artifact; an uncalibrated feed's
 validity frequency range is that feed's own `frequency_range`, with azimuth `0-360`,
-elevation `0-90` and 290 K as fixed conservative defaults. The identically-named
+elevation `0-90` and 290 K as fixed conservative defaults — where that elevation is the
+**polar angle from boresight** (0° = boresight), not horizon elevation (`docs/domain-contract.md`,
+far-field row), so `0-90` is the forward hemisphere. Reading it as horizon elevation is half of
+why the config block was removed rather than fixed. The identically-named
 `ValidityRanges` and `CalibrationCoverage` types on `AntennaCalibration` below are the
 artifact's, and are unaffected.
 
