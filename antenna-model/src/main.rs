@@ -1,7 +1,7 @@
 //! Antenna Model Service - Main Entry Point
 //!
-//! This service provides REST API access to calibrated antenna models
-//! using 4D B-spline interpolation.
+//! This service provides REST API access to calibrated antenna models using physical
+//! optics plus validated 3D correction-surface interpolation inside fitted support.
 //!
 //! # Configuration
 //!

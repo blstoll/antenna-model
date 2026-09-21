@@ -4,10 +4,7 @@
 //! domain coordinates (E-clock, E-cone, and frequency); schema 5's synthetic
 //! temperature axis is confined to the wire adapter in this module.
 
-use std::collections::BTreeMap;
-
 use crate::data::types::{BSplineModel4D, ValidationError as DataValidationError};
-use crate::error::{ComputationError, Result as ModelResult};
 
 /// One non-zero contribution to a correction-surface coefficient.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -42,9 +39,20 @@ pub enum CorrectionEvaluation {
     OutsideSupport,
 }
 
+impl CorrectionEvaluation {
+    /// Return the evidence-backed correction, or `None` outside fitted support.
+    pub fn correction_db(self) -> Option<f64> {
+        match self {
+            Self::Applied(correction_db) => Some(correction_db),
+            Self::OutsideSupport => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct AxisLayout {
     knots: Vec<f64>,
+    coefficient_count: usize,
 }
 
 impl AxisLayout {
@@ -52,9 +60,23 @@ impl AxisLayout {
         (self.knots[order - 1], self.knots[self.knots.len() - order])
     }
 
-    fn contains(&self, value: f64, order: usize) -> bool {
+    fn active_basis(&self, value: f64, order: usize) -> Option<Vec<(usize, f64)>> {
         let (lower, upper) = self.support(order);
-        (lower..=upper).contains(&value)
+        if !value.is_finite() || !(lower..=upper).contains(&value) {
+            return None;
+        }
+
+        let span = find_knot_span(&self.knots, value, order);
+        let active = evaluate_basis_functions(&self.knots, span, value, order)
+            .into_iter()
+            .enumerate()
+            .filter(|(_, weight)| *weight != 0.0)
+            .map(|(local, weight)| {
+                let coefficient_index = span + local - (order - 1);
+                (coefficient_index < self.coefficient_count).then_some((coefficient_index, weight))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        (!active.is_empty()).then_some(active)
     }
 }
 
@@ -134,74 +156,31 @@ impl CorrectionSurfaceLayout {
         e_clock_deg: f64,
         e_cone_deg: f64,
         frequency_mhz: f64,
-    ) -> ModelResult<BasisStencilOutcome> {
-        let query = [e_clock_deg, e_cone_deg, frequency_mhz];
-        if query.iter().any(|value| !value.is_finite()) {
-            return Err(ComputationError::InvalidCorrectionSurfaceQuery {
-                e_clock_deg,
-                e_cone_deg,
-                frequency_mhz,
-                reason: "all query coordinates must be finite".to_string(),
-            }
-            .into());
-        }
+    ) -> BasisStencilOutcome {
+        let Some(clock_basis) = self.axes[0].active_basis(e_clock_deg, self.order) else {
+            return BasisStencilOutcome::OutsideSupport;
+        };
+        let Some(cone_basis) = self.axes[1].active_basis(e_cone_deg, self.order) else {
+            return BasisStencilOutcome::OutsideSupport;
+        };
+        let Some(frequency_basis) = self.axes[2].active_basis(frequency_mhz, self.order) else {
+            return BasisStencilOutcome::OutsideSupport;
+        };
 
-        if self
-            .axes
-            .iter()
-            .zip(query)
-            .any(|(axis, value)| !axis.contains(value, self.order))
-        {
-            return Ok(BasisStencilOutcome::OutsideSupport);
-        }
-
-        let spans: [usize; 3] = std::array::from_fn(|index| {
-            find_knot_span(&self.axes[index].knots, query[index], self.order)
-        });
-        let basis: [Vec<f64>; 3] = std::array::from_fn(|index| {
-            evaluate_basis_functions(
-                &self.axes[index].knots,
-                spans[index],
-                query[index],
-                self.order,
-            )
-        });
-
-        // Legacy schema-5 validation admits knot vectors longer than shape + order.
-        // Clamp those surplus mathematical basis positions to the last serialized
-        // coefficient exactly once here, then combine aliases into one sparse entry.
-        // Issue #95 will tighten construction; until then this preserves loadability
-        // without spreading indexing rules across callers.
-        let mut weights = BTreeMap::<usize, f64>::new();
-        for frequency_local in 0..self.order {
-            let frequency_index =
-                coefficient_index(spans[2], frequency_local, self.order, self.shape[2]);
-            for cone_local in 0..self.order {
-                let cone_index = coefficient_index(spans[1], cone_local, self.order, self.shape[1]);
-                for clock_local in 0..self.order {
-                    let weight =
-                        basis[0][clock_local] * basis[1][cone_local] * basis[2][frequency_local];
-                    if weight == 0.0 {
-                        continue;
-                    }
-                    let clock_index =
-                        coefficient_index(spans[0], clock_local, self.order, self.shape[0]);
-                    let index = clock_index
-                        + self.shape[0] * (cone_index + self.shape[1] * frequency_index);
-                    *weights.entry(index).or_default() += weight;
+        let mut entries = Vec::with_capacity(self.order.pow(3));
+        for &(frequency_index, frequency_weight) in &frequency_basis {
+            for &(cone_index, cone_weight) in &cone_basis {
+                for &(clock_index, clock_weight) in &clock_basis {
+                    entries.push(BasisStencilEntry {
+                        coefficient_index: clock_index
+                            + self.shape[0] * (cone_index + self.shape[1] * frequency_index),
+                        basis_weight: clock_weight * cone_weight * frequency_weight,
+                    });
                 }
             }
         }
 
-        Ok(BasisStencilOutcome::InSupport(BasisStencil {
-            entries: weights
-                .into_iter()
-                .map(|(coefficient_index, basis_weight)| BasisStencilEntry {
-                    coefficient_index,
-                    basis_weight,
-                })
-                .collect(),
-        }))
+        BasisStencilOutcome::InSupport(BasisStencil { entries })
     }
 }
 
@@ -250,19 +229,19 @@ impl FittedCorrectionSurface {
         e_clock_deg: f64,
         e_cone_deg: f64,
         frequency_mhz: f64,
-    ) -> ModelResult<CorrectionEvaluation> {
+    ) -> CorrectionEvaluation {
         match self
             .layout
-            .basis_stencil(e_clock_deg, e_cone_deg, frequency_mhz)?
+            .basis_stencil(e_clock_deg, e_cone_deg, frequency_mhz)
         {
-            BasisStencilOutcome::OutsideSupport => Ok(CorrectionEvaluation::OutsideSupport),
-            BasisStencilOutcome::InSupport(stencil) => Ok(CorrectionEvaluation::Applied(
+            BasisStencilOutcome::OutsideSupport => CorrectionEvaluation::OutsideSupport,
+            BasisStencilOutcome::InSupport(stencil) => CorrectionEvaluation::Applied(
                 stencil
                     .entries()
                     .iter()
                     .map(|entry| self.coefficients[entry.coefficient_index] * entry.basis_weight)
                     .sum(),
-            )),
+            ),
         }
     }
 }
@@ -310,7 +289,10 @@ fn validated_axis(
         });
     }
 
-    Ok(AxisLayout { knots })
+    Ok(AxisLayout {
+        knots,
+        coefficient_count,
+    })
 }
 
 /// Validate schema 5's wire representation through the same adapter used to prepare it.
@@ -383,10 +365,6 @@ fn coefficient_count(shape: [usize; 3]) -> Option<usize> {
         .try_fold(1usize, |count, axis| count.checked_mul(axis))
 }
 
-fn coefficient_index(span: usize, local: usize, order: usize, count: usize) -> usize {
-    (span + local - (order - 1)).min(count - 1)
-}
-
 fn find_knot_span(knots: &[f64], value: f64, order: usize) -> usize {
     let mut low = order - 1;
     let mut high = knots.len() - order;
@@ -449,11 +427,11 @@ mod tests {
         let surface = FittedCorrectionSurface::new(layout, vec![1.25; 8]).unwrap();
 
         assert_eq!(
-            surface.evaluate(5.0, 10.0, 8_500.0).unwrap(),
+            surface.evaluate(5.0, 10.0, 8_500.0),
             CorrectionEvaluation::Applied(1.25)
         );
         assert_eq!(
-            surface.evaluate(10_000.0, 10.0, 8_500.0).unwrap(),
+            surface.evaluate(10_000.0, 10.0, 8_500.0),
             CorrectionEvaluation::OutsideSupport
         );
     }
@@ -469,8 +447,7 @@ mod tests {
         )
         .unwrap();
 
-        let BasisStencilOutcome::InSupport(stencil) =
-            layout.basis_stencil(5.0, 10.0, 8_500.0).unwrap()
+        let BasisStencilOutcome::InSupport(stencil) = layout.basis_stencil(5.0, 10.0, 8_500.0)
         else {
             panic!("midpoint must be in support");
         };
@@ -504,7 +481,7 @@ mod tests {
             (1.0e12, 10.0, 8_500.0),
         ] {
             assert_eq!(
-                surface.evaluate(query.0, query.1, query.2).unwrap(),
+                surface.evaluate(query.0, query.1, query.2),
                 CorrectionEvaluation::OutsideSupport,
                 "query {query:?}"
             );
@@ -520,7 +497,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    surface.evaluate(query.0, query.1, query.2).unwrap(),
+                    surface.evaluate(query.0, query.1, query.2),
                     CorrectionEvaluation::Applied(_)
                 ),
                 "exact boundary {query:?}"
@@ -542,7 +519,7 @@ mod tests {
             .map(|index| if index % 2 == 0 { 0.0 } else { 10.0 })
             .collect();
         let surface = FittedCorrectionSurface::new(layout, coefficients).unwrap();
-        let value = |clock| match surface.evaluate(clock, 10.0, 8_500.0).unwrap() {
+        let value = |clock| match surface.evaluate(clock, 10.0, 8_500.0) {
             CorrectionEvaluation::Applied(value) => value,
             CorrectionEvaluation::OutsideSupport => panic!("query must be in support"),
         };
@@ -554,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn non_finite_query_is_an_error_not_outside_support() {
+    fn non_finite_query_is_outside_support_without_a_numeric_value() {
         let layout = CorrectionSurfaceLayout::new(
             [2, 2, 2],
             vec![0.0, 0.0, 10.0, 10.0],
@@ -564,9 +541,55 @@ mod tests {
         )
         .unwrap();
         let surface = FittedCorrectionSurface::new(layout, vec![0.0; 8]).unwrap();
-        assert!(surface.evaluate(f64::NAN, 10.0, 8_500.0).is_err());
-        assert!(surface.evaluate(5.0, f64::INFINITY, 8_500.0).is_err());
-        assert!(surface.evaluate(5.0, 10.0, f64::NEG_INFINITY).is_err());
+        for query in [
+            (f64::NAN, 10.0, 8_500.0),
+            (5.0, f64::INFINITY, 8_500.0),
+            (5.0, 10.0, f64::NEG_INFINITY),
+        ] {
+            assert_eq!(
+                surface.evaluate(query.0, query.1, query.2),
+                CorrectionEvaluation::OutsideSupport
+            );
+        }
+    }
+
+    #[test]
+    fn surplus_knot_basis_positions_are_outside_fitted_support() {
+        // Schema 5 historically admitted knot vectors longer than shape + order. The
+        // mathematical basis then contains positions with no serialized coefficient.
+        // Those regions are unsupported; they must not alias onto the final coefficient.
+        let layout = CorrectionSurfaceLayout::new(
+            [2, 2, 2],
+            vec![0.0, 0.0, 0.0, 10.0, 10.0, 10.0],
+            vec![0.0, 0.0, 20.0, 20.0],
+            vec![8_000.0, 8_000.0, 9_000.0, 9_000.0],
+            2,
+        )
+        .unwrap();
+        let surface = FittedCorrectionSurface::new(layout, vec![7.0; 8]).unwrap();
+
+        assert_eq!(
+            surface.evaluate(7.5, 10.0, 8_500.0),
+            CorrectionEvaluation::OutsideSupport
+        );
+    }
+
+    #[test]
+    fn degenerate_executable_axis_has_no_fitted_value() {
+        let layout = CorrectionSurfaceLayout::new(
+            [2, 2, 2],
+            vec![0.0, 0.0, 0.0, 0.0],
+            vec![0.0, 0.0, 20.0, 20.0],
+            vec![8_000.0, 8_000.0, 9_000.0, 9_000.0],
+            2,
+        )
+        .unwrap();
+        let surface = FittedCorrectionSurface::new(layout, vec![7.0; 8]).unwrap();
+
+        assert_eq!(
+            surface.evaluate(0.0, 10.0, 8_500.0),
+            CorrectionEvaluation::OutsideSupport
+        );
     }
 
     #[test]
@@ -605,7 +628,7 @@ mod tests {
         let surface = FittedCorrectionSurface::from_model4d(&model).unwrap();
         assert_eq!(surface.layout().shape(), [2, 2, 2]);
         assert_eq!(
-            surface.evaluate(5.0, 10.0, 8_500.0).unwrap(),
+            surface.evaluate(5.0, 10.0, 8_500.0),
             CorrectionEvaluation::Applied(1.5)
         );
     }

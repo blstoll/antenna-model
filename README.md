@@ -584,8 +584,8 @@ The service follows a layered architecture:
    - Warning generation
 
 3. **Model Computation Engine**
-   - 4D B-spline interpolation
-   - Extrapolation handling
+   - Shared 3D E-clock/E-cone/frequency B-spline stencils
+   - Explicit fitted-support outcomes; no numeric correction extrapolation
    - Performance-optimized evaluation
 
 4. **Calibration Data Repository**

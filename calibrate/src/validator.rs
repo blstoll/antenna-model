@@ -43,6 +43,7 @@ use crate::correction_surface::{
     CorrectionSurface, CorrectionSurfaceError, CorrectionSurfaceParams,
 };
 use crate::parser::MeasurementPoint;
+use antenna_core::model::CorrectionEvaluation;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, info, warn};
@@ -221,18 +222,18 @@ pub struct AngularRegionStats {
     pub mean_error_db: f64,
 }
 
-/// A fold whose training split could not be fitted.
+/// A cross-validation fold that could not be scored.
 ///
-/// Roadmap D22: recorded and reported rather than aborting the run. Since D20 an
-/// underdetermined fit is a hard error and a fold trains on `(1 − 1/folds)` of the data, so
-/// a dataset can clear the coefficient count on the full set and miss it on a split.
+/// Roadmap D22: recorded and reported rather than aborting the run. A training split can
+/// fail to fit, or its fitted support can exclude every held-out point. Neither case is a
+/// numeric correction result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FoldFailure {
     /// 1-based fold number.
     pub fold: usize,
-    /// Size of the training split that could not be fitted.
+    /// Size of the fold's training split.
     pub training_points: usize,
-    /// The underlying fitting error, with both point counts.
+    /// Why the fold could not be scored completely.
     pub reason: String,
 }
 
@@ -249,9 +250,16 @@ pub struct CrossValidationResults {
     /// `num_folds` when `failed_folds` is non-empty — so **this vector is dense and its index
     /// is not the fold number**. Pair it with [`Self::scored_fold_numbers`] before labelling.
     pub fold_rmse_values: Vec<f64>,
-    /// Folds whose training split could not be fitted. Empty in the normal case.
+    /// Folds that could not be refitted or had no supported validation points.
     #[serde(default)]
     pub failed_folds: Vec<FoldFailure>,
+    /// Held-out points omitted because they lay outside their fold's fitted support.
+    ///
+    /// A nonzero count makes the run incomplete even when every fold has an RMSE. Keeping
+    /// the count explicit prevents a supported-subset score from masquerading as full
+    /// cross-validation.
+    #[serde(default)]
+    pub unsupported_validation_points: usize,
     /// Mean over the folds that were scored.
     ///
     /// `Option` rather than a NaN sentinel: these are serialized into the `--report` JSON,
@@ -265,14 +273,14 @@ pub struct CrossValidationResults {
 }
 
 impl CrossValidationResults {
-    /// True when every requested fold was scored.
+    /// True when every requested fold and every held-out point was scored.
     pub fn is_complete(&self) -> bool {
-        self.failed_folds.is_empty()
+        self.failed_folds.is_empty() && self.unsupported_validation_points == 0
     }
 
     /// The 1-based fold numbers behind `fold_rmse_values`, in the same order.
     ///
-    /// `fold_rmse_values` skips folds that could not be refitted, so its *position* is not its
+    /// `fold_rmse_values` skips folds that could not be scored, so its *position* is not its
     /// fold number. Reporting it positionally silently relabels the survivors — with folds 1
     /// and 2 failing, the value printed as "fold 1" is really fold 3.
     pub fn scored_fold_numbers(&self) -> Vec<usize> {
@@ -487,12 +495,18 @@ fn compute_corrected_predictions(
     model_predictions: &[f64],
     correction_surface: &CorrectionSurface,
 ) -> Result<Vec<f64>> {
+    let fitted = correction_surface.fitted()?;
     let mut corrected = Vec::with_capacity(measurements.len());
 
     for (meas, &model_pred) in measurements.iter().zip(model_predictions.iter()) {
-        let correction =
-            correction_surface.evaluate(meas.frequency_mhz, meas.e_cone_deg, meas.e_clock_deg)?;
-        corrected.push(model_pred + correction);
+        let CorrectionEvaluation::Applied(correction_db) =
+            fitted.evaluate(meas.e_clock_deg, meas.e_cone_deg, meas.frequency_mhz)
+        else {
+            return Err(ValidationError::ComputationError {
+                reason: "a validation point is outside the full fitted surface".to_string(),
+            });
+        };
+        corrected.push(model_pred + correction_db);
     }
 
     Ok(corrected)
@@ -763,6 +777,7 @@ fn perform_cross_validation(
 
     let mut fold_rmse_values = Vec::new();
     let mut failed_folds: Vec<FoldFailure> = Vec::new();
+    let mut unsupported_validation_points = 0usize;
 
     for fold in 0..num_folds {
         // Fold assignment comes from `correction_surface::is_held_out` — the crate's single
@@ -828,25 +843,55 @@ fn perform_cross_validation(
             }
         };
 
-        // Evaluate on test set
+        // Evaluate on the test set through core's fitted-support outcome. A held-out edge
+        // can lie beyond the training fold's fitted domain; it has no correction value and
+        // must not be scored as a fabricated 0 dB correction.
+        let fitted = correction_surface.fitted()?;
+        let mut test_measured = Vec::new();
         let mut test_corrected = Vec::new();
+        let mut unsupported_points = 0usize;
         for (meas, &model_pred) in test_measurements.iter().zip(test_predictions.iter()) {
-            let correction = correction_surface.evaluate(
-                meas.frequency_mhz,
-                meas.e_cone_deg,
-                meas.e_clock_deg,
-            )?;
-            test_corrected.push(model_pred + correction);
+            match fitted.evaluate(meas.e_clock_deg, meas.e_cone_deg, meas.frequency_mhz) {
+                CorrectionEvaluation::Applied(correction_db) => {
+                    test_measured.push(meas.g_over_t_db);
+                    test_corrected.push(model_pred + correction_db);
+                }
+                CorrectionEvaluation::OutsideSupport => unsupported_points += 1,
+            }
         }
 
-        let test_measured: Vec<f64> = test_measurements.iter().map(|m| m.g_over_t_db).collect();
+        if test_corrected.is_empty() {
+            let reason = format!(
+                "fold {}/{} has no validation points inside its fitted support ({} held-out points)",
+                fold + 1,
+                num_folds,
+                unsupported_points
+            );
+            warn!("{reason}");
+            failed_folds.push(FoldFailure {
+                fold: fold + 1,
+                training_points: train_measurements.len(),
+                reason,
+            });
+            continue;
+        }
+        if unsupported_points > 0 {
+            unsupported_validation_points += unsupported_points;
+            warn!(
+                "fold {}/{} excluded {unsupported_points}/{} validation points outside its fitted support",
+                fold + 1,
+                num_folds,
+                test_measurements.len()
+            );
+        }
+
         let fold_rmse = compute_rmse(&test_measured, &test_corrected);
 
         debug!(
             "Fold {}: RMSE = {:.3} dB ({} test points)",
             fold + 1,
             fold_rmse,
-            test_measurements.len()
+            test_corrected.len()
         );
         fold_rmse_values.push(fold_rmse);
     }
@@ -882,28 +927,26 @@ fn perform_cross_validation(
         )
     };
 
-    match (
-        failed_folds.is_empty(),
-        mean_rmse,
-        std_rmse,
-        min_rmse,
-        max_rmse,
-    ) {
-        (true, Some(mean), Some(std), Some(min), Some(max)) => info!(
-            "Cross-validation complete: mean RMSE = {mean:.3} ± {std:.3} dB \
-             (min: {min:.3}, max: {max:.3})"
-        ),
-        (false, Some(mean), Some(std), _, _) => warn!(
+    match (mean_rmse, std_rmse, min_rmse, max_rmse) {
+        (Some(mean), Some(std), Some(min), Some(max))
+            if failed_folds.is_empty() && unsupported_validation_points == 0 =>
+        {
+            info!(
+                "Cross-validation complete: mean RMSE = {mean:.3} ± {std:.3} dB \
+                 (min: {min:.3}, max: {max:.3})"
+            )
+        }
+        (Some(mean), Some(std), _, _) => warn!(
             "Cross-validation INCOMPLETE: {scored}/{num_folds} folds scored (mean RMSE = \
-             {mean:.3} ± {std:.3} dB over those); {} fold(s) could not refit on their \
-             training split. The artifact is still written — its own fit succeeded — but \
-             this figure describes only the folds that ran.",
+             {mean:.3} ± {std:.3} dB over those); {} fold(s) could not be scored and \
+             {unsupported_validation_points} held-out point(s) were omitted. The artifact is \
+             still written — its own fit succeeded — but this figure is partial.",
             failed_folds.len()
         ),
         _ => warn!(
-            "Cross-validation produced NO figure: none of the {num_folds} folds could refit \
-             on its training split. The artifact is still written — its own fit on the full \
-             dataset succeeded."
+            "Cross-validation produced NO figure: none of the {num_folds} folds could be \
+             scored. The artifact is still written — its own fit on the full dataset \
+             succeeded."
         ),
     }
 
@@ -911,6 +954,7 @@ fn perform_cross_validation(
         num_folds,
         fold_rmse_values,
         failed_folds,
+        unsupported_validation_points,
         mean_rmse,
         std_rmse,
         min_rmse,
@@ -1043,8 +1087,9 @@ impl ValidationReport {
             // 0.64 / 10.86, which reads as two populations and is what exposed the defect.
             //
             // Each value is labelled with its own fold NUMBER, not its position:
-            // `fold_rmse_values` is dense and skips folds that could not refit, so with folds
-            // 1 and 2 failing, printing positionally would report fold 3's RMSE as "fold 1".
+            // `fold_rmse_values` is dense and skips folds that could not be scored, so with
+            // folds 1 and 2 failing, printing positionally would report fold 3's RMSE as
+            // "fold 1".
             if !cv.fold_rmse_values.is_empty() {
                 s.push_str("Per fold:   ");
                 for (i, (fold_no, rmse)) in cv
@@ -1063,11 +1108,13 @@ impl ValidationReport {
 
             if !cv.is_complete() {
                 s.push_str(&format!(
-                    "\n⚠ INCOMPLETE: {} of {} folds could not refit on their training \
-                     split, so the figures above cover only the {} that ran. The artifact \
-                     is still written — its own fit succeeded on the full dataset.\n",
+                    "\n⚠ INCOMPLETE: {} of {} folds failed and {} held-out points were \
+                     outside their fold's fitted support. The figures above cover {} scored \
+                     folds and omit those unsupported points. The artifact is still written \
+                     — its own fit succeeded on the full dataset.\n",
                     cv.failed_folds.len(),
                     cv.num_folds,
+                    cv.unsupported_validation_points,
                     cv.fold_rmse_values.len()
                 ));
                 for failure in &cv.failed_folds {
@@ -1365,6 +1412,7 @@ mod tests {
                     reason: "fold 4/5 could not refit".to_string(),
                 },
             ],
+            unsupported_validation_points: 0,
             mean_rmse: Some(0.40),
             std_rmse: Some(0.0816),
             min_rmse: Some(0.30),
@@ -1420,6 +1468,28 @@ mod tests {
             cross_validation: None,
             meets_accuracy_requirements: true,
         }
+    }
+
+    /// A run is complete only when every held-out observation has a correction value.
+    /// A supported-subset RMSE may still be reported, but the omitted count must remain
+    /// explicit so it cannot masquerade as full cross-validation.
+    #[test]
+    fn a_partially_unsupported_fold_is_recorded_as_incomplete() {
+        let (mut points, predictions) = cv_fixture();
+        points[0].e_clock_deg = 359.0;
+        let params = artifact_params();
+        let surface =
+            crate::correction_surface::fit_correction_surface(&points, &predictions, &params)
+                .expect("the full fit includes the unique extreme point");
+
+        let report = validate_calibration(&points, &predictions, &surface, &config_with(params))
+            .expect("an incomplete fold is reportable and does not withhold the artifact");
+        let cv = report.cross_validation.expect("cross-validation ran");
+
+        assert!(!cv.is_complete());
+        assert!(cv.failed_folds.is_empty());
+        assert_eq!(cv.unsupported_validation_points, 1);
+        assert_eq!(cv.fold_rmse_values.len(), 5);
     }
 
     /// The behavioural counterpart: `perform_cross_validation` itself must produce folds that
@@ -1544,7 +1614,11 @@ mod tests {
             .unwrap_or_else(|e| panic!("{folds} folds: {e}"));
 
             assert_eq!(results.num_folds, folds);
-            assert_eq!(results.fold_rmse_values.len(), folds);
+            assert_eq!(
+                results.fold_rmse_values.len() + results.failed_folds.len(),
+                folds,
+                "every requested fold must be represented as scored or unsupported"
+            );
         }
     }
 }

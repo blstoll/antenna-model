@@ -620,11 +620,12 @@ fn assert_injected_bias_recovery(scenario: &UntunedScenario) {
         (500.0, 10.0, 260.0),
     ];
 
+    let fitted = fitted_correction_surface(surface);
     let mut worst = 0.0_f64;
     for (frequency_mhz, e_cone_deg, e_clock_deg) in probes {
         // Parameters are named azimuth/elevation but the 3D->4D bridge maps
         // clock -> azimuth, cone -> elevation (artifact_export.rs:482). Clock first.
-        let got = schema5_correction_value(surface, e_clock_deg, e_cone_deg, frequency_mhz);
+        let got = correction_value(&fitted, e_clock_deg, e_cone_deg, frequency_mhz);
 
         assert!(
             got.is_finite(),

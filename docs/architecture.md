@@ -90,9 +90,9 @@ The Antenna Model Service is a high-accuracy antenna loss modeling system deploy
 │  │                 │                                   │ │
 │  │  ┌──────────────▼─────────────────────────────────┐ │ │
 │  │  │         Model Computation Engine               │ │ │
-│  │  │  - 4D interpolation (az, el, freq, [temp])     │ │ │
-│  │  │  - B-spline evaluation                         │ │ │
-│  │  │  - Extrapolation handling                      │ │ │
+│  │  │  - 3D interpolation (clock, cone, frequency)   │ │ │
+│  │  │  - Shared sparse B-spline stencil              │ │ │
+│  │  │  - Explicit fitted-support gating              │ │ │
 │  │  │  - [Future: GPU acceleration]                  │ │ │
 │  │  └──────────────┬─────────────────────────────────┘ │ │
 │  │                 │                                   │ │
@@ -177,9 +177,9 @@ The Antenna Model Service is a high-accuracy antenna loss modeling system deploy
 
 #### 3.2.3 Model Computation Engine
 **Responsibilities:**
-- 4D B-spline interpolation (azimuth, elevation, frequency, temperature)
-- Efficient coefficient evaluation
-- Extrapolation for out-of-range queries
+- Validated 3D B-spline correction over E-clock, E-cone, and frequency
+- Shared sparse basis stencils for fitting and fitted evaluation
+- Explicit `OutsideSupport` outcomes with no numeric extrapolation
 - Performance-critical path optimization
 
 **Design Considerations:**
@@ -356,11 +356,14 @@ read the disposition; they never re-derive either boolean:
 
 ```rust
 let (correction_db, disposition) = match &prepared_correction_surface {
+    None if outside_partial_calibration_region(calibration, clock, cone) => {
+        (0.0, CorrectionDisposition::UnavailableOutsideCoverage)
+    }
     None => (0.0, CorrectionDisposition::Unavailable),
     Some(_) if !is_in_coverage(&calibration.calibration_coverage, clock, cone, freq) => {
         (0.0, CorrectionDisposition::OutsideCoverage)
     }
-    Some(surface) => match surface.evaluate(clock, cone, freq)? {
+    Some(surface) => match surface.evaluate(clock, cone, freq) {
         CorrectionEvaluation::Applied(value) => (value, CorrectionDisposition::Applied),
         CorrectionEvaluation::OutsideSupport => (0.0, CorrectionDisposition::OutsideSupport),
     },
@@ -369,10 +372,12 @@ let (correction_db, disposition) = match &prepared_correction_surface {
 let final_gain_db = physics_gain_db + correction_db;
 ```
 
-`Unavailable` is not extrapolated — there is no fitted surface to leave. `OutsideCoverage`
-and `OutsideSupport` return physics only and set the compatibility `metadata.extrapolated`
-flag. The B-spline is never evaluated outside fitted support, so `Applied` always denotes
-an interpolation and never emits a numeric extrapolation.
+`Unavailable` is not extrapolated — there is no fitted surface or measured-region boundary
+to leave. For partially calibrated antennas without a surface,
+`UnavailableOutsideCoverage` preserves the measured-direction boundary and is extrapolated
+compatibility metadata. `OutsideCoverage` and `OutsideSupport` likewise return physics only
+and set `metadata.extrapolated`. The B-spline is never evaluated outside fitted support, so
+`Applied` always denotes interpolation and never emits a numeric extrapolation.
 
 **Accuracy Adjustment:**
 For partially calibrated antennas, accuracy estimate varies by query location:

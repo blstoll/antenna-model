@@ -225,7 +225,10 @@ pub(crate) fn evaluate_gain_from_request_with_budget(
     let calibration_status_info = prepared.calibration_status().map(|status| {
         let mut info = CalibrationStatusInfo::from(status);
         let application = match served.correction {
-            CorrectionDisposition::Unavailable => CorrectionApplication::Unavailable,
+            CorrectionDisposition::Unavailable
+            | CorrectionDisposition::UnavailableOutsideCoverage => {
+                CorrectionApplication::Unavailable
+            }
             CorrectionDisposition::OutsideCoverage | CorrectionDisposition::OutsideSupport => {
                 CorrectionApplication::None
             }
@@ -325,11 +328,11 @@ mod tests {
             calibration.correction_surface = Some(crate::data::types::BSplineModel4D {
                 coefficients: vec![1.0; 2 * 2 * 2],
                 shape: [2, 2, 2, 1],
-                knots_azimuth: vec![0.0, 0.0, 0.0, 360.0, 360.0, 360.0],
-                knots_elevation: vec![0.0, 0.0, 0.0, 90.0, 90.0, 90.0],
-                knots_frequency: vec![8000.0, 8000.0, 8000.0, 9000.0, 9000.0, 9000.0],
-                knots_temperature: vec![290.0, 290.0, 290.0, 290.0, 290.0, 290.0],
-                spline_order: 3,
+                knots_azimuth: vec![0.0, 0.0, 360.0, 360.0],
+                knots_elevation: vec![0.0, 0.0, 90.0, 90.0],
+                knots_frequency: vec![8000.0, 8000.0, 9000.0, 9000.0],
+                knots_temperature: vec![290.0, 290.0, 290.0],
+                spline_order: 2,
             });
             calibration
         };

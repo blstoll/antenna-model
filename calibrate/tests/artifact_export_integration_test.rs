@@ -7,7 +7,7 @@
 
 use antenna_model::data::loader::load_calibration_artifact;
 use antenna_model::data::types::CALIBRATION_SCHEMA_VERSION;
-use antenna_model::model::{CorrectionEvaluation, FittedCorrectionSurface};
+use antenna_model::model::FittedCorrectionSurface;
 use calibrate::artifact_export::{export_full_calibration, ExportPhysicalParams};
 use calibrate::correction_surface::{
     assess_angular_resolution, fit_correction_surface, CorrectionSurfaceParams,
@@ -20,13 +20,10 @@ fn applied_value(
     e_cone_deg: f64,
     frequency_mhz: f64,
 ) -> f64 {
-    match surface
+    surface
         .evaluate(e_clock_deg, e_cone_deg, frequency_mhz)
-        .expect("correction evaluation")
-    {
-        CorrectionEvaluation::Applied(value) => value,
-        CorrectionEvaluation::OutsideSupport => panic!("test query left fitted support"),
-    }
+        .correction_db()
+        .expect("test query left fitted support")
 }
 
 /// Smooth synthetic residual over (clock, cone, freq).
@@ -136,7 +133,7 @@ fn test_full_export_loads_via_service() {
 
     // Shape: spatial axes copy directly (no top-padding; service evaluator fixed),
     // temperature = order + 1.
-    let [n_freq, n_cone, n_clock] = surface.shape;
+    let [n_clock, n_cone, n_freq] = surface.shape;
     assert_eq!(correction.shape[0], n_clock, "azimuth control points");
     assert_eq!(correction.shape[1], n_cone, "elevation control points");
     assert_eq!(correction.shape[2], n_freq, "frequency control points");
@@ -630,7 +627,7 @@ fn a_minimal_frequency_axis_round_trips_and_a_degenerate_one_is_refused() {
         fit_correction_surface(&measurements, &predictions, &params).expect("minimal-axis fit");
 
     assert_eq!(
-        surface.shape[0], 4,
+        surface.shape[2], 4,
         "zero interior knots at order 4 must leave exactly `order` frequency coefficients"
     );
 
@@ -758,10 +755,9 @@ fn a_minimal_frequency_axis_round_trips_and_a_degenerate_one_is_refused() {
 /// confirming it.** The complete round trip — fit, convert, export, write, load, evaluate —
 /// completes in a **24 KiB** thread stack, and the whole `calibrate` lib suite passes with
 /// `RUST_MIN_STACK=65536`. There was also nothing to rewrite iteratively: the then-existing
-/// 4D evaluator (`correction_interpolator::evaluate_basis_functions`) was already an iterative Cox-de Boor
-/// loop at `4b439c0` itself, and the one genuine recursion,
-/// `correction_surface::bspline_basis`, is depth-bounded by `spline_order` (4 here), so its
-/// worst case is 2⁴ tiny frames.
+/// service evaluator was already iterative at `4b439c0`. Issue #92 subsequently consolidated
+/// fitting and serving onto `antenna_core::model::correction_surface`'s iterative sparse
+/// stencil and removed calibrate's recursive basis copy entirely.
 ///
 /// So the value of this test is not the rewrite D3 imagined — it is turning a Linux-only,
 /// CI-only symptom into a property that fails on every platform. `GUARD_STACK_BYTES` is

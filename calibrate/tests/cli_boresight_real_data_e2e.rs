@@ -60,7 +60,7 @@ use antenna_model::data::repository::CalibrationRepository;
 use antenna_model::data::types::{
     AntennaCalibration, CalibrationStatus, CALIBRATION_SCHEMA_VERSION,
 };
-use antenna_model::model::{CorrectionEvaluation, FittedCorrectionSurface};
+use antenna_model::model::FittedCorrectionSurface;
 use antenna_model::service::compute_gain_from_request;
 use antenna_model::warnings::WarningCode;
 use std::path::{Path, PathBuf};
@@ -668,13 +668,10 @@ fn sa_8002a_correction_is_material_not_decorative() {
     // drive the basis to zero here (the D15 silent-zero failure mode).
     let mut max_abs = 0.0_f64;
     for &(frequency_mhz, _) in &SA_PUBLISHED {
-        let value = match fitted
+        let value = fitted
             .evaluate(0.0, 0.0, frequency_mhz)
-            .expect("evaluate the fitted correction")
-        {
-            CorrectionEvaluation::Applied(value) => value,
-            CorrectionEvaluation::OutsideSupport => panic!("published frequency left support"),
-        };
+            .correction_db()
+            .expect("published frequency left support");
         assert!(
             value.is_finite(),
             "correction at {frequency_mhz} MHz is not finite: {value}"

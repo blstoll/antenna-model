@@ -20,23 +20,18 @@
 //! All angular dimensions are in degrees on both sides, so knot vectors copy
 //! directly. The temperature axis does not exist in the source surface, so it
 //! is constructed as a *flat-but-valid* axis (see [`to_bspline_4d`]): the
-//! coefficient slab is replicated `spline_order` times along temperature with a
+//! coefficient slab is replicated `spline_order + 1` times along temperature with a
 //! clamped knot vector over a real, nonzero interval. Because every temperature
 //! layer is identical and B-spline basis functions form a partition of unity,
 //! the surface evaluates to the same temperature-independent value anywhere in
 //! the interval.
 //!
-//! # Index Reordering
+//! # Canonical coefficient order
 //!
-//! The two B-spline representations use different flat-index conventions:
-//!
-//! - 3D source: `idx = i_freq + n_freq * (i_cone + n_cone * i_clock)`
-//!   (frequency varies fastest, clock slowest)
-//! - 4D dest:   `idx = i_az + n_az * (i_el + n_el * (i_freq + n_freq * i_temp))`
-//!   (azimuth/clock varies fastest, temperature slowest)
-//!
-//! Because azimuth := clock, these orderings differ; coefficients must be
-//! reindexed (not memcpy'd).
+//! Fitting and serving share core's E-clock-fastest order:
+//! `idx = i_clock + n_clock * (i_cone + n_cone * i_frequency)`.
+//! A temperature slab therefore copies directly into schema 5's azimuth-fastest wire order;
+//! export only replicates that slab along the retained synthetic temperature axis.
 
 use antenna_core::data::loader::encode_calibration_artifact;
 use antenna_core::data::types::{
@@ -168,8 +163,8 @@ pub(crate) fn flat_axis(lo: f64, hi: f64, order: usize) -> (usize, Vec<f64>) {
 /// * `t_lo` - Lower bound of the (flat) temperature interval in Kelvin.
 /// * `t_hi` - Upper bound of the (flat) temperature interval in Kelvin (must be > `t_lo`).
 pub fn to_bspline_4d(surface: &CorrectionSurface, t_lo: f64, t_hi: f64) -> Result<BSplineModel4D> {
-    let [n_freq, n_cone, n_clock] = surface.shape;
-    if n_freq == 0 || n_cone == 0 || n_clock == 0 {
+    let [n_clock, n_cone, n_freq] = surface.shape;
+    if n_clock == 0 || n_cone == 0 || n_freq == 0 {
         return Err(ArtifactExportError::InvalidSurface(format!(
             "correction surface has zero-sized dimension: shape={:?}",
             surface.shape
@@ -190,36 +185,18 @@ pub fn to_bspline_4d(surface: &CorrectionSurface, t_lo: f64, t_hi: f64) -> Resul
     let knots_elevation = surface.knots_econe.clone();
     let knots_frequency = surface.knots_frequency.clone();
 
-    let n_az = n_clock;
-    let n_el = n_cone;
-    let n_freq_4d = n_freq;
     // Flat-but-valid temperature axis (see [`flat_axis`] and the module/fn docs).
     let (n_temp, knots_temperature) = flat_axis(t_lo, t_hi, order);
 
-    // Reindex coefficients from source layout (freq fastest) to dest layout (az fastest).
-    //   Source: idx = i_freq + n_freq * (i_cone + n_cone * i_clock)
-    //   Dest:   idx = i_az   + n_az   * (i_el   + n_el   * (i_freq + n_freq * i_temp))
-    // The temperature slab is replicated identically across all `n_temp` layers.
-    let total = n_az * n_el * n_freq_4d * n_temp;
-    let mut coefficients = vec![0.0_f64; total];
-
-    for i_az in 0..n_az {
-        for i_el in 0..n_el {
-            for i_freq in 0..n_freq_4d {
-                let src_idx = i_freq + n_freq * (i_el + n_cone * i_az);
-                let value = surface.coefficients[src_idx];
-
-                for i_temp in 0..n_temp {
-                    let dst_idx = i_az + n_az * (i_el + n_el * (i_freq + n_freq_4d * i_temp));
-                    coefficients[dst_idx] = value;
-                }
-            }
-        }
-    }
+    // Core and schema 5 use the same E-clock/azimuth-fastest spatial order. Replicate the
+    // already-canonical slab identically across every synthetic temperature layer.
+    let coefficients = (0..n_temp)
+        .flat_map(|_| surface.coefficients.iter().copied())
+        .collect();
 
     Ok(BSplineModel4D {
         coefficients,
-        shape: [n_az, n_el, n_freq_4d, n_temp],
+        shape: [n_clock, n_cone, n_freq, n_temp],
         knots_azimuth,
         knots_elevation,
         knots_frequency,
@@ -543,7 +520,7 @@ pub fn write_calibration_artifact(calibration: &AntennaCalibration, path: &Path)
 mod tests {
     use super::*;
     use crate::correction_surface::{fit_correction_surface, CorrectionSurfaceParams};
-    use antenna_core::model::{CorrectionEvaluation, FittedCorrectionSurface};
+    use antenna_core::model::FittedCorrectionSurface;
 
     fn applied_value(
         surface: &FittedCorrectionSurface,
@@ -551,13 +528,10 @@ mod tests {
         e_cone_deg: f64,
         frequency_mhz: f64,
     ) -> f64 {
-        match surface
+        surface
             .evaluate(e_clock_deg, e_cone_deg, frequency_mhz)
-            .expect("correction evaluation")
-        {
-            CorrectionEvaluation::Applied(value) => value,
-            CorrectionEvaluation::OutsideSupport => panic!("test query left fitted support"),
-        }
+            .correction_db()
+            .expect("test query left fitted support")
     }
 
     /// Smooth synthetic residual function over (clock, cone, freq).
@@ -623,7 +597,7 @@ mod tests {
 
         // Shape mapping: spatial axes copy directly (no padding now that the
         // service's find_knot_span off-by-one is fixed); temperature axis has order+1 layers.
-        let [n_freq, n_cone, n_clock] = surface.shape;
+        let [n_clock, n_cone, n_freq] = surface.shape;
         assert_eq!(model.shape[0], n_clock); // azimuth <- clock, no pad
         assert_eq!(model.shape[1], n_cone); // elevation <- cone, no pad
         assert_eq!(model.shape[2], n_freq); // frequency, no pad

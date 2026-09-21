@@ -18,7 +18,7 @@ use antenna_model::data::loader::{ANTC_ARTIFACT_VERSION, ANTC_HEADER_LEN, ANTC_M
 use antenna_model::data::types::{
     CalibrationStatus, BORESIGHT_COVERAGE_CONE_DEG, CALIBRATION_SCHEMA_VERSION,
 };
-use antenna_model::model::{CorrectionEvaluation, FittedCorrectionSurface};
+use antenna_model::model::FittedCorrectionSurface;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -339,13 +339,10 @@ fn the_carried_frequency_correction_evaluates_to_a_real_value() {
     let frequencies = [7100.0, 7450.0, 7800.0, 8150.0, 8500.0];
     let mut max_abs = 0.0_f64;
     for freq in frequencies {
-        let value = match fitted
+        let value = fitted
             .evaluate(0.0, 0.0, freq)
-            .expect("evaluate the boresight correction")
-        {
-            CorrectionEvaluation::Applied(value) => value,
-            CorrectionEvaluation::OutsideSupport => panic!("measured frequency left support"),
-        };
+            .correction_db()
+            .expect("measured frequency left support");
         assert!(
             value.is_finite(),
             "correction at {freq} MHz is not finite: {value}"

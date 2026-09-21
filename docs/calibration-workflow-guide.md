@@ -95,7 +95,7 @@ All calibration levels produce binary `.bin` files containing:
 - **Antenna metadata**: ID, name, feeds
 - **Physical configuration**: Reflector geometry, feed parameters, mesh properties
 - **Calibration status**: Fully/Partially/Uncalibrated with accuracy estimates
-- **Correction surface** (optional): 4D B-spline interpolation model
+- **Correction surface** (optional): schema-5 4D wire model adapted once to a 3D E-clock/E-cone/frequency evaluator
 - **Validity ranges**: Azimuth, elevation, frequency, temperature
 
 The service loads these artifacts at startup from the `calibration_data/` directory.

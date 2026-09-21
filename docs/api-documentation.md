@@ -665,7 +665,7 @@ CI drift test, so a code cannot reach a client undocumented.
 | `severe_feed_offset` | Edge-case analysis found the feed displaced more than 0.5·f from the focus. Reports the *geometry*; `ray_trace_degraded` reports what the model did about it. |
 | `feed_offset_spillover_unmodeled` | The feed offset is in the 0.3·f–0.5·f band, where the exact coma phase still applies but spillover efficiency is not modelled. |
 | `spillover_significant` | Estimated feed spillover exceeds 10% of radiated power, enough to reduce aperture efficiency materially. |
-| `points_extrapolated` | `/api/v1/heatmap` grid summary: how many successful point dispositions were outside calibration coverage or fitted support. The count comes from the served correction disposition, never from warning codes. |
+| `points_extrapolated` | `/api/v1/heatmap` grid summary: how many successful point dispositions used physics outside a partially calibrated antenna's measured region, outside correction coverage, or outside fitted support. The count comes from the served disposition, never from warning codes. |
 | `point_computation_failed` | At least one grid point (`/api/v1/heatmap`) or cell (`/api/v1/h3-heatmap`) could not be evaluated. Those are counted in `metadata.failed_points` and carry the failure sentinel rather than a gain. |
 
 **`off_axis_unvalidated` in detail.** Beyond the validated main-beam region the returned

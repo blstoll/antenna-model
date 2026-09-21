@@ -146,7 +146,7 @@ Built production-grade REST API with complete 3D coordinate-based gain computati
 **Key Implementation:**
 - `src/api/schemas.rs` (1214 lines) - All API types
 - `src/data/repository.rs` (367 lines) - Calibration management
-- `src/model/correction_interpolator.rs` (462 lines) - **B-spline interpolation FULLY INTEGRATED**
+- `antenna-core/src/model/correction_surface.rs` - **shared sparse B-spline fitting/evaluation layout**
 - `src/service/evaluator.rs` - 7-step gain computation pipeline
 - `src/service/validator.rs` (924 lines) - Comprehensive validation
 

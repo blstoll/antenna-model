@@ -16,6 +16,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
+pub(crate) type PreparedCorrection =
+    std::result::Result<Option<Arc<FittedCorrectionSurface>>, ValidationError>;
+
+#[derive(Debug, Clone)]
+struct CalibrationEntry {
+    calibration: AntennaCalibration,
+    /// The schema-5 wire surface validated and flattened exactly once when inserted.
+    correction_surface: PreparedCorrection,
+}
+
 /// Thread-safe repository for calibration data
 ///
 /// Manages loaded calibration data for multiple antennas and feeds.
@@ -47,16 +57,6 @@ use tracing::{debug, info, warn};
 /// }
 /// # Ok::<(), antenna_model::error::DataError>(())
 /// ```
-pub(crate) type PreparedCorrection =
-    std::result::Result<Option<Arc<FittedCorrectionSurface>>, ValidationError>;
-
-#[derive(Debug, Clone)]
-struct CalibrationEntry {
-    calibration: AntennaCalibration,
-    /// The schema-5 wire surface validated and flattened exactly once when inserted.
-    correction_surface: PreparedCorrection,
-}
-
 #[derive(Clone)]
 pub struct CalibrationRepository {
     /// Nested map: antenna_id -> feed_id -> calibration and its prepared correction.

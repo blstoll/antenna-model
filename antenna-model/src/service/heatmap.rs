@@ -441,6 +441,7 @@ mod tests {
         };
         let results = vec![
             successful(CorrectionDisposition::Unavailable),
+            successful(CorrectionDisposition::UnavailableOutsideCoverage),
             successful(CorrectionDisposition::Applied),
             successful(CorrectionDisposition::OutsideCoverage),
             successful(CorrectionDisposition::OutsideSupport),
@@ -454,9 +455,9 @@ mod tests {
         assert_eq!(
             summarize_grid_corrections(&results),
             GridCorrectionSummary {
-                successful_count: 4,
+                successful_count: 5,
                 corrected_count: 1,
-                extrapolated_count: 2,
+                extrapolated_count: 3,
             }
         );
     }

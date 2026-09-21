@@ -201,6 +201,9 @@ pub(crate) enum ReferenceGainRequest {
 pub(crate) enum CorrectionDisposition {
     /// This artifact carries no correction surface at all. Served gain is raw physics.
     Unavailable,
+    /// No correction surface exists and a partially calibrated antenna was queried outside
+    /// its measured spatial region. Gain is physics-model extrapolation.
+    UnavailableOutsideCoverage,
     /// The fitted correction contributed to served gain.
     Applied,
     /// A surface exists but the query is outside calibrated coverage, so it was not
@@ -217,12 +220,13 @@ impl CorrectionDisposition {
         matches!(self, Self::Applied)
     }
 
-    /// Whether a present fitted surface could not support the served query.
-    ///
-    /// An antenna with no correction surface is not "extrapolated": there is no fitted
-    /// surface to leave. An applied correction is always an interpolation inside support.
+    /// Whether the served physics term is outside empirical coverage, or a present fitted
+    /// surface could not support the query. An applied correction is always interpolation.
     pub(crate) fn extrapolated(&self) -> bool {
-        matches!(self, Self::OutsideCoverage | Self::OutsideSupport)
+        matches!(
+            self,
+            Self::UnavailableOutsideCoverage | Self::OutsideCoverage | Self::OutsideSupport
+        )
     }
 }
 
@@ -317,9 +321,8 @@ impl PreparedServedGain {
             .as_ref()
             .map(FittedCorrectionSurface::from_model4d)
             .transpose()
-            .map_err(invalid_correction_surface)?
-            .map(Arc::new);
-        Self::prepare_with_correction_surface(
+            .map(|surface| surface.map(Arc::new));
+        Self::prepare_with_cached_correction(
             calibration,
             correction_surface,
             steering,
@@ -339,22 +342,7 @@ impl PreparedServedGain {
         frequencies: ServedFrequencies,
         time_budget: Duration,
     ) -> Result<Self> {
-        Self::prepare_with_correction_surface(
-            calibration,
-            correction_surface.map_err(invalid_correction_surface)?,
-            steering,
-            frequencies,
-            time_budget,
-        )
-    }
-
-    fn prepare_with_correction_surface(
-        calibration: AntennaCalibration,
-        correction_surface: Option<Arc<FittedCorrectionSurface>>,
-        steering: FeedSteering,
-        frequencies: ServedFrequencies,
-        time_budget: Duration,
-    ) -> Result<Self> {
+        let correction_surface = correction_surface.map_err(invalid_correction_surface)?;
         let focal_length_m = calibration.physical_config.reflector.focal_length_m;
         let diameter_m = calibration.physical_config.reflector.diameter_m;
 
@@ -727,6 +715,14 @@ impl PreparedServedGain {
         // Correction surface, gated on the FULL coverage question (direction and
         // frequency). Interpolated at the squint-corrected direction.
         let (correction_db, disposition) = match &self.correction_surface {
+            None if outside_partial_calibration_region(
+                &self.calibration,
+                corrected.e_clock_deg,
+                corrected.e_cone_deg,
+            ) =>
+            {
+                (0.0, CorrectionDisposition::UnavailableOutsideCoverage)
+            }
             None => (0.0, CorrectionDisposition::Unavailable),
             Some(_)
                 if !is_in_coverage(
@@ -742,7 +738,7 @@ impl PreparedServedGain {
                 corrected.e_clock_deg,
                 corrected.e_cone_deg,
                 self.frequencies.operating_mhz,
-            )? {
+            ) {
                 CorrectionEvaluation::Applied(correction_db) => {
                     (correction_db, CorrectionDisposition::Applied)
                 }
@@ -895,6 +891,18 @@ struct PhysicsOutcome {
 ///
 /// This remains private to the served-gain law; endpoints consume the resulting
 /// [`CorrectionDisposition`] rather than repeating this predicate.
+fn outside_partial_calibration_region(
+    calibration: &antenna_core::data::types::AntennaCalibration,
+    e_clock_deg: f64,
+    e_cone_deg: f64,
+) -> bool {
+    matches!(
+        calibration.calibration_status.as_ref(),
+        Some(CalibrationStatus::PartiallyCalibrated { coverage, .. })
+            if !coverage.contains_direction(e_clock_deg, e_cone_deg)
+    )
+}
+
 fn is_in_coverage(
     coverage: &Option<CalibrationCoverage>,
     azimuth_deg: f64,
@@ -965,7 +973,9 @@ fn generate_calibration_warnings(
         CorrectionDisposition::OutsideSupport => {
             Some("Correction surface not applied: query is outside fitted support")
         }
-        CorrectionDisposition::Unavailable | CorrectionDisposition::Applied => None,
+        CorrectionDisposition::Unavailable
+        | CorrectionDisposition::UnavailableOutsideCoverage
+        | CorrectionDisposition::Applied => None,
     };
     warnings.extend(
         correction_not_applied.map(|message| WarningCode::CorrectionNotApplied.with(message)),
@@ -1264,6 +1274,8 @@ mod tests {
         // from — "uncorrected" is not "extrapolated".
         assert!(!CorrectionDisposition::Unavailable.applied());
         assert!(!CorrectionDisposition::Unavailable.extrapolated());
+        assert!(!CorrectionDisposition::UnavailableOutsideCoverage.applied());
+        assert!(CorrectionDisposition::UnavailableOutsideCoverage.extrapolated());
 
         assert!(CorrectionDisposition::Applied.applied());
         assert!(!CorrectionDisposition::Applied.extrapolated());
@@ -2080,6 +2092,22 @@ mod tests {
 
         // And stays silent inside the main beam (gate is the same, threshold intact).
         assert!(off_axis_unvalidated_warning(&calibration, 0.0, 8400.0).is_none());
+
+        // The served disposition retains the independent measured-region fact even though
+        // there is no correction surface. Heatmap summaries consume this value rather than
+        // reverse-engineering OutOfCoverage from warning codes.
+        let served = prepare_unsteered(calibration)
+            .evaluate_direct(
+                PreSquintDirection::new(0.0, 2.0),
+                ReferenceGainRequest::Omit,
+            )
+            .unwrap();
+        assert_eq!(
+            served.correction,
+            CorrectionDisposition::UnavailableOutsideCoverage
+        );
+        assert!(served.correction.extrapolated());
+        assert!(warning_codes(&served).contains(&WarningCode::OutOfCoverage));
     }
 
     /// The threshold is beamwidth-relative (λ/D), not a fixed angle: the same

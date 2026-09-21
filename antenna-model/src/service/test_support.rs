@@ -77,10 +77,10 @@ pub(crate) fn dummy_correction_surface() -> crate::data::types::BSplineModel4D {
     crate::data::types::BSplineModel4D {
         coefficients: vec![0.0; 2 * 2 * 2],
         shape: [2, 2, 2, 1],
-        knots_azimuth: vec![0.0, 0.0, 0.0, 360.0, 360.0, 360.0],
-        knots_elevation: vec![0.0, 0.0, 0.0, 90.0, 90.0, 90.0],
-        knots_frequency: vec![1000.0, 1000.0, 1000.0, 10000.0, 10000.0, 10000.0],
-        knots_temperature: vec![290.0, 290.0, 290.0, 290.0, 290.0, 290.0],
-        spline_order: 3,
+        knots_azimuth: vec![0.0, 0.0, 360.0, 360.0],
+        knots_elevation: vec![0.0, 0.0, 90.0, 90.0],
+        knots_frequency: vec![1000.0, 1000.0, 10000.0, 10000.0],
+        knots_temperature: vec![290.0, 290.0, 290.0],
+        spline_order: 2,
     }
 }

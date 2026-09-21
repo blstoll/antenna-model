@@ -487,11 +487,12 @@ The system supports multiple calibration statuses, enabling graceful degradation
       `compute_g_over_t`, the same function the service uses — so model bias is absorbed
       at calibrated points rather than laundered through a separate gain conversion.
    4. **Fit the correction surface** to the residuals `measured − model`
-      (`correction_surface.rs`): a **4D B-spline** over (E-clock, E-cone, frequency,
-      temperature), normal equations accumulated from the basis's local support and
-      solved by an in-house Cholesky (no BLAS). An underdetermined fit is a hard error
-      (roadmap D20), and the delivered knot spacing is compared against the antenna's own
-      `λ/D` lobe period and reported (roadmap D21).
+      (`correction_surface.rs`): a **3D B-spline** over E-clock, E-cone, and frequency,
+      using antenna-core's validated layout and sparse basis stencil. Normal equations are
+      accumulated from the basis's local support and solved by an in-house Cholesky (no
+      BLAS). An underdetermined fit is a hard error (roadmap D20), and the delivered knot
+      spacing is compared against the antenna's own `λ/D` lobe period and reported
+      (roadmap D21).
    5. **Validate** (`validator.rs`, `--validate`): strided k-fold cross-validation
       (point `i` held out by fold `i % K`, roadmap D22) plus main-lobe / first-sidelobe
       error checks.
@@ -537,11 +538,11 @@ The system supports multiple calibration statuses, enabling graceful degradation
    1. **Load design specs** as initial estimates
    2. **Tune physical parameters** across all measurement points
    3. **Optional correction surface**:
-      - Fit sparse ~~3D~~ **4D** B-spline (azimuth, elevation, frequency, **temperature**)
-        *(corrected: `BSplineModel4D` is the only surface shape any artifact can carry, and
-        postcard's encoding is positional — a 3D surface is not a smaller valid artifact,
-        it is an unloadable one)*
-      - Use measurements to construct sparse grid
+      - Fit a sparse **3D** B-spline over E-clock, E-cone, and frequency.
+      - Serialize it through the schema-5 `BSplineModel4D` wire type by repeating the same
+        coefficients across its retained synthetic temperature axis; postcard's positional
+        encoding means that wire field cannot be removed in schema 5.
+      - Use measurements to construct the sparse grid.
    4. **Validate**: Check in-coverage accuracy
    5. **Output**: Calibration artifact with coverage metadata
 
@@ -576,16 +577,17 @@ The calibration artifacts vary based on calibration status:
      absorbed by item 3.
 
 3. **Correction Surface** (Dense)
-   - *Corrected:* a **4D B-spline**, not a 3D lookup table:
-     (azimuth = E-clock, elevation = E-cone, frequency, temperature) → correction_dB,
-     evaluated by `model/correction_interpolator.rs` and applied in
-     `service/evaluator.rs`. `BSplineModel4D` carries the coefficients, per-axis knot
-     vectors and the spline order; the loader validates knot count and monotonicity
-     against the declared shape.
+   - Runtime uses one validated **3D B-spline** over E-clock, E-cone, and frequency,
+     implemented by `antenna-core/src/model/correction_surface.rs` and applied by the
+     served-gain law. `BSplineModel4D` remains the schema-5 wire type for byte
+     compatibility; its synthetic temperature slabs must be identical and are flattened
+     once during load/preparation, so temperature is not a query coordinate.
    - ~~Separate tables for main lobe, sidelobes, far field~~ — *not implemented.* One
-     surface covers the whole domain; there is no lobe-region partition.
-   - **Coverage**: recorded per artifact in `calibration_coverage`; a query outside it
-     still returns a value, with an extrapolation warning.
+     surface covers the whole fitted domain; there is no lobe-region partition.
+   - **Coverage and support**: `calibration_coverage` gates the empirical claim before
+     evaluation. Inside coverage and fitted support, the correction is applied. Outside
+     either boundary, no correction value is produced and served gain is physics-only;
+     `correction_not_applied` names the reason.
    - **Known limitation (roadmap D21/D24):** the angular knots are absolute while the
      pattern scale is `λ/D`, so on a narrow-beam antenna the surface carries the
      residual's *envelope trend*, not its lobe structure. Every full-mode fit now reports
@@ -615,7 +617,8 @@ The calibration artifacts vary based on calibration status:
 
 2. **Optional Frequency Correction** (1D)
    - Frequency-only correction: `correction(freq)`
-   - Stored as degenerate 4D B-spline (single spatial point)
+   - Executed through the 3D runtime evaluator with collapsed spatial axes; serialized in
+     the schema-5 4D wire shape with identical synthetic temperature slabs.
    - **Applied only**: When query is at or near boresight
 
 3. **Calibration Coverage Metadata**

@@ -308,7 +308,7 @@ fn create_knot_vector(data_points: &[f64], order: u8) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use antenna_core::model::{CorrectionEvaluation, FittedCorrectionSurface};
+    use antenna_core::model::FittedCorrectionSurface;
 
     fn applied_value(
         surface: &FittedCorrectionSurface,
@@ -316,13 +316,10 @@ mod tests {
         e_cone_deg: f64,
         frequency_mhz: f64,
     ) -> f64 {
-        match surface
+        surface
             .evaluate(e_clock_deg, e_cone_deg, frequency_mhz)
-            .expect("correction evaluation")
-        {
-            CorrectionEvaluation::Applied(value) => value,
-            CorrectionEvaluation::OutsideSupport => panic!("test query left fitted support"),
-        }
+            .correction_db()
+            .expect("test query left fitted support")
     }
 
     #[test]
