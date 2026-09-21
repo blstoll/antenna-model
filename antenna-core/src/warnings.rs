@@ -43,8 +43,7 @@
 //! This constrains every producer reachable from an aggregating endpoint, not just
 //! the honesty warnings. A message there may interpolate values that are constant
 //! across the grid (an antenna's accuracy estimate, a feed offset in units of `f`)
-//! but not values that vary with the query. `model::correction_interpolator` names
-//! the out-of-range *dimensions* rather than the angles for exactly this reason.
+//! but not values that vary with the query.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -57,10 +56,9 @@ use std::fmt;
 #[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
 #[serde(rename_all = "snake_case")]
 pub enum WarningCode {
-    /// `extrapolated` — the correction surface was evaluated outside the range of
-    /// its knot vectors in at least one dimension, so the returned correction is an
-    /// extrapolation rather than an interpolation.
-    /// Producer: `model::correction_interpolator`.
+    /// `extrapolated` — compatibility-reserved wire member. Correction-surface
+    /// evaluation no longer produces it: outside fitted support has no numeric
+    /// correction and is reported through [`WarningCode::CorrectionNotApplied`].
     Extrapolated,
 
     /// `out_of_coverage` — the query falls outside the azimuth/elevation region a
@@ -69,8 +67,9 @@ pub enum WarningCode {
     OutOfCoverage,
 
     /// `correction_not_applied` — the antenna has a correction surface but it was
-    /// not applied to this query (the query fell outside the recorded coverage).
-    /// The returned gain is raw physics. Producer: `service::served_gain`.
+    /// not applied because the query fell outside recorded coverage or fitted support.
+    /// The message names which reason applies. The returned gain is raw physics.
+    /// Producer: `service::served_gain`.
     CorrectionNotApplied,
 
     /// `uncalibrated` — the antenna has no measurement-derived calibration and is
@@ -123,12 +122,10 @@ pub enum WarningCode {
     /// Producer: `model::edge_cases`.
     SpilloverSignificant,
 
-    /// `points_extrapolated` — grid-level summary from `/heatmap`: how many of the
-    /// evaluated points carried [`WarningCode::Extrapolated`],
-    /// [`WarningCode::CorrectionNotApplied`], or [`WarningCode::OutOfCoverage`] —
-    /// the three ways a returned value can be an extrapolation. The first two are
-    /// exactly the per-point `metadata.extrapolated` flag that `/api/v1/gain`
-    /// returns. Producer: `service::heatmap`.
+    /// `points_extrapolated` — grid-level summary from `/heatmap`: how many successful
+    /// point dispositions were outside calibration coverage or fitted support. The count
+    /// is derived from authoritative correction dispositions, never warning codes.
+    /// Producer: `service::heatmap`.
     PointsExtrapolated,
 
     /// `point_computation_failed` — at least one grid point (`/heatmap`) or cell

@@ -543,7 +543,22 @@ pub fn write_calibration_artifact(calibration: &AntennaCalibration, path: &Path)
 mod tests {
     use super::*;
     use crate::correction_surface::{fit_correction_surface, CorrectionSurfaceParams};
-    use antenna_core::model::evaluate_correction;
+    use antenna_core::model::{CorrectionEvaluation, FittedCorrectionSurface};
+
+    fn applied_value(
+        surface: &FittedCorrectionSurface,
+        e_clock_deg: f64,
+        e_cone_deg: f64,
+        frequency_mhz: f64,
+    ) -> f64 {
+        match surface
+            .evaluate(e_clock_deg, e_cone_deg, frequency_mhz)
+            .expect("correction evaluation")
+        {
+            CorrectionEvaluation::Applied(value) => value,
+            CorrectionEvaluation::OutsideSupport => panic!("test query left fitted support"),
+        }
+    }
 
     /// Smooth synthetic residual function over (clock, cone, freq).
     fn residual(clock_deg: f64, cone_deg: f64, freq_mhz: f64, freq0: f64) -> f64 {
@@ -620,9 +635,9 @@ mod tests {
         let (surface, _freq0) = make_test_surface();
         let t_lo = 289.0;
         let t_hi = 291.0;
-        let t_mid = 0.5 * (t_lo + t_hi);
         let model = to_bspline_4d(&surface, t_lo, t_hi).expect("conversion should succeed");
         assert!(model.validate().is_ok());
+        let fitted = FittedCorrectionSurface::from_model4d(&model).unwrap();
 
         // Sample interior points AND the exact domain boundaries of every axis
         // (fitted ranges: clock [0, 350], cone [0, 10], freq [8000, 8400]) —
@@ -637,28 +652,21 @@ mod tests {
         ];
         let cones = [0.0, 0.5, 3.0, 5.0, 7.0, 9.5, 10.0];
         let freqs = [8000.0, 8050.0, 8200.0, 8350.0, 8400.0];
-        let temps = [t_lo, t_mid, t_hi];
-
         let mut max_err = 0.0_f64;
         let mut samples = 0;
         for &k in &clocks {
             for &c in &cones {
                 for &f in &freqs {
                     let expected = surface.evaluate(f, c, k).expect("3D evaluate");
-                    for &t in &temps {
-                        // 4D mapping: azimuth=clock, elevation=cone, frequency=f.
-                        let got = evaluate_correction(&model, k, c, f, t)
-                            .expect("4D evaluate")
-                            .correction_db;
-                        let err = (got - expected).abs();
-                        max_err = max_err.max(err);
-                        samples += 1;
-                        assert!(
-                            err < 1e-9,
-                            "mismatch at clock={k}, cone={c}, freq={f}, temp={t}: \
-                             expected={expected}, got={got}, err={err}"
-                        );
-                    }
+                    let got = applied_value(&fitted, k, c, f);
+                    let err = (got - expected).abs();
+                    max_err = max_err.max(err);
+                    samples += 1;
+                    assert!(
+                        err < 1e-9,
+                        "mismatch at clock={k}, cone={c}, freq={f}: \
+                         expected={expected}, got={got}, err={err}"
+                    );
                 }
             }
         }
@@ -671,6 +679,7 @@ mod tests {
         // The flat temperature axis must NOT zero out the correction.
         let (surface, _freq0) = make_test_surface();
         let model = to_bspline_4d(&surface, 280.0, 300.0).expect("conversion");
+        let fitted = FittedCorrectionSurface::from_model4d(&model).unwrap();
 
         // A point with a clearly nonzero expected correction.
         let (k, c, f) = (90.0, 5.0, 8200.0);
@@ -680,16 +689,13 @@ mod tests {
             "test point should have nonzero correction, got {expected}"
         );
 
-        // Evaluating at several temperatures in-range must all match (flat axis).
-        for &t in &[281.0, 290.0, 299.0] {
-            let got = evaluate_correction(&model, k, c, f, t)
-                .expect("4D evaluate")
-                .correction_db;
-            assert!(
-                (got - expected).abs() < 1e-9,
-                "temperature {t} should be flat: expected={expected}, got={got}"
-            );
-        }
+        // Preparation accepts the schema-5 adapter only because every synthetic
+        // temperature slab is identical; runtime evaluation has no temperature input.
+        let got = applied_value(&fitted, k, c, f);
+        assert!(
+            (got - expected).abs() < 1e-9,
+            "flat-temperature adapter changed the correction: expected={expected}, got={got}"
+        );
     }
 
     #[test]

@@ -1,0 +1,612 @@
+//! Correction-surface layout and evaluation (GitHub issue #92).
+//!
+//! This module is the mathematical owner of fitted residual surfaces. Callers use
+//! domain coordinates (E-clock, E-cone, and frequency); schema 5's synthetic
+//! temperature axis is confined to the wire adapter in this module.
+
+use std::collections::BTreeMap;
+
+use crate::data::types::{BSplineModel4D, ValidationError as DataValidationError};
+use crate::error::{ComputationError, Result as ModelResult};
+
+/// One non-zero contribution to a correction-surface coefficient.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BasisStencilEntry {
+    pub coefficient_index: usize,
+    pub basis_weight: f64,
+}
+
+/// Sparse tensor-product basis values for one in-support query.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BasisStencil {
+    entries: Vec<BasisStencilEntry>,
+}
+
+impl BasisStencil {
+    pub fn entries(&self) -> &[BasisStencilEntry] {
+        &self.entries
+    }
+}
+
+/// Outcome of asking an unfitted layout for its sparse basis stencil.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BasisStencilOutcome {
+    InSupport(BasisStencil),
+    OutsideSupport,
+}
+
+/// Outcome of evaluating a fitted residual surface.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CorrectionEvaluation {
+    Applied(f64),
+    OutsideSupport,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct AxisLayout {
+    knots: Vec<f64>,
+}
+
+impl AxisLayout {
+    fn support(&self, order: usize) -> (f64, f64) {
+        (self.knots[order - 1], self.knots[self.knots.len() - order])
+    }
+
+    fn contains(&self, value: f64, order: usize) -> bool {
+        let (lower, upper) = self.support(order);
+        (lower..=upper).contains(&value)
+    }
+}
+
+/// Validated three-axis B-spline geometry in canonical coefficient order.
+///
+/// Coefficients are E-clock-fastest, then E-cone, then frequency:
+///
+/// ```text
+/// i_e_clock + n_e_clock * (i_e_cone + n_e_cone * i_frequency)
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct CorrectionSurfaceLayout {
+    axes: [AxisLayout; 3],
+    shape: [usize; 3],
+    order: usize,
+}
+
+impl CorrectionSurfaceLayout {
+    pub fn new(
+        shape: [usize; 3],
+        knots_e_clock: Vec<f64>,
+        knots_e_cone: Vec<f64>,
+        knots_frequency: Vec<f64>,
+        spline_order: u8,
+    ) -> std::result::Result<Self, DataValidationError> {
+        Self::new_with_axis_names(
+            shape,
+            [knots_e_clock, knots_e_cone, knots_frequency],
+            ["E-clock", "E-cone", "frequency"],
+            spline_order,
+        )
+    }
+
+    fn new_with_axis_names(
+        shape: [usize; 3],
+        knots: [Vec<f64>; 3],
+        names: [&'static str; 3],
+        spline_order: u8,
+    ) -> std::result::Result<Self, DataValidationError> {
+        validate_order(spline_order)?;
+        let order = spline_order as usize;
+        let [knots_first, knots_second, knots_third] = knots;
+        let axes = [
+            validated_axis(names[0], shape[0], knots_first, order)?,
+            validated_axis(names[1], shape[1], knots_second, order)?,
+            validated_axis(names[2], shape[2], knots_third, order)?,
+        ];
+
+        coefficient_count(shape).ok_or_else(|| DataValidationError::InvalidKnotVector {
+            dimension: "correction surface".to_string(),
+            reason: format!("coefficient shape {shape:?} overflows usize"),
+        })?;
+
+        Ok(Self { axes, shape, order })
+    }
+
+    pub fn coefficient_count(&self) -> usize {
+        // Construction proves this product fits in usize.
+        self.shape[0] * self.shape[1] * self.shape[2]
+    }
+
+    pub fn shape(&self) -> [usize; 3] {
+        self.shape
+    }
+
+    pub fn spline_order(&self) -> u8 {
+        self.order as u8
+    }
+
+    /// Compute the sparse basis stencil for a domain query.
+    ///
+    /// Exact support boundaries are included. A query outside any axis returns
+    /// [`BasisStencilOutcome::OutsideSupport`] before any basis is evaluated; no
+    /// coordinate is clamped and no polynomial is extended beyond fitted support.
+    pub fn basis_stencil(
+        &self,
+        e_clock_deg: f64,
+        e_cone_deg: f64,
+        frequency_mhz: f64,
+    ) -> ModelResult<BasisStencilOutcome> {
+        let query = [e_clock_deg, e_cone_deg, frequency_mhz];
+        if query.iter().any(|value| !value.is_finite()) {
+            return Err(ComputationError::InvalidCorrectionSurfaceQuery {
+                e_clock_deg,
+                e_cone_deg,
+                frequency_mhz,
+                reason: "all query coordinates must be finite".to_string(),
+            }
+            .into());
+        }
+
+        if self
+            .axes
+            .iter()
+            .zip(query)
+            .any(|(axis, value)| !axis.contains(value, self.order))
+        {
+            return Ok(BasisStencilOutcome::OutsideSupport);
+        }
+
+        let spans: [usize; 3] = std::array::from_fn(|index| {
+            find_knot_span(&self.axes[index].knots, query[index], self.order)
+        });
+        let basis: [Vec<f64>; 3] = std::array::from_fn(|index| {
+            evaluate_basis_functions(
+                &self.axes[index].knots,
+                spans[index],
+                query[index],
+                self.order,
+            )
+        });
+
+        // Legacy schema-5 validation admits knot vectors longer than shape + order.
+        // Clamp those surplus mathematical basis positions to the last serialized
+        // coefficient exactly once here, then combine aliases into one sparse entry.
+        // Issue #95 will tighten construction; until then this preserves loadability
+        // without spreading indexing rules across callers.
+        let mut weights = BTreeMap::<usize, f64>::new();
+        for frequency_local in 0..self.order {
+            let frequency_index =
+                coefficient_index(spans[2], frequency_local, self.order, self.shape[2]);
+            for cone_local in 0..self.order {
+                let cone_index = coefficient_index(spans[1], cone_local, self.order, self.shape[1]);
+                for clock_local in 0..self.order {
+                    let weight =
+                        basis[0][clock_local] * basis[1][cone_local] * basis[2][frequency_local];
+                    if weight == 0.0 {
+                        continue;
+                    }
+                    let clock_index =
+                        coefficient_index(spans[0], clock_local, self.order, self.shape[0]);
+                    let index = clock_index
+                        + self.shape[0] * (cone_index + self.shape[1] * frequency_index);
+                    *weights.entry(index).or_default() += weight;
+                }
+            }
+        }
+
+        Ok(BasisStencilOutcome::InSupport(BasisStencil {
+            entries: weights
+                .into_iter()
+                .map(|(coefficient_index, basis_weight)| BasisStencilEntry {
+                    coefficient_index,
+                    basis_weight,
+                })
+                .collect(),
+        }))
+    }
+}
+
+/// A validated correction-surface layout plus fitted coefficients.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FittedCorrectionSurface {
+    layout: CorrectionSurfaceLayout,
+    coefficients: Vec<f64>,
+}
+
+impl FittedCorrectionSurface {
+    pub fn new(
+        layout: CorrectionSurfaceLayout,
+        coefficients: Vec<f64>,
+    ) -> std::result::Result<Self, DataValidationError> {
+        let expected = layout.coefficient_count();
+        if coefficients.len() != expected {
+            return Err(DataValidationError::InconsistentShape {
+                expected,
+                actual: coefficients.len(),
+            });
+        }
+        Ok(Self {
+            layout,
+            coefficients,
+        })
+    }
+
+    /// Adapt schema 5's byte-compatible 4D wire type into the executable 3D model.
+    ///
+    /// The synthetic temperature dimension is accepted only when every slab is
+    /// identical. Validation and flattening happen here once; evaluation never scans
+    /// the wire coefficients.
+    pub fn from_model4d(model: &BSplineModel4D) -> std::result::Result<Self, DataValidationError> {
+        let layout = schema5_layout(model)?;
+        let coefficients = model.coefficients[..layout.coefficient_count()].to_vec();
+        Self::new(layout, coefficients)
+    }
+
+    pub fn layout(&self) -> &CorrectionSurfaceLayout {
+        &self.layout
+    }
+
+    pub fn evaluate(
+        &self,
+        e_clock_deg: f64,
+        e_cone_deg: f64,
+        frequency_mhz: f64,
+    ) -> ModelResult<CorrectionEvaluation> {
+        match self
+            .layout
+            .basis_stencil(e_clock_deg, e_cone_deg, frequency_mhz)?
+        {
+            BasisStencilOutcome::OutsideSupport => Ok(CorrectionEvaluation::OutsideSupport),
+            BasisStencilOutcome::InSupport(stencil) => Ok(CorrectionEvaluation::Applied(
+                stencil
+                    .entries()
+                    .iter()
+                    .map(|entry| self.coefficients[entry.coefficient_index] * entry.basis_weight)
+                    .sum(),
+            )),
+        }
+    }
+}
+
+fn validate_order(spline_order: u8) -> std::result::Result<(), DataValidationError> {
+    if !(1..=10).contains(&spline_order) {
+        return Err(DataValidationError::InvalidSplineOrder(spline_order));
+    }
+    Ok(())
+}
+
+fn validated_axis(
+    name: &'static str,
+    coefficient_count: usize,
+    knots: Vec<f64>,
+    order: usize,
+) -> std::result::Result<AxisLayout, DataValidationError> {
+    if coefficient_count == 0 {
+        return Err(DataValidationError::InvalidKnotVector {
+            dimension: name.to_string(),
+            reason: "coefficient count must be non-zero".to_string(),
+        });
+    }
+    let minimum_knots = coefficient_count.checked_add(order).ok_or_else(|| {
+        DataValidationError::InvalidKnotVector {
+            dimension: name.to_string(),
+            reason: "coefficient count + spline order overflows usize".to_string(),
+        }
+    })?;
+    if knots.len() < minimum_knots {
+        return Err(DataValidationError::InvalidKnotVector {
+            dimension: name.to_string(),
+            reason: format!(
+                "knot vector length {} < shape {} + order {}",
+                knots.len(),
+                coefficient_count,
+                order
+            ),
+        });
+    }
+    if !knots.windows(2).all(|window| window[0] <= window[1]) {
+        return Err(DataValidationError::InvalidKnotVector {
+            dimension: name.to_string(),
+            reason: "knot vector is not non-decreasing".to_string(),
+        });
+    }
+
+    Ok(AxisLayout { knots })
+}
+
+/// Validate schema 5's wire representation through the same adapter used to prepare it.
+pub(crate) fn validate_model4d(
+    model: &BSplineModel4D,
+) -> std::result::Result<(), DataValidationError> {
+    schema5_layout(model).map(|_| ())
+}
+
+fn schema5_layout(
+    model: &BSplineModel4D,
+) -> std::result::Result<CorrectionSurfaceLayout, DataValidationError> {
+    let layout = CorrectionSurfaceLayout::new_with_axis_names(
+        [model.shape[0], model.shape[1], model.shape[2]],
+        [
+            model.knots_azimuth.clone(),
+            model.knots_elevation.clone(),
+            model.knots_frequency.clone(),
+        ],
+        ["azimuth", "elevation", "frequency"],
+        model.spline_order,
+    )?;
+    let order = model.spline_order as usize;
+    validated_axis(
+        "temperature",
+        model.shape[3],
+        model.knots_temperature.clone(),
+        order,
+    )?;
+
+    let slab_size = layout.coefficient_count();
+    let expected = slab_size.checked_mul(model.shape[3]).ok_or_else(|| {
+        DataValidationError::InvalidKnotVector {
+            dimension: "correction surface".to_string(),
+            reason: format!("coefficient shape {:?} overflows usize", model.shape),
+        }
+    })?;
+    if model.coefficients.len() != expected {
+        return Err(DataValidationError::InconsistentShape {
+            expected,
+            actual: model.coefficients.len(),
+        });
+    }
+
+    let reference = &model.coefficients[..slab_size];
+    for temperature_slab in 1..model.shape[3] {
+        let start = temperature_slab * slab_size;
+        let slab = &model.coefficients[start..start + slab_size];
+        if let Some((coefficient_index, (&expected, &actual))) = reference
+            .iter()
+            .zip(slab)
+            .enumerate()
+            .find(|(_, (expected, actual))| expected != actual)
+        {
+            return Err(DataValidationError::TemperatureDependentCorrection {
+                temperature_slab,
+                coefficient_index,
+                expected,
+                actual,
+            });
+        }
+    }
+
+    Ok(layout)
+}
+
+fn coefficient_count(shape: [usize; 3]) -> Option<usize> {
+    shape
+        .into_iter()
+        .try_fold(1usize, |count, axis| count.checked_mul(axis))
+}
+
+fn coefficient_index(span: usize, local: usize, order: usize, count: usize) -> usize {
+    (span + local - (order - 1)).min(count - 1)
+}
+
+fn find_knot_span(knots: &[f64], value: f64, order: usize) -> usize {
+    let mut low = order - 1;
+    let mut high = knots.len() - order;
+    if value >= knots[high] {
+        return high - 1;
+    }
+
+    while high - low > 1 {
+        let middle = (low + high) / 2;
+        if value < knots[middle] {
+            high = middle;
+        } else {
+            low = middle;
+        }
+    }
+    low
+}
+
+fn evaluate_basis_functions(knots: &[f64], span: usize, value: f64, order: usize) -> Vec<f64> {
+    let degree = order - 1;
+    let mut basis = vec![0.0; order];
+    let mut left = vec![0.0; order];
+    let mut right = vec![0.0; order];
+    basis[0] = 1.0;
+
+    for level in 1..=degree {
+        left[level] = value - knots[span + 1 - level];
+        right[level] = knots[span + level] - value;
+        let mut saved = 0.0;
+        for basis_index in 0..level {
+            let denominator = right[basis_index + 1] + left[level - basis_index];
+            let term = if denominator.abs() > 1e-14 {
+                basis[basis_index] / denominator
+            } else {
+                0.0
+            };
+            basis[basis_index] = saved + right[basis_index + 1] * term;
+            saved = left[level - basis_index] * term;
+        }
+        basis[level] = saved;
+    }
+
+    basis
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fitted_surface_applies_inside_support_and_refuses_outside_support() {
+        let layout = CorrectionSurfaceLayout::new(
+            [2, 2, 2],
+            vec![0.0, 0.0, 10.0, 10.0],
+            vec![0.0, 0.0, 20.0, 20.0],
+            vec![8_000.0, 8_000.0, 9_000.0, 9_000.0],
+            2,
+        )
+        .unwrap();
+        let surface = FittedCorrectionSurface::new(layout, vec![1.25; 8]).unwrap();
+
+        assert_eq!(
+            surface.evaluate(5.0, 10.0, 8_500.0).unwrap(),
+            CorrectionEvaluation::Applied(1.25)
+        );
+        assert_eq!(
+            surface.evaluate(10_000.0, 10.0, 8_500.0).unwrap(),
+            CorrectionEvaluation::OutsideSupport
+        );
+    }
+
+    #[test]
+    fn sparse_stencil_uses_e_clock_fastest_canonical_order() {
+        let layout = CorrectionSurfaceLayout::new(
+            [2, 2, 2],
+            vec![0.0, 0.0, 10.0, 10.0],
+            vec![0.0, 0.0, 20.0, 20.0],
+            vec![8_000.0, 8_000.0, 9_000.0, 9_000.0],
+            2,
+        )
+        .unwrap();
+
+        let BasisStencilOutcome::InSupport(stencil) =
+            layout.basis_stencil(5.0, 10.0, 8_500.0).unwrap()
+        else {
+            panic!("midpoint must be in support");
+        };
+        assert_eq!(stencil.entries().len(), 8);
+        for (expected_index, entry) in stencil.entries().iter().enumerate() {
+            assert_eq!(entry.coefficient_index, expected_index);
+            assert!((entry.basis_weight - 0.125).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn every_axis_has_closed_support_and_far_outside_has_no_value() {
+        let layout = CorrectionSurfaceLayout::new(
+            [2, 2, 2],
+            vec![0.0, 0.0, 10.0, 10.0],
+            vec![0.0, 0.0, 20.0, 20.0],
+            vec![8_000.0, 8_000.0, 9_000.0, 9_000.0],
+            2,
+        )
+        .unwrap();
+        let coefficients: Vec<f64> = (0..8).map(|index| index as f64).collect();
+        let surface = FittedCorrectionSurface::new(layout, coefficients).unwrap();
+
+        for query in [
+            (-1.0, 10.0, 8_500.0),
+            (11.0, 10.0, 8_500.0),
+            (5.0, -1.0, 8_500.0),
+            (5.0, 21.0, 8_500.0),
+            (5.0, 10.0, 7_999.0),
+            (5.0, 10.0, 9_001.0),
+            (1.0e12, 10.0, 8_500.0),
+        ] {
+            assert_eq!(
+                surface.evaluate(query.0, query.1, query.2).unwrap(),
+                CorrectionEvaluation::OutsideSupport,
+                "query {query:?}"
+            );
+        }
+
+        for query in [
+            (0.0, 10.0, 8_500.0),
+            (10.0, 10.0, 8_500.0),
+            (5.0, 0.0, 8_500.0),
+            (5.0, 20.0, 8_500.0),
+            (5.0, 10.0, 8_000.0),
+            (5.0, 10.0, 9_000.0),
+        ] {
+            assert!(
+                matches!(
+                    surface.evaluate(query.0, query.1, query.2).unwrap(),
+                    CorrectionEvaluation::Applied(_)
+                ),
+                "exact boundary {query:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn linear_surface_is_continuous_at_exact_boundaries() {
+        let layout = CorrectionSurfaceLayout::new(
+            [2, 2, 2],
+            vec![0.0, 0.0, 10.0, 10.0],
+            vec![0.0, 0.0, 20.0, 20.0],
+            vec![8_000.0, 8_000.0, 9_000.0, 9_000.0],
+            2,
+        )
+        .unwrap();
+        let coefficients: Vec<f64> = (0..8)
+            .map(|index| if index % 2 == 0 { 0.0 } else { 10.0 })
+            .collect();
+        let surface = FittedCorrectionSurface::new(layout, coefficients).unwrap();
+        let value = |clock| match surface.evaluate(clock, 10.0, 8_500.0).unwrap() {
+            CorrectionEvaluation::Applied(value) => value,
+            CorrectionEvaluation::OutsideSupport => panic!("query must be in support"),
+        };
+
+        assert_eq!(value(0.0), 0.0);
+        assert_eq!(value(10.0), 10.0);
+        assert!((value(1.0e-9) - value(0.0)).abs() < 1.0e-8);
+        assert!((value(10.0 - 1.0e-9) - value(10.0)).abs() < 1.0e-8);
+    }
+
+    #[test]
+    fn non_finite_query_is_an_error_not_outside_support() {
+        let layout = CorrectionSurfaceLayout::new(
+            [2, 2, 2],
+            vec![0.0, 0.0, 10.0, 10.0],
+            vec![0.0, 0.0, 20.0, 20.0],
+            vec![8_000.0, 8_000.0, 9_000.0, 9_000.0],
+            2,
+        )
+        .unwrap();
+        let surface = FittedCorrectionSurface::new(layout, vec![0.0; 8]).unwrap();
+        assert!(surface.evaluate(f64::NAN, 10.0, 8_500.0).is_err());
+        assert!(surface.evaluate(5.0, f64::INFINITY, 8_500.0).is_err());
+        assert!(surface.evaluate(5.0, 10.0, f64::NEG_INFINITY).is_err());
+    }
+
+    #[test]
+    fn schema5_adapter_rejects_temperature_varying_coefficients() {
+        let model = BSplineModel4D {
+            coefficients: vec![1.0; 8].into_iter().chain(vec![2.0; 8]).collect(),
+            shape: [2, 2, 2, 2],
+            knots_azimuth: vec![0.0, 0.0, 10.0, 10.0],
+            knots_elevation: vec![0.0, 0.0, 20.0, 20.0],
+            knots_frequency: vec![8_000.0, 8_000.0, 9_000.0, 9_000.0],
+            knots_temperature: vec![280.0, 280.0, 300.0, 300.0],
+            spline_order: 2,
+        };
+
+        let error = FittedCorrectionSurface::from_model4d(&model).unwrap_err();
+        assert!(
+            error.to_string().contains("temperature slab 1"),
+            "error must identify the unequal slab: {error}"
+        );
+        assert_eq!(model.validate().unwrap_err(), error);
+    }
+
+    #[test]
+    fn schema5_adapter_flattens_identical_temperature_slabs_once() {
+        let model = BSplineModel4D {
+            coefficients: vec![1.5; 16],
+            shape: [2, 2, 2, 2],
+            knots_azimuth: vec![0.0, 0.0, 10.0, 10.0],
+            knots_elevation: vec![0.0, 0.0, 20.0, 20.0],
+            knots_frequency: vec![8_000.0, 8_000.0, 9_000.0, 9_000.0],
+            knots_temperature: vec![280.0, 280.0, 300.0, 300.0],
+            spline_order: 2,
+        };
+
+        model.validate().unwrap();
+        let surface = FittedCorrectionSurface::from_model4d(&model).unwrap();
+        assert_eq!(surface.layout().shape(), [2, 2, 2]);
+        assert_eq!(
+            surface.evaluate(5.0, 10.0, 8_500.0).unwrap(),
+            CorrectionEvaluation::Applied(1.5)
+        );
+    }
+}

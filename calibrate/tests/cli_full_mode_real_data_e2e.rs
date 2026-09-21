@@ -51,9 +51,9 @@
 use antenna_core::model::coordinates_3d::compute_emitter_direction_with_attitude;
 use antenna_model::api::schemas::{GainRequest, GainResponse, Position3D};
 use antenna_model::data::repository::CalibrationRepository;
-use antenna_model::data::types::{AntennaCalibration, CalibrationStatus};
+use antenna_model::data::types::{AntennaCalibration, BSplineModel4D, CalibrationStatus};
 use antenna_model::model::coordinates_3d::geodetic_to_ecef;
-use antenna_model::model::evaluate_correction;
+use antenna_model::model::{CorrectionEvaluation, FittedCorrectionSurface};
 use antenna_model::service::compute_gain_from_request;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -62,6 +62,22 @@ use std::process::Command;
 // ============================================================================
 // Identity of the run
 // ============================================================================
+
+fn schema5_correction_value(
+    model: &BSplineModel4D,
+    e_clock_deg: f64,
+    e_cone_deg: f64,
+    frequency_mhz: f64,
+) -> f64 {
+    let surface = FittedCorrectionSurface::from_model4d(model).expect("valid correction surface");
+    match surface
+        .evaluate(e_clock_deg, e_cone_deg, frequency_mhz)
+        .expect("correction evaluation")
+    {
+        CorrectionEvaluation::Applied(value) => value,
+        CorrectionEvaluation::OutsideSupport => panic!("test query left fitted support"),
+    }
+}
 
 const ANTENNA_ID: &str = "nasa_cr159703_122m";
 const FEED_ID: &str = "kumar_12ghz";
@@ -1025,15 +1041,12 @@ fn assert_the_served_correction_reproduces_the_injected_residual(scenario: &Real
 
     let mut worst = 0.0_f64;
     for anchor in scenario.generated.anchors() {
-        let correction = evaluate_correction(
+        let correction = schema5_correction_value(
             surface,
             anchor.clock_deg,
             anchor.cone_deg,
             ANCHOR_FREQUENCY_MHZ,
-            calibration.validity_ranges.temperature_const,
-        )
-        .expect("evaluate the 4D correction surface")
-        .correction_db;
+        );
 
         let error = (correction - anchor.trend_db).abs();
         worst = worst.max(error);

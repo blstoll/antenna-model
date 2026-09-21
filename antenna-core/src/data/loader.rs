@@ -45,7 +45,7 @@
 //! skipping *both* integrity checks, the container version gate and the CRC32. It was kept
 //! afterwards to stay compatible with artifacts written before D2. That compatibility turned
 //! out to be empty: the schema gate below runs on every artifact regardless of framing, and
-//! [`crate::data::types::CALIBRATION_SCHEMA_VERSION`] has since moved 2.0 → 3.0 → 4.0 → 5.0,
+//! [`crate::data::types::CALIBRATION_SCHEMA_VERSION`] has since moved 2.0 → 3.0 → 4.0 → 5.1,
 //! so every artifact the fallback existed for is refused on the schema axis anyway. It could
 //! therefore only ever succeed on a bare postcard encoding at the *current* schema.
 //!
@@ -930,6 +930,48 @@ mod tests {
         let loaded = load_calibration_artifact(temp_file.path())
             .expect("a differing schema MINOR must warn and load, not fail");
         assert_eq!(loaded.metadata.format_version, differing_minor);
+    }
+
+    #[test]
+    fn schema_5_0_flat_temperature_artifact_loads_under_minor_policy() {
+        let mut calibration = create_test_calibration();
+        calibration.metadata.format_version = "5.0".to_string();
+        calibration.correction_surface = Some(BSplineModel4D {
+            coefficients: vec![1.0; 16],
+            shape: [2, 2, 2, 2],
+            knots_azimuth: vec![0.0, 0.0, 10.0, 10.0],
+            knots_elevation: vec![0.0, 0.0, 20.0, 20.0],
+            knots_frequency: vec![8_000.0, 8_000.0, 9_000.0, 9_000.0],
+            knots_temperature: vec![280.0, 280.0, 300.0, 300.0],
+            spline_order: 2,
+        });
+
+        let loaded = load_calibration_artifact(write_framed(&calibration).path())
+            .expect("valid schema 5.0 surface must load under the minor-version policy");
+        assert_eq!(loaded.metadata.format_version, "5.0");
+    }
+
+    #[test]
+    fn schema_5_0_temperature_varying_artifact_is_rejected() {
+        let mut calibration = create_test_calibration();
+        calibration.metadata.format_version = "5.0".to_string();
+        calibration.correction_surface = Some(BSplineModel4D {
+            coefficients: vec![1.0; 8].into_iter().chain(vec![2.0; 8]).collect(),
+            shape: [2, 2, 2, 2],
+            knots_azimuth: vec![0.0, 0.0, 10.0, 10.0],
+            knots_elevation: vec![0.0, 0.0, 20.0, 20.0],
+            knots_frequency: vec![8_000.0, 8_000.0, 9_000.0, 9_000.0],
+            knots_temperature: vec![280.0, 280.0, 300.0, 300.0],
+            spline_order: 2,
+        });
+
+        match load_calibration_artifact(write_framed(&calibration).path()) {
+            Err(DataError::ValidationError { reason, .. }) => assert!(
+                reason.contains("temperature slab 1"),
+                "rejection must name the unequal slab: {reason}"
+            ),
+            other => panic!("temperature-varying surface must be rejected, got {other:?}"),
+        }
     }
 
     #[test]

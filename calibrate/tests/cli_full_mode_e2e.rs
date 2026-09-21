@@ -624,15 +624,7 @@ fn assert_injected_bias_recovery(scenario: &UntunedScenario) {
     for (frequency_mhz, e_cone_deg, e_clock_deg) in probes {
         // Parameters are named azimuth/elevation but the 3D->4D bridge maps
         // clock -> azimuth, cone -> elevation (artifact_export.rs:482). Clock first.
-        let got = antenna_model::model::evaluate_correction(
-            surface,
-            e_clock_deg,
-            e_cone_deg,
-            frequency_mhz,
-            FIXTURE_TEMPERATURE_K,
-        )
-        .expect("evaluate the 4D correction surface")
-        .correction_db;
+        let got = schema5_correction_value(surface, e_clock_deg, e_cone_deg, frequency_mhz);
 
         assert!(
             got.is_finite(),

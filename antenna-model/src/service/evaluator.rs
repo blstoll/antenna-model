@@ -37,9 +37,9 @@
 //!          ▼
 //! ┌─────────────────────────────────────────────────────────────────────┐
 //! │ Step 4: Correction Surface Evaluation                               │
-//! │ - Interpolate B-spline correction (if calibrated)                   │
+//! │ - Interpolate inside fitted E-clock/E-cone/frequency support         │
 //! │ - Add correction to physics model: Gain_final = Gain_phys + ΔG      │
-//! │ - Generate warnings for extrapolation outside calibrated range      │
+//! │ - Outside coverage/support, return physics only with a warning       │
 //! └────────┬────────────────────────────────────────────────────────────┘
 //!          │
 //!          ▼
@@ -130,6 +130,25 @@ pub fn compute_gain_from_request_with_budget(
     repository: &CalibrationRepository,
     time_budget: Duration,
 ) -> Result<GainResponse> {
+    evaluate_gain_from_request_with_budget(request, repository, time_budget)
+        .map(|evaluation| evaluation.response)
+}
+
+/// Internal endpoint adaptation that preserves the authoritative correction disposition.
+///
+/// Public responses intentionally expose only the stable correction summary fields. Grid
+/// aggregation needs the richer disposition without reconstructing it from warnings, so the
+/// rectangular heatmap consumes this crate-private result.
+pub(crate) struct GainEvaluation {
+    pub(crate) response: GainResponse,
+    pub(crate) correction: CorrectionDisposition,
+}
+
+pub(crate) fn evaluate_gain_from_request_with_budget(
+    request: &GainRequest,
+    repository: &CalibrationRepository,
+    time_budget: Duration,
+) -> Result<GainEvaluation> {
     let start = Instant::now();
 
     // Coordinate transformation runs BEFORE the repository lookup. That ordering is
@@ -144,8 +163,8 @@ pub fn compute_gain_from_request_with_budget(
         request.vehicle_attitude,
     )?;
 
-    let calibration = repository
-        .get_calibration(&request.antenna_id, &request.feed_id)
+    let (calibration, correction_surface) = repository
+        .get_prepared_calibration(&request.antenna_id, &request.feed_id)
         .ok_or_else(|| AntennaModelError::FeedNotFound {
             antenna_id: request.antenna_id.clone(),
             feed_id: request.feed_id.clone(),
@@ -180,8 +199,9 @@ pub fn compute_gain_from_request_with_budget(
         "Computed emitter direction in antenna frame"
     );
 
-    let prepared = PreparedServedGain::prepare(
+    let prepared = PreparedServedGain::prepare_with_cached_correction(
         calibration,
+        correction_surface,
         FeedSteering::new(steer_x, steer_y, steer_z),
         ServedFrequencies::new(request.frequency_mhz, request.pointing_frequency_mhz),
         time_budget,
@@ -206,42 +226,48 @@ pub fn compute_gain_from_request_with_budget(
         let mut info = CalibrationStatusInfo::from(status);
         let application = match served.correction {
             CorrectionDisposition::Unavailable => CorrectionApplication::Unavailable,
-            CorrectionDisposition::OutsideCoverage => CorrectionApplication::None,
-            CorrectionDisposition::Applied { .. } => CorrectionApplication::All,
+            CorrectionDisposition::OutsideCoverage | CorrectionDisposition::OutsideSupport => {
+                CorrectionApplication::None
+            }
+            CorrectionDisposition::Applied => CorrectionApplication::All,
         };
         info.set_correction_application(application);
         info
     });
 
-    Ok(GainResponse {
-        antenna_id: request.antenna_id.clone(),
-        feed_id: request.feed_id.clone(),
-        gain_db: served.gain_db,
-        reference_gain_db: served.reference_gain_db,
-        loss_db: served.loss_db,
-        geometry: GeometryInfo {
-            physical_feed_offset_m: Vector3D::new(
-                served.physical_feed_offset.x_m,
-                served.physical_feed_offset.y_m,
-                served.physical_feed_offset.z_m,
-            ),
-            emitter_azimuth_deg: served.direction.e_clock_deg,
-            emitter_elevation_deg: served.direction.e_cone_deg,
-            beam_squint_deg: served.reported_beam_squint_deg(),
+    let correction = served.correction;
+    Ok(GainEvaluation {
+        response: GainResponse {
+            antenna_id: request.antenna_id.clone(),
+            feed_id: request.feed_id.clone(),
+            gain_db: served.gain_db,
+            reference_gain_db: served.reference_gain_db,
+            loss_db: served.loss_db,
+            geometry: GeometryInfo {
+                physical_feed_offset_m: Vector3D::new(
+                    served.physical_feed_offset.x_m,
+                    served.physical_feed_offset.y_m,
+                    served.physical_feed_offset.z_m,
+                ),
+                emitter_azimuth_deg: served.direction.e_clock_deg,
+                emitter_elevation_deg: served.direction.e_cone_deg,
+                beam_squint_deg: served.reported_beam_squint_deg(),
+            },
+            // A single-gain failure is an HTTP error, never a 200 body carrying a
+            // reason — only `service::batch` populates this field.
+            error: None,
+            metadata: ComputationMetadata {
+                computation_time_ms: start.elapsed().as_secs_f64() * 1000.0,
+                coordinate_transform_ms: None,
+                physics_model_ms: None,
+                correction_surface_ms: None,
+                extrapolated: served.correction.extrapolated(),
+                spillover_loss_db: served.spillover_loss_db,
+            },
+            warnings: served.warnings,
+            calibration_status: calibration_status_info,
         },
-        // A single-gain failure is an HTTP error, never a 200 body carrying a
-        // reason — only `service::batch` populates this field.
-        error: None,
-        metadata: ComputationMetadata {
-            computation_time_ms: start.elapsed().as_secs_f64() * 1000.0,
-            coordinate_transform_ms: None,
-            physics_model_ms: None,
-            correction_surface_ms: None,
-            extrapolated: served.correction.extrapolated(),
-            spillover_loss_db: served.spillover_loss_db,
-        },
-        warnings: served.warnings,
-        calibration_status: calibration_status_info,
+        correction,
     })
 }
 
@@ -287,40 +313,94 @@ mod tests {
         }
     }
 
-    /// The correction surface must be evaluated at the calibration's
-    /// temperature_const, not a hardcoded 290 K. This artifact is calibrated
-    /// at 300 K; with the old hardcoded 290 K the temperature dimension
-    /// extrapolated and emitted a warning.
+    /// Runtime correction evaluation is three-dimensional: changing the artifact's
+    /// calibration temperature cannot change the served gain or warnings.
     #[test]
-    fn test_correction_uses_calibration_temperature() {
-        let mut repo = CalibrationRepository::new();
-        let mut calibration = create_test_calibration(CalibrationStatus::FullyCalibrated {
-            accuracy_estimate_db: 1.0,
-        });
-        calibration.validity_ranges.temperature_const = 300.0;
-        calibration.correction_surface = Some(crate::data::types::BSplineModel4D {
-            coefficients: vec![1.0; 2 * 2 * 2],
-            shape: [2, 2, 2, 1],
-            knots_azimuth: vec![0.0, 0.0, 0.0, 360.0, 360.0, 360.0],
-            knots_elevation: vec![0.0, 0.0, 0.0, 90.0, 90.0, 90.0],
-            knots_frequency: vec![8000.0, 8000.0, 8000.0, 9000.0, 9000.0, 9000.0],
-            knots_temperature: vec![300.0, 300.0, 300.0, 300.0, 300.0, 300.0],
-            spline_order: 3,
-        });
-        repo.add_calibration(calibration);
+    fn correction_surface_has_no_temperature_query_coordinate() {
+        let calibration_at = |temperature_const| {
+            let mut calibration = create_test_calibration(CalibrationStatus::FullyCalibrated {
+                accuracy_estimate_db: 1.0,
+            });
+            calibration.validity_ranges.temperature_const = temperature_const;
+            calibration.correction_surface = Some(crate::data::types::BSplineModel4D {
+                coefficients: vec![1.0; 2 * 2 * 2],
+                shape: [2, 2, 2, 1],
+                knots_azimuth: vec![0.0, 0.0, 0.0, 360.0, 360.0, 360.0],
+                knots_elevation: vec![0.0, 0.0, 0.0, 90.0, 90.0, 90.0],
+                knots_frequency: vec![8000.0, 8000.0, 8000.0, 9000.0, 9000.0, 9000.0],
+                knots_temperature: vec![290.0, 290.0, 290.0, 290.0, 290.0, 290.0],
+                spline_order: 3,
+            });
+            calibration
+        };
+        let repository_at = |temperature_const| {
+            let mut repository = CalibrationRepository::new();
+            repository.add_calibration(calibration_at(temperature_const));
+            repository
+        };
 
         let request = create_test_request();
-        let response = compute_gain_from_request(&request, &repo).unwrap();
+        let cold = compute_gain_from_request(&request, &repository_at(100.0)).unwrap();
+        let hot = compute_gain_from_request(&request, &repository_at(500.0)).unwrap();
 
-        assert!(
-            !response
-                .warnings
-                .iter()
-                .any(|w| w.message.contains("temperature")),
-            "no temperature extrapolation warning expected, got: {:?}",
-            response.warnings
+        assert_eq!(cold.gain_db, hot.gain_db);
+        assert_eq!(cold.warnings, hot.warnings);
+        assert!(!cold.metadata.extrapolated);
+        assert!(!hot.metadata.extrapolated);
+    }
+
+    /// The public gain evaluation path must not leak a boundary polynomial beyond fitted
+    /// support. A large correction outside support produces the same gain as an in-support
+    /// zero surface, with truthful response metadata and warning codes.
+    #[test]
+    fn public_gain_path_returns_physics_only_outside_fitted_support() {
+        let surface = |clock_knots, cone_knots, correction_db| crate::data::types::BSplineModel4D {
+            coefficients: vec![correction_db; 8],
+            shape: [2, 2, 2, 1],
+            knots_azimuth: clock_knots,
+            knots_elevation: cone_knots,
+            knots_frequency: vec![8000.0, 8000.0, 9000.0, 9000.0],
+            knots_temperature: vec![290.0, 290.0, 290.0],
+            spline_order: 2,
+        };
+        let repository_with = |correction_surface| {
+            let mut repository = CalibrationRepository::new();
+            let mut calibration = create_test_calibration(CalibrationStatus::FullyCalibrated {
+                accuracy_estimate_db: 1.0,
+            });
+            calibration.correction_surface = Some(correction_surface);
+            repository.add_calibration(calibration);
+            repository
+        };
+
+        let zero_surface = surface(
+            vec![0.0, 0.0, 360.0, 360.0],
+            vec![0.0, 0.0, 180.0, 180.0],
+            0.0,
         );
-        assert!(!response.metadata.extrapolated);
+        let far_surface = surface(
+            vec![1000.0, 1000.0, 1010.0, 1010.0],
+            vec![1000.0, 1000.0, 1010.0, 1010.0],
+            100.0,
+        );
+        let request = create_test_request();
+
+        let baseline = compute_gain_from_request(&request, &repository_with(zero_surface)).unwrap();
+        let outside = compute_gain_from_request(&request, &repository_with(far_surface)).unwrap();
+
+        assert_eq!(outside.gain_db, baseline.gain_db);
+        assert!(outside.metadata.extrapolated);
+        let status = outside.calibration_status.unwrap();
+        assert_eq!(status.correction_application, CorrectionApplication::None);
+        assert!(!status.correction_applied);
+        assert!(outside
+            .warnings
+            .iter()
+            .any(|warning| warning.is(WarningCode::CorrectionNotApplied)));
+        assert!(!outside
+            .warnings
+            .iter()
+            .any(|warning| warning.is(WarningCode::Extrapolated)));
     }
 
     #[test]
@@ -483,8 +563,8 @@ mod tests {
         let mut calibration = create_test_calibration(CalibrationStatus::FullyCalibrated {
             accuracy_estimate_db: 1.0,
         });
-        // Valid order-3 B-spline knot vectors (>=4 knots each), matching the pattern used by
-        // `test_correction_uses_calibration_temperature`, so the surface actually evaluates.
+        // Valid order-3 B-spline knot vectors matching the temperature-independent
+        // correction test above, so the surface actually evaluates.
         calibration.correction_surface = Some(crate::data::types::BSplineModel4D {
             coefficients: vec![1.0; 2 * 2 * 2],
             shape: [2, 2, 2, 1],
@@ -535,7 +615,7 @@ mod tests {
                 accuracy_estimate_db: 1.0,
             });
         calibration_with_surface.correction_surface = Some(crate::data::types::BSplineModel4D {
-            coefficients: vec![1.0; 2 * 2 * 2],
+            coefficients: vec![0.0; 2 * 2 * 2],
             shape: [2, 2, 2, 1],
             knots_azimuth: vec![0.0, 0.0, 0.0, 360.0, 360.0, 360.0],
             knots_elevation: vec![0.0, 0.0, 0.0, 90.0, 90.0, 90.0],
@@ -970,12 +1050,12 @@ mod tests {
         });
         // Add a correction surface so out-of-coverage detection triggers
         calibration.correction_surface = Some(crate::data::types::BSplineModel4D {
-            coefficients: vec![0.0; 10],
+            coefficients: vec![0.0; 8],
             shape: [2, 2, 2, 1],
-            knots_azimuth: vec![0.0, 10.0],
-            knots_elevation: vec![0.0, 10.0],
-            knots_frequency: vec![8000.0, 9000.0],
-            knots_temperature: vec![290.0],
+            knots_azimuth: vec![0.0, 0.0, 0.0, 10.0, 10.0],
+            knots_elevation: vec![0.0, 0.0, 0.0, 10.0, 10.0],
+            knots_frequency: vec![8000.0, 8000.0, 8000.0, 9000.0, 9000.0],
+            knots_temperature: vec![290.0, 290.0, 290.0, 290.0],
             spline_order: 3,
         });
         repo.add_calibration(calibration);

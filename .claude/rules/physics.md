@@ -40,7 +40,7 @@ already accurate to ±0.02 dB.
 
 - **`coordinates.rs`** — ECEF ↔ Geodetic ↔ Antenna Frame ↔ Spherical transforms.
 - **`coordinates_3d.rs`** — 3D position → antenna-frame direction transforms.
-- **`correction_interpolator.rs`** — 4D B-spline evaluation of the residual correction surface.
+- **`correction_surface.rs`** — validated 3D E-clock/E-cone/frequency layout, sparse basis stencils, and fitted residual evaluation. Outside fitted support returns no correction.
 - **`illumination.rs`** — feed pattern: cos^q with q-factor.
 - **`mesh.rs`** — mesh transparency (wire-mesh reflection efficiency). Surface RMS / Ruze
   efficiency lives in `pattern.rs`, not here.

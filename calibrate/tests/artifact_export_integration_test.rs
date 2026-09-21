@@ -7,11 +7,27 @@
 
 use antenna_model::data::loader::load_calibration_artifact;
 use antenna_model::data::types::CALIBRATION_SCHEMA_VERSION;
+use antenna_model::model::{CorrectionEvaluation, FittedCorrectionSurface};
 use calibrate::artifact_export::{export_full_calibration, ExportPhysicalParams};
 use calibrate::correction_surface::{
     assess_angular_resolution, fit_correction_surface, CorrectionSurfaceParams,
 };
 use calibrate::parser::MeasurementPoint;
+
+fn applied_value(
+    surface: &FittedCorrectionSurface,
+    e_clock_deg: f64,
+    e_cone_deg: f64,
+    frequency_mhz: f64,
+) -> f64 {
+    match surface
+        .evaluate(e_clock_deg, e_cone_deg, frequency_mhz)
+        .expect("correction evaluation")
+    {
+        CorrectionEvaluation::Applied(value) => value,
+        CorrectionEvaluation::OutsideSupport => panic!("test query left fitted support"),
+    }
+}
 
 /// Smooth synthetic residual over (clock, cone, freq).
 fn residual(clock_deg: f64, cone_deg: f64, freq_mhz: f64) -> f64 {
@@ -193,17 +209,14 @@ fn test_full_export_correction_evaluates_against_3d() {
     write_antc(&calibration, tmp.path());
     let loaded = load_calibration_artifact(tmp.path()).expect("service load");
     let model = loaded.correction_surface.expect("correction");
+    let fitted = FittedCorrectionSurface::from_model4d(&model).unwrap();
 
-    // Temperature interval is [t_meas-1, t_meas+1] = [289, 291]; midpoint 290.
-    let t_mid = 290.0;
     let mut max_err = 0.0_f64;
     for &k in &[10.0, 90.0, 180.0, 270.0, 349.0] {
         for &c in &[0.5, 5.0, 9.5] {
             for &f in &[8050.0, 8200.0, 8350.0] {
                 let expected = surface.evaluate(f, c, k).expect("3D eval");
-                let got = antenna_model::model::evaluate_correction(&model, k, c, f, t_mid)
-                    .expect("4D eval")
-                    .correction_db;
+                let got = applied_value(&fitted, k, c, f);
                 max_err = max_err.max((got - expected).abs());
             }
         }
@@ -471,30 +484,21 @@ fn export_write_load(
 /// (`calibrate::artifact_export::tests::test_round_trip_matches_3d_evaluation`) does sample
 /// the exact domain bounds, but it compares two *in-process* objects and never crosses the
 /// writer or the loader. So the combination that matters here — a domain edge, evaluated by
-/// the service's own 4D interpolator, on an artifact that came off disk — was covered by
+/// the core three-axis correction surface on an artifact that came off disk — was covered by
 /// neither.
 ///
 /// That combination is the one with history. **D15** was an upper-edge collapse in
-/// `bspline_basis` at a domain maximum: the two implementations agree everywhere except at
-/// an endpoint, and the fitted surface was corrupted across the whole top knot span while
-/// every interior probe stayed clean. The 3D and 4D evaluators are *different code*
-/// (`correction_surface::bspline_basis` versus `correction_interpolator`'s Cox-de Boor
-/// loop), so their endpoint conventions are exactly the kind of thing that can diverge
-/// without any interior sample noticing.
-///
-/// The `extrapolated` assertion is the second half: a point sitting **on** a domain bound is
-/// in the domain. If an endpoint ever starts reporting extrapolation, the served response
-/// gains a spurious `Extrapolated` warning for a query the artifact genuinely covers, which
-/// no agreement check alone would catch.
+/// `bspline_basis` at a domain maximum: fitting and serving agreed everywhere except at an
+/// endpoint, and the fitted surface was corrupted across the whole top knot span while every
+/// interior probe stayed clean. Until #93 moves fitting onto the core stencil, the fit-side
+/// and core evaluators remain different code, so their endpoint conventions need this guard.
 ///
 /// The probe grid is **derived from the served knot vectors** rather than hand-listed, so it
-/// lands exactly on every knot — the clamped ends *and* the interior ones — plus a midpoint
-/// in each span. Interior knots earn their place independently of the endpoints: the two
-/// implementations guard a vanishing Cox-de Boor denominator at **different thresholds**
-/// (`1e-10` in `correction_surface::bspline_basis`, `1e-14` in
-/// `correction_interpolator::evaluate_basis_functions`), and a knot is where that denominator
-/// gets small. Deriving the grid also means it follows the fixture: change the knot counts and
-/// the probes move with them instead of quietly going stale.
+/// lands exactly on every executable-axis knot — the clamped ends *and* the interior ones —
+/// plus a midpoint in each span. The wire temperature knots are checked separately because
+/// schema 5.1 retains that field but exposes no runtime temperature query. Deriving the grid
+/// also means it follows the fixture: change the knot counts and the probes move with them
+/// instead of quietly going stale.
 #[test]
 fn the_round_trip_agrees_at_every_axis_boundary_after_a_service_load() {
     let measurements = build_measurements();
@@ -502,9 +506,11 @@ fn the_round_trip_agrees_at_every_axis_boundary_after_a_service_load() {
     let surface = fit_correction_surface(&measurements, &predictions, &round_trip_params())
         .expect("surface fit");
     let model = export_write_load(&surface, &measurements);
+    let fitted = FittedCorrectionSurface::from_model4d(&model).unwrap();
 
     // Every distinct knot on an axis, plus the midpoint of each span between them. The
-    // clamped end knots are the domain bounds, so this covers both edges of all four axes.
+    // clamped end knots are the domain bounds, so this covers both edges of all three
+    // executable axes. Temperature remains a validated schema-5 wire axis only.
     fn probes(knots: &[f64]) -> Vec<f64> {
         let mut distinct: Vec<f64> = Vec::new();
         for &k in knots {
@@ -550,24 +556,15 @@ fn the_round_trip_agrees_at_every_axis_boundary_after_a_service_load() {
                     "3D evaluation must be finite at clock={k}, cone={c}, freq={f}: {expected}"
                 );
                 max_expected = max_expected.max(expected.abs());
-                for &t in &temps {
-                    let got = antenna_model::model::evaluate_correction(&model, k, c, f, t)
-                        .expect("4D eval");
-                    let err = (got.correction_db - expected).abs();
-                    max_err = max_err.max(err);
-                    samples += 1;
-                    assert!(
-                        err < 1e-9,
-                        "boundary mismatch at clock={k}, cone={c}, freq={f}, temp={t}: \
-                         3D expected={expected}, served 4D got={}, err={err:e}",
-                        got.correction_db
-                    );
-                    assert!(
-                        !got.extrapolated,
-                        "a point on the fitted domain bound must not report extrapolation: \
-                         clock={k}, cone={c}, freq={f}, temp={t}"
-                    );
-                }
+                let got = applied_value(&fitted, k, c, f);
+                let err = (got - expected).abs();
+                max_err = max_err.max(err);
+                samples += 1;
+                assert!(
+                    err < 1e-9,
+                    "boundary mismatch at clock={k}, cone={c}, freq={f}: \
+                     3D expected={expected}, served got={got}, err={err:e}"
+                );
             }
         }
     }
@@ -583,7 +580,7 @@ fn the_round_trip_agrees_at_every_axis_boundary_after_a_service_load() {
 
     assert_eq!(
         samples,
-        clocks.len() * cones.len() * freqs.len() * temps.len(),
+        clocks.len() * cones.len() * freqs.len(),
         "the probe grid must visit every knot/midpoint combination"
     );
     eprintln!("D3 boundary round-trip max error over {samples} samples: {max_err:e}");
@@ -638,6 +635,7 @@ fn a_minimal_frequency_axis_round_trips_and_a_degenerate_one_is_refused() {
     );
 
     let model = export_write_load(&surface, &measurements);
+    let fitted = FittedCorrectionSurface::from_model4d(&model).unwrap();
     assert_eq!(
         model.shape[2], 4,
         "the served frequency axis must carry the same 4"
@@ -662,25 +660,17 @@ fn a_minimal_frequency_axis_round_trips_and_a_degenerate_one_is_refused() {
                 );
                 max_expected = max_expected.max(expected.abs());
 
-                let got = antenna_model::model::evaluate_correction(&model, k, c, f, 290.0)
-                    .expect("4D eval");
+                let got = applied_value(&fitted, k, c, f);
                 assert!(
-                    got.correction_db.is_finite(),
-                    "served correction must be finite at clock={k}, cone={c}, freq={f}: {}",
-                    got.correction_db
-                );
-                assert!(
-                    !got.extrapolated,
-                    "a point inside the fitted domain must not report extrapolation: \
-                     clock={k}, cone={c}, freq={f}"
+                    got.is_finite(),
+                    "served correction must be finite at clock={k}, cone={c}, freq={f}: {got}"
                 );
 
-                let err = (got.correction_db - expected).abs();
+                let err = (got - expected).abs();
                 assert!(
                     err < 1e-9,
                     "minimal-axis mismatch at clock={k}, cone={c}, freq={f}: \
-                     3D expected={expected}, served 4D got={}, err={err:e}",
-                    got.correction_db
+                     3D expected={expected}, served got={got}, err={err:e}"
                 );
                 max_err = max_err.max(err);
             }
@@ -767,8 +757,8 @@ fn a_minimal_frequency_axis_round_trips_and_a_degenerate_one_is_refused() {
 /// **Measurement (2026-08-20, macOS aarch64, debug) contradicts that diagnosis rather than
 /// confirming it.** The complete round trip — fit, convert, export, write, load, evaluate —
 /// completes in a **24 KiB** thread stack, and the whole `calibrate` lib suite passes with
-/// `RUST_MIN_STACK=65536`. There is also nothing to rewrite iteratively: the 4D evaluator
-/// (`correction_interpolator::evaluate_basis_functions`) was already an iterative Cox-de Boor
+/// `RUST_MIN_STACK=65536`. There was also nothing to rewrite iteratively: the then-existing
+/// 4D evaluator (`correction_interpolator::evaluate_basis_functions`) was already an iterative Cox-de Boor
 /// loop at `4b439c0` itself, and the one genuine recursion,
 /// `correction_surface::bspline_basis`, is depth-bounded by `spline_order` (4 here), so its
 /// worst case is 2⁴ tiny frames.
@@ -805,11 +795,10 @@ fn the_round_trip_fits_in_a_small_thread_stack() {
             let surface = fit_correction_surface(&measurements, &predictions, &round_trip_params())
                 .expect("surface fit");
             let model = export_write_load(&surface, &measurements);
+            let fitted = FittedCorrectionSurface::from_model4d(&model).unwrap();
 
             let expected = surface.evaluate(8200.0, 5.0, 175.0).expect("3D eval");
-            let got = antenna_model::model::evaluate_correction(&model, 175.0, 5.0, 8200.0, 290.0)
-                .expect("4D eval")
-                .correction_db;
+            let got = applied_value(&fitted, 175.0, 5.0, 8200.0);
             assert!(
                 (got - expected).abs() < 1e-9,
                 "round trip inside the guarded stack must still be correct: \

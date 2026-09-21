@@ -44,6 +44,15 @@ use std::fmt;
 ///
 /// # History
 ///
+/// - **5.1 (2026-09-20, GitHub issue #92)** — schema-5 correction surfaces are accepted
+///   only when every synthetic temperature coefficient slab is identical. Runtime queries
+///   are three-dimensional (E-clock, E-cone, frequency), and a query outside fitted support
+///   has no numeric correction value. The postcard field layout and every existing field's
+///   meaning are unchanged, so this is a MINOR-only validation/interpretation tightening;
+///   [`crate::data::loader::ANTC_ARTIFACT_VERSION`] remains 4. Valid 5.0 artifacts load under
+///   the minor-version policy; temperature-varying ones are rejected with an actionable
+///   validation error.
+///
 /// - **5.0 (2026-08-04, roadmap D21)** — `CalibrationMetadata.angular_resolution` added, so
 ///   an artifact can state whether its correction surface's knots can resolve the antenna's
 ///   own `λ/D` lobe period. A **layout** change like 4.0, so the container axis moves too
@@ -103,7 +112,7 @@ use std::fmt;
 ///   a wrong artifact past the gate this bump exists to close. (One of them carries a 5 cm
 ///   *lateral* design offset, which is legitimate and is what this field is for; the C13
 ///   signature is specifically an axial component equal to the focal length.)
-pub const CALIBRATION_SCHEMA_VERSION: &str = "5.0";
+pub const CALIBRATION_SCHEMA_VERSION: &str = "5.1";
 
 /// Complete calibration data for a single antenna-feed combination (v2.0 physics-based).
 ///
@@ -502,10 +511,12 @@ impl AngularResolution {
     }
 }
 
-/// 4D B-spline interpolation model.
+/// Schema-5 wire representation of a correction surface.
 ///
-/// Represents a tensor product B-spline over four dimensions:
-/// azimuth, elevation, frequency, and temperature.
+/// The historical field names map `azimuth` to E-clock and `elevation` to E-cone.
+/// Temperature remains a fourth serialized axis for byte compatibility, but schema 5.1
+/// requires every temperature coefficient slab to be identical. Executable surfaces adapt
+/// this type once into the three-dimensional [`crate::model::FittedCorrectionSurface`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BSplineModel4D {
     /// Flattened 4D array of B-spline coefficients.
@@ -538,102 +549,11 @@ impl BSplineModel4D {
     }
 
     /// Validates that the model is internally consistent.
+    ///
+    /// Schema-5 wire fields are adapted through the correction-surface module so
+    /// layout, coefficient indexing, and the flat-temperature invariant have one owner.
     pub fn validate(&self) -> Result<(), ValidationError> {
-        // Check shape consistency
-        let expected_size = self.shape.iter().product::<usize>();
-        if self.coefficients.len() != expected_size {
-            return Err(ValidationError::InconsistentShape {
-                expected: expected_size,
-                actual: self.coefficients.len(),
-            });
-        }
-
-        // Check knot vector sizes
-        let order = self.spline_order as usize;
-
-        if self.knots_azimuth.len() < self.shape[0] + order {
-            return Err(ValidationError::InvalidKnotVector {
-                dimension: "azimuth".to_string(),
-                reason: format!(
-                    "knot vector length {} < shape {} + order {}",
-                    self.knots_azimuth.len(),
-                    self.shape[0],
-                    order
-                ),
-            });
-        }
-
-        if self.knots_elevation.len() < self.shape[1] + order {
-            return Err(ValidationError::InvalidKnotVector {
-                dimension: "elevation".to_string(),
-                reason: format!(
-                    "knot vector length {} < shape {} + order {}",
-                    self.knots_elevation.len(),
-                    self.shape[1],
-                    order
-                ),
-            });
-        }
-
-        if self.knots_frequency.len() < self.shape[2] + order {
-            return Err(ValidationError::InvalidKnotVector {
-                dimension: "frequency".to_string(),
-                reason: format!(
-                    "knot vector length {} < shape {} + order {}",
-                    self.knots_frequency.len(),
-                    self.shape[2],
-                    order
-                ),
-            });
-        }
-
-        if self.knots_temperature.len() < self.shape[3] + order {
-            return Err(ValidationError::InvalidKnotVector {
-                dimension: "temperature".to_string(),
-                reason: format!(
-                    "knot vector length {} < shape {} + order {}",
-                    self.knots_temperature.len(),
-                    self.shape[3],
-                    order
-                ),
-            });
-        }
-
-        // Check knot vectors are non-decreasing
-        if !is_non_decreasing(&self.knots_azimuth) {
-            return Err(ValidationError::InvalidKnotVector {
-                dimension: "azimuth".to_string(),
-                reason: "knot vector is not non-decreasing".to_string(),
-            });
-        }
-
-        if !is_non_decreasing(&self.knots_elevation) {
-            return Err(ValidationError::InvalidKnotVector {
-                dimension: "elevation".to_string(),
-                reason: "knot vector is not non-decreasing".to_string(),
-            });
-        }
-
-        if !is_non_decreasing(&self.knots_frequency) {
-            return Err(ValidationError::InvalidKnotVector {
-                dimension: "frequency".to_string(),
-                reason: "knot vector is not non-decreasing".to_string(),
-            });
-        }
-
-        if !is_non_decreasing(&self.knots_temperature) {
-            return Err(ValidationError::InvalidKnotVector {
-                dimension: "temperature".to_string(),
-                reason: "knot vector is not non-decreasing".to_string(),
-            });
-        }
-
-        // Check spline order is valid
-        if self.spline_order < 1 || self.spline_order > 10 {
-            return Err(ValidationError::InvalidSplineOrder(self.spline_order));
-        }
-
-        Ok(())
+        crate::model::correction_surface::validate_model4d(self)
     }
 
     /// Returns the total number of coefficients.
@@ -1336,6 +1256,14 @@ pub enum ValidationError {
     /// Invalid spline order
     InvalidSplineOrder(u8),
 
+    /// Schema-5 correction surfaces must be independent of the synthetic temperature axis.
+    TemperatureDependentCorrection {
+        temperature_slab: usize,
+        coefficient_index: usize,
+        expected: f64,
+        actual: f64,
+    },
+
     /// Invalid range (min > max or out of physical bounds)
     InvalidRange {
         dimension: String,
@@ -1380,6 +1308,18 @@ impl fmt::Display for ValidationError {
             ValidationError::InvalidSplineOrder(order) => {
                 write!(f, "Invalid spline order: {}", order)
             }
+            ValidationError::TemperatureDependentCorrection {
+                temperature_slab,
+                coefficient_index,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "Correction surface temperature slab {} differs from slab 0 at spatial \
+                 coefficient {} (expected {}, got {}); schema 5.1 requires every \
+                 temperature slab to be identical",
+                temperature_slab, coefficient_index, expected, actual
+            ),
             ValidationError::InvalidRange {
                 dimension,
                 min,
@@ -1935,13 +1875,6 @@ impl CalibrationCoverageBuilder {
     }
 }
 
-// Helper functions
-
-/// Check if a vector is non-decreasing.
-fn is_non_decreasing(v: &[f64]) -> bool {
-    v.windows(2).all(|w| w[0] <= w[1])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2007,15 +1940,6 @@ mod tests {
             .feed(feed)
             .build()
             .unwrap()
-    }
-
-    #[test]
-    fn test_is_non_decreasing() {
-        assert!(is_non_decreasing(&[1.0, 2.0, 3.0, 4.0]));
-        assert!(is_non_decreasing(&[1.0, 1.0, 2.0, 2.0]));
-        assert!(!is_non_decreasing(&[1.0, 3.0, 2.0, 4.0]));
-        assert!(is_non_decreasing(&[]));
-        assert!(is_non_decreasing(&[1.0]));
     }
 
     #[test]

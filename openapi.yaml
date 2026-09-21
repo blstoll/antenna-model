@@ -1298,7 +1298,9 @@ components:
           description: Correction surface interpolation time in milliseconds
         extrapolated:
           type: boolean
-          description: Whether the query was extrapolated (outside calibrated range)
+          description: |-
+            Whether a present correction surface was not applied because the query was
+            outside calibration coverage or fitted support.
         spillover_loss_db:
           type:
           - number

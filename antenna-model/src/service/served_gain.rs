@@ -55,17 +55,19 @@
 //! [`PreparedServedGain`] is immutable and `Sync` (pinned by a compile-time assertion in
 //! this module's tests) so one instance can be shared across parallel grid workers.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use antenna_core::data::types::{AntennaCalibration, CalibrationCoverage, CalibrationStatus};
-use antenna_core::error::{AntennaModelError, Result};
+use antenna_core::error::{AntennaModelError, ComputationError, Result};
 use antenna_core::model::{
-    analyze_edge_cases, compute_gain_db, evaluate_correction, squint_corrected_direction,
-    AntennaConfiguration, FeedParameters as ModelFeedParams, FeedPosition, IntegrationParams,
-    MeshParameters as ModelMeshParams, ReflectorGeometry as ModelReflector,
+    analyze_edge_cases, compute_gain_db, squint_corrected_direction, AntennaConfiguration,
+    CorrectionEvaluation, FeedParameters as ModelFeedParams, FeedPosition, FittedCorrectionSurface,
+    IntegrationParams, MeshParameters as ModelMeshParams, ReflectorGeometry as ModelReflector,
 };
 use antenna_core::warnings::{ApiWarning, WarningCode};
 
+use crate::data::repository::PreparedCorrection;
 use crate::service::cache::{CachedGain, GainCache, GainCacheKey};
 
 /// A direction in the antenna frame, **before** beam-squint correction.
@@ -199,31 +201,28 @@ pub(crate) enum ReferenceGainRequest {
 pub(crate) enum CorrectionDisposition {
     /// This artifact carries no correction surface at all. Served gain is raw physics.
     Unavailable,
-    /// The surface was applied. `extrapolated` is the B-spline's own knot-range verdict:
-    /// the query was inside calibrated coverage but outside the fitted knot span.
-    Applied { extrapolated: bool },
+    /// The fitted correction contributed to served gain.
+    Applied,
     /// A surface exists but the query is outside calibrated coverage, so it was not
     /// applied. Served gain is physics-model extrapolation.
     OutsideCoverage,
+    /// Coverage admitted the query, but it lies outside the fitted spline support.
+    /// Served gain is physics only; no correction value exists for this outcome.
+    OutsideSupport,
 }
 
 impl CorrectionDisposition {
     /// Whether the correction surface contributed to the served gain.
     pub(crate) fn applied(&self) -> bool {
-        matches!(self, Self::Applied { .. })
+        matches!(self, Self::Applied)
     }
 
-    /// Whether the served value is an extrapolation — either the B-spline extrapolated
-    /// inside coverage, or coverage was left entirely and physics extrapolated.
+    /// Whether a present fitted surface could not support the served query.
     ///
     /// An antenna with no correction surface is not "extrapolated": there is no fitted
-    /// surface to leave.
+    /// surface to leave. An applied correction is always an interpolation inside support.
     pub(crate) fn extrapolated(&self) -> bool {
-        match self {
-            Self::Unavailable => false,
-            Self::Applied { extrapolated } => *extrapolated,
-            Self::OutsideCoverage => true,
-        }
+        matches!(self, Self::OutsideCoverage | Self::OutsideSupport)
     }
 }
 
@@ -271,10 +270,11 @@ impl ServedGain {
 /// value's `Sync` story a runtime property instead of a structural one.
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedServedGain {
-    /// The projected artifact. Held whole because coverage, the correction surface, the
-    /// calibration temperature, the status advisories and the antenna id are all read
-    /// from it per direction.
+    /// The projected artifact. Held whole because coverage, status advisories and the
+    /// antenna id are read from it per direction.
     calibration: AntennaCalibration,
+    /// Executable three-axis correction prepared and validated once, never per direction.
+    correction_surface: Option<Arc<FittedCorrectionSurface>>,
     /// Physical-optics model built from the artifact plus the request's feed geometry.
     antenna_config: AntennaConfiguration,
     /// Direction-independent edge-case advisories, computed once from `antenna_config`.
@@ -290,6 +290,13 @@ pub(crate) struct PreparedServedGain {
     diameter_m: f64,
 }
 
+fn invalid_correction_surface(
+    error: antenna_core::data::types::ValidationError,
+) -> AntennaModelError {
+    ComputationError::InvalidModelState(format!("invalid correction surface in artifact: {error}"))
+        .into()
+}
+
 impl PreparedServedGain {
     /// Project a calibration artifact and one request's feed geometry into a value that
     /// can serve any number of directions.
@@ -301,6 +308,49 @@ impl PreparedServedGain {
     /// request or grid (roadmap S3).
     pub(crate) fn prepare(
         calibration: AntennaCalibration,
+        steering: FeedSteering,
+        frequencies: ServedFrequencies,
+        time_budget: Duration,
+    ) -> Result<Self> {
+        let correction_surface = calibration
+            .correction_surface
+            .as_ref()
+            .map(FittedCorrectionSurface::from_model4d)
+            .transpose()
+            .map_err(invalid_correction_surface)?
+            .map(Arc::new);
+        Self::prepare_with_correction_surface(
+            calibration,
+            correction_surface,
+            steering,
+            frequencies,
+            time_budget,
+        )
+    }
+
+    /// Project using the correction result cached when the repository entry was inserted.
+    ///
+    /// One insertion performs the schema-5 temperature-slab scan, then every rectangular-grid
+    /// point reuses the immutable executable surface. Cached validation failures remain errors.
+    pub(crate) fn prepare_with_cached_correction(
+        calibration: AntennaCalibration,
+        correction_surface: PreparedCorrection,
+        steering: FeedSteering,
+        frequencies: ServedFrequencies,
+        time_budget: Duration,
+    ) -> Result<Self> {
+        Self::prepare_with_correction_surface(
+            calibration,
+            correction_surface.map_err(invalid_correction_surface)?,
+            steering,
+            frequencies,
+            time_budget,
+        )
+    }
+
+    fn prepare_with_correction_surface(
+        calibration: AntennaCalibration,
+        correction_surface: Option<Arc<FittedCorrectionSurface>>,
         steering: FeedSteering,
         frequencies: ServedFrequencies,
         time_budget: Duration,
@@ -402,6 +452,7 @@ impl PreparedServedGain {
 
         Ok(Self {
             calibration,
+            correction_surface,
             antenna_config,
             configuration_warnings,
             integration_params,
@@ -675,33 +726,30 @@ impl PreparedServedGain {
 
         // Correction surface, gated on the FULL coverage question (direction and
         // frequency). Interpolated at the squint-corrected direction.
-        let (correction_db, disposition) = match &self.calibration.correction_surface {
+        let (correction_db, disposition) = match &self.correction_surface {
             None => (0.0, CorrectionDisposition::Unavailable),
-            Some(surface) => {
-                if is_in_coverage(
+            Some(_)
+                if !is_in_coverage(
                     &self.calibration.calibration_coverage,
                     corrected.e_clock_deg,
                     corrected.e_cone_deg,
                     self.frequencies.operating_mhz,
-                ) {
-                    let result = evaluate_correction(
-                        surface,
-                        corrected.e_clock_deg,
-                        corrected.e_cone_deg,
-                        self.frequencies.operating_mhz,
-                        self.calibration.validity_ranges.temperature_const,
-                    )?;
-                    warnings.extend(result.warnings);
-                    (
-                        result.correction_db,
-                        CorrectionDisposition::Applied {
-                            extrapolated: result.extrapolated,
-                        },
-                    )
-                } else {
-                    (0.0, CorrectionDisposition::OutsideCoverage)
-                }
+                ) =>
+            {
+                (0.0, CorrectionDisposition::OutsideCoverage)
             }
+            Some(surface) => match surface.evaluate(
+                corrected.e_clock_deg,
+                corrected.e_cone_deg,
+                self.frequencies.operating_mhz,
+            )? {
+                CorrectionEvaluation::Applied(correction_db) => {
+                    (correction_db, CorrectionDisposition::Applied)
+                }
+                CorrectionEvaluation::OutsideSupport => {
+                    (0.0, CorrectionDisposition::OutsideSupport)
+                }
+            },
         };
 
         let gain_db = physics.gain_db + correction_db;
@@ -724,7 +772,7 @@ impl PreparedServedGain {
             &self.calibration,
             corrected.e_clock_deg,
             corrected.e_cone_deg,
-            disposition.applied(),
+            disposition,
         ));
 
         // Off-axis honesty warning (P8): E-cone IS the off-boresight angle.
@@ -868,7 +916,7 @@ fn generate_calibration_warnings(
     calibration: &antenna_core::data::types::AntennaCalibration,
     azimuth_deg: f64,
     elevation_deg: f64,
-    correction_applied: bool,
+    correction: CorrectionDisposition,
 ) -> Vec<ApiWarning> {
     let mut warnings = Vec::new();
 
@@ -910,13 +958,18 @@ fn generate_calibration_warnings(
         }
     }
 
-    // Warn if correction surface exists but wasn't applied
-    if !correction_applied && calibration.correction_surface.is_some() {
-        warnings.push(
-            WarningCode::CorrectionNotApplied
-                .with("Correction surface not applied (out of coverage)"),
-        );
-    }
+    let correction_not_applied = match correction {
+        CorrectionDisposition::OutsideCoverage => {
+            Some("Correction surface not applied: query is outside calibration coverage")
+        }
+        CorrectionDisposition::OutsideSupport => {
+            Some("Correction surface not applied: query is outside fitted support")
+        }
+        CorrectionDisposition::Unavailable | CorrectionDisposition::Applied => None,
+    };
+    warnings.extend(
+        correction_not_applied.map(|message| WarningCode::CorrectionNotApplied.with(message)),
+    );
 
     warnings
 }
@@ -1212,22 +1265,14 @@ mod tests {
         assert!(!CorrectionDisposition::Unavailable.applied());
         assert!(!CorrectionDisposition::Unavailable.extrapolated());
 
-        // Applied: the B-spline's own knot-range verdict is the answer.
-        assert!(CorrectionDisposition::Applied {
-            extrapolated: false
-        }
-        .applied());
-        assert!(!CorrectionDisposition::Applied {
-            extrapolated: false
-        }
-        .extrapolated());
-        assert!(CorrectionDisposition::Applied { extrapolated: true }.applied());
-        assert!(CorrectionDisposition::Applied { extrapolated: true }.extrapolated());
+        assert!(CorrectionDisposition::Applied.applied());
+        assert!(!CorrectionDisposition::Applied.extrapolated());
 
-        // A surface exists but coverage was left: not applied, and the served physics is
-        // an extrapolation beyond the calibrated region.
+        // A present surface that cannot be used leaves the served result on physics only.
         assert!(!CorrectionDisposition::OutsideCoverage.applied());
         assert!(CorrectionDisposition::OutsideCoverage.extrapolated());
+        assert!(!CorrectionDisposition::OutsideSupport.applied());
+        assert!(CorrectionDisposition::OutsideSupport.extrapolated());
     }
 
     /// Preparation combines the request's steering displacement with THIS feed's design
@@ -1308,18 +1353,8 @@ mod tests {
             .evaluate_direct(direction, ReferenceGainRequest::Omit)
             .unwrap();
 
-        assert_eq!(
-            zero_served.correction,
-            CorrectionDisposition::Applied {
-                extrapolated: false
-            }
-        );
-        assert_eq!(
-            shifted_served.correction,
-            CorrectionDisposition::Applied {
-                extrapolated: false
-            }
-        );
+        assert_eq!(zero_served.correction, CorrectionDisposition::Applied);
+        assert_eq!(shifted_served.correction, CorrectionDisposition::Applied);
         let delta = shifted_served.gain_db - zero_served.gain_db;
         assert!(
             (delta - 2.5).abs() < 1e-9,
@@ -1638,7 +1673,12 @@ mod tests {
             loss_accuracy_estimate_db: 2.0,
         });
 
-        let warnings = generate_calibration_warnings(&calibration, 180.0, 45.0, false);
+        let warnings = generate_calibration_warnings(
+            &calibration,
+            180.0,
+            45.0,
+            CorrectionDisposition::Unavailable,
+        );
 
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].code, WarningCode::Uncalibrated);
@@ -1664,7 +1704,12 @@ mod tests {
             coverage: coverage.clone(),
         });
 
-        let warnings = generate_calibration_warnings(&calibration, 180.0, 45.0, true);
+        let warnings = generate_calibration_warnings(
+            &calibration,
+            180.0,
+            45.0,
+            CorrectionDisposition::Applied,
+        );
 
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].code, WarningCode::PartiallyCalibrated);
@@ -1698,7 +1743,12 @@ mod tests {
             spline_order: 3,
         });
 
-        let warnings = generate_calibration_warnings(&calibration, 180.0, 45.0, false);
+        let warnings = generate_calibration_warnings(
+            &calibration,
+            180.0,
+            45.0,
+            CorrectionDisposition::OutsideCoverage,
+        );
 
         assert_eq!(
             warnings.iter().map(|w| w.code).collect::<Vec<_>>(),
@@ -1716,7 +1766,12 @@ mod tests {
             accuracy_estimate_db: 1.0,
         });
 
-        let warnings = generate_calibration_warnings(&calibration, 180.0, 45.0, true);
+        let warnings = generate_calibration_warnings(
+            &calibration,
+            180.0,
+            45.0,
+            CorrectionDisposition::Applied,
+        );
 
         assert_eq!(warnings.len(), 0);
     }
@@ -1738,7 +1793,12 @@ mod tests {
             spline_order: 3,
         });
 
-        let warnings = generate_calibration_warnings(&calibration, 180.0, 45.0, false);
+        let warnings = generate_calibration_warnings(
+            &calibration,
+            180.0,
+            45.0,
+            CorrectionDisposition::OutsideCoverage,
+        );
 
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].code, WarningCode::CorrectionNotApplied);
@@ -1777,7 +1837,12 @@ mod tests {
             12_000.0
         ));
 
-        let warnings = generate_calibration_warnings(&calibration, 45.0, 15.0, false);
+        let warnings = generate_calibration_warnings(
+            &calibration,
+            45.0,
+            15.0,
+            CorrectionDisposition::OutsideCoverage,
+        );
 
         assert_eq!(
             warnings.iter().map(|w| w.code).collect::<Vec<_>>(),
@@ -2350,11 +2415,10 @@ mod tests {
         );
     }
 
-    /// A correction applied outside the fitted knot span: the interpolator's own
-    /// extrapolation warning is produced AFTER the cache lookup on every path, so it must
-    /// be identical on a hit.
+    /// A query outside fitted support serves physics only on every cache path. The
+    /// correction is never extrapolated numerically, and the warning names fitted support.
     #[test]
-    fn cached_evaluation_matches_direct_when_the_correction_extrapolates() {
+    fn cached_evaluation_matches_direct_outside_fitted_support() {
         let mut calibration = create_test_calibration(CalibrationStatus::FullyCalibrated {
             accuracy_estimate_db: 1.0,
         });
@@ -2368,11 +2432,17 @@ mod tests {
         );
         assert_eq!(
             served.correction,
-            CorrectionDisposition::Applied { extrapolated: true },
-            "fixture must actually extrapolate, or this pins nothing"
+            CorrectionDisposition::OutsideSupport,
+            "fixture must actually leave fitted support, or this pins nothing"
         );
         let codes = warning_codes(&served);
-        assert!(codes.contains(&WarningCode::Extrapolated), "{codes:?}");
+        assert!(!codes.contains(&WarningCode::Extrapolated), "{codes:?}");
+        let warning = served
+            .warnings
+            .iter()
+            .find(|warning| warning.is(WarningCode::CorrectionNotApplied))
+            .expect("outside support must explain why correction was not applied");
+        assert!(warning.message.contains("fitted support"), "{warning:?}");
     }
 
     /// A severe feed offset in the FORWARD hemisphere routes to the ray-tracing stub, so

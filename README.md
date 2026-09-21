@@ -7,7 +7,7 @@ A high-performance antenna gain modeling system for parabolic dish antennas with
 This service implements a **hybrid physical optics + correction surface model** for parabolic dish antenna performance prediction. The system combines:
 
 1. **Physical Optics Computation Engine**: Aperture integration with phase functions (path, coma aberration, surface error, mesh effects) providing physics-based gain predictions
-2. **Optional Correction Surface**: 4D B-spline interpolation (azimuth, elevation, frequency, temperature) for residual error corrections when calibration data is available
+2. **Optional Correction Surface**: validated 3D B-spline interpolation (E-clock, E-cone, frequency) for residual error corrections inside fitted support
 
 The hybrid approach enables graceful degradation from fully calibrated antennas (±1 dB accuracy) to uncalibrated antennas using design specifications only (±2 dB loss accuracy).
 
@@ -45,7 +45,7 @@ CLI does not compile the web stack:
 antenna-model/
 ├── antenna-core/           # Physics engine + calibration-artifact layer (no web stack)
 │   └── src/
-│       ├── model/          # bessel, coordinates, coordinates_3d, correction_interpolator,
+│       ├── model/          # bessel, coordinates, coordinates_3d, correction_surface,
 │       │                   #   edge_cases, fft, geometry, illumination, integration, mesh,
 │       │                   #   pattern, phase, ray_trace
 │       ├── data/           # Artifact layer: types.rs + loader.rs (ANTC container)

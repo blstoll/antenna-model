@@ -393,6 +393,17 @@ pub enum ComputationError {
         reason: String,
     },
 
+    /// A correction-surface query contains a non-finite domain value.
+    #[error(
+        "invalid correction-surface query (E-clock={e_clock_deg}, E-cone={e_cone_deg}, frequency={frequency_mhz} MHz): {reason}"
+    )]
+    InvalidCorrectionSurfaceQuery {
+        e_clock_deg: f64,
+        e_cone_deg: f64,
+        frequency_mhz: f64,
+        reason: String,
+    },
+
     /// Invalid model state
     #[error("invalid model state: {0}")]
     InvalidModelState(String),
