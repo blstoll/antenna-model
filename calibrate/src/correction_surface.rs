@@ -1294,8 +1294,8 @@ pub(crate) fn is_held_out(index: usize, fold: usize, num_folds: usize) -> bool {
 
 /// Perform k-fold cross-validation.
 ///
-/// Returns `None` when no fold could be scored, rather than failing the caller: a fold refits
-/// on `(1 − 1/folds)` of the data, and since roadmap **D20** an underdetermined fit is a hard
+/// Returns `None` when any fold could not be refitted, rather than failing the caller: a fold
+/// refits on `(1 − 1/folds)` of the data, and since roadmap **D20** an underdetermined fit is a hard
 /// error, so a dataset can clear the coefficient count on the full set and miss it on a split.
 /// Propagating that killed the whole run — and because `--validate` sets
 /// `cross_validation_folds`, it killed it *here*, inside the fit, before
@@ -1303,12 +1303,6 @@ pub(crate) fn is_held_out(index: usize, fold: usize, num_folds: usize) -> bool {
 /// could therefore **remove an artifact that the same command without it produces**, which is
 /// exactly what roadmap D22 decided it must not do. Fixing that only in the validator left
 /// this copy as the reachable one; both are non-fatal now.
-fn supported_validation_error(residual_db: f64, evaluation: CorrectionEvaluation) -> Option<f64> {
-    evaluation
-        .correction_db()
-        .map(|correction_db| residual_db - correction_db)
-}
-
 fn cross_validate(
     residuals: &[ResidualPoint],
     params: &CorrectionSurfaceParams,
@@ -1378,59 +1372,88 @@ fn cross_validate(
             }
         };
 
-        // Evaluate on the validation fold through the same core support law used by
-        // serving. Unsupported fold points are not fabricated as 0 dB corrections and do
-        // not contribute to RMSE.
+        // Evaluate through the same core support law used by serving. Outside support
+        // contributes the physics-only error and remains typed; it is never represented as
+        // a successfully applied 0 dB correction.
         let fitted = surface.fitted()?;
-        let (fold_errors, fold_unsupported) = validation.iter().fold(
-            (Vec::new(), 0usize),
-            |(mut errors, unsupported), val_res| {
-                let evaluation = fitted.evaluate(
-                    val_res.e_clock_deg,
-                    val_res.e_cone_deg,
-                    val_res.frequency_mhz,
-                );
-                match supported_validation_error(val_res.residual_db, evaluation) {
-                    Some(error) => {
-                        errors.push(error);
-                        (errors, unsupported)
-                    }
-                    None => (errors, unsupported + 1),
-                }
-            },
-        );
+        let evaluated: Vec<EvaluatedResidual> = validation
+            .iter()
+            .map(|residual| {
+                evaluated_residual(
+                    residual.residual_db,
+                    fitted.evaluate(
+                        residual.e_clock_deg,
+                        residual.e_cone_deg,
+                        residual.frequency_mhz,
+                    ),
+                )
+            })
+            .collect();
+        let fold_unsupported = evaluated
+            .iter()
+            .filter(|residual| matches!(residual.correction, CorrectionEvaluation::OutsideSupport))
+            .count();
+        unsupported_points += fold_unsupported;
         if fold_unsupported > 0 {
-            failed_folds += 1;
-            unsupported_points += fold_unsupported;
             warn!(
-                "cross-validation fold {}/{k} could not score all held-out points: \
-                 {fold_unsupported}/{} lie outside its fitted support",
-                fold + 1,
-                validation.len()
+                fold = fold + 1,
+                folds = k,
+                unsupported_points = fold_unsupported,
+                validation_points = validation.len(),
+                "cross-validation points outside fitted support use physics-only errors"
             );
-        } else {
-            cv_errors.extend(fold_errors);
-            scored_folds += 1;
         }
+        cv_errors.extend(evaluated.iter().map(|residual| residual.error_db));
+        scored_folds += 1;
     }
 
-    if scored_folds == 0 {
-        warn!(
-            "cross-validation could not score any of the {k} folds; the surface's own fit on \
-             the full dataset succeeded, so it is reported without a cross-validation figure"
-        );
-        return Ok(None);
-    }
-    if failed_folds > 0 || unsupported_points > 0 {
-        warn!(
-            "cross-validation is INCOMPLETE: {scored_folds}/{k} folds scored and \
-             {unsupported_points} validation points lay outside their fold's fitted support; \
-             the surface is reported without a cross-validation figure"
-        );
-        return Ok(None);
-    }
+    let cross_validation_rmse = match (scored_folds, failed_folds) {
+        (0, _) => {
+            warn!(
+                folds = k,
+                "cross-validation could not score any fold; the successful full-data fit is reported without a cross-validation figure"
+            );
+            None
+        }
+        (_, failed) if failed > 0 => {
+            warn!(
+                failed_folds = failed,
+                scored_folds,
+                folds = k,
+                "cross-validation is incomplete because some folds could not be refitted; the surface is reported without a cross-validation figure"
+            );
+            None
+        }
+        _ => {
+            if unsupported_points > 0 {
+                warn!(
+                    unsupported_points,
+                    "cross-validation RMSE includes physics-only served behavior outside fitted support"
+                );
+            }
+            Some(compute_rmse(&cv_errors))
+        }
+    };
 
-    Ok(Some(compute_rmse(&cv_errors)))
+    Ok(cross_validation_rmse)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct EvaluatedResidual {
+    error_db: f64,
+    correction: CorrectionEvaluation,
+}
+
+/// Compute served-behavior error without erasing fitted-support provenance.
+fn evaluated_residual(residual_db: f64, correction: CorrectionEvaluation) -> EvaluatedResidual {
+    let error_db = match correction {
+        CorrectionEvaluation::Applied(correction_db) => residual_db - correction_db,
+        CorrectionEvaluation::OutsideSupport => residual_db,
+    };
+    EvaluatedResidual {
+        error_db,
+        correction,
+    }
 }
 
 // ============================================================================
@@ -2358,18 +2381,24 @@ mod tests {
     #[test]
     fn cross_validation_never_scores_outside_support_as_zero_correction() {
         assert_eq!(
-            supported_validation_error(3.0, CorrectionEvaluation::Applied(1.25)),
-            Some(1.75)
+            evaluated_residual(3.0, CorrectionEvaluation::Applied(1.25)),
+            EvaluatedResidual {
+                error_db: 1.75,
+                correction: CorrectionEvaluation::Applied(1.25),
+            }
         );
         assert_eq!(
-            supported_validation_error(3.0, CorrectionEvaluation::OutsideSupport),
-            None,
-            "an unsupported fold point has no correction value and must not become a 3 dB error against fabricated 0 dB"
+            evaluated_residual(3.0, CorrectionEvaluation::OutsideSupport),
+            EvaluatedResidual {
+                error_db: 3.0,
+                correction: CorrectionEvaluation::OutsideSupport,
+            },
+            "physics-only error must retain OutsideSupport rather than become Applied(0.0)"
         );
     }
 
     #[test]
-    fn partial_fold_support_does_not_produce_a_cross_validation_figure() {
+    fn partial_fold_support_uses_physics_only_in_the_cross_validation_figure() {
         let (mut measurements, predictions) = grid_measurements(2, 40, 8);
         measurements[0].e_clock_deg = 359.0;
         let params = CorrectionSurfaceParams {
@@ -2389,8 +2418,8 @@ mod tests {
             .expect("an incomplete fold must not withhold the full-data fit");
 
         assert!(
-            surface.fit_stats.cross_validation_rmse.is_none(),
-            "a scalar RMSE cannot truthfully represent a run that omitted unsupported held-out points"
+            surface.fit_stats.cross_validation_rmse.is_some(),
+            "outside-support points have a physics-only served prediction and must contribute to cross-validation"
         );
     }
 

@@ -310,6 +310,12 @@ pub struct ExportPhysicalParams {
 /// the artifact, or the artifact describes something other than what it serves.** Roadmap
 /// **D26** finding 2; taking the parameter away is what makes the two agree by construction
 /// rather than by a caller's care.
+///
+/// `served_behavior_rmse_db` describes the value the service returns at every validation point:
+/// physics plus correction in support, and physics-only outside support. The artifact's generic
+/// `accuracy_estimate_db` and `rmse_db` fields already describe served accuracy, so issue #93
+/// changes neither their meaning nor the wire layout. Issue #96 will add a separate in-support
+/// correction metric to the validation report.
 #[allow(clippy::too_many_arguments)]
 pub fn export_full_calibration(
     antenna_id: &str,
@@ -319,7 +325,7 @@ pub fn export_full_calibration(
     physical: &ExportPhysicalParams,
     surface: &CorrectionSurface,
     measurements: &[MeasurementPoint],
-    rmse_db: f64,
+    served_behavior_rmse_db: f64,
     r_squared: f64,
     physics_only_rmse_db: f64,
     parameters_tuned: bool,
@@ -427,16 +433,16 @@ pub fn export_full_calibration(
         })?;
 
     let calibration_status = CalibrationStatus::FullyCalibrated {
-        accuracy_estimate_db: rmse_db,
+        accuracy_estimate_db: served_behavior_rmse_db,
     };
 
-    let correction_improvement_db = physics_only_rmse_db - rmse_db;
+    let correction_improvement_db = physics_only_rmse_db - served_behavior_rmse_db;
     let metadata = CalibrationMetadataBuilder::default()
         .antenna_name(antenna_name.to_string())
         .calibration_date(chrono::Utc::now().to_rfc3339())
         .format_version(CALIBRATION_SCHEMA_VERSION.to_string())
         .data_source(data_source)
-        .rmse_db(rmse_db)
+        .rmse_db(served_behavior_rmse_db)
         .r_squared(r_squared)
         .num_measurements(measurements.len())
         .physics_only_rmse_db(physics_only_rmse_db)

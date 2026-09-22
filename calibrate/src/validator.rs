@@ -8,10 +8,10 @@
 //! The validator provides:
 //! - K-fold cross-validation for robustness assessment
 //! - Error metrics (RMSE, max error, R²) for model quality
-//! - Before/after comparison (model-only vs model+correction)
+//! - Before/after comparison (model-only vs served behavior)
 //! - Main lobe accuracy verification (<1 dB target)
 //! - First sidelobe accuracy verification (<1 dB target)
-//! - Outlier identification (>1 dB error cases)
+//! - High-error served-prediction identification (>1 dB error cases)
 //! - Error analysis by frequency band and angular region
 //!
 //! # Example
@@ -34,7 +34,7 @@
 //! )?;
 //!
 //! println!("RMSE (model only): {:.3} dB", report.model_only_rmse);
-//! println!("RMSE (corrected): {:.3} dB", report.corrected_rmse);
+//! println!("RMSE (served behavior): {:.3} dB", report.corrected_rmse);
 //! println!("Main lobe max error: {:.3} dB", report.main_lobe_max_error);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
@@ -149,13 +149,19 @@ pub struct ValidationReport {
     pub model_only_max_error: f64,
     pub model_only_r_squared: f64,
 
-    /// Corrected model performance (with correction surface)
+    /// Served-behavior RMSE over every validation point.
+    ///
+    /// The field retains its legacy serialized name until issue #96 adds separate served and
+    /// in-support metrics. Outside fitted support, this includes the physics-only prediction.
     pub corrected_rmse: f64,
+    /// Served-behavior maximum error, with physics-only fallback outside fitted support.
     pub corrected_max_error: f64,
+    /// Served-behavior coefficient of determination, with physics-only fallback outside support.
     pub corrected_r_squared: f64,
 
-    /// Improvement metrics
+    /// Served-behavior RMSE improvement relative to physics-only predictions.
     pub rmse_improvement_percent: f64,
+    /// Served-behavior maximum-error improvement relative to physics-only predictions.
     pub max_error_improvement_percent: f64,
 
     /// Main lobe statistics
@@ -170,8 +176,9 @@ pub struct ValidationReport {
     pub first_sidelobe_rmse: f64,
     pub first_sidelobe_meets_target: bool,
 
-    /// Outlier analysis
+    /// High-error served predictions; this does not classify measurement quality.
     pub outliers: Vec<OutlierPoint>,
+    /// Number of high-error served predictions.
     pub num_outliers: usize,
 
     /// Error analysis by frequency band
@@ -225,8 +232,8 @@ pub struct AngularRegionStats {
 /// A cross-validation fold that could not be scored.
 ///
 /// Roadmap D22: recorded and reported rather than aborting the run. A training split can
-/// fail to fit, or its fitted support can exclude every held-out point. Neither case is a
-/// numeric correction result.
+/// fail to fit even when the full dataset succeeds; outside fitted support is not a fold
+/// failure because issue #93 gives it a physics-only served prediction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FoldFailure {
     /// 1-based fold number.
@@ -250,17 +257,17 @@ pub struct CrossValidationResults {
     /// `num_folds` when `failed_folds` is non-empty — so **this vector is dense and its index
     /// is not the fold number**. Pair it with [`Self::scored_fold_numbers`] before labelling.
     pub fold_rmse_values: Vec<f64>,
-    /// Folds that could not be refitted or had no supported validation points.
+    /// Folds whose training split could not be refitted.
     #[serde(default)]
     pub failed_folds: Vec<FoldFailure>,
-    /// Held-out points omitted because they lay outside their fold's fitted support.
+    /// Held-out points served physics-only because they lay outside fitted support.
     ///
-    /// A nonzero count makes the run incomplete even when every fold has an RMSE. Keeping
-    /// the count explicit prevents a supported-subset score from masquerading as full
-    /// cross-validation.
+    /// A nonzero count means correction support is incomplete even though every such point
+    /// contributes to the served-behavior RMSE. Issue #96 will expose the corresponding
+    /// in-support-only metric and proportion.
     #[serde(default)]
     pub unsupported_validation_points: usize,
-    /// Mean over the folds that were scored.
+    /// Served-behavior RMSE mean over the folds that were scored.
     ///
     /// `Option` rather than a NaN sentinel: these are serialized into the `--report` JSON,
     /// `serde_json` writes a non-finite `f64` as `null`, and a plain `f64` field cannot read
@@ -273,7 +280,7 @@ pub struct CrossValidationResults {
 }
 
 impl CrossValidationResults {
-    /// True when every requested fold and every held-out point was scored.
+    /// True when every fold refitted and every held-out point had correction support.
     pub fn is_complete(&self) -> bool {
         self.failed_folds.is_empty() && self.unsupported_validation_points == 0
     }
@@ -337,9 +344,25 @@ pub fn validate_calibration(
 
     let num_points = measurements.len();
 
-    // Compute corrected predictions
-    let corrected_predictions =
-        compute_corrected_predictions(measurements, model_predictions, correction_surface)?;
+    // Compute served predictions while retaining whether each correction was applied.
+    // Issue #96 will expose separate served and in-support metrics; until then, keeping the
+    // typed outcome here prevents outside support from becoming an unlabelled 0 dB correction.
+    let evaluated_predictions =
+        compute_served_predictions(measurements, model_predictions, correction_surface)?;
+    let served_predictions: Vec<f64> = evaluated_predictions
+        .iter()
+        .map(|prediction| prediction.served_db)
+        .collect();
+    let unsupported_points = evaluated_predictions
+        .iter()
+        .filter(|prediction| matches!(prediction.correction, CorrectionEvaluation::OutsideSupport))
+        .count();
+    if unsupported_points > 0 {
+        warn!(
+            unsupported_points,
+            "validation points outside fitted support use physics-only predictions"
+        );
+    }
 
     // Extract measured values
     let measured: Vec<f64> = measurements.iter().map(|m| m.g_over_t_db).collect();
@@ -349,27 +372,29 @@ pub fn validate_calibration(
     let model_only_max_error = compute_max_error(&measured, model_predictions);
     let model_only_r_squared = compute_r_squared(&measured, model_predictions);
 
-    // Corrected model statistics
-    let corrected_rmse = compute_rmse(&measured, &corrected_predictions);
-    let corrected_max_error = compute_max_error(&measured, &corrected_predictions);
-    let corrected_r_squared = compute_r_squared(&measured, &corrected_predictions);
+    // Served-behavior statistics
+    let served_behavior_rmse = compute_rmse(&measured, &served_predictions);
+    let served_behavior_max_error = compute_max_error(&measured, &served_predictions);
+    let served_behavior_r_squared = compute_r_squared(&measured, &served_predictions);
 
     // Improvement metrics
     let rmse_improvement_percent = if model_only_rmse > 0.0 {
-        100.0 * (model_only_rmse - corrected_rmse) / model_only_rmse
+        100.0 * (model_only_rmse - served_behavior_rmse) / model_only_rmse
     } else {
         0.0
     };
 
     let max_error_improvement_percent = if model_only_max_error > 0.0 {
-        100.0 * (model_only_max_error - corrected_max_error) / model_only_max_error
+        100.0 * (model_only_max_error - served_behavior_max_error) / model_only_max_error
     } else {
         0.0
     };
 
     info!(
-        "Model-only RMSE: {:.3} dB, Corrected RMSE: {:.3} dB ({:.1}% improvement)",
-        model_only_rmse, corrected_rmse, rmse_improvement_percent
+        model_only_rmse_db = model_only_rmse,
+        served_behavior_rmse_db = served_behavior_rmse,
+        rmse_improvement_percent,
+        "validation error metrics"
     );
 
     // Classify points by region
@@ -378,7 +403,7 @@ pub fn validate_calibration(
 
     // Main lobe statistics
     let (main_lobe_rmse, main_lobe_max_error, main_lobe_num_points) =
-        compute_region_stats(&measured, &corrected_predictions, &main_lobe_indices);
+        compute_region_stats(&measured, &served_predictions, &main_lobe_indices);
     let main_lobe_meets_target = main_lobe_max_error <= config.main_lobe_target_db;
 
     info!(
@@ -396,7 +421,7 @@ pub fn validate_calibration(
 
     // First sidelobe statistics
     let (first_sidelobe_rmse, first_sidelobe_max_error, first_sidelobe_num_points) =
-        compute_region_stats(&measured, &corrected_predictions, &first_sidelobe_indices);
+        compute_region_stats(&measured, &served_predictions, &first_sidelobe_indices);
     let first_sidelobe_meets_target = first_sidelobe_max_error <= config.first_sidelobe_target_db;
 
     info!(
@@ -415,7 +440,7 @@ pub fn validate_calibration(
     // Identify outliers
     let outliers = identify_outliers(
         measurements,
-        &corrected_predictions,
+        &served_predictions,
         config.outlier_threshold_db,
         config,
     );
@@ -429,14 +454,11 @@ pub fn validate_calibration(
     }
 
     // Frequency band analysis
-    let frequency_band_analysis = analyze_by_frequency_band(
-        measurements,
-        &corrected_predictions,
-        &config.frequency_bands,
-    );
+    let frequency_band_analysis =
+        analyze_by_frequency_band(measurements, &served_predictions, &config.frequency_bands);
 
     // Angular region analysis
-    let angular_region_analysis = analyze_by_angular_region(measurements, &corrected_predictions);
+    let angular_region_analysis = analyze_by_angular_region(measurements, &served_predictions);
 
     // Cross-validation (if requested)
     let cross_validation = if config.num_folds > 1 {
@@ -463,9 +485,9 @@ pub fn validate_calibration(
         model_only_rmse,
         model_only_max_error,
         model_only_r_squared,
-        corrected_rmse,
-        corrected_max_error,
-        corrected_r_squared,
+        corrected_rmse: served_behavior_rmse,
+        corrected_max_error: served_behavior_max_error,
+        corrected_r_squared: served_behavior_r_squared,
         rmse_improvement_percent,
         max_error_improvement_percent,
         main_lobe_num_points,
@@ -489,27 +511,45 @@ pub fn validate_calibration(
 // Helper Functions
 // ============================================================================
 
-/// Compute corrected predictions using correction surface
-fn compute_corrected_predictions(
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct EvaluatedPrediction {
+    served_db: f64,
+    correction: CorrectionEvaluation,
+}
+
+/// Apply the served-gain support law without erasing the typed correction outcome.
+fn evaluated_prediction(physics_db: f64, correction: CorrectionEvaluation) -> EvaluatedPrediction {
+    let served_db = match correction {
+        CorrectionEvaluation::Applied(correction_db) => physics_db + correction_db,
+        CorrectionEvaluation::OutsideSupport => physics_db,
+    };
+    EvaluatedPrediction {
+        served_db,
+        correction,
+    }
+}
+
+/// Compute served predictions using the fitted core correction surface.
+fn compute_served_predictions(
     measurements: &[MeasurementPoint],
     model_predictions: &[f64],
     correction_surface: &CorrectionSurface,
-) -> Result<Vec<f64>> {
+) -> Result<Vec<EvaluatedPrediction>> {
     let fitted = correction_surface.fitted()?;
-    let mut corrected = Vec::with_capacity(measurements.len());
-
-    for (meas, &model_pred) in measurements.iter().zip(model_predictions.iter()) {
-        let CorrectionEvaluation::Applied(correction_db) =
-            fitted.evaluate(meas.e_clock_deg, meas.e_cone_deg, meas.frequency_mhz)
-        else {
-            return Err(ValidationError::ComputationError {
-                reason: "a validation point is outside the full fitted surface".to_string(),
-            });
-        };
-        corrected.push(model_pred + correction_db);
-    }
-
-    Ok(corrected)
+    Ok(measurements
+        .iter()
+        .zip(model_predictions.iter())
+        .map(|(measurement, &physics_db)| {
+            evaluated_prediction(
+                physics_db,
+                fitted.evaluate(
+                    measurement.e_clock_deg,
+                    measurement.e_cone_deg,
+                    measurement.frequency_mhz,
+                ),
+            )
+        })
+        .collect())
 }
 
 /// Compute root mean squared error
@@ -610,10 +650,14 @@ fn compute_region_stats(
     (rmse, max_error, indices.len())
 }
 
-/// Identify outlier points
+/// Identify high-error served predictions.
+///
+/// These are model-error diagnostics, not a measurement-quality classification. A point outside
+/// fitted support may appear here when its physics-only served prediction exceeds the threshold;
+/// issue #96 will expose that support disposition in the report.
 fn identify_outliers(
     measurements: &[MeasurementPoint],
-    corrected_predictions: &[f64],
+    served_predictions: &[f64],
     threshold_db: f64,
     config: &ValidationConfig,
 ) -> Vec<OutlierPoint> {
@@ -624,7 +668,7 @@ fn identify_outliers(
 
     for (i, (meas, &pred)) in measurements
         .iter()
-        .zip(corrected_predictions.iter())
+        .zip(served_predictions.iter())
         .enumerate()
     {
         let error = (meas.g_over_t_db - pred).abs();
@@ -656,7 +700,7 @@ fn identify_outliers(
 /// Analyze errors by frequency band
 fn analyze_by_frequency_band(
     measurements: &[MeasurementPoint],
-    corrected_predictions: &[f64],
+    served_predictions: &[f64],
     bands: &[(f64, f64)],
 ) -> Vec<FrequencyBandStats> {
     let mut results = Vec::new();
@@ -665,7 +709,7 @@ fn analyze_by_frequency_band(
         let mut band_measured = Vec::new();
         let mut band_predicted = Vec::new();
 
-        for (meas, &pred) in measurements.iter().zip(corrected_predictions.iter()) {
+        for (meas, &pred) in measurements.iter().zip(served_predictions.iter()) {
             if meas.frequency_mhz >= band_min && meas.frequency_mhz < band_max {
                 band_measured.push(meas.g_over_t_db);
                 band_predicted.push(pred);
@@ -699,7 +743,7 @@ fn analyze_by_frequency_band(
 /// Analyze errors by angular region (E-cone bins)
 fn analyze_by_angular_region(
     measurements: &[MeasurementPoint],
-    corrected_predictions: &[f64],
+    served_predictions: &[f64],
 ) -> Vec<AngularRegionStats> {
     // Define angular regions (E-cone bins)
     let regions = vec![
@@ -716,7 +760,7 @@ fn analyze_by_angular_region(
         let mut region_measured = Vec::new();
         let mut region_predicted = Vec::new();
 
-        for (meas, &pred) in measurements.iter().zip(corrected_predictions.iter()) {
+        for (meas, &pred) in measurements.iter().zip(served_predictions.iter()) {
             let cone = meas.e_cone_deg.abs();
             if cone >= cone_min && cone < cone_max {
                 region_measured.push(meas.g_over_t_db);
@@ -843,55 +887,57 @@ fn perform_cross_validation(
             }
         };
 
-        // Evaluate on the test set through core's fitted-support outcome. A held-out edge
-        // can lie beyond the training fold's fitted domain; it has no correction value and
-        // must not be scored as a fabricated 0 dB correction.
+        // Evaluate through the fitted core surface and keep the typed support outcome.
+        // Outside support has no correction value, so served behavior is physics-only; it
+        // remains counted separately for #96 rather than masquerading as Applied(0.0).
         let fitted = correction_surface.fitted()?;
-        let mut test_measured = Vec::new();
-        let mut test_corrected = Vec::new();
-        let mut unsupported_points = 0usize;
-        for (meas, &model_pred) in test_measurements.iter().zip(test_predictions.iter()) {
-            match fitted.evaluate(meas.e_clock_deg, meas.e_cone_deg, meas.frequency_mhz) {
-                CorrectionEvaluation::Applied(correction_db) => {
-                    test_measured.push(meas.g_over_t_db);
-                    test_corrected.push(model_pred + correction_db);
-                }
-                CorrectionEvaluation::OutsideSupport => unsupported_points += 1,
-            }
-        }
-
-        if test_corrected.is_empty() {
-            let reason = format!(
-                "fold {}/{} has no validation points inside its fitted support ({} held-out points)",
-                fold + 1,
-                num_folds,
-                unsupported_points
-            );
-            warn!("{reason}");
-            failed_folds.push(FoldFailure {
-                fold: fold + 1,
-                training_points: train_measurements.len(),
-                reason,
-            });
-            continue;
-        }
+        let evaluated: Vec<(f64, EvaluatedPrediction)> = test_measurements
+            .iter()
+            .zip(test_predictions.iter())
+            .map(|(measurement, &physics_db)| {
+                let correction = fitted.evaluate(
+                    measurement.e_clock_deg,
+                    measurement.e_cone_deg,
+                    measurement.frequency_mhz,
+                );
+                (
+                    measurement.g_over_t_db,
+                    evaluated_prediction(physics_db, correction),
+                )
+            })
+            .collect();
+        let unsupported_points = evaluated
+            .iter()
+            .filter(|(_, prediction)| {
+                matches!(prediction.correction, CorrectionEvaluation::OutsideSupport)
+            })
+            .count();
+        unsupported_validation_points += unsupported_points;
         if unsupported_points > 0 {
-            unsupported_validation_points += unsupported_points;
             warn!(
-                "fold {}/{} excluded {unsupported_points}/{} validation points outside its fitted support",
-                fold + 1,
+                fold = fold + 1,
                 num_folds,
-                test_measurements.len()
+                unsupported_points,
+                validation_points = evaluated.len(),
+                "cross-validation points outside fitted support use physics-only predictions"
             );
         }
+        let test_measured: Vec<f64> = evaluated
+            .iter()
+            .map(|(measured_db, _)| *measured_db)
+            .collect();
+        let test_served: Vec<f64> = evaluated
+            .iter()
+            .map(|(_, prediction)| prediction.served_db)
+            .collect();
 
-        let fold_rmse = compute_rmse(&test_measured, &test_corrected);
+        let fold_rmse = compute_rmse(&test_measured, &test_served);
 
         debug!(
             "Fold {}: RMSE = {:.3} dB ({} test points)",
             fold + 1,
             fold_rmse,
-            test_corrected.len()
+            test_served.len()
         );
         fold_rmse_values.push(fold_rmse);
     }
@@ -932,16 +978,21 @@ fn perform_cross_validation(
             if failed_folds.is_empty() && unsupported_validation_points == 0 =>
         {
             info!(
-                "Cross-validation complete: mean RMSE = {mean:.3} ± {std:.3} dB \
-                 (min: {min:.3}, max: {max:.3})"
+                mean_rmse_db = mean,
+                std_rmse_db = std,
+                min_rmse_db = min,
+                max_rmse_db = max,
+                "cross-validation complete"
             )
         }
         (Some(mean), Some(std), _, _) => warn!(
-            "Cross-validation INCOMPLETE: {scored}/{num_folds} folds scored (mean RMSE = \
-             {mean:.3} ± {std:.3} dB over those); {} fold(s) could not be scored and \
-             {unsupported_validation_points} held-out point(s) were omitted. The artifact is \
-             still written — its own fit succeeded — but this figure is partial.",
-            failed_folds.len()
+            scored_folds = scored,
+            num_folds,
+            mean_rmse_db = mean,
+            std_rmse_db = std,
+            failed_folds = failed_folds.len(),
+            unsupported_validation_points,
+            "cross-validation support incomplete; served-behavior RMSE uses physics-only predictions outside support, and the successful full-data fit is still written"
         ),
         _ => warn!(
             "Cross-validation produced NO figure: none of the {num_folds} folds could be \
@@ -992,15 +1043,15 @@ impl ValidationReport {
         ));
 
         s.push_str(&format!(
-            "Corrected RMSE:         {:.3} dB\n",
+            "Served-behavior RMSE: {:.3} dB\n",
             self.corrected_rmse
         ));
         s.push_str(&format!(
-            "Corrected max error:    {:.3} dB\n",
+            "Served-behavior max error: {:.3} dB\n",
             self.corrected_max_error
         ));
         s.push_str(&format!(
-            "Corrected R²:           {:.4}\n\n",
+            "Served-behavior R²: {:.4}\n\n",
             self.corrected_r_squared
         ));
 
@@ -1070,10 +1121,10 @@ impl ValidationReport {
                 cv.num_folds, cv.num_folds
             ));
             match (cv.mean_rmse, cv.std_rmse) {
-                (Some(mean), Some(std)) => {
-                    s.push_str(&format!("Mean RMSE:  {mean:.3} ± {std:.3} dB\n"))
-                }
-                _ => s.push_str("Mean RMSE:  n/a (no fold could be scored)\n"),
+                (Some(mean), Some(std)) => s.push_str(&format!(
+                    "Served-behavior mean RMSE:  {mean:.3} ± {std:.3} dB\n"
+                )),
+                _ => s.push_str("Served-behavior mean RMSE:  n/a (no fold could be scored)\n"),
             }
             match (cv.min_rmse, cv.max_rmse) {
                 (Some(min), Some(max)) => {
@@ -1108,10 +1159,10 @@ impl ValidationReport {
 
             if !cv.is_complete() {
                 s.push_str(&format!(
-                    "\n⚠ INCOMPLETE: {} of {} folds failed and {} held-out points were \
+                    "\n⚠ SUPPORT INCOMPLETE: {} of {} folds failed and {} held-out points were \
                      outside their fold's fitted support. The figures above cover {} scored \
-                     folds and omit those unsupported points. The artifact is still written \
-                     — its own fit succeeded on the full dataset.\n",
+                     folds and use physics-only predictions for those unsupported points. The \
+                     artifact is still written — its own fit succeeded on the full dataset.\n",
                     cv.failed_folds.len(),
                     cv.num_folds,
                     cv.unsupported_validation_points,
@@ -1173,6 +1224,63 @@ mod tests {
         assert_eq!(config.num_folds, 5);
         assert_eq!(config.main_lobe_target_db, 1.0);
         assert_eq!(config.first_sidelobe_target_db, 1.0);
+    }
+
+    #[test]
+    fn outside_support_uses_the_physics_prediction_during_validation() {
+        let surface = CorrectionSurface {
+            coefficients: vec![1.0; 8],
+            shape: [2, 2, 2],
+            knots_frequency: vec![0.0, 0.0, 1.0, 1.0],
+            knots_econe: vec![0.0, 0.0, 1.0, 1.0],
+            knots_eclock: vec![0.0, 0.0, 1.0, 1.0],
+            spline_order: 2,
+            fit_stats: crate::correction_surface::FitStatistics {
+                num_points: 2,
+                rmse_db: 0.0,
+                max_residual_db: 0.0,
+                r_squared: 1.0,
+                cross_validation_rmse: None,
+                improvement_percent: 0.0,
+            },
+        };
+        let measurements = vec![
+            MeasurementPoint::new(0.5, 0.5, 0.5, 11.0, 290.0),
+            MeasurementPoint::new(2.0, 0.5, 0.5, 13.0, 290.0),
+        ];
+        let predictions = vec![10.0, 10.0];
+        let config = ValidationConfig {
+            num_folds: 0,
+            frequency_bands: vec![],
+            outlier_threshold_db: 2.0,
+            ..ValidationConfig::default()
+        };
+
+        let evaluated = compute_served_predictions(&measurements, &predictions, &surface)
+            .expect("the fitted core surface must return typed outcomes");
+        assert_eq!(
+            evaluated,
+            vec![
+                EvaluatedPrediction {
+                    served_db: 11.0,
+                    correction: CorrectionEvaluation::Applied(1.0),
+                },
+                EvaluatedPrediction {
+                    served_db: 10.0,
+                    correction: CorrectionEvaluation::OutsideSupport,
+                },
+            ],
+            "physics-only fallback must retain its typed support disposition internally"
+        );
+
+        let report = validate_calibration(&measurements, &predictions, &surface, &config)
+            .expect("outside support must fall back to the physics prediction");
+
+        let expected_rmse = 3.0 / 2.0_f64.sqrt();
+        assert!((report.corrected_rmse - expected_rmse).abs() < 1e-12);
+        assert_eq!(report.corrected_max_error, 3.0);
+        assert_eq!(report.outliers.len(), 1);
+        assert_eq!(report.outliers[0].predicted_db, 10.0);
     }
 
     // ========================================================================
@@ -1470,13 +1578,32 @@ mod tests {
         }
     }
 
-    /// A run is complete only when every held-out observation has a correction value.
-    /// A supported-subset RMSE may still be reported, but the omitted count must remain
-    /// explicit so it cannot masquerade as full cross-validation.
+    #[test]
+    fn legacy_corrected_fields_are_labeled_as_served_behavior() {
+        let report = ValidationReport {
+            corrected_rmse: 0.25,
+            ..minimal_report()
+        };
+
+        let summary = report.format_summary();
+        assert!(
+            summary.contains("Served-behavior RMSE: 0.250 dB"),
+            "the legacy corrected_rmse field includes physics-only fallback and must be labeled by its served-behavior semantics; got:\n{summary}"
+        );
+        assert!(
+            !summary.contains("Corrected RMSE"),
+            "unsupported points are not corrected, so this label is misleading; got:\n{summary}"
+        );
+    }
+
+    /// Correction support is complete only when every held-out observation has a
+    /// correction value. The served-behavior RMSE still includes physics-only predictions
+    /// outside support, while the count keeps those outcomes distinguishable.
     #[test]
     fn a_partially_unsupported_fold_is_recorded_as_incomplete() {
         let (mut points, predictions) = cv_fixture();
         points[0].e_clock_deg = 359.0;
+        points[0].g_over_t_db = predictions[0] + 50.0;
         let params = artifact_params();
         let surface =
             crate::correction_surface::fit_correction_surface(&points, &predictions, &params)
@@ -1490,6 +1617,19 @@ mod tests {
         assert!(cv.failed_folds.is_empty());
         assert_eq!(cv.unsupported_validation_points, 1);
         assert_eq!(cv.fold_rmse_values.len(), 5);
+
+        // Point 0 belongs to fold 1 and lies outside that fold's fitted support. Its
+        // physics-only error is exactly 50 dB, so including it puts a hard lower bound on
+        // the fold RMSE. Omitting it (the pre-#93 behavior) falls below this bound, while
+        // the support count above proves the value was not relabelled Applied(0.0).
+        let fold_one_points = points.len().div_ceil(cv.num_folds);
+        let physics_only_lower_bound = 50.0 / (fold_one_points as f64).sqrt();
+        assert!(
+            cv.fold_rmse_values[0] >= physics_only_lower_bound,
+            "fold 1 RMSE {} omitted the 50 dB physics-only error; expected at least {}",
+            cv.fold_rmse_values[0],
+            physics_only_lower_bound
+        );
     }
 
     /// The behavioural counterpart: `perform_cross_validation` itself must produce folds that
