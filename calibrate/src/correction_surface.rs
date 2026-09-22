@@ -35,6 +35,9 @@
 use crate::parser::MeasurementPoint;
 use antenna_core::data::types::AngularResolution;
 use antenna_core::model::phase::wavelength_from_frequency;
+use antenna_core::model::{
+    BasisStencilOutcome, CorrectionEvaluation, CorrectionSurfaceLayout, FittedCorrectionSurface,
+};
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -102,6 +105,29 @@ pub enum CorrectionSurfaceError {
 }
 
 pub type Result<T> = std::result::Result<T, CorrectionSurfaceError>;
+
+fn correction_layout(
+    shape: [usize; 3],
+    knots_eclock: &[f64],
+    knots_econe: &[f64],
+    knots_frequency: &[f64],
+    spline_order: usize,
+) -> Result<CorrectionSurfaceLayout> {
+    let spline_order =
+        u8::try_from(spline_order).map_err(|_| CorrectionSurfaceError::InvalidKnotVector {
+            reason: format!("spline order {spline_order} does not fit the core wire type"),
+        })?;
+    CorrectionSurfaceLayout::new(
+        shape,
+        knots_eclock.to_vec(),
+        knots_econe.to_vec(),
+        knots_frequency.to_vec(),
+        spline_order,
+    )
+    .map_err(|error| CorrectionSurfaceError::InvalidKnotVector {
+        reason: error.to_string(),
+    })
+}
 
 // ============================================================================
 // Data Structures
@@ -221,11 +247,11 @@ pub struct ResidualPoint {
 /// A fitted 3D B-spline correction surface
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CorrectionSurface {
-    /// B-spline coefficients (flattened 3D array)
-    /// Indexing: coeff[i_freq + n_freq * (i_cone + n_cone * i_clock)]
+    /// B-spline coefficients (flattened 3D array).
+    /// Indexing is the shared core order: E-clock fastest, then E-cone, then frequency.
     pub coefficients: Vec<f64>,
 
-    /// Shape: [n_frequency, n_cone, n_clock]
+    /// Shape: [n_clock, n_cone, n_frequency]
     pub shape: [usize; 3],
 
     /// Knot vectors for each dimension
@@ -604,20 +630,21 @@ pub fn fit_correction_surface(
         });
     }
 
-    // Build design matrix and solve least squares
-    let coefficients = fit_bspline_coefficients(
-        &residuals,
-        &knots_freq,
-        &knots_cone,
+    // Build the shared core layout once. Fitting and serving now consume the same sparse
+    // stencil and therefore the same support, span, basis, and coefficient-index laws.
+    let layout = correction_layout(
+        [n_clock, n_cone, n_freq],
         &knots_clock,
+        &knots_cone,
+        &knots_freq,
         params.spline_order,
-        params.regularization,
     )?;
+    let coefficients = fit_bspline_coefficients(&residuals, &layout, params.regularization)?;
 
-    // Create the surface
+    // Create the surface in core's canonical E-clock-fastest coefficient order.
     let surface = CorrectionSurface {
-        coefficients: coefficients.clone(),
-        shape: [n_freq, n_cone, n_clock],
+        coefficients,
+        shape: layout.shape(),
         knots_frequency: knots_freq,
         knots_econe: knots_cone,
         knots_eclock: knots_clock,
@@ -675,136 +702,6 @@ pub fn fit_correction_surface(
     } else {
         Ok(surface)
     }
-}
-
-// ============================================================================
-// B-Spline Basis Functions
-// ============================================================================
-
-/// Evaluate a single B-spline basis function using Cox-de Boor recursion
-///
-/// # Arguments
-/// * `i` - Basis function index
-/// * `k` - Order (degree + 1)
-/// * `t` - Evaluation point
-/// * `knots` - Knot vector
-///
-/// # Returns
-/// Value of B_{i,k}(t)
-///
-/// # Degenerate axis
-/// A fully degenerate knot vector (every knot equal, e.g. `[5.0; 8]`) has zero-width spans
-/// everywhere, so every basis function — including the domain-maximum case above — returns
-/// 0.0 rather than summing to a partition of unity. This is pre-existing, not something the
-/// domain-maximum fix introduced or fixes: the half-open span can't fire on a zero-width
-/// interval either. It is guarded upstream, not here — `generate_knot_vector` rejects
-/// `max_val - min_val < min_spacing` before a degenerate vector can be built, so a caller
-/// that bypasses that guard would need its own handling for this case.
-fn bspline_basis(i: usize, k: usize, t: f64, knots: &[f64]) -> f64 {
-    if k == 1 {
-        // Base case: characteristic function of the half-open span [knots[i], knots[i+1]).
-        if i < knots.len() - 1 && t >= knots[i] && t < knots[i + 1] {
-            return 1.0;
-        }
-        // The domain maximum needs the last non-degenerate span to be closed on the
-        // right, or no basis function is non-zero there at all.
-        //
-        // This is not cosmetic. `accumulate_normal_equations` evaluates the basis at
-        // every measurement, so before this a point sitting exactly on an axis maximum
-        // contributed an all-zero row: the last coefficient in that axis got no data
-        // support and was driven to ~0 by the ridge term, corrupting the fit across the
-        // entire top knot span rather than just at the endpoint. On a regular grid the
-        // maximum always has data on it. See
-        // docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md.
-        //
-        // The previous attempt at this keyed on `i == knots.len() - 2`, which for a
-        // clamped knot vector is a padding index outside the valid basis range
-        // `0..knots.len() - order`, so it never fired for a basis function that is
-        // actually evaluated.
-        if i + 1 < knots.len()
-            && t == knots[knots.len() - 1]
-            && knots[i + 1] == t
-            && knots[i] < knots[i + 1]
-        {
-            return 1.0;
-        }
-        return 0.0;
-    }
-
-    // Recursive case
-    let mut left = 0.0;
-    let mut right = 0.0;
-
-    // Left term
-    if i + k <= knots.len() {
-        let denom = knots[i + k - 1] - knots[i];
-        if denom.abs() > 1e-10 {
-            left = (t - knots[i]) / denom * bspline_basis(i, k - 1, t, knots);
-        }
-    }
-
-    // Right term
-    if i + 1 < knots.len() && i + k <= knots.len() {
-        let denom = knots[i + k] - knots[i + 1];
-        if denom.abs() > 1e-10 {
-            right = (knots[i + k] - t) / denom * bspline_basis(i + 1, k - 1, t, knots);
-        }
-    }
-
-    left + right
-}
-
-/// Evaluate all non-zero B-spline basis functions at a point
-///
-/// Returns a vector of (index, value) pairs for non-zero basis functions
-fn evaluate_basis_functions(t: f64, knots: &[f64], order: usize) -> Vec<(usize, f64)> {
-    let n_basis = knots.len() - order;
-    let mut results = Vec::new();
-
-    // Find the knot interval containing t
-    let interval = find_knot_interval(t, knots, order);
-
-    // Only evaluate basis functions that can be non-zero at t
-    // For order k, at most k basis functions are non-zero at any point
-    let start = interval.saturating_sub(order - 1);
-    let end = (interval + 1).min(n_basis);
-
-    for i in start..end {
-        let value = bspline_basis(i, order, t, knots);
-        if value.abs() > 1e-12 {
-            results.push((i, value));
-        }
-    }
-
-    results
-}
-
-/// Find the knot interval containing t
-fn find_knot_interval(t: f64, knots: &[f64], order: usize) -> usize {
-    let n = knots.len() - order;
-
-    // Handle edge cases
-    if t <= knots[order - 1] {
-        return order - 1;
-    }
-    if t >= knots[n] {
-        return n - 1;
-    }
-
-    // Binary search
-    let mut left = order - 1;
-    let mut right = n;
-
-    while right - left > 1 {
-        let mid = (left + right) / 2;
-        if t < knots[mid] {
-            right = mid;
-        } else {
-            left = mid;
-        }
-    }
-
-    left
 }
 
 // ============================================================================
@@ -972,9 +869,8 @@ fn enforce_min_spacing(knots: &[f64], min_spacing: f64) -> Vec<f64> {
 ///   continuity reduction, down to C⁰ at `order - 1`. Multiplicity `order` splits the spline
 ///   into disconnected pieces, which this fitter never intends.
 ///
-/// A fully degenerate vector (every knot equal) fails the first rule, which also closes the
-/// gap documented on [`bspline_basis`] — previously guarded only upstream in
-/// [`generate_knot_vector`].
+/// A fully degenerate vector (every knot equal) fails the first rule, before the shared core
+/// layout can be constructed.
 fn validate_knot_vector(knots: &[f64], order: usize) -> Result<()> {
     if knots.len() < 2 * order {
         return Err(CorrectionSurfaceError::InvalidKnotVector {
@@ -1053,54 +949,44 @@ fn validate_knot_vector(knots: &[f64], order: usize) -> Result<()> {
 /// `B^T B` product would; the design matrix is never materialized.
 fn accumulate_normal_equations(
     residuals: &[ResidualPoint],
-    knots_freq: &[f64],
-    knots_cone: &[f64],
-    knots_clock: &[f64],
-    order: usize,
+    layout: &CorrectionSurfaceLayout,
     regularization: f64,
-) -> (Array2<f64>, Array1<f64>) {
-    let n_freq = knots_freq.len() - order;
-    let n_cone = knots_cone.len() - order;
-    let n_clock = knots_clock.len() - order;
-    let n_coeff = n_freq * n_cone * n_clock;
-
+) -> Result<(Array2<f64>, Array1<f64>)> {
+    let n_coeff = layout.coefficient_count();
     let mut normal_matrix = Array2::<f64>::zeros((n_coeff, n_coeff));
     let mut btr = Array1::<f64>::zeros(n_coeff);
 
-    let mut active: Vec<(usize, f64)> = Vec::with_capacity(order * order * order);
+    for residual in residuals {
+        let BasisStencilOutcome::InSupport(stencil) = layout.basis_stencil(
+            residual.e_clock_deg,
+            residual.e_cone_deg,
+            residual.frequency_mhz,
+        ) else {
+            return Err(CorrectionSurfaceError::InterpolationError {
+                reason: format!(
+                    "fitting point (E-clock={}, E-cone={}, frequency={} MHz) is outside the generated layout",
+                    residual.e_clock_deg, residual.e_cone_deg, residual.frequency_mhz
+                ),
+            });
+        };
 
-    for res in residuals {
-        let basis_freq = evaluate_basis_functions(res.frequency_mhz, knots_freq, order);
-        let basis_cone = evaluate_basis_functions(res.e_cone_deg, knots_cone, order);
-        let basis_clock = evaluate_basis_functions(res.e_clock_deg, knots_clock, order);
-
-        // The non-zero entries of this point's design-matrix row.
-        active.clear();
-        for &(if_, vf) in &basis_freq {
-            for &(ic, vc) in &basis_cone {
-                for &(ik, vk) in &basis_clock {
-                    let idx = if_ + n_freq * (ic + n_cone * ik);
-                    active.push((idx, vf * vc * vk));
-                }
-            }
-        }
-
-        // Rank-1 update restricted to the active columns.
-        for &(ia, va) in &active {
-            btr[ia] += va * res.residual_db;
-            for &(ib, vb) in &active {
-                normal_matrix[[ia, ib]] += va * vb;
+        // Rank-1 update restricted to the shared core stencil's active columns.
+        for entry_a in stencil.entries() {
+            btr[entry_a.coefficient_index] += entry_a.basis_weight * residual.residual_db;
+            for entry_b in stencil.entries() {
+                normal_matrix[[entry_a.coefficient_index, entry_b.coefficient_index]] +=
+                    entry_a.basis_weight * entry_b.basis_weight;
             }
         }
     }
 
     if regularization > 0.0 {
-        for i in 0..n_coeff {
-            normal_matrix[[i, i]] += regularization;
+        for index in 0..n_coeff {
+            normal_matrix[[index, index]] += regularization;
         }
     }
 
-    (normal_matrix, btr)
+    Ok((normal_matrix, btr))
 }
 
 /// Solve `A x = b` for symmetric positive-definite `A` by Cholesky factorization.
@@ -1197,14 +1083,10 @@ fn cholesky_solve(a: &mut Array2<f64>, b: &Array1<f64>) -> Option<Array1<f64>> {
 /// where B is the design matrix, r is the residual vector, and λ is regularization
 fn fit_bspline_coefficients(
     residuals: &[ResidualPoint],
-    knots_freq: &[f64],
-    knots_cone: &[f64],
-    knots_clock: &[f64],
-    order: usize,
+    layout: &CorrectionSurfaceLayout,
     regularization: f64,
 ) -> Result<Vec<f64>> {
-    let n_coeff =
-        (knots_freq.len() - order) * (knots_cone.len() - order) * (knots_clock.len() - order);
+    let n_coeff = layout.coefficient_count();
 
     info!(
         "Accumulating normal equations: {} data points, {} coefficients",
@@ -1212,14 +1094,7 @@ fn fit_bspline_coefficients(
         n_coeff
     );
 
-    let (mut normal_matrix, btr) = accumulate_normal_equations(
-        residuals,
-        knots_freq,
-        knots_cone,
-        knots_clock,
-        order,
-        regularization,
-    );
+    let (mut normal_matrix, btr) = accumulate_normal_equations(residuals, layout, regularization)?;
 
     let coefficients = cholesky_solve(&mut normal_matrix, &btr).ok_or_else(|| {
         CorrectionSurfaceError::SingularMatrix {
@@ -1240,47 +1115,74 @@ fn fit_bspline_coefficients(
 // ============================================================================
 
 impl CorrectionSurface {
-    /// Evaluate the correction at a given point
-    ///
-    /// # Arguments
-    /// * `frequency_mhz` - Frequency in MHz
-    /// * `e_cone_deg` - E-cone angle in degrees
-    /// * `e_clock_deg` - E-clock angle in degrees
-    ///
-    /// # Returns
-    /// Correction value in dB to add to the model prediction
-    pub fn evaluate(&self, frequency_mhz: f64, e_cone_deg: f64, e_clock_deg: f64) -> Result<f64> {
-        let basis_freq =
-            evaluate_basis_functions(frequency_mhz, &self.knots_frequency, self.spline_order);
-        let basis_cone = evaluate_basis_functions(e_cone_deg, &self.knots_econe, self.spline_order);
-        let basis_clock =
-            evaluate_basis_functions(e_clock_deg, &self.knots_eclock, self.spline_order);
-
-        let [n_freq, n_cone, _n_clock] = self.shape;
-        let mut correction = 0.0;
-
-        for &(if_, vf) in &basis_freq {
-            for &(ic, vc) in &basis_cone {
-                for &(ik, vk) in &basis_clock {
-                    let idx = if_ + n_freq * (ic + n_cone * ik);
-                    if idx < self.coefficients.len() {
-                        correction += self.coefficients[idx] * vf * vc * vk;
-                    }
-                }
+    pub(crate) fn fitted(&self) -> Result<FittedCorrectionSurface> {
+        let layout = correction_layout(
+            self.shape,
+            &self.knots_eclock,
+            &self.knots_econe,
+            &self.knots_frequency,
+            self.spline_order,
+        )?;
+        FittedCorrectionSurface::new(layout, self.coefficients.clone()).map_err(|error| {
+            CorrectionSurfaceError::InterpolationError {
+                reason: error.to_string(),
             }
-        }
-
-        Ok(correction)
+        })
     }
 
-    /// Evaluate corrections for multiple points (batch evaluation)
+    /// Evaluate the correction at a given point through the shared core evaluator.
+    pub fn evaluate_outcome(
+        &self,
+        frequency_mhz: f64,
+        e_cone_deg: f64,
+        e_clock_deg: f64,
+    ) -> Result<CorrectionEvaluation> {
+        Ok(self
+            .fitted()?
+            .evaluate(e_clock_deg, e_cone_deg, frequency_mhz))
+    }
+
+    /// Evaluate a correction known to be inside fitted support.
+    ///
+    /// Callers that can encounter an unsupported point, including cross-validation, use
+    /// [`Self::evaluate_outcome`] and preserve [`CorrectionEvaluation::OutsideSupport`].
+    pub fn evaluate(&self, frequency_mhz: f64, e_cone_deg: f64, e_clock_deg: f64) -> Result<f64> {
+        match self.evaluate_outcome(frequency_mhz, e_cone_deg, e_clock_deg)? {
+            CorrectionEvaluation::Applied(correction_db) => Ok(correction_db),
+            CorrectionEvaluation::OutsideSupport => {
+                Err(CorrectionSurfaceError::InterpolationError {
+                    reason: format!(
+                        "query (E-clock={e_clock_deg}, E-cone={e_cone_deg}, frequency={frequency_mhz} MHz) is outside fitted support"
+                    ),
+                })
+            }
+        }
+    }
+
+    /// Evaluate corrections for multiple points (batch evaluation).
     pub fn evaluate_batch(
         &self,
         points: &[(f64, f64, f64)], // (freq, cone, clock)
     ) -> Result<Vec<f64>> {
+        let fitted = self.fitted()?;
         points
             .iter()
-            .map(|(f, c, k)| self.evaluate(*f, *c, *k))
+            .map(
+                |(frequency_mhz, e_cone_deg, e_clock_deg)| match fitted.evaluate(
+                    *e_clock_deg,
+                    *e_cone_deg,
+                    *frequency_mhz,
+                ) {
+                    CorrectionEvaluation::Applied(correction_db) => Ok(correction_db),
+                    CorrectionEvaluation::OutsideSupport => {
+                        Err(CorrectionSurfaceError::InterpolationError {
+                            reason: format!(
+                                "query (E-clock={e_clock_deg}, E-cone={e_cone_deg}, frequency={frequency_mhz} MHz) is outside fitted support"
+                            ),
+                        })
+                    }
+                },
+            )
             .collect()
     }
 }
@@ -1295,11 +1197,19 @@ fn compute_fit_statistics(
     residuals: &[ResidualPoint],
     initial_rmse: f64,
 ) -> Result<FitStatistics> {
+    let fitted = surface.fitted()?;
     let mut corrected_residuals = Vec::with_capacity(residuals.len());
     let mut max_residual: f64 = 0.0;
 
     for res in residuals {
-        let correction = surface.evaluate(res.frequency_mhz, res.e_cone_deg, res.e_clock_deg)?;
+        let CorrectionEvaluation::Applied(correction) =
+            fitted.evaluate(res.e_clock_deg, res.e_cone_deg, res.frequency_mhz)
+        else {
+            return Err(CorrectionSurfaceError::InterpolationError {
+                reason: "a fitting point left the fitted support during fit-statistics evaluation"
+                    .to_string(),
+            });
+        };
         let corrected = res.residual_db - correction;
         max_residual = max_residual.max(corrected.abs());
         corrected_residuals.push(corrected);
@@ -1393,6 +1303,12 @@ pub(crate) fn is_held_out(index: usize, fold: usize, num_folds: usize) -> bool {
 /// could therefore **remove an artifact that the same command without it produces**, which is
 /// exactly what roadmap D22 decided it must not do. Fixing that only in the validator left
 /// this copy as the reachable one; both are non-fatal now.
+fn supported_validation_error(residual_db: f64, evaluation: CorrectionEvaluation) -> Option<f64> {
+    evaluation
+        .correction_db()
+        .map(|correction_db| residual_db - correction_db)
+}
+
 fn cross_validate(
     residuals: &[ResidualPoint],
     params: &CorrectionSurfaceParams,
@@ -1407,6 +1323,7 @@ fn cross_validate(
     let mut cv_errors = Vec::new();
     let mut scored_folds = 0usize;
     let mut failed_folds = 0usize;
+    let mut unsupported_points = 0usize;
 
     for fold in 0..k {
         // Split into training and validation sets, through the shared assignment above.
@@ -1461,17 +1378,40 @@ fn cross_validate(
             }
         };
 
-        // Evaluate on validation fold
-        for val_res in &validation {
-            let correction = surface.evaluate(
-                val_res.frequency_mhz,
-                val_res.e_cone_deg,
-                val_res.e_clock_deg,
-            )?;
-            let error = val_res.residual_db - correction;
-            cv_errors.push(error);
+        // Evaluate on the validation fold through the same core support law used by
+        // serving. Unsupported fold points are not fabricated as 0 dB corrections and do
+        // not contribute to RMSE.
+        let fitted = surface.fitted()?;
+        let (fold_errors, fold_unsupported) = validation.iter().fold(
+            (Vec::new(), 0usize),
+            |(mut errors, unsupported), val_res| {
+                let evaluation = fitted.evaluate(
+                    val_res.e_clock_deg,
+                    val_res.e_cone_deg,
+                    val_res.frequency_mhz,
+                );
+                match supported_validation_error(val_res.residual_db, evaluation) {
+                    Some(error) => {
+                        errors.push(error);
+                        (errors, unsupported)
+                    }
+                    None => (errors, unsupported + 1),
+                }
+            },
+        );
+        if fold_unsupported > 0 {
+            failed_folds += 1;
+            unsupported_points += fold_unsupported;
+            warn!(
+                "cross-validation fold {}/{k} could not score all held-out points: \
+                 {fold_unsupported}/{} lie outside its fitted support",
+                fold + 1,
+                validation.len()
+            );
+        } else {
+            cv_errors.extend(fold_errors);
+            scored_folds += 1;
         }
-        scored_folds += 1;
     }
 
     if scored_folds == 0 {
@@ -1481,11 +1421,13 @@ fn cross_validate(
         );
         return Ok(None);
     }
-    if failed_folds > 0 {
+    if failed_folds > 0 || unsupported_points > 0 {
         warn!(
-            "cross-validation is INCOMPLETE: {scored_folds}/{k} folds scored; the figure below \
-             covers only those"
+            "cross-validation is INCOMPLETE: {scored_folds}/{k} folds scored and \
+             {unsupported_points} validation points lay outside their fold's fitted support; \
+             the surface is reported without a cross-validation figure"
         );
+        return Ok(None);
     }
 
     Ok(Some(compute_rmse(&cv_errors)))
@@ -1591,21 +1533,6 @@ fn std_residual(residuals: &[ResidualPoint]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_bspline_basis_order_1() {
-        let knots = vec![0.0, 1.0, 2.0, 3.0];
-        assert!((bspline_basis(0, 1, 0.5, &knots) - 1.0).abs() < 1e-10);
-        assert!((bspline_basis(1, 1, 1.5, &knots) - 1.0).abs() < 1e-10);
-        assert!(bspline_basis(0, 1, 1.5, &knots).abs() < 1e-10);
-    }
-
-    #[test]
-    fn test_bspline_basis_order_2() {
-        let knots = vec![0.0, 0.0, 1.0, 2.0, 2.0];
-        let val = bspline_basis(0, 2, 0.5, &knots);
-        assert!(val > 0.0 && val < 1.0);
-    }
 
     #[test]
     fn test_generate_uniform_knots() {
@@ -2428,6 +2355,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cross_validation_never_scores_outside_support_as_zero_correction() {
+        assert_eq!(
+            supported_validation_error(3.0, CorrectionEvaluation::Applied(1.25)),
+            Some(1.75)
+        );
+        assert_eq!(
+            supported_validation_error(3.0, CorrectionEvaluation::OutsideSupport),
+            None,
+            "an unsupported fold point has no correction value and must not become a 3 dB error against fabricated 0 dB"
+        );
+    }
+
+    #[test]
+    fn partial_fold_support_does_not_produce_a_cross_validation_figure() {
+        let (mut measurements, predictions) = grid_measurements(2, 40, 8);
+        measurements[0].e_clock_deg = 359.0;
+        let params = CorrectionSurfaceParams {
+            spline_order: 4,
+            num_knots_frequency: 4,
+            num_knots_econe: 6,
+            num_knots_eclock: 8,
+            regularization: 1e-3,
+            adaptive_knots: true,
+            cross_validation_folds: 5,
+            min_knot_spacing_frequency: 50.0,
+            min_knot_spacing_econe: 2.0,
+            min_knot_spacing_eclock: 5.0,
+        };
+
+        let surface = fit_correction_surface(&measurements, &predictions, &params)
+            .expect("an incomplete fold must not withhold the full-data fit");
+
+        assert!(
+            surface.fit_stats.cross_validation_rmse.is_none(),
+            "a scalar RMSE cannot truthfully represent a run that omitted unsupported held-out points"
+        );
+    }
+
     /// A fold fit inside `cross_validate` must not cross-validate in turn. The fixture is
     /// sized so the recursion is exactly what fails, restated against the quantity roadmap
     /// D20 made binding — the coefficient count, not the old `(4+1)³ = 125` minimum.
@@ -2578,9 +2544,9 @@ mod tests {
         let knots_econe = clamped_knots(0.0, 24.0, 4, order);
         let knots_eclock = clamped_knots(0.0, 315.0, 6, order);
         let shape = [
-            knots_frequency.len() - order,
-            knots_econe.len() - order,
             knots_eclock.len() - order,
+            knots_econe.len() - order,
+            knots_frequency.len() - order,
         ];
         CorrectionSurface {
             coefficients: vec![1.0; shape[0] * shape[1] * shape[2]],
@@ -2755,34 +2721,45 @@ mod least_squares_tests {
         )
     }
 
-    /// Textbook dense construction of `(B^T B + λI, B^T r)`, materializing the design
-    /// matrix. This is the definition `accumulate_normal_equations` optimizes away, kept
-    /// here as an independent oracle.
+    fn fixture_layout() -> CorrectionSurfaceLayout {
+        let (knots_frequency, knots_cone, knots_clock, order) = fixture_knots();
+        correction_layout(
+            [
+                knots_clock.len() - order,
+                knots_cone.len() - order,
+                knots_frequency.len() - order,
+            ],
+            &knots_clock,
+            &knots_cone,
+            &knots_frequency,
+            order,
+        )
+        .unwrap()
+    }
+
+    /// Dense construction of `(B^T B + λI, B^T r)`, materializing the design matrix
+    /// from the shared core stencil. This independently checks the sparse rank-1
+    /// accumulation without carrying a second Cox–de Boor implementation.
     fn dense_normal_equations(
         residuals: &[ResidualPoint],
-        knots_freq: &[f64],
-        knots_cone: &[f64],
-        knots_clock: &[f64],
-        order: usize,
+        layout: &CorrectionSurfaceLayout,
         regularization: f64,
     ) -> (Array2<f64>, Array1<f64>) {
-        let n_freq = knots_freq.len() - order;
-        let n_cone = knots_cone.len() - order;
-        let n_clock = knots_clock.len() - order;
-        let n_coeff = n_freq * n_cone * n_clock;
-
+        let n_coeff = layout.coefficient_count();
         let mut design = Array2::<f64>::zeros((residuals.len(), n_coeff));
         let mut rhs = Array1::<f64>::zeros(residuals.len());
 
-        for (i, res) in residuals.iter().enumerate() {
-            rhs[i] = res.residual_db;
-            for &(if_, vf) in &evaluate_basis_functions(res.frequency_mhz, knots_freq, order) {
-                for &(ic, vc) in &evaluate_basis_functions(res.e_cone_deg, knots_cone, order) {
-                    for &(ik, vk) in &evaluate_basis_functions(res.e_clock_deg, knots_clock, order)
-                    {
-                        design[[i, if_ + n_freq * (ic + n_cone * ik)]] = vf * vc * vk;
-                    }
-                }
+        for (row, residual) in residuals.iter().enumerate() {
+            rhs[row] = residual.residual_db;
+            let BasisStencilOutcome::InSupport(stencil) = layout.basis_stencil(
+                residual.e_clock_deg,
+                residual.e_cone_deg,
+                residual.frequency_mhz,
+            ) else {
+                panic!("fixture residual must be inside support");
+            };
+            for entry in stencil.entries() {
+                design[[row, entry.coefficient_index]] = entry.basis_weight;
             }
         }
 
@@ -2798,12 +2775,12 @@ mod least_squares_tests {
     #[test]
     fn normal_equations_match_dense_reference() {
         let residuals = fixture_residuals();
-        let (kf, kc, kk, order) = fixture_knots();
+        let layout = fixture_layout();
         let lambda = 1e-3;
 
         let (sparse_a, sparse_b) =
-            accumulate_normal_equations(&residuals, &kf, &kc, &kk, order, lambda);
-        let (dense_a, dense_b) = dense_normal_equations(&residuals, &kf, &kc, &kk, order, lambda);
+            accumulate_normal_equations(&residuals, &layout, lambda).unwrap();
+        let (dense_a, dense_b) = dense_normal_equations(&residuals, &layout, lambda);
 
         assert_eq!(sparse_a.dim(), dense_a.dim());
         let max_a = (&sparse_a - &dense_a)
@@ -2846,11 +2823,11 @@ mod least_squares_tests {
     #[test]
     fn fit_satisfies_normal_equations() {
         let residuals = fixture_residuals();
-        let (kf, kc, kk, order) = fixture_knots();
+        let layout = fixture_layout();
         let lambda = 1e-3;
 
-        let coeffs = fit_bspline_coefficients(&residuals, &kf, &kc, &kk, order, lambda).unwrap();
-        let (a, b) = accumulate_normal_equations(&residuals, &kf, &kc, &kk, order, lambda);
+        let coeffs = fit_bspline_coefficients(&residuals, &layout, lambda).unwrap();
+        let (a, b) = accumulate_normal_equations(&residuals, &layout, lambda).unwrap();
 
         let residual = a.dot(&Array1::from_vec(coeffs)) - &b;
         let max = residual.iter().fold(0.0f64, |m, v| m.max(v.abs()));
@@ -2862,8 +2839,7 @@ mod least_squares_tests {
     /// replaced. It is not an oracle for the B-spline basis itself — see the re-pin note
     /// below.
     ///
-    /// **Re-pinned 2026-07-30** after the `bspline_basis` domain-maximum fix (see the
-    /// `k == 1` base case above and
+    /// **Re-pinned 2026-07-30** after the domain-maximum basis fix (see
     /// `docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md`). This
     /// fixture's frequency axis (`fixture_residuals`, `i in 0..8` → 8000..8700 MHz in
     /// 100 MHz steps) reaches exactly 8700 MHz, the frequency knot vector's maximum
@@ -2883,11 +2859,9 @@ mod least_squares_tests {
     /// Sanity check on the new values: `sum` rose (81.54 -> 87.17) and `c[last]` rose
     /// sharply (0.149 -> 0.566) — exactly the direction expected when a starved
     /// coefficient regains data support instead of being suppressed by the ridge term.
-    /// This is coefficient-index-specific, not a uniform shift: flattening index is
-    /// `i_freq + n_freq * (i_cone + n_cone * i_clock)`, and `c[0]`, `c[1]`, `c[mid]` all
-    /// have `i_freq != 4` (the top frequency index), so none of them touch the
-    /// frequency-max span and none move much — while `c[last]` (index 124) is the single
-    /// coefficient at `i_freq = 4`, the one that was starved.
+    /// This is coefficient-index-specific, not a uniform shift. Coefficients now use
+    /// core's canonical E-clock-fastest order; the final coefficient remains the corner at
+    /// every axis maximum.
     ///
     /// The new values are corroborated by three independent checks, not just accepted
     /// as "whatever the code now emits": `fit_satisfies_normal_equations` (the solve is
@@ -2899,9 +2873,9 @@ mod least_squares_tests {
     #[test]
     fn fit_matches_openblas_golden() {
         let residuals = fixture_residuals();
-        let (kf, kc, kk, order) = fixture_knots();
+        let layout = fixture_layout();
 
-        let c = fit_bspline_coefficients(&residuals, &kf, &kc, &kk, order, 1e-3).unwrap();
+        let c = fit_bspline_coefficients(&residuals, &layout, 1e-3).unwrap();
 
         assert_eq!(c.len(), 125);
         let sum: f64 = c.iter().sum();
@@ -2917,7 +2891,7 @@ mod least_squares_tests {
         close(sum, 8.717338510919e1, "sum");
         close(sumsq, 6.171608452120e1, "sumsq");
         close(c[0], 7.444512507241e-1, "c[0]");
-        close(c[1], 7.368946771474e-1, "c[1]");
+        close(c[1], 7.749544106931e-1, "c[1]");
         close(c[c.len() / 2], 7.472561519268e-1, "c[mid]");
         close(c[c.len() - 1], 5.661438211178e-1, "c[last]");
     }
@@ -2928,7 +2902,7 @@ mod least_squares_tests {
     /// numerically meaningless answer. All production call sites use λ > 0.
     #[test]
     fn unregularized_rank_deficient_fit_reports_singular_matrix() {
-        let (kf, kc, kk, order) = fixture_knots();
+        let layout = fixture_layout();
         // 125 basis functions, 2 data points — hopelessly rank-deficient.
         let residuals = vec![
             ResidualPoint {
@@ -2945,7 +2919,7 @@ mod least_squares_tests {
             },
         ];
 
-        let err = fit_bspline_coefficients(&residuals, &kf, &kc, &kk, order, 0.0).unwrap_err();
+        let err = fit_bspline_coefficients(&residuals, &layout, 0.0).unwrap_err();
         assert!(
             matches!(err, CorrectionSurfaceError::SingularMatrix { .. }),
             "expected SingularMatrix, got {err:?}"

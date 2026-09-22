@@ -286,7 +286,8 @@ pub struct ComputationMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub correction_surface_ms: Option<f64>,
 
-    /// Whether the query was extrapolated (outside calibrated range)
+    /// Whether a present correction surface was not applied because the query was
+    /// outside calibration coverage or fitted support.
     pub extrapolated: bool,
 
     /// Physical spillover loss folded into `gain_db`, in dB (a small **negative**

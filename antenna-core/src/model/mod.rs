@@ -16,7 +16,7 @@
 pub mod bessel;
 pub mod coordinates;
 pub mod coordinates_3d;
-pub mod correction_interpolator;
+pub mod correction_surface;
 pub mod edge_cases;
 /// Mixed-radix FFT backing the aperture integrator's φ' transform (roadmap P10-perf).
 ///
@@ -162,7 +162,10 @@ pub use coordinates_3d::{
     validate_ecef, validate_geodetic, CoordinateSystem, Position3D,
 };
 
-pub use correction_interpolator::{evaluate_correction, CorrectionResult};
+pub use correction_surface::{
+    BasisStencil, BasisStencilEntry, BasisStencilOutcome, CorrectionEvaluation,
+    CorrectionSurfaceLayout, FittedCorrectionSurface,
+};
 
 pub use geometry::{
     AntennaConfiguration, AntennaConfigurationBuilder, FeedParameters, FeedParametersBuilder,

@@ -6,14 +6,25 @@ use crate::config::{AntennaConfig, AntennaConfigEntry, CalibrationConfig, FeedSp
 use crate::data::loader::load_calibration_artifact;
 use crate::data::types::{
     AntennaCalibration, BSplineModel4D, CalibrationMetadata, CalibrationStatus, FeedParameters,
-    MeshParameters, PhysicalAntennaConfig, ReflectorGeometry, ValidityRanges,
+    MeshParameters, PhysicalAntennaConfig, ReflectorGeometry, ValidationError, ValidityRanges,
     CALIBRATION_SCHEMA_VERSION,
 };
 use crate::error::DataError;
+use crate::model::FittedCorrectionSurface;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
+
+pub(crate) type PreparedCorrection =
+    std::result::Result<Option<Arc<FittedCorrectionSurface>>, ValidationError>;
+
+#[derive(Debug, Clone)]
+struct CalibrationEntry {
+    calibration: AntennaCalibration,
+    /// The schema-5 wire surface validated and flattened exactly once when inserted.
+    correction_surface: PreparedCorrection,
+}
 
 /// Thread-safe repository for calibration data
 ///
@@ -48,8 +59,8 @@ use tracing::{debug, info, warn};
 /// ```
 #[derive(Clone)]
 pub struct CalibrationRepository {
-    /// Nested map: antenna_id -> feed_id -> calibration
-    data: Arc<RwLock<HashMap<String, HashMap<String, AntennaCalibration>>>>,
+    /// Nested map: antenna_id -> feed_id -> calibration and its prepared correction.
+    data: Arc<RwLock<HashMap<String, HashMap<String, CalibrationEntry>>>>,
 }
 
 impl CalibrationRepository {
@@ -325,10 +336,20 @@ impl CalibrationRepository {
     pub fn add_calibration(&mut self, calibration: AntennaCalibration) {
         let antenna_id = calibration.antenna_id.clone();
         let feed_id = calibration.feed_id.clone();
+        let correction_surface = calibration
+            .correction_surface
+            .as_ref()
+            .map(FittedCorrectionSurface::from_model4d)
+            .transpose()
+            .map(|surface| surface.map(Arc::new));
+        let entry = CalibrationEntry {
+            calibration,
+            correction_surface,
+        };
 
         let mut data = self.data.write();
         let antenna_map = data.entry(antenna_id.clone()).or_default();
-        antenna_map.insert(feed_id.clone(), calibration);
+        antenna_map.insert(feed_id.clone(), entry);
 
         debug!("Added calibration: {}:{}", antenna_id, feed_id);
     }
@@ -346,7 +367,22 @@ impl CalibrationRepository {
         let data = self.data.read();
         data.get(antenna_id)
             .and_then(|feeds| feeds.get(feed_id))
-            .cloned()
+            .map(|entry| entry.calibration.clone())
+    }
+
+    /// Get a calibration together with its once-prepared correction surface.
+    ///
+    /// The cached validation error preserves the behavior of direct test/programmatic
+    /// insertion without rescanning schema-5 coefficient slabs on every evaluated point.
+    pub(crate) fn get_prepared_calibration(
+        &self,
+        antenna_id: &str,
+        feed_id: &str,
+    ) -> Option<(AntennaCalibration, PreparedCorrection)> {
+        let data = self.data.read();
+        data.get(antenna_id)
+            .and_then(|feeds| feeds.get(feed_id))
+            .map(|entry| (entry.calibration.clone(), entry.correction_surface.clone()))
     }
 
     /// Get the physical antenna configuration for a specific antenna and feed
@@ -642,6 +678,37 @@ mod tests {
 
         let correction = repo.get_correction_surface("antenna_1", "x_band").unwrap();
         assert!(correction.is_none()); // Test calibration has no correction surface
+    }
+
+    #[test]
+    fn prepared_correction_surface_is_shared_across_point_lookups() {
+        let mut repo = CalibrationRepository::new();
+        let mut calibration = create_test_calibration("antenna_1", "x_band");
+        calibration.correction_surface = Some(BSplineModel4D {
+            coefficients: vec![1.0; 8],
+            shape: [2, 2, 2, 1],
+            knots_azimuth: vec![0.0, 0.0, 360.0, 360.0],
+            knots_elevation: vec![0.0, 0.0, 180.0, 180.0],
+            knots_frequency: vec![8_000.0, 8_000.0, 9_000.0, 9_000.0],
+            knots_temperature: vec![290.0, 290.0, 290.0],
+            spline_order: 2,
+        });
+        repo.add_calibration(calibration);
+
+        let prepared = || {
+            repo.get_prepared_calibration("antenna_1", "x_band")
+                .expect("calibration")
+                .1
+                .expect("valid surface")
+                .expect("present surface")
+        };
+        let first = prepared();
+        let second = prepared();
+
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "grid-point lookups must reuse one validated executable surface"
+        );
     }
 
     #[test]

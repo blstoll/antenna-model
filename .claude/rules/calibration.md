@@ -61,11 +61,15 @@ full and boresight mode (D2).
 
 - **Container** — the ANTC header `u32` (`ANTC_ARTIFACT_VERSION` = **4**), readable before the
   decode.
-- **Schema** — `metadata.format_version` (`CALIBRATION_SCHEMA_VERSION` = **"5.0"**), readable
+- **Schema** — `metadata.format_version` (`CALIBRATION_SCHEMA_VERSION` = **"5.1"**), readable
   only after it. A foreign MAJOR is a hard error.
 
-Three recent bumps cover the three cases, and they moved the axes differently:
+Recent bumps cover the versioning cases, and they moved the axes differently:
 
+- **#92 (5.1 / container 4)** tightened correction-surface validation without moving any
+  bytes: every synthetic temperature slab must be identical, runtime evaluation uses only
+  E-clock/E-cone/frequency, and outside fitted support has no numeric correction. Valid 5.0
+  artifacts still load under the minor-version policy; a temperature-varying one is rejected.
 - **D21 (5.0 / container 4)** added `metadata.angular_resolution` and **fixes no wrong number
   at all** — every 4.0 artifact means what it said and no consumer reads the new field. But
   postcard is positional, so a 4.0 payload is short by the `Option` discriminant and everything

@@ -20,23 +20,18 @@
 //! All angular dimensions are in degrees on both sides, so knot vectors copy
 //! directly. The temperature axis does not exist in the source surface, so it
 //! is constructed as a *flat-but-valid* axis (see [`to_bspline_4d`]): the
-//! coefficient slab is replicated `spline_order` times along temperature with a
+//! coefficient slab is replicated `spline_order + 1` times along temperature with a
 //! clamped knot vector over a real, nonzero interval. Because every temperature
 //! layer is identical and B-spline basis functions form a partition of unity,
 //! the surface evaluates to the same temperature-independent value anywhere in
 //! the interval.
 //!
-//! # Index Reordering
+//! # Canonical coefficient order
 //!
-//! The two B-spline representations use different flat-index conventions:
-//!
-//! - 3D source: `idx = i_freq + n_freq * (i_cone + n_cone * i_clock)`
-//!   (frequency varies fastest, clock slowest)
-//! - 4D dest:   `idx = i_az + n_az * (i_el + n_el * (i_freq + n_freq * i_temp))`
-//!   (azimuth/clock varies fastest, temperature slowest)
-//!
-//! Because azimuth := clock, these orderings differ; coefficients must be
-//! reindexed (not memcpy'd).
+//! Fitting and serving share core's E-clock-fastest order:
+//! `idx = i_clock + n_clock * (i_cone + n_cone * i_frequency)`.
+//! A temperature slab therefore copies directly into schema 5's azimuth-fastest wire order;
+//! export only replicates that slab along the retained synthetic temperature axis.
 
 use antenna_core::data::loader::encode_calibration_artifact;
 use antenna_core::data::types::{
@@ -168,8 +163,8 @@ pub(crate) fn flat_axis(lo: f64, hi: f64, order: usize) -> (usize, Vec<f64>) {
 /// * `t_lo` - Lower bound of the (flat) temperature interval in Kelvin.
 /// * `t_hi` - Upper bound of the (flat) temperature interval in Kelvin (must be > `t_lo`).
 pub fn to_bspline_4d(surface: &CorrectionSurface, t_lo: f64, t_hi: f64) -> Result<BSplineModel4D> {
-    let [n_freq, n_cone, n_clock] = surface.shape;
-    if n_freq == 0 || n_cone == 0 || n_clock == 0 {
+    let [n_clock, n_cone, n_freq] = surface.shape;
+    if n_clock == 0 || n_cone == 0 || n_freq == 0 {
         return Err(ArtifactExportError::InvalidSurface(format!(
             "correction surface has zero-sized dimension: shape={:?}",
             surface.shape
@@ -190,36 +185,18 @@ pub fn to_bspline_4d(surface: &CorrectionSurface, t_lo: f64, t_hi: f64) -> Resul
     let knots_elevation = surface.knots_econe.clone();
     let knots_frequency = surface.knots_frequency.clone();
 
-    let n_az = n_clock;
-    let n_el = n_cone;
-    let n_freq_4d = n_freq;
     // Flat-but-valid temperature axis (see [`flat_axis`] and the module/fn docs).
     let (n_temp, knots_temperature) = flat_axis(t_lo, t_hi, order);
 
-    // Reindex coefficients from source layout (freq fastest) to dest layout (az fastest).
-    //   Source: idx = i_freq + n_freq * (i_cone + n_cone * i_clock)
-    //   Dest:   idx = i_az   + n_az   * (i_el   + n_el   * (i_freq + n_freq * i_temp))
-    // The temperature slab is replicated identically across all `n_temp` layers.
-    let total = n_az * n_el * n_freq_4d * n_temp;
-    let mut coefficients = vec![0.0_f64; total];
-
-    for i_az in 0..n_az {
-        for i_el in 0..n_el {
-            for i_freq in 0..n_freq_4d {
-                let src_idx = i_freq + n_freq * (i_el + n_cone * i_az);
-                let value = surface.coefficients[src_idx];
-
-                for i_temp in 0..n_temp {
-                    let dst_idx = i_az + n_az * (i_el + n_el * (i_freq + n_freq_4d * i_temp));
-                    coefficients[dst_idx] = value;
-                }
-            }
-        }
-    }
+    // Core and schema 5 use the same E-clock/azimuth-fastest spatial order. Replicate the
+    // already-canonical slab identically across every synthetic temperature layer.
+    let coefficients = (0..n_temp)
+        .flat_map(|_| surface.coefficients.iter().copied())
+        .collect();
 
     Ok(BSplineModel4D {
         coefficients,
-        shape: [n_az, n_el, n_freq_4d, n_temp],
+        shape: [n_clock, n_cone, n_freq, n_temp],
         knots_azimuth,
         knots_elevation,
         knots_frequency,
@@ -543,7 +520,19 @@ pub fn write_calibration_artifact(calibration: &AntennaCalibration, path: &Path)
 mod tests {
     use super::*;
     use crate::correction_surface::{fit_correction_surface, CorrectionSurfaceParams};
-    use antenna_core::model::evaluate_correction;
+    use antenna_core::model::FittedCorrectionSurface;
+
+    fn applied_value(
+        surface: &FittedCorrectionSurface,
+        e_clock_deg: f64,
+        e_cone_deg: f64,
+        frequency_mhz: f64,
+    ) -> f64 {
+        surface
+            .evaluate(e_clock_deg, e_cone_deg, frequency_mhz)
+            .correction_db()
+            .expect("test query left fitted support")
+    }
 
     /// Smooth synthetic residual function over (clock, cone, freq).
     fn residual(clock_deg: f64, cone_deg: f64, freq_mhz: f64, freq0: f64) -> f64 {
@@ -608,7 +597,7 @@ mod tests {
 
         // Shape mapping: spatial axes copy directly (no padding now that the
         // service's find_knot_span off-by-one is fixed); temperature axis has order+1 layers.
-        let [n_freq, n_cone, n_clock] = surface.shape;
+        let [n_clock, n_cone, n_freq] = surface.shape;
         assert_eq!(model.shape[0], n_clock); // azimuth <- clock, no pad
         assert_eq!(model.shape[1], n_cone); // elevation <- cone, no pad
         assert_eq!(model.shape[2], n_freq); // frequency, no pad
@@ -620,9 +609,9 @@ mod tests {
         let (surface, _freq0) = make_test_surface();
         let t_lo = 289.0;
         let t_hi = 291.0;
-        let t_mid = 0.5 * (t_lo + t_hi);
         let model = to_bspline_4d(&surface, t_lo, t_hi).expect("conversion should succeed");
         assert!(model.validate().is_ok());
+        let fitted = FittedCorrectionSurface::from_model4d(&model).unwrap();
 
         // Sample interior points AND the exact domain boundaries of every axis
         // (fitted ranges: clock [0, 350], cone [0, 10], freq [8000, 8400]) —
@@ -637,28 +626,21 @@ mod tests {
         ];
         let cones = [0.0, 0.5, 3.0, 5.0, 7.0, 9.5, 10.0];
         let freqs = [8000.0, 8050.0, 8200.0, 8350.0, 8400.0];
-        let temps = [t_lo, t_mid, t_hi];
-
         let mut max_err = 0.0_f64;
         let mut samples = 0;
         for &k in &clocks {
             for &c in &cones {
                 for &f in &freqs {
                     let expected = surface.evaluate(f, c, k).expect("3D evaluate");
-                    for &t in &temps {
-                        // 4D mapping: azimuth=clock, elevation=cone, frequency=f.
-                        let got = evaluate_correction(&model, k, c, f, t)
-                            .expect("4D evaluate")
-                            .correction_db;
-                        let err = (got - expected).abs();
-                        max_err = max_err.max(err);
-                        samples += 1;
-                        assert!(
-                            err < 1e-9,
-                            "mismatch at clock={k}, cone={c}, freq={f}, temp={t}: \
-                             expected={expected}, got={got}, err={err}"
-                        );
-                    }
+                    let got = applied_value(&fitted, k, c, f);
+                    let err = (got - expected).abs();
+                    max_err = max_err.max(err);
+                    samples += 1;
+                    assert!(
+                        err < 1e-9,
+                        "mismatch at clock={k}, cone={c}, freq={f}: \
+                         expected={expected}, got={got}, err={err}"
+                    );
                 }
             }
         }
@@ -671,6 +653,7 @@ mod tests {
         // The flat temperature axis must NOT zero out the correction.
         let (surface, _freq0) = make_test_surface();
         let model = to_bspline_4d(&surface, 280.0, 300.0).expect("conversion");
+        let fitted = FittedCorrectionSurface::from_model4d(&model).unwrap();
 
         // A point with a clearly nonzero expected correction.
         let (k, c, f) = (90.0, 5.0, 8200.0);
@@ -680,16 +663,13 @@ mod tests {
             "test point should have nonzero correction, got {expected}"
         );
 
-        // Evaluating at several temperatures in-range must all match (flat axis).
-        for &t in &[281.0, 290.0, 299.0] {
-            let got = evaluate_correction(&model, k, c, f, t)
-                .expect("4D evaluate")
-                .correction_db;
-            assert!(
-                (got - expected).abs() < 1e-9,
-                "temperature {t} should be flat: expected={expected}, got={got}"
-            );
-        }
+        // Preparation accepts the schema-5 adapter only because every synthetic
+        // temperature slab is identical; runtime evaluation has no temperature input.
+        let got = applied_value(&fitted, k, c, f);
+        assert!(
+            (got - expected).abs() < 1e-9,
+            "flat-temperature adapter changed the correction: expected={expected}, got={got}"
+        );
     }
 
     #[test]

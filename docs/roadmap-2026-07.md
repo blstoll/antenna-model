@@ -30,11 +30,13 @@ fresh contract-conformance pass (re-derived, not trusted) confirms the fixes hol
 - `phase_center_offset` is now consumed by the live path as an axial defocus term
   (`integration.rs:516-517`) — the domain contract's open item on this is stale.
 
-**The 4D B-spline correction surface is fully implemented and live**
-(`model/correction_interpolator.rs`, applied at `service/evaluator.rs:265-287`, evaluated at
-calibration `temperature_const`, knot vectors validated at load). CLAUDE.md's claim that
-this is "not yet implemented in Sprint 5" is false — the project is roughly two sprints
-ahead of its own primary onboarding doc.
+**The correction surface is fully implemented and live.** Schema 5 retains the 4D
+`BSplineModel4D` wire layout, but runtime adapts its required-identical temperature slabs
+once into `antenna-core/src/model/correction_surface.rs`'s 3D E-clock/E-cone/frequency
+layout. Fitting and serving share that sparse stencil and return `OutsideSupport` rather
+than extrapolating a numeric correction. CLAUDE.md's claim that this was "not yet
+implemented in Sprint 5" was false — the project was roughly two sprints ahead of its
+primary onboarding doc.
 
 What remains in the physics layer is **scope, not bugs**:
 

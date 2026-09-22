@@ -352,6 +352,7 @@ mod tests {
                     reason: "fold 2/2 could not refit".to_string(),
                 },
             ],
+            unsupported_validation_points: 0,
             mean_rmse: None,
             std_rmse: None,
             min_rmse: None,

@@ -48,16 +48,18 @@
 //! the difference. That budget is a *measurement of a known limitation*, not an accuracy
 //! claim: see `docs/findings-2026-08-02-correction-surface-angular-resolution.md`.
 
+mod support;
+
 use antenna_core::model::coordinates_3d::compute_emitter_direction_with_attitude;
 use antenna_model::api::schemas::{GainRequest, GainResponse, Position3D};
 use antenna_model::data::repository::CalibrationRepository;
 use antenna_model::data::types::{AntennaCalibration, CalibrationStatus};
 use antenna_model::model::coordinates_3d::geodetic_to_ecef;
-use antenna_model::model::evaluate_correction;
 use antenna_model::service::compute_gain_from_request;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use support::{correction_value, fitted_correction_surface};
 
 // ============================================================================
 // Identity of the run
@@ -127,7 +129,7 @@ const MODEL_AGREEMENT_DB: f64 = 1e-3;
 /// from a kink lands inside 0.05 dB.
 ///
 /// This is the tight, purely internal assertion of the file: fill → CSV → fit → artifact →
-/// service loader → 4D interpolator, with no measurement uncertainty in it at all. A
+/// service loader → schema-5 adapter → 3D fitted evaluator, with no measurement uncertainty in it at all. A
 /// regression anywhere in that chain shows up here first and unambiguously.
 const CORRECTION_FIDELITY_DB: f64 = 0.30;
 
@@ -1014,8 +1016,8 @@ fn assert_the_correction_surface_fits_the_fill(scenario: &RealDataScenario) {
 /// The served correction reproduces, at every anchor, the residual the fill injected there.
 ///
 /// This is the file's tight assertion: no measurement uncertainty enters it, only the chain
-/// fill → CSV → fit → artifact → loader → 4D interpolator. Note the argument order — the 3D
-/// surface's clock/cone map onto the 4D surface's azimuth/elevation.
+/// fill → CSV → fit → artifact → loader → schema-5 adapter → 3D evaluator. The retained
+/// wire names map E-clock/E-cone onto azimuth/elevation.
 fn assert_the_served_correction_reproduces_the_injected_residual(scenario: &RealDataScenario) {
     let calibration = &scenario.calibration;
     let surface = calibration
@@ -1023,17 +1025,15 @@ fn assert_the_served_correction_reproduces_the_injected_residual(scenario: &Real
         .as_ref()
         .expect("correction surface");
 
+    let fitted = fitted_correction_surface(surface);
     let mut worst = 0.0_f64;
     for anchor in scenario.generated.anchors() {
-        let correction = evaluate_correction(
-            surface,
+        let correction = correction_value(
+            &fitted,
             anchor.clock_deg,
             anchor.cone_deg,
             ANCHOR_FREQUENCY_MHZ,
-            calibration.validity_ranges.temperature_const,
-        )
-        .expect("evaluate the 4D correction surface")
-        .correction_db;
+        );
 
         let error = (correction - anchor.trend_db).abs();
         worst = worst.max(error);

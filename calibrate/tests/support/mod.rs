@@ -11,9 +11,10 @@
 
 #![allow(dead_code)] // Not every consumer of this module uses every helper.
 
+use antenna_model::data::types::BSplineModel4D;
 use antenna_model::model::{
     compute_g_over_t, AntennaConfiguration, AntennaConfigurationBuilder, FeedParametersBuilder,
-    IntegrationParams, MeshParametersBuilder, ReflectorGeometryBuilder,
+    FittedCorrectionSurface, IntegrationParams, MeshParametersBuilder, ReflectorGeometryBuilder,
 };
 use rayon::prelude::*;
 
@@ -74,6 +75,24 @@ pub const BIAS_CONST_DB: f64 = 0.80;
 pub const BIAS_FREQ_DB: f64 = 0.50;
 pub const BIAS_CLOCK_DB: f64 = 0.60;
 pub const BIAS_CONE_DB: f64 = 0.40;
+
+/// Prepare a schema-5 wire surface once for repeated three-axis probes.
+pub fn fitted_correction_surface(model: &BSplineModel4D) -> FittedCorrectionSurface {
+    FittedCorrectionSurface::from_model4d(model).expect("valid correction surface")
+}
+
+/// Extract the correction for a test query that must be inside fitted support.
+pub fn correction_value(
+    surface: &FittedCorrectionSurface,
+    e_clock_deg: f64,
+    e_cone_deg: f64,
+    frequency_mhz: f64,
+) -> f64 {
+    surface
+        .evaluate(e_clock_deg, e_cone_deg, frequency_mhz)
+        .correction_db()
+        .expect("test query left fitted support")
+}
 
 // ============================================================================
 // Grid definition

@@ -10,7 +10,8 @@ use crate::data::repository::CalibrationRepository;
 use crate::error::{AntennaModelError, Result};
 use crate::model::coordinates_3d::{ecef_to_enu_rotation, ecef_to_geodetic, geodetic_to_ecef};
 use crate::model::integration::DEFAULT_INTEGRATION_BUDGET;
-use crate::service::evaluator::compute_gain_from_request_with_budget;
+use crate::service::evaluator::evaluate_gain_from_request_with_budget;
+use crate::service::served_gain::CorrectionDisposition;
 use crate::warnings::{ApiWarning, WarningCode};
 use rayon::prelude::*;
 use std::collections::HashSet;
@@ -48,8 +49,48 @@ type GridPoints = (Vec<(f64, f64)>, (Vec<f64>, Vec<f64>));
 struct GridPointResult {
     gain_db: f64,
     warnings: Vec<ApiWarning>,
-    failed: bool,
-    correction_applied: bool,
+    outcome: GridPointOutcome,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GridPointOutcome {
+    Success(CorrectionDisposition),
+    Failed,
+}
+
+impl GridPointResult {
+    fn failed(&self) -> bool {
+        matches!(self.outcome, GridPointOutcome::Failed)
+    }
+
+    fn correction(&self) -> Option<CorrectionDisposition> {
+        match self.outcome {
+            GridPointOutcome::Success(correction) => Some(correction),
+            GridPointOutcome::Failed => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GridCorrectionSummary {
+    successful_count: usize,
+    corrected_count: usize,
+    extrapolated_count: usize,
+}
+
+fn summarize_grid_corrections(results: &[GridPointResult]) -> GridCorrectionSummary {
+    results.iter().filter_map(GridPointResult::correction).fold(
+        GridCorrectionSummary {
+            successful_count: 0,
+            corrected_count: 0,
+            extrapolated_count: 0,
+        },
+        |summary, correction| GridCorrectionSummary {
+            successful_count: summary.successful_count + 1,
+            corrected_count: summary.corrected_count + usize::from(correction.applied()),
+            extrapolated_count: summary.extrapolated_count + usize::from(correction.extrapolated()),
+        },
+    )
 }
 
 /// Generate a heatmap for the given request.
@@ -123,14 +164,14 @@ pub fn generate_heatmap_with_budget(
     };
 
     // Count failed points
-    let failed_count = results.iter().filter(|result| result.failed).count();
+    let failed_count = results.iter().filter(|result| result.failed()).count();
 
     // Find peak gain (maximum across all successful points only).
     // With no successful point there is no peak: report the finite sentinel rather than
     // -inf, which would serialize to `null` under HTTP 200.
     let peak_gain_db = results
         .iter()
-        .filter(|result| !result.failed)
+        .filter(|result| !result.failed())
         .map(|result| result.gain_db)
         .filter(|gain| gain.is_finite())
         .fold(f64::NEG_INFINITY, f64::max);
@@ -145,7 +186,7 @@ pub fn generate_heatmap_with_budget(
     let losses: Vec<f64> = results
         .iter()
         .map(|result| {
-            if result.failed || !result.gain_db.is_finite() {
+            if result.failed() || !result.gain_db.is_finite() {
                 FAILED_POINT_LOSS_DB
             } else {
                 peak_gain_db - result.gain_db
@@ -161,17 +202,15 @@ pub fn generate_heatmap_with_budget(
     let mut warnings: Vec<ApiWarning> = all_warnings.into_iter().collect();
     warnings.sort();
 
-    // Count points whose gain was extrapolated rather than interpolated.
-    let extrapolated_count = results
-        .iter()
-        .filter(|result| point_was_extrapolated(&result.warnings))
-        .count();
-    if extrapolated_count > 0 {
+    // Count extrapolation and correction from the served law's dispositions. Warning
+    // messages and codes are presentation; they are never reverse-engineered into state.
+    let correction_summary = summarize_grid_corrections(&results);
+    if correction_summary.extrapolated_count > 0 {
         warnings.insert(
             0,
             WarningCode::PointsExtrapolated.with(format!(
                 "{} out of {} points were extrapolated",
-                extrapolated_count,
+                correction_summary.extrapolated_count,
                 grid_points.len()
             )),
         );
@@ -202,11 +241,6 @@ pub fn generate_heatmap_with_budget(
 
     // Derive aggregate correction state from successful point outcomes. Failed points
     // do not count as uncorrected and therefore cannot turn `all` into `partial`.
-    let successful_count = results.len() - failed_count;
-    let corrected_count = results
-        .iter()
-        .filter(|result| !result.failed && result.correction_applied)
-        .count();
     let calibration_status_info = repository
         .get_calibration(&request.antenna_id, &request.feed_id)
         .and_then(|calibration| {
@@ -214,8 +248,8 @@ pub fn generate_heatmap_with_budget(
                 let mut info = CalibrationStatusInfo::from(status);
                 info.set_correction_application(CorrectionApplication::summarize(
                     calibration.correction_surface.is_some(),
-                    successful_count,
-                    corrected_count,
+                    correction_summary.successful_count,
+                    correction_summary.corrected_count,
                 ));
                 info
             })
@@ -234,39 +268,6 @@ pub fn generate_heatmap_with_budget(
             failed_points: failed_count,
         },
         calibration_status: calibration_status_info,
-    })
-}
-
-/// Whether a grid point's warnings say its gain was extrapolated rather than
-/// interpolated — the predicate behind the `points_extrapolated` summary.
-///
-/// Before C8 stage 3 this was `w.contains("extrapolat") || w.contains("out of range")`
-/// — a substring test against prose owned by two other modules, which silently
-/// depended on their spelling (and on the second phrase, which no producer had emitted
-/// for some time). The typed codes let the predicate say what it means.
-///
-/// The three codes are exactly the ways a returned value can be an extrapolation:
-///
-/// - [`WarningCode::Extrapolated`] — the correction surface was applied outside its
-///   knot range.
-/// - [`WarningCode::CorrectionNotApplied`] — a correction surface exists but the query
-///   fell outside its coverage, so the point is raw physics.
-/// - [`WarningCode::OutOfCoverage`] — a partially calibrated antenna was queried
-///   outside the region it was measured over.
-///
-/// The first two are precisely `service::evaluator`'s per-point `metadata.extrapolated`
-/// (`correction_extrapolated || out_of_coverage`), so this count does not disagree with
-/// the flag a client gets from `/api/v1/gain` for the same point.
-/// `CorrectionNotApplied` was the disjunct this predicate missed until 2026-07-28,
-/// which zeroed the count on a fully calibrated antenna whose whole grid fell outside
-/// coverage. [`WarningCode::OutOfCoverage`] is counted on top: it has no single-point
-/// flag of its own, and a partially calibrated antenna queried outside its measured
-/// region is extrapolated by any reading.
-fn point_was_extrapolated(warnings: &[ApiWarning]) -> bool {
-    warnings.iter().any(|w| {
-        w.is(WarningCode::Extrapolated)
-            || w.is(WarningCode::CorrectionNotApplied)
-            || w.is(WarningCode::OutOfCoverage)
     })
 }
 
@@ -339,8 +340,7 @@ fn evaluate_grid_point(
                 gain_db: f64::NEG_INFINITY,
                 warnings: vec![WarningCode::PointComputationFailed
                     .with("Failed to compute emitter position for this point")],
-                failed: true,
-                correction_applied: false,
+                outcome: GridPointOutcome::Failed,
             };
         }
     };
@@ -360,22 +360,18 @@ fn evaluate_grid_point(
     };
 
     // Evaluate gain at this point
-    match compute_gain_from_request_with_budget(&gain_request, repository, time_budget) {
-        Ok(response) => GridPointResult {
-            gain_db: response.gain_db,
-            warnings: response.warnings,
-            failed: false,
-            correction_applied: response
-                .calibration_status
-                .is_some_and(|status| status.correction_applied),
+    match evaluate_gain_from_request_with_budget(&gain_request, repository, time_budget) {
+        Ok(evaluation) => GridPointResult {
+            gain_db: evaluation.response.gain_db,
+            warnings: evaluation.response.warnings,
+            outcome: GridPointOutcome::Success(evaluation.correction),
         },
         Err(_) => GridPointResult {
             gain_db: f64::NEG_INFINITY,
             warnings: vec![
                 WarningCode::PointComputationFailed.with("Computation failed for this point")
             ],
-            failed: true,
-            correction_applied: false,
+            outcome: GridPointOutcome::Failed,
         },
     }
 }
@@ -435,49 +431,35 @@ mod tests {
     use super::*;
     use crate::data::repository::CalibrationRepository;
 
-    /// `points_extrapolated` counts every way a point can be an extrapolation.
-    ///
-    /// `correction_not_applied` is the case that regressed: it is half of
-    /// `service::evaluator`'s per-point `metadata.extrapolated`, but the C8 stage 3
-    /// rewrite of this predicate dropped it, so a `/heatmap` over a fully calibrated
-    /// antenna whose whole grid fell outside the correction coverage reported no
-    /// extrapolated points while every single-point query reported `extrapolated:
-    /// true`. The predicate is asserted directly because reaching it end-to-end needs
-    /// a calibration artifact with a correction surface, which this crate's tests do
-    /// not ship.
     #[test]
-    fn extrapolation_predicate_covers_every_extrapolating_code() {
-        let extrapolating = [
-            WarningCode::Extrapolated,
-            WarningCode::CorrectionNotApplied,
-            WarningCode::OutOfCoverage,
+    fn grid_summary_uses_dispositions_and_ignores_failed_points() {
+        let successful = |correction| GridPointResult {
+            gain_db: 1.0,
+            warnings: vec![WarningCode::Uncalibrated
+                .with("warning content must not influence disposition counts")],
+            outcome: GridPointOutcome::Success(correction),
+        };
+        let results = vec![
+            successful(CorrectionDisposition::Unavailable),
+            successful(CorrectionDisposition::UnavailableOutsideCoverage),
+            successful(CorrectionDisposition::Applied),
+            successful(CorrectionDisposition::OutsideCoverage),
+            successful(CorrectionDisposition::OutsideSupport),
+            GridPointResult {
+                gain_db: f64::NEG_INFINITY,
+                warnings: vec![WarningCode::CorrectionNotApplied.with("failed")],
+                outcome: GridPointOutcome::Failed,
+            },
         ];
-        for code in extrapolating {
-            assert!(
-                point_was_extrapolated(&[code.with("…")]),
-                "{code} means the returned value is an extrapolation but is not counted"
-            );
-        }
 
-        // Warnings about model fidelity are not extrapolation of a fitted surface.
-        for code in [
-            WarningCode::Uncalibrated,
-            WarningCode::PartiallyCalibrated,
-            WarningCode::OffAxisUnvalidated,
-            WarningCode::NonConvergence,
-        ] {
-            assert!(
-                !point_was_extrapolated(&[code.with("…")]),
-                "{code} does not mean the point was extrapolated"
-            );
-        }
-
-        assert!(!point_was_extrapolated(&[]));
-        // One extrapolating code among others still counts the point.
-        assert!(point_was_extrapolated(&[
-            WarningCode::Uncalibrated.with("…"),
-            WarningCode::CorrectionNotApplied.with("…"),
-        ]));
+        assert_eq!(
+            summarize_grid_corrections(&results),
+            GridCorrectionSummary {
+                successful_count: 5,
+                corrected_count: 1,
+                extrapolated_count: 3,
+            }
+        );
     }
 
     #[test]

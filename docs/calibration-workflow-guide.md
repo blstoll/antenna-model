@@ -95,7 +95,7 @@ All calibration levels produce binary `.bin` files containing:
 - **Antenna metadata**: ID, name, feeds
 - **Physical configuration**: Reflector geometry, feed parameters, mesh properties
 - **Calibration status**: Fully/Partially/Uncalibrated with accuracy estimates
-- **Correction surface** (optional): 4D B-spline interpolation model
+- **Correction surface** (optional): schema-5 4D wire model adapted once to a 3D E-clock/E-cone/frequency evaluator
 - **Validity ranges**: Azimuth, elevation, frequency, temperature
 
 The service loads these artifacts at startup from the `calibration_data/` directory.
@@ -661,7 +661,7 @@ Error: Failed to parse CSV: Missing column 'frequency_mhz'
 
 ## 4. Full Grid Calibration Workflow
 
-Full grid calibration fits a 4D correction surface from dense measurements across azimuth, elevation, and frequency. This provides ±1 dB accuracy everywhere in the calibrated region.
+Full grid calibration fits a 3D correction surface from dense measurements across E-clock, E-cone, and frequency. Schema-5 artifacts retain a synthetic flat temperature axis on the wire, but runtime correction queries are three-dimensional and apply only inside fitted support. This provides ±1 dB accuracy everywhere in the calibrated region.
 
 ### 4.1 Test Planning
 
@@ -770,9 +770,9 @@ The full calibration tool performs:
      *(corrected: the feed q-factor is declared, not tuned)*
    - Uses same physics model as boresight calibration
 3. **Compute residuals**: `residual = measured - physics_model`
-4. **Fit correction surface** (4D B-spline to residuals)
-   - Azimuth, elevation, frequency, (temperature)
-   - Cubic B-spline interpolation
+4. **Fit correction surface** (3D B-spline to residuals)
+   - E-clock, E-cone, and frequency
+   - Cubic B-spline interpolation; export adds only the schema-5 flat temperature wire axis
 5. **Cross-validation** (if `--validate` flag)
    - Split data into training/test sets
    - Verify <1 dB error in main lobe and first sidelobe
@@ -890,7 +890,7 @@ and to the `--metadata` sidecar, so a consumer can read them without re-running 
 - `"correction_application": "all"` (every successful direction used the B-spline correction surface)
 - `"correction_applied": true` (compatibility field; true for `partial` or `all`)
 - No coverage warnings (full field of view calibrated)
-- No extrapolation warnings (everywhere in-coverage)
+- No coverage or correction warnings (everywhere in-coverage)
 
 ---
 
@@ -1900,6 +1900,15 @@ is bit-identical. Check first that the artifact does not carry the defect the bu
 reject — restamping a wrong artifact launders it past the new gate. (For C13 that check is
 "the feed's axial offset is not the focal length"; a lateral offset is legitimate, and one of
 these two fixtures has one.)
+
+**5.1 (GitHub issue #92, 2026-09-20) tightens validation without moving a byte.**
+Schema-5 artifacts retain the historical temperature fields, but every temperature
+coefficient slab must now be identical. The executable correction surface is therefore a
+three-axis value queried by E-clock, E-cone, and frequency; a query outside fitted support
+returns no correction rather than extending a boundary polynomial. This is a MINOR bump:
+container version 4 and the postcard layout are unchanged. Valid 5.0 artifacts load under
+the loader's minor-version policy, while a temperature-varying surface is rejected during
+artifact validation with the differing slab and coefficient named.
 
 **5.0 (D21, 2026-08-04) is the first bump here that fixes no wrong number.** It added
 `CalibrationMetadata.angular_resolution` — what the fitted correction surface's knots can

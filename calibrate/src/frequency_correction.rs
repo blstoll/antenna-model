@@ -1,9 +1,9 @@
 //! Frequency-only correction surface fitting for boresight calibration.
 //!
 //! This module provides functionality to fit a 1D frequency-only correction surface
-//! to boresight measurement residuals. The correction is stored as a 4D B-spline
-//! whose azimuth, elevation and temperature axes are *flat* — constant, but with a
-//! real span — for compatibility with the service's existing interpolation code.
+//! to boresight measurement residuals. The correction is stored in schema 5's 4D
+//! wire type, whose E-clock, E-cone, and synthetic temperature axes are *flat* —
+//! constant, but with a real span. Runtime evaluation adapts it to three dimensions.
 //!
 //! # Use Case
 //!
@@ -41,9 +41,9 @@ use crate::artifact_export::flat_axis;
 /// Span of the flat azimuth axis, in degrees.
 ///
 /// The three constants below bound axes the fitted surface is **constant**
-/// along, so their only job is to cover every value the service can ever query
-/// — a query landing outside a knot span is reported as extrapolated, and there
-/// is no interpolation error here to warn about. Azimuth is the full circle
+/// along, so their only job is to cover every value the service can ever query.
+/// Outside fitted support the service applies no correction, and there is no reason
+/// for a constant axis to create that outcome. E-clock spans the full circle
 /// because `coordinates_3d::normalize_azimuth_deg` maps into `[0, 360)`.
 ///
 /// The claim that this correction is only *measured* at boresight is carried by
@@ -65,10 +65,9 @@ const AZIMUTH_AXIS_DEG: (f64, f64) = (0.0, 360.0);
 /// full range is `[0, 180]`. See [`AZIMUTH_AXIS_DEG`].
 const ELEVATION_AXIS_DEG: (f64, f64) = (0.0, 180.0);
 
-/// Span of the flat temperature axis, in Kelvin. The evaluator queries the
-/// correction with `validity_ranges.temperature_const`, which boresight mode
-/// sets to 290 K; this bracket covers any system noise temperature that value
-/// could plausibly take. See [`AZIMUTH_AXIS_DEG`].
+/// Span of the synthetic flat temperature wire axis, in Kelvin. Schema 5.1 keeps
+/// these knots for byte compatibility, but the evaluator has no temperature query
+/// coordinate. See [`AZIMUTH_AXIS_DEG`].
 const TEMPERATURE_AXIS_K: (f64, f64) = (0.0, 1000.0);
 
 /// Error types for frequency correction fitting.
@@ -309,7 +308,19 @@ fn create_knot_vector(data_points: &[f64], order: u8) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use antenna_core::model::evaluate_correction;
+    use antenna_core::model::FittedCorrectionSurface;
+
+    fn applied_value(
+        surface: &FittedCorrectionSurface,
+        e_clock_deg: f64,
+        e_cone_deg: f64,
+        frequency_mhz: f64,
+    ) -> f64 {
+        surface
+            .evaluate(e_clock_deg, e_cone_deg, frequency_mhz)
+            .correction_db()
+            .expect("test query left fitted support")
+    }
 
     #[test]
     fn test_should_fit_correction_with_small_residuals() {
@@ -419,11 +430,10 @@ mod tests {
         let frequencies = vec![3700.0, 3950.0, 4200.0, 5925.0, 6175.0, 6425.0];
         let residuals = vec![0.9, 0.7, 0.55, -0.8, -0.95, -0.6];
         let bspline = fit_frequency_correction(&frequencies, &residuals).unwrap();
+        let surface = FittedCorrectionSurface::from_model4d(&bspline).unwrap();
 
         let freq = 4000.0;
-        let reference = evaluate_correction(&bspline, 0.0, 0.0, freq, 290.0)
-            .expect("evaluate at boresight")
-            .correction_db;
+        let reference = applied_value(&surface, 0.0, 0.0, freq);
 
         assert!(
             reference.abs() > 0.1,
@@ -433,21 +443,12 @@ mod tests {
 
         for az in [0.0, 1.0, 45.0, 180.0, 359.0, 360.0] {
             for el in [0.0, 0.5, 30.0, 90.0, 179.0, 180.0] {
-                for temp in [1.0, 100.0, 290.0, 500.0, 999.0] {
-                    let result = evaluate_correction(&bspline, az, el, freq, temp)
-                        .expect("evaluate off the collapsed axes' origin");
-                    assert!(
-                        (result.correction_db - reference).abs() < 1e-12,
-                        "correction must not depend on az/el/temperature: \
-                         ({az}, {el}, {temp}) gave {} dB vs {reference} dB at the origin",
-                        result.correction_db
-                    );
-                    assert!(
-                        !result.extrapolated,
-                        "({az}, {el}, {temp}) is inside every flat axis span but was \
-                         reported as extrapolated"
-                    );
-                }
+                let result = applied_value(&surface, az, el, freq);
+                assert!(
+                    (result - reference).abs() < 1e-12,
+                    "correction must not depend on E-clock/E-cone: \
+                     ({az}, {el}) gave {result} dB vs {reference} dB at the origin"
+                );
             }
         }
     }
@@ -461,6 +462,7 @@ mod tests {
         let frequencies = vec![3700.0, 3950.0, 4200.0, 5925.0, 6175.0, 6425.0];
         let residuals = vec![0.9, 0.7, 0.55, -0.8, -0.95, -0.6];
         let bspline = fit_frequency_correction(&frequencies, &residuals).unwrap();
+        let surface = FittedCorrectionSurface::from_model4d(&bspline).unwrap();
 
         for (freq, expected) in [
             (frequencies[0], residuals[0]),
@@ -469,9 +471,7 @@ mod tests {
                 residuals[residuals.len() - 1],
             ),
         ] {
-            let got = evaluate_correction(&bspline, 0.0, 0.0, freq, 290.0)
-                .expect("evaluate at a sweep endpoint")
-                .correction_db;
+            let got = applied_value(&surface, 0.0, 0.0, freq);
             assert!(
                 (got - expected).abs() < 1e-9,
                 "at {freq} MHz the correction should reproduce the endpoint residual \
@@ -492,10 +492,9 @@ mod tests {
         let frequencies = vec![1000.0, 1100.0, 1200.0, 1300.0, 1400.0];
         let residuals = vec![0.0, 2.0, 0.0, 2.0, 0.0];
         let bspline = fit_frequency_correction(&frequencies, &residuals).unwrap();
+        let surface = FittedCorrectionSurface::from_model4d(&bspline).unwrap();
 
-        let got = evaluate_correction(&bspline, 0.0, 0.0, frequencies[1], 290.0)
-            .expect("evaluate at an interior control point")
-            .correction_db;
+        let got = applied_value(&surface, 0.0, 0.0, frequencies[1]);
 
         assert!(
             (got - residuals[1]).abs() > 0.1,

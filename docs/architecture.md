@@ -90,9 +90,9 @@ The Antenna Model Service is a high-accuracy antenna loss modeling system deploy
 │  │                 │                                   │ │
 │  │  ┌──────────────▼─────────────────────────────────┐ │ │
 │  │  │         Model Computation Engine               │ │ │
-│  │  │  - 4D interpolation (az, el, freq, [temp])     │ │ │
-│  │  │  - B-spline evaluation                         │ │ │
-│  │  │  - Extrapolation handling                      │ │ │
+│  │  │  - 3D interpolation (clock, cone, frequency)   │ │ │
+│  │  │  - Shared sparse B-spline stencil              │ │ │
+│  │  │  - Explicit fitted-support gating              │ │ │
 │  │  │  - [Future: GPU acceleration]                  │ │ │
 │  │  └──────────────┬─────────────────────────────────┘ │ │
 │  │                 │                                   │ │
@@ -177,9 +177,9 @@ The Antenna Model Service is a high-accuracy antenna loss modeling system deploy
 
 #### 3.2.3 Model Computation Engine
 **Responsibilities:**
-- 4D B-spline interpolation (azimuth, elevation, frequency, temperature)
-- Efficient coefficient evaluation
-- Extrapolation for out-of-range queries
+- Validated 3D B-spline correction over E-clock, E-cone, and frequency
+- Shared sparse basis stencils for fitting and fitted evaluation
+- Explicit `OutsideSupport` outcomes with no numeric extrapolation
 - Performance-critical path optimization
 
 **Design Considerations:**
@@ -207,7 +207,7 @@ The Antenna Model Service is a high-accuracy antenna loss modeling system deploy
 - In-memory nested hash map: `antenna_id -> feed_id -> AntennaCalibration`
 - Each `AntennaCalibration` contains:
   - Physical antenna configuration (reflector, feed parameters)
-  - Optional B-spline correction surface (4D tensor) - if calibrated
+  - Optional fitted B-spline correction surface (E-clock, E-cone, frequency) - if calibrated
   - Knot vectors for each dimension (if correction surface present)
   - Validity ranges (min/max for az, el, freq)
   - Calibration status (Fully/Partially/Uncalibrated)
@@ -345,29 +345,39 @@ without being called out-of-coverage. `ValidityRanges::contains` is a separate
 domain concept and is not calibration coverage.
 
 **Correction Surface Application:**
-Correction surface is applied only when:
-1. Correction surface exists in calibration data
-2. Query is within calibrated coverage region
+Correction is applied only when:
+1. A validated fitted surface exists in the calibration data.
+2. The query is within calibrated coverage.
+3. The query is within the fitted E-clock, E-cone, and frequency support.
 
-Those two conditions produce a `CorrectionDisposition` — the sole authority for both
-"was correction applied" and "is this result extrapolated" (issue #61). Callers read the
-disposition; they never re-derive either boolean:
+Those conditions produce a `CorrectionDisposition` — the sole authority for both
+"was correction applied" and "is this result extrapolated" (issues #61 and #92). Callers
+read the disposition; they never re-derive either boolean:
 
 ```rust
-let (correction_db, disposition) = match &calibration.correction_surface {
-    None => (0.0, CorrectionDisposition::Unavailable),
-    Some(surface) if is_in_coverage(&calibration.calibration_coverage, az, e_cone, freq) => {
-        let result = evaluate_correction(surface, az, e_cone, freq, temperature_k)?;
-        (result.correction_db, CorrectionDisposition::Applied { extrapolated: result.extrapolated })
+let (correction_db, disposition) = match &prepared_correction_surface {
+    None if outside_partial_calibration_region(calibration, clock, cone) => {
+        (0.0, CorrectionDisposition::UnavailableOutsideCoverage)
     }
-    Some(_) => (0.0, CorrectionDisposition::OutsideCoverage),
+    None => (0.0, CorrectionDisposition::Unavailable),
+    Some(_) if !is_in_coverage(&calibration.calibration_coverage, clock, cone, freq) => {
+        (0.0, CorrectionDisposition::OutsideCoverage)
+    }
+    Some(surface) => match surface.evaluate(clock, cone, freq) {
+        CorrectionEvaluation::Applied(value) => (value, CorrectionDisposition::Applied),
+        CorrectionEvaluation::OutsideSupport => (0.0, CorrectionDisposition::OutsideSupport),
+    },
 };
 
 let final_gain_db = physics_gain_db + correction_db;
 ```
 
-`Unavailable` is not extrapolated — there is no fitted surface to leave. `OutsideCoverage`
-is, and so is `Applied` when the B-spline itself extrapolated past its knot span.
+`Unavailable` is not extrapolated — there is no fitted surface or measured-region boundary
+to leave. For partially calibrated antennas without a surface,
+`UnavailableOutsideCoverage` preserves the measured-direction boundary and is extrapolated
+compatibility metadata. `OutsideCoverage` and `OutsideSupport` likewise return physics only
+and set `metadata.extrapolated`. The B-spline is never evaluated outside fitted support, so
+`Applied` always denotes interpolation and never emits a numeric extrapolation.
 
 **Accuracy Adjustment:**
 For partially calibrated antennas, accuracy estimate varies by query location:
@@ -395,8 +405,9 @@ For partially calibrated antennas, accuracy estimate varies by query location:
 - Accuracy estimate may vary by query location
 
 **Fully Calibrated:**
-- No calibration warnings (backward compatible)
-- Only extrapolation warnings if query outside validity ranges
+- No calibration-status warning (backward compatible)
+- Query-validity and model warnings still apply (`correction_not_applied`,
+  `off_axis_unvalidated`, `rear_hemisphere_invalid`, `non_convergence`)
 
 #### 3.6.6 API Response Augmentation
 
@@ -1387,7 +1398,7 @@ antenna-model/                       # Cargo workspace root (3 members, roadmap 
 │       │   ├── coordinates.rs       # ECEF ↔ geodetic ↔ antenna ↔ spherical
 │       │   ├── coordinates_3d.rs    # 3D position → antenna-frame direction;
 │       │   │                        #   defines Position3D / CoordinateSystem
-│       │   ├── correction_interpolator.rs  # 4D B-spline correction surface
+│       │   ├── correction_surface.rs  # Validated 3D correction layout/evaluator
 │       │   ├── edge_cases.rs        # Special-case handling, spillover
 │       │   ├── fft.rs               # Mixed-radix FFT for the φ' transform
 │       │   ├── geometry.rs          # Reflector / feed / mesh parameters
@@ -1483,7 +1494,7 @@ web stack; `scripts/check.sh` asserts both halves (roadmap D4).
 - ✅ REST API with health, status, gain, batch, heatmap, antenna/feed endpoints
 - ✅ Support all calibration statuses (fully/partially/uncalibrated)
 - ✅ Load uncalibrated antennas from design specs (no .bin file required)
-- ✅ 4D B-spline interpolation for correction surfaces (optional)
+- ✅ Validated 3D B-spline correction surfaces with physics-only behavior outside fitted support (optional)
 - ✅ Physics-based model always computed
 - ✅ Out-of-range queries with warnings
 - ✅ Calibration status information in API responses
