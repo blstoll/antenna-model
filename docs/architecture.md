@@ -405,8 +405,9 @@ For partially calibrated antennas, accuracy estimate varies by query location:
 - Accuracy estimate may vary by query location
 
 **Fully Calibrated:**
-- No calibration warnings (backward compatible)
-- Only extrapolation warnings if query outside validity ranges
+- No calibration-status warning (backward compatible)
+- Query-validity and model warnings still apply (`correction_not_applied`,
+  `off_axis_unvalidated`, `rear_hemisphere_invalid`, `non_convergence`)
 
 #### 3.6.6 API Response Augmentation
 

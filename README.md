@@ -675,7 +675,7 @@ All requests are logged with structured fields:
 ### Slow response times
 - Check concurrent request load
 - Verify calibration model sizes are reasonable
-- Review logs for extrapolation warnings (slower than interpolation)
+- Review logs for `non_convergence` warnings (iteration budget exhausted)
 - Monitor memory usage
 
 ### Inaccurate predictions

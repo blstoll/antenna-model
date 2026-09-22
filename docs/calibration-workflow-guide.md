@@ -890,7 +890,7 @@ and to the `--metadata` sidecar, so a consumer can read them without re-running 
 - `"correction_application": "all"` (every successful direction used the B-spline correction surface)
 - `"correction_applied": true` (compatibility field; true for `partial` or `all`)
 - No coverage warnings (full field of view calibrated)
-- No extrapolation warnings (everywhere in-coverage)
+- No coverage or correction warnings (everywhere in-coverage)
 
 ---
 

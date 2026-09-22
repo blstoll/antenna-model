@@ -822,7 +822,9 @@ impl PhysicalAntennaConfig {
 
 /// Valid ranges for antenna model parameters.
 ///
-/// Queries outside these ranges will trigger extrapolation warnings.
+/// These bounds are reported in the antenna metadata for reference; queries
+/// outside them are neither rejected nor warned about. Calibration coverage and
+/// fitted surface support govern correction application and warnings.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ValidityRanges {
     /// Azimuth range in degrees: (min, max)
