@@ -1,37 +1,38 @@
 //! Full-calibration artifact export.
 //!
-//! This module converts the calibrate tool's internal 3D [`CorrectionSurface`]
-//! (over frequency, e-cone, e-clock) into the service-loadable 4D
-//! [`BSplineModel4D`] (over azimuth, elevation, frequency, temperature) and
-//! assembles a complete [`AntennaCalibration`] artifact that the antenna-model
-//! service can load via `load_calibration_artifact`.
+//! This module assembles a complete [`AntennaCalibration`] artifact that the antenna-model
+//! service can load via `load_calibration_artifact`, and it owns the schema-5 wire adapter
+//! around the fitted correction surface.
 //!
-//! # Dimension Mapping
+//! # Domain names and wire names
 //!
-//! The 3D correction surface dimensions map onto the 4D service surface as:
+//! The fitter and the correction-surface module speak the domain: **E-clock**, **E-cone**
+//! and **frequency**. Schema 5's [`BSplineModel4D`] carries the first two under the
+//! historical field names `knots_azimuth` and `knots_elevation`, plus a synthetic
+//! temperature axis. That translation is confined to [`to_schema5_model`] and lives nowhere
+//! else (GitHub issue #94):
 //!
-//! | 3D (calibrate)        | 4D (service)           |
-//! |-----------------------|------------------------|
-//! | e-clock (degrees)     | azimuth (degrees)      |
-//! | e-cone (degrees)      | elevation (degrees)    |
-//! | frequency (MHz)       | frequency (MHz)        |
-//! | (none)                | temperature (Kelvin)   |
+//! | Domain (fitted surface) | Schema-5 wire field    |
+//! |-------------------------|------------------------|
+//! | E-clock (degrees)       | azimuth (degrees)      |
+//! | E-cone (degrees)        | elevation (degrees)    |
+//! | frequency (MHz)         | frequency (MHz)        |
+//! | (none)                  | temperature (Kelvin)   |
 //!
-//! All angular dimensions are in degrees on both sides, so knot vectors copy
-//! directly. The temperature axis does not exist in the source surface, so it
-//! is constructed as a *flat-but-valid* axis (see [`to_bspline_4d`]): the
-//! coefficient slab is replicated `spline_order + 1` times along temperature with a
-//! clamped knot vector over a real, nonzero interval. Because every temperature
-//! layer is identical and B-spline basis functions form a partition of unity,
-//! the surface evaluates to the same temperature-independent value anywhere in
-//! the interval.
+//! All angular dimensions are degrees on both sides, so validated knot vectors copy
+//! directly. The temperature axis does not exist in the fitted surface, so it is constructed
+//! as a *flat-but-valid* axis (see [`flat_axis`]): the coefficient slab is replicated
+//! `spline_order + 1` times along temperature with a clamped knot vector over a real,
+//! nonzero interval. Because every temperature layer is identical and B-spline basis
+//! functions form a partition of unity, the surface evaluates to the same
+//! temperature-independent value anywhere in the interval.
 //!
 //! # Canonical coefficient order
 //!
-//! Fitting and serving share core's E-clock-fastest order:
-//! `idx = i_clock + n_clock * (i_cone + n_cone * i_frequency)`.
-//! A temperature slab therefore copies directly into schema 5's azimuth-fastest wire order;
-//! export only replicates that slab along the retained synthetic temperature axis.
+//! The fit solves in the artifact's own order — E-clock fastest, then E-cone, then
+//! frequency: `idx = i_e_clock + n_e_clock * (i_e_cone + n_e_cone * i_frequency)`. Export
+//! therefore *constructs* the wire type from that layout and replicates its slab along
+//! temperature; no coefficient is permuted or reindexed anywhere in this module.
 
 use antenna_core::data::loader::encode_calibration_artifact;
 use antenna_core::data::types::{
@@ -46,6 +47,7 @@ use antenna_core::model::PHYSICS_MODEL_VERSION;
 
 use crate::correction_surface::{assess_angular_resolution, CorrectionSurface};
 use crate::parser::MeasurementPoint;
+use antenna_core::model::FittedCorrectionSurface;
 use std::path::Path;
 
 /// Errors that can occur while exporting a full-calibration artifact.
@@ -133,20 +135,18 @@ pub(crate) fn flat_axis(lo: f64, hi: f64, order: usize) -> (usize, Vec<f64>) {
     (n_layers, knots)
 }
 
-/// Convert a 3D calibrate [`CorrectionSurface`] into a service-loadable 4D
-/// [`BSplineModel4D`].
+/// Construct schema 5's [`BSplineModel4D`] wire adapter around a fitted correction surface.
 ///
-/// The mapping is `azimuth := e_clock`, `elevation := e_cone`,
-/// `frequency := frequency`, with a flat (temperature-independent) temperature
-/// axis over `[t_lo, t_hi]`.
+/// This is construction, not conversion: the fit already solved in the artifact's canonical
+/// coefficient order, so the wire type is that same layout under its historical field names
+/// plus the synthetic temperature axis (GitHub issue #94). Nothing is reindexed here, and
+/// there is no second mathematical surface model to convert between.
 ///
-/// # Spatial axes
+/// # Domain names and wire names
 ///
-/// Each spatial knot vector is copied directly from the 3D surface; no padding
-/// is applied.  The service's `find_knot_span` previously had an off-by-one
-/// (`n = len - order - 1`) that prevented it from reaching the topmost knot
-/// interval.  That bug has been fixed (`n = len - order`), so the evaluator and
-/// the calibrate side now agree natively without any extra sentinel knots.
+/// The adapter is the only place the legacy wire field names appear:
+/// `knots_azimuth := E-clock`, `knots_elevation := E-cone`, `knots_frequency := frequency`.
+/// All angular axes are degrees on both sides, so the validated knot vectors copy directly.
 ///
 /// # Temperature axis construction
 ///
@@ -156,52 +156,48 @@ pub(crate) fn flat_axis(lo: f64, hi: f64, order: usize) -> (usize, Vec<f64>) {
 /// `n_temp = spline_order + 1` temperature layers over a clamped knot vector on
 /// the real interval `[t_lo, t_hi]`. Because all temperature layers are
 /// identical and the basis is a partition of unity, the result is
-/// temperature-independent across `[t_lo, t_hi]`.
+/// temperature-independent across `[t_lo, t_hi]`. Issue #98 removes this axis;
+/// the first three axes and their order survive it unchanged.
 ///
 /// # Arguments
-/// * `surface` - The fitted 3D correction surface.
+/// * `fitted` - The fitted correction surface, in canonical coefficient order.
 /// * `t_lo` - Lower bound of the (flat) temperature interval in Kelvin.
 /// * `t_hi` - Upper bound of the (flat) temperature interval in Kelvin (must be > `t_lo`).
-pub fn to_bspline_4d(surface: &CorrectionSurface, t_lo: f64, t_hi: f64) -> Result<BSplineModel4D> {
-    let [n_clock, n_cone, n_freq] = surface.shape;
-    if n_clock == 0 || n_cone == 0 || n_freq == 0 {
-        return Err(ArtifactExportError::InvalidSurface(format!(
-            "correction surface has zero-sized dimension: shape={:?}",
-            surface.shape
-        )));
-    }
-
-    let order = surface.spline_order;
+///
+/// A zero-sized axis needs no check here: [`CorrectionSurfaceLayout`] refuses one at
+/// construction, so every fitted surface that exists has a non-empty shape.
+pub fn to_schema5_model(
+    fitted: &FittedCorrectionSurface,
+    t_lo: f64,
+    t_hi: f64,
+) -> Result<BSplineModel4D> {
     if t_hi <= t_lo {
         return Err(ArtifactExportError::InvalidSurface(format!(
             "temperature interval must be non-empty: t_lo={t_lo}, t_hi={t_hi}"
         )));
     }
 
-    // Dimension mapping: azimuth <- clock, elevation <- cone, frequency <- frequency.
-    // Knot vectors are copied directly (no top-padding needed now that the service's
-    // find_knot_span off-by-one has been corrected).
-    let knots_azimuth = surface.knots_eclock.clone();
-    let knots_elevation = surface.knots_econe.clone();
-    let knots_frequency = surface.knots_frequency.clone();
+    let layout = fitted.layout();
+    let [n_e_clock, n_e_cone, n_frequency] = layout.shape();
+    let order = layout.spline_order() as usize;
 
     // Flat-but-valid temperature axis (see [`flat_axis`] and the module/fn docs).
     let (n_temp, knots_temperature) = flat_axis(t_lo, t_hi, order);
 
-    // Core and schema 5 use the same E-clock/azimuth-fastest spatial order. Replicate the
-    // already-canonical slab identically across every synthetic temperature layer.
+    // The canonical slab is already the wire slab. Replicate it identically across every
+    // synthetic temperature layer.
     let coefficients = (0..n_temp)
-        .flat_map(|_| surface.coefficients.iter().copied())
+        .flat_map(|_| fitted.coefficients().iter().copied())
         .collect();
 
     Ok(BSplineModel4D {
         coefficients,
-        shape: [n_clock, n_cone, n_freq, n_temp],
-        knots_azimuth,
-        knots_elevation,
-        knots_frequency,
+        shape: [n_e_clock, n_e_cone, n_frequency, n_temp],
+        knots_azimuth: layout.knots_e_clock().to_vec(),
+        knots_elevation: layout.knots_e_cone().to_vec(),
+        knots_frequency: layout.knots_frequency().to_vec(),
         knots_temperature,
-        spline_order: order as u8,
+        spline_order: layout.spline_order(),
     })
 }
 
@@ -346,7 +342,7 @@ pub fn export_full_calibration(
     let (t_meas_lo, t_meas_hi) = extents.temperature_min_max;
     let t_lo = t_meas_lo - 1.0;
     let t_hi = t_meas_hi + 1.0;
-    let correction = to_bspline_4d(surface, t_lo, t_hi)?;
+    let correction = to_schema5_model(surface.fitted(), t_lo, t_hi)?;
 
     // Physical config.
     let reflector = DataReflectorGeometry {
@@ -592,9 +588,10 @@ mod tests {
     }
 
     #[test]
-    fn test_to_bspline_4d_validates() {
+    fn the_constructed_wire_model_validates() {
         let (surface, _freq0) = make_test_surface();
-        let model = to_bspline_4d(&surface, 289.0, 291.0).expect("conversion should succeed");
+        let model = to_schema5_model(surface.fitted(), 289.0, 291.0)
+            .expect("wire construction should succeed");
         assert!(
             model.validate().is_ok(),
             "exported 4D model failed validation: {:?}",
@@ -603,11 +600,11 @@ mod tests {
 
         // Shape mapping: spatial axes copy directly (no padding now that the
         // service's find_knot_span off-by-one is fixed); temperature axis has order+1 layers.
-        let [n_clock, n_cone, n_freq] = surface.shape;
+        let [n_clock, n_cone, n_freq] = surface.shape();
         assert_eq!(model.shape[0], n_clock); // azimuth <- clock, no pad
         assert_eq!(model.shape[1], n_cone); // elevation <- cone, no pad
         assert_eq!(model.shape[2], n_freq); // frequency, no pad
-        assert_eq!(model.shape[3], surface.spline_order + 1);
+        assert_eq!(model.shape[3], surface.spline_order() + 1);
     }
 
     #[test]
@@ -615,7 +612,8 @@ mod tests {
         let (surface, _freq0) = make_test_surface();
         let t_lo = 289.0;
         let t_hi = 291.0;
-        let model = to_bspline_4d(&surface, t_lo, t_hi).expect("conversion should succeed");
+        let model = to_schema5_model(surface.fitted(), t_lo, t_hi)
+            .expect("wire construction should succeed");
         assert!(model.validate().is_ok());
         let fitted = FittedCorrectionSurface::from_model4d(&model).unwrap();
 
@@ -658,7 +656,7 @@ mod tests {
     fn test_temperature_axis_is_flat_not_zero() {
         // The flat temperature axis must NOT zero out the correction.
         let (surface, _freq0) = make_test_surface();
-        let model = to_bspline_4d(&surface, 280.0, 300.0).expect("conversion");
+        let model = to_schema5_model(surface.fitted(), 280.0, 300.0).expect("wire construction");
         let fitted = FittedCorrectionSurface::from_model4d(&model).unwrap();
 
         // A point with a clearly nonzero expected correction.

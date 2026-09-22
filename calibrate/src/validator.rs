@@ -535,7 +535,7 @@ fn compute_served_predictions(
     model_predictions: &[f64],
     correction_surface: &CorrectionSurface,
 ) -> Result<Vec<EvaluatedPrediction>> {
-    let fitted = correction_surface.fitted()?;
+    let fitted = correction_surface.fitted();
     Ok(measurements
         .iter()
         .zip(model_predictions.iter())
@@ -890,7 +890,7 @@ fn perform_cross_validation(
         // Evaluate through the fitted core surface and keep the typed support outcome.
         // Outside support has no correction value, so served behavior is physics-only; it
         // remains counted separately for #96 rather than masquerading as Applied(0.0).
-        let fitted = correction_surface.fitted()?;
+        let fitted = correction_surface.fitted();
         let evaluated: Vec<(f64, EvaluatedPrediction)> = test_measurements
             .iter()
             .zip(test_predictions.iter())
@@ -1193,6 +1193,7 @@ impl ValidationReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use antenna_core::model::{CorrectionSurfaceLayout, FittedCorrectionSurface};
 
     #[test]
     fn test_compute_rmse() {
@@ -1228,14 +1229,17 @@ mod tests {
 
     #[test]
     fn outside_support_uses_the_physics_prediction_during_validation() {
-        let surface = CorrectionSurface {
-            coefficients: vec![1.0; 8],
-            shape: [2, 2, 2],
-            knots_frequency: vec![0.0, 0.0, 1.0, 1.0],
-            knots_econe: vec![0.0, 0.0, 1.0, 1.0],
-            knots_eclock: vec![0.0, 0.0, 1.0, 1.0],
-            spline_order: 2,
-            fit_stats: crate::correction_surface::FitStatistics {
+        let layout = CorrectionSurfaceLayout::new(
+            [2, 2, 2],
+            vec![0.0, 0.0, 1.0, 1.0],
+            vec![0.0, 0.0, 1.0, 1.0],
+            vec![0.0, 0.0, 1.0, 1.0],
+            2,
+        )
+        .expect("a clamped unit layout");
+        let surface = CorrectionSurface::new(
+            FittedCorrectionSurface::new(layout, vec![1.0; 8]).expect("eight coefficients"),
+            crate::correction_surface::FitStatistics {
                 num_points: 2,
                 rmse_db: 0.0,
                 max_residual_db: 0.0,
@@ -1243,7 +1247,7 @@ mod tests {
                 cross_validation_rmse: None,
                 improvement_percent: 0.0,
             },
-        };
+        );
         let measurements = vec![
             MeasurementPoint::new(0.5, 0.5, 0.5, 11.0, 290.0),
             MeasurementPoint::new(2.0, 0.5, 0.5, 13.0, 290.0),

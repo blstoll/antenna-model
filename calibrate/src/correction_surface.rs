@@ -244,23 +244,18 @@ pub struct ResidualPoint {
     pub residual_db: f64,
 }
 
-/// A fitted 3D B-spline correction surface
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A fitted 3D B-spline correction surface: one canonical model plus its fit statistics.
+///
+/// The geometry and the coefficients are the core [`FittedCorrectionSurface`] the solve
+/// produced — this type keeps no second copy of them and no second indexing law. Export is
+/// therefore *construction* of the schema-5 wire adapter from this surface (see
+/// [`crate::artifact_export::to_schema5_model`]), never conversion between two mathematical
+/// surface models with their own coefficient orders (GitHub issue #94).
+#[derive(Debug, Clone)]
 pub struct CorrectionSurface {
-    /// B-spline coefficients (flattened 3D array).
-    /// Indexing is the shared core order: E-clock fastest, then E-cone, then frequency.
-    pub coefficients: Vec<f64>,
-
-    /// Shape: [n_clock, n_cone, n_frequency]
-    pub shape: [usize; 3],
-
-    /// Knot vectors for each dimension
-    pub knots_frequency: Vec<f64>,
-    pub knots_econe: Vec<f64>,
-    pub knots_eclock: Vec<f64>,
-
-    /// Spline order (degree + 1)
-    pub spline_order: usize,
+    /// The solved surface: validated layout plus coefficients in core's canonical
+    /// E-clock-fastest order.
+    fitted: FittedCorrectionSurface,
 
     /// Fitting statistics
     pub fit_stats: FitStatistics,
@@ -342,7 +337,7 @@ pub fn assess_angular_resolution(
     };
 
     // Shortest wavelength in coverage ⇒ finest pattern structure ⇒ hardest to resolve.
-    let max_frequency_mhz = axis_max(&surface.knots_frequency, "frequency")?;
+    let max_frequency_mhz = axis_max(surface.knots_frequency(), "frequency")?;
 
     if !(max_frequency_mhz.is_finite() && max_frequency_mhz > 0.0) {
         return Err(CorrectionSurfaceError::InvalidParameter {
@@ -360,7 +355,7 @@ pub fn assess_angular_resolution(
     // 4.8° clock knots. Clamped at 90° because |sin| peaks there: beyond it the clamp is
     // conservative (a tighter requirement than the geometry demands), never optimistic.
     let outermost_cone_deg = {
-        let knots = &surface.knots_econe;
+        let knots = surface.knots_e_cone();
         let (first, last) = (
             *knots
                 .first()
@@ -407,9 +402,9 @@ pub fn assess_angular_resolution(
     // NaN gap on it was silently discarded, reporting the axis as *better* resolved than it
     // is.
     let resolution = AngularResolution {
-        cone_knot_spacing_deg: widest_knot_gap(&surface.knots_econe, "E-cone")?,
+        cone_knot_spacing_deg: widest_knot_gap(surface.knots_e_cone(), "E-cone")?,
         cone_lobe_period_deg,
-        clock_knot_spacing_deg: widest_knot_gap(&surface.knots_eclock, "E-clock")?,
+        clock_knot_spacing_deg: widest_knot_gap(surface.knots_e_clock(), "E-clock")?,
         clock_lobe_period_deg,
     };
 
@@ -641,32 +636,16 @@ pub fn fit_correction_surface(
     )?;
     let coefficients = fit_bspline_coefficients(&residuals, &layout, params.regularization)?;
 
-    // Create the surface in core's canonical E-clock-fastest coefficient order.
-    let surface = CorrectionSurface {
-        coefficients,
-        shape: layout.shape(),
-        knots_frequency: knots_freq,
-        knots_econe: knots_cone,
-        knots_eclock: knots_clock,
-        spline_order: params.spline_order,
-        fit_stats: FitStatistics {
-            num_points: residuals.len(),
-            rmse_db: 0.0, // Will be computed below
-            max_residual_db: 0.0,
-            r_squared: 0.0,
-            cross_validation_rmse: None,
-            improvement_percent: 0.0,
-        },
-    };
+    // The solve already ran in the artifact's canonical coefficient order, so the fitted
+    // surface is the layout it was solved against plus those coefficients — no permutation.
+    let fitted = FittedCorrectionSurface::new(layout, coefficients).map_err(|error| {
+        CorrectionSurfaceError::InvalidKnotVector {
+            reason: error.to_string(),
+        }
+    })?;
 
-    // Compute fit statistics
-    let fit_stats = compute_fit_statistics(&surface, &residuals, initial_rmse)?;
-
-    // Update the surface with statistics
-    let surface = CorrectionSurface {
-        fit_stats,
-        ..surface
-    };
+    let fit_stats = compute_fit_statistics(&fitted, &residuals, initial_rmse)?;
+    let surface = CorrectionSurface::new(fitted, fit_stats);
 
     info!(
         "Correction surface fitted successfully. RMSE: {:.3} dB, R²: {:.3}, Improvement: {:.1}%",
@@ -1115,19 +1094,46 @@ fn fit_bspline_coefficients(
 // ============================================================================
 
 impl CorrectionSurface {
-    pub(crate) fn fitted(&self) -> Result<FittedCorrectionSurface> {
-        let layout = correction_layout(
-            self.shape,
-            &self.knots_eclock,
-            &self.knots_econe,
-            &self.knots_frequency,
-            self.spline_order,
-        )?;
-        FittedCorrectionSurface::new(layout, self.coefficients.clone()).map_err(|error| {
-            CorrectionSurfaceError::InterpolationError {
-                reason: error.to_string(),
-            }
-        })
+    /// Pair a solved core surface with the statistics measured against it.
+    pub fn new(fitted: FittedCorrectionSurface, fit_stats: FitStatistics) -> Self {
+        Self { fitted, fit_stats }
+    }
+
+    /// The solved core surface — the single mathematical model this type carries.
+    pub fn fitted(&self) -> &FittedCorrectionSurface {
+        &self.fitted
+    }
+
+    /// The validated layout: shape, knot vectors, spline order, canonical index law.
+    pub fn layout(&self) -> &CorrectionSurfaceLayout {
+        self.fitted.layout()
+    }
+
+    /// Coefficient counts per axis: `[n_e_clock, n_e_cone, n_frequency]`.
+    pub fn shape(&self) -> [usize; 3] {
+        self.layout().shape()
+    }
+
+    /// Spline order (degree + 1).
+    pub fn spline_order(&self) -> usize {
+        self.layout().spline_order() as usize
+    }
+
+    pub fn knots_e_clock(&self) -> &[f64] {
+        self.layout().knots_e_clock()
+    }
+
+    pub fn knots_e_cone(&self) -> &[f64] {
+        self.layout().knots_e_cone()
+    }
+
+    pub fn knots_frequency(&self) -> &[f64] {
+        self.layout().knots_frequency()
+    }
+
+    /// The fitted coefficients, E-clock fastest, then E-cone, then frequency.
+    pub fn coefficients(&self) -> &[f64] {
+        self.fitted.coefficients()
     }
 
     /// Evaluate the correction at a given point through the shared core evaluator.
@@ -1136,10 +1142,8 @@ impl CorrectionSurface {
         frequency_mhz: f64,
         e_cone_deg: f64,
         e_clock_deg: f64,
-    ) -> Result<CorrectionEvaluation> {
-        Ok(self
-            .fitted()?
-            .evaluate(e_clock_deg, e_cone_deg, frequency_mhz))
+    ) -> CorrectionEvaluation {
+        self.fitted.evaluate(e_clock_deg, e_cone_deg, frequency_mhz)
     }
 
     /// Evaluate a correction known to be inside fitted support.
@@ -1147,16 +1151,12 @@ impl CorrectionSurface {
     /// Callers that can encounter an unsupported point, including cross-validation, use
     /// [`Self::evaluate_outcome`] and preserve [`CorrectionEvaluation::OutsideSupport`].
     pub fn evaluate(&self, frequency_mhz: f64, e_cone_deg: f64, e_clock_deg: f64) -> Result<f64> {
-        match self.evaluate_outcome(frequency_mhz, e_cone_deg, e_clock_deg)? {
-            CorrectionEvaluation::Applied(correction_db) => Ok(correction_db),
-            CorrectionEvaluation::OutsideSupport => {
-                Err(CorrectionSurfaceError::InterpolationError {
-                    reason: format!(
-                        "query (E-clock={e_clock_deg}, E-cone={e_cone_deg}, frequency={frequency_mhz} MHz) is outside fitted support"
-                    ),
-                })
-            }
-        }
+        applied_or_outside(
+            self.evaluate_outcome(frequency_mhz, e_cone_deg, e_clock_deg),
+            frequency_mhz,
+            e_cone_deg,
+            e_clock_deg,
+        )
     }
 
     /// Evaluate corrections for multiple points (batch evaluation).
@@ -1164,27 +1164,35 @@ impl CorrectionSurface {
         &self,
         points: &[(f64, f64, f64)], // (freq, cone, clock)
     ) -> Result<Vec<f64>> {
-        let fitted = self.fitted()?;
         points
             .iter()
-            .map(
-                |(frequency_mhz, e_cone_deg, e_clock_deg)| match fitted.evaluate(
-                    *e_clock_deg,
-                    *e_cone_deg,
-                    *frequency_mhz,
-                ) {
-                    CorrectionEvaluation::Applied(correction_db) => Ok(correction_db),
-                    CorrectionEvaluation::OutsideSupport => {
-                        Err(CorrectionSurfaceError::InterpolationError {
-                            reason: format!(
-                                "query (E-clock={e_clock_deg}, E-cone={e_cone_deg}, frequency={frequency_mhz} MHz) is outside fitted support"
-                            ),
-                        })
-                    }
-                },
-            )
+            .map(|&(frequency_mhz, e_cone_deg, e_clock_deg)| {
+                applied_or_outside(
+                    self.evaluate_outcome(frequency_mhz, e_cone_deg, e_clock_deg),
+                    frequency_mhz,
+                    e_cone_deg,
+                    e_clock_deg,
+                )
+            })
             .collect()
     }
+}
+
+/// Require an evidence-backed correction, naming the query when there is none.
+fn applied_or_outside(
+    outcome: CorrectionEvaluation,
+    frequency_mhz: f64,
+    e_cone_deg: f64,
+    e_clock_deg: f64,
+) -> Result<f64> {
+    outcome
+        .correction_db()
+        .ok_or_else(|| CorrectionSurfaceError::InterpolationError {
+            reason: format!(
+                "query (E-clock={e_clock_deg}, E-cone={e_cone_deg}, \
+                 frequency={frequency_mhz} MHz) is outside fitted support"
+            ),
+        })
 }
 
 // ============================================================================
@@ -1193,11 +1201,10 @@ impl CorrectionSurface {
 
 /// Compute fit statistics for the correction surface
 fn compute_fit_statistics(
-    surface: &CorrectionSurface,
+    fitted: &FittedCorrectionSurface,
     residuals: &[ResidualPoint],
     initial_rmse: f64,
 ) -> Result<FitStatistics> {
-    let fitted = surface.fitted()?;
     let mut corrected_residuals = Vec::with_capacity(residuals.len());
     let mut max_residual: f64 = 0.0;
 
@@ -1375,7 +1382,7 @@ fn cross_validate(
         // Evaluate through the same core support law used by serving. Outside support
         // contributes the physics-only error and remains typed; it is never represented as
         // a successfully applied 0 dB correction.
-        let fitted = surface.fitted()?;
+        let fitted = surface.fitted();
         let evaluated: Vec<EvaluatedResidual> = validation
             .iter()
             .map(|residual| {
@@ -1921,12 +1928,12 @@ mod tests {
         for (spacing, knots, axis) in [
             (
                 resolution.cone_knot_spacing_deg,
-                &surface.knots_econe,
+                surface.knots_e_cone(),
                 "cone",
             ),
             (
                 resolution.clock_knot_spacing_deg,
-                &surface.knots_eclock,
+                surface.knots_e_clock(),
                 "clock",
             ),
         ] {
@@ -2157,26 +2164,41 @@ mod tests {
 
     /// The clock axis received none of the emptiness/finiteness validation its siblings got.
     /// It now goes through the same gate, and the assessment refuses rather than reporting.
+    ///
+    /// The degenerate axis is built through the real constructor, because the surface carries
+    /// no knot vector of its own to corrupt any more (GitHub issue #94): a run of equal knots
+    /// is a *valid* layout that resolves nothing, which is exactly the case the assessment
+    /// must refuse. A non-finite knot cannot reach here at all — the core layout rejects a
+    /// knot vector that is not non-decreasing — so its coverage sits where it is reachable,
+    /// on `widest_knot_gap` in `a_non_finite_knot_gap_is_refused_not_skipped_over`.
     #[test]
     fn the_clock_axis_is_validated_like_its_siblings() {
-        let mut surface = fitted_surface(24.0);
-        surface.knots_eclock = vec![7.0; surface.knots_eclock.len()];
-        let err = assess_angular_resolution(&surface, 8.0)
+        let surface = fitted_surface(24.0);
+        let degenerate_clock = CorrectionSurface::new(
+            FittedCorrectionSurface::new(
+                correction_layout(
+                    surface.shape(),
+                    &vec![7.0; surface.knots_e_clock().len()],
+                    surface.knots_e_cone(),
+                    surface.knots_frequency(),
+                    surface.spline_order(),
+                )
+                .expect("a run of equal knots is a valid layout"),
+                surface.coefficients().to_vec(),
+            )
+            .expect("coefficient count is unchanged"),
+            surface.fit_stats.clone(),
+        );
+
+        let err = assess_angular_resolution(&degenerate_clock, 8.0)
             .expect_err("a degenerate clock axis must be refused");
         assert!(
             format!("{err}").contains("E-clock"),
             "the error must name the offending axis, got: {err}"
         );
 
-        let mut nan_clock = fitted_surface(24.0);
-        nan_clock.knots_eclock[2] = f64::NAN;
-        assert!(
-            assess_angular_resolution(&nan_clock, 8.0).is_err(),
-            "a non-finite clock knot must be refused"
-        );
-
         // Control: untouched, it assesses fine.
-        assert!(assess_angular_resolution(&fitted_surface(24.0), 8.0).is_ok());
+        assert!(assess_angular_resolution(&surface, 8.0).is_ok());
     }
 
     /// Finding 4: the span guard in `generate_knot_vector` is `max - min < min_spacing`,
@@ -2577,14 +2599,15 @@ mod tests {
             knots_econe.len() - order,
             knots_frequency.len() - order,
         ];
-        CorrectionSurface {
-            coefficients: vec![1.0; shape[0] * shape[1] * shape[2]],
-            shape,
-            knots_frequency,
-            knots_econe,
-            knots_eclock,
-            spline_order: order,
-            fit_stats: FitStatistics {
+        let layout = correction_layout(shape, &knots_eclock, &knots_econe, &knots_frequency, order)
+            .expect("a clamped layout");
+        let fitted =
+            FittedCorrectionSurface::new(layout, vec![1.0; shape[0] * shape[1] * shape[2]])
+                .expect("coefficients sized to the layout");
+
+        CorrectionSurface::new(
+            fitted,
+            FitStatistics {
                 num_points: 0,
                 rmse_db: 0.0,
                 max_residual_db: 0.0,
@@ -2592,7 +2615,7 @@ mod tests {
                 cross_validation_rmse: None,
                 improvement_percent: 0.0,
             },
-        }
+        )
     }
 
     /// The regression this fixes: the basis was a partition of unity everywhere *except*
