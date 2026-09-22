@@ -5,9 +5,9 @@
 //! write it with the ANTC header used by full mode, then load it back through
 //! the service loader (`antenna_model::data::loader::load_calibration_artifact`).
 
+use antenna_core::model::FittedCorrectionSurface;
 use antenna_model::data::loader::load_calibration_artifact;
 use antenna_model::data::types::CALIBRATION_SCHEMA_VERSION;
-use antenna_model::model::FittedCorrectionSurface;
 use calibrate::artifact_export::{export_full_calibration, ExportPhysicalParams};
 use calibrate::correction_surface::{
     assess_angular_resolution, fit_correction_surface, CorrectionSurfaceParams,
@@ -155,6 +155,23 @@ fn test_full_export_loads_via_service() {
     ));
 }
 
+/// Fit the standard round-trip surface and carry it all the way to a decoded wire model:
+/// fit, export, write with the production writer, load through the service loader.
+///
+/// The two tests below make different assertions about the same journey, so the journey
+/// itself is defined once.
+fn fit_export_write_load() -> (
+    calibrate::correction_surface::CorrectionSurface,
+    antenna_model::data::types::BSplineModel4D,
+) {
+    let measurements = build_measurements();
+    let predictions = vec![0.0; measurements.len()];
+    let surface = fit_correction_surface(&measurements, &predictions, &round_trip_params())
+        .expect("surface fit");
+    let model = export_write_load(&surface, &measurements);
+    (surface, model)
+}
+
 /// The served surface is the *same* fitted surface, not a numerically similar one.
 ///
 /// This replaces the sampled fit-versus-serve equivalence test that preceded issue #94.
@@ -167,12 +184,7 @@ fn test_full_export_loads_via_service() {
 /// equality can, and it needs no tolerance.
 #[test]
 fn the_served_surface_is_exactly_the_fitted_surface_after_a_service_load() {
-    let measurements = build_measurements();
-    let predictions = vec![0.0; measurements.len()];
-    let surface = fit_correction_surface(&measurements, &predictions, &round_trip_params())
-        .expect("surface fit");
-
-    let model = export_write_load(&surface, &measurements);
+    let (surface, model) = fit_export_write_load();
     let served = FittedCorrectionSurface::from_model4d(&model).expect("decode the wire model");
 
     assert_eq!(
@@ -202,12 +214,7 @@ fn the_served_surface_is_exactly_the_fitted_surface_after_a_service_load() {
 /// on the wire bytes' own order rather than on what comes back out of them.
 #[test]
 fn every_wire_temperature_slab_is_the_canonical_coefficient_vector_verbatim() {
-    let measurements = build_measurements();
-    let predictions = vec![0.0; measurements.len()];
-    let surface = fit_correction_surface(&measurements, &predictions, &round_trip_params())
-        .expect("surface fit");
-
-    let model = export_write_load(&surface, &measurements);
+    let (surface, model) = fit_export_write_load();
     let coefficients = surface.coefficients();
 
     assert_eq!(

@@ -207,14 +207,14 @@ pub fn to_schema5_model(
 /// Extents of the measurement set used to populate validity ranges and coverage.
 #[derive(Debug, Clone, Copy)]
 struct MeasurementExtents {
-    azimuth_min_max: (f64, f64),   // from e_clock
-    elevation_min_max: (f64, f64), // from e_cone
+    e_clock_min_max: (f64, f64),
+    e_cone_min_max: (f64, f64),
     frequency_min_max: (f64, f64),
     temperature_mid: f64,
     temperature_min_max: (f64, f64),
 }
 
-/// Compute measurement extents (az/el/freq/temperature ranges) from the points.
+/// Compute measurement extents (E-clock/E-cone/frequency/temperature) from the points.
 fn measurement_extents(measurements: &[MeasurementPoint]) -> Result<MeasurementExtents> {
     if measurements.is_empty() {
         return Err(ArtifactExportError::InvalidSurface(
@@ -222,16 +222,16 @@ fn measurement_extents(measurements: &[MeasurementPoint]) -> Result<MeasurementE
         ));
     }
 
-    let mut az = (f64::INFINITY, f64::NEG_INFINITY);
-    let mut el = (f64::INFINITY, f64::NEG_INFINITY);
+    let mut e_clock = (f64::INFINITY, f64::NEG_INFINITY);
+    let mut e_cone = (f64::INFINITY, f64::NEG_INFINITY);
     let mut freq = (f64::INFINITY, f64::NEG_INFINITY);
     let mut temp = (f64::INFINITY, f64::NEG_INFINITY);
 
     for p in measurements {
-        az.0 = az.0.min(p.e_clock_deg);
-        az.1 = az.1.max(p.e_clock_deg);
-        el.0 = el.0.min(p.e_cone_deg);
-        el.1 = el.1.max(p.e_cone_deg);
+        e_clock.0 = e_clock.0.min(p.e_clock_deg);
+        e_clock.1 = e_clock.1.max(p.e_clock_deg);
+        e_cone.0 = e_cone.0.min(p.e_cone_deg);
+        e_cone.1 = e_cone.1.max(p.e_cone_deg);
         freq.0 = freq.0.min(p.frequency_mhz);
         freq.1 = freq.1.max(p.frequency_mhz);
         temp.0 = temp.0.min(p.temperature_k);
@@ -241,8 +241,8 @@ fn measurement_extents(measurements: &[MeasurementPoint]) -> Result<MeasurementE
     let temperature_mid = 0.5 * (temp.0 + temp.1);
 
     Ok(MeasurementExtents {
-        azimuth_min_max: az,
-        elevation_min_max: el,
+        e_clock_min_max: e_clock,
+        e_cone_min_max: e_cone,
         frequency_min_max: freq,
         temperature_mid,
         temperature_min_max: temp,
@@ -396,20 +396,22 @@ pub fn export_full_calibration(
     // Failing loudly here rather than clamping is deliberate: a clamp cannot distinguish
     // "already in the right convention" from "silently truncated", which is exactly how this
     // went unseen. If it fires, the input never went through the normalization above.
-    let (el_lo, el_hi) = extents.elevation_min_max;
-    if !(0.0..=90.0).contains(&el_lo) || !(0.0..=90.0).contains(&el_hi) || el_lo > el_hi {
+    let (cone_lo, cone_hi) = extents.e_cone_min_max;
+    if !(0.0..=90.0).contains(&cone_lo) || !(0.0..=90.0).contains(&cone_hi) || cone_lo > cone_hi {
         return Err(ArtifactExportError::BuildFailed {
             what: "validity ranges".to_string(),
             reason: format!(
-                "measured E-cone extent [{el_lo}, {el_hi}]° is not a polar-angle range in \
+                "measured E-cone extent [{cone_lo}, {cone_hi}]° is not a polar-angle range in \
                  [0, 90]; measurements must be in the polar convention before export \
                  (see MeasurementPoint::to_polar_convention)"
             ),
         });
     }
+    // `azimuth_range`/`elevation_range` are the artifact's wire names for the E-clock and
+    // E-cone extents, the same translation [`to_schema5_model`] makes for the knot vectors.
     let validity_ranges = ValidityRangesBuilder::default()
-        .azimuth_range(extents.azimuth_min_max.0, extents.azimuth_min_max.1)
-        .elevation_range(el_lo, el_hi)
+        .azimuth_range(extents.e_clock_min_max.0, extents.e_clock_min_max.1)
+        .elevation_range(cone_lo, cone_hi)
         .frequency_range(extents.frequency_min_max.0, extents.frequency_min_max.1)
         .temperature(extents.temperature_mid)
         .build()
@@ -420,8 +422,8 @@ pub fn export_full_calibration(
 
     // Coverage from measurement extents.
     let coverage = CalibrationCoverageBuilder::default()
-        .azimuth_range(extents.azimuth_min_max.0, extents.azimuth_min_max.1)
-        .elevation_range(el_lo, el_hi)
+        .azimuth_range(extents.e_clock_min_max.0, extents.e_clock_min_max.1)
+        .elevation_range(cone_lo, cone_hi)
         .frequency_range(extents.frequency_min_max.0, extents.frequency_min_max.1)
         .num_measurements(measurements.len())
         .has_correction_surface(true)
