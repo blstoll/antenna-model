@@ -70,6 +70,9 @@ Recent bumps cover the versioning cases, and they moved the axes differently:
   bytes: every synthetic temperature slab must be identical, runtime evaluation uses only
   E-clock/E-cone/frequency, and outside fitted support has no numeric correction. Valid 5.0
   artifacts still load under the minor-version policy; a temperature-varying one is rejected.
+  **#93 made no version movement:** `calibrate` now consumes that same core evaluator.
+  `OutsideSupport` still has no correction value; validation retains the typed disposition and
+  scores the physics-only prediction, matching served behavior without changing artifact bytes.
 - **D21 (5.0 / container 4)** added `metadata.angular_resolution` and **fixes no wrong number
   at all** — every 4.0 artifact means what it said and no consumer reads the new field. But
   postcard is positional, so a 4.0 payload is short by the `Option` discriminant and everything
@@ -203,7 +206,12 @@ antenna under D20's sufficiency check. See
 
 ### 4. Validate (`validator.rs`)
 
-Cross-validation; ensure <1 dB error in main lobe / first sidelobe.
+Cross-validation; ensure <1 dB error in main lobe / first sidelobe. Validation uses the fitted
+core surface outcome directly: `Applied(correction_db)` scores physics plus correction, while
+`OutsideSupport` scores physics-only and remains typed until support accounting. The existing
+`corrected_*` report fields therefore describe **served behavior** despite their legacy names.
+Issue #96 owns the separate in-support metric, in-sample and per-fold support counts/proportions,
+and the corresponding structured-report field names.
 
 **Folds are strided — point `i` is held out by fold `i % K`** (D22), through the single shared
 definition `correction_surface::is_held_out`. **There are two k-fold implementations** and both

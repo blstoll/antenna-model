@@ -772,8 +772,8 @@ async fn run_calibration(args: Args) -> Result<()> {
 
     info!("  ✓ Validation complete");
     info!(
-        "    Corrected RMSE: {:.4} dB",
-        validation_report.corrected_rmse
+        served_behavior_rmse_db = validation_report.corrected_rmse,
+        "validation served-behavior RMSE"
     );
     info!(
         "    Main lobe max error: {:.4} dB",
@@ -813,25 +813,36 @@ async fn run_calibration(args: Args) -> Result<()> {
     if let Some(cv) = &validation_report.cross_validation {
         info!("  Cross-validation results:");
         match (cv.mean_rmse, cv.std_rmse) {
-            (Some(mean), Some(std)) => {
-                info!("    Mean RMSE: {mean:.4} dB (± {std:.4} dB)")
-            }
-            _ => info!("    Mean RMSE: n/a — no fold could be refitted"),
+            (Some(mean), Some(std)) => info!(
+                mean_rmse_db = mean,
+                std_rmse_db = std,
+                "cross-validation served-behavior RMSE"
+            ),
+            _ => info!("    Served-behavior mean RMSE: n/a — no fold could be refitted"),
         }
         if let (Some(min), Some(max)) = (cv.min_rmse, cv.max_rmse) {
-            info!("    Range: [{min:.4}, {max:.4}] dB");
+            info!(
+                min_rmse_db = min,
+                max_rmse_db = max,
+                "cross-validation served-behavior RMSE range"
+            );
         }
-        if !cv.is_complete() {
+        if !cv.failed_folds.is_empty() {
             warn!(
-                "    {} of {} folds could not refit on their training split; the figures \
-                 above cover only the {} that ran. The artifact is still written.",
-                cv.failed_folds.len(),
-                cv.num_folds,
-                cv.fold_rmse_values.len()
+                failed_folds = cv.failed_folds.len(),
+                requested_folds = cv.num_folds,
+                scored_folds = cv.fold_rmse_values.len(),
+                "cross-validation folds could not refit; aggregates cover only scored folds, and the successful full-data fit is still written"
             );
             for failure in &cv.failed_folds {
-                warn!("      {}", failure.reason);
+                warn!(fold = failure.fold, reason = %failure.reason, "cross-validation fold failed");
             }
+        }
+        if cv.unsupported_validation_points > 0 {
+            warn!(
+                unsupported_validation_points = cv.unsupported_validation_points,
+                "cross-validation served-behavior metrics include physics-only predictions outside fitted support"
+            );
         }
     }
 
@@ -854,9 +865,10 @@ async fn run_calibration(args: Args) -> Result<()> {
     };
 
     // Build a service-loadable AntennaCalibration (4D B-spline correction
-    // surface) and write it as the binary artifact. `artifact_metadata` above
-    // and `validation_report` only drive the optional `--metadata`/`--report`
-    // JSON sidecars below; neither is part of the on-disk binary format.
+    // surface) and write it as the binary artifact. `artifact_metadata` above drives only the
+    // optional `--metadata` sidecar. The validation report also supplies the served-behavior
+    // RMSE stamped into the artifact's generic accuracy fields, but the report struct itself is
+    // written only to the optional `--report` JSON sidecar.
     // (`export_physical` was built back at step 5, so the assessment reported there and the
     // one the artifact carries describe the same dish.)
     let feed_id = args.feed_id.as_deref().unwrap_or("primary");
@@ -915,8 +927,8 @@ async fn run_calibration(args: Args) -> Result<()> {
     );
     info!("  Model-only RMSE: {:.4} dB", model_only_rmse);
     info!(
-        "  Corrected RMSE: {:.4} dB",
-        validation_report.corrected_rmse
+        served_behavior_rmse_db = validation_report.corrected_rmse,
+        "calibration served-behavior RMSE"
     );
     info!(
         "  Improvement: {:.1}%",
