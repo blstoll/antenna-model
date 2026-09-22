@@ -102,6 +102,14 @@ pub enum CorrectionSurfaceError {
 
     #[error("Cross-validation failed: {reason}")]
     CrossValidationError { reason: String },
+
+    /// The solved coefficients do not fill the layout they were solved against.
+    ///
+    /// Named separately from [`Self::InvalidKnotVector`] because the knot vectors were
+    /// already validated when the layout was built: what is inconsistent here is the
+    /// coefficient count, and the message has to say so to be actionable.
+    #[error("Fitted coefficients are inconsistent with the solved layout: {reason}")]
+    InconsistentCoefficients { reason: String },
 }
 
 pub type Result<T> = std::result::Result<T, CorrectionSurfaceError>;
@@ -639,7 +647,7 @@ pub fn fit_correction_surface(
     // The solve already ran in the artifact's canonical coefficient order, so the fitted
     // surface is the layout it was solved against plus those coefficients — no permutation.
     let fitted = FittedCorrectionSurface::new(layout, coefficients).map_err(|error| {
-        CorrectionSurfaceError::InvalidKnotVector {
+        CorrectionSurfaceError::InconsistentCoefficients {
             reason: error.to_string(),
         }
     })?;

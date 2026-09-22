@@ -9,8 +9,11 @@
 //! The fitter and the correction-surface module speak the domain: **E-clock**, **E-cone**
 //! and **frequency**. Schema 5's [`BSplineModel4D`] carries the first two under the
 //! historical field names `knots_azimuth` and `knots_elevation`, plus a synthetic
-//! temperature axis. That translation is confined to [`to_schema5_model`] and lives nowhere
-//! else (GitHub issue #94):
+//! temperature axis. For the fitted correction surface that translation happens in exactly
+//! one place, [`to_schema5_model`], and nowhere else (GitHub issue #94). The two
+//! boresight-mode producers in `frequency_correction` and `boresight_calibration` build
+//! their own `BSplineModel4D` over axes that were never fitted — `flat_axis` collapses
+//! azimuth, elevation and temperature there — so they name the wire fields directly too.
 //!
 //! | Domain (fitted surface) | Schema-5 wire field    |
 //! |-------------------------|------------------------|
