@@ -177,7 +177,7 @@ fn test_correction_surface_interpolation() {
         num_knots_eclock: 3,
         adaptive_knots: false,
         cross_validation_folds: 0,
-        spline_order: 3, // Cubic splines, need 4^3 = 64 points minimum
+        spline_order: 3, // Quadratic (order = degree + 1); the pre-check needs 4^3 = 64 points
         ..Default::default()
     };
 

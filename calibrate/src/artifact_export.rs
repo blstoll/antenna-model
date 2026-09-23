@@ -39,6 +39,11 @@ pub enum ArtifactExportError {
     #[error("invalid correction surface: {0}")]
     InvalidSurface(String),
 
+    /// The core wire adapter refused to construct the correction surface's wire form.
+    /// Carries the typed core error, which names the axis (GitHub issue #95).
+    #[error("invalid correction surface: {0}")]
+    InvalidCorrectionSurface(#[from] antenna_core::data::types::ValidationError),
+
     /// A builder for one of the artifact sub-structures failed.
     #[error("failed to build {what}: {reason}")]
     BuildFailed {
@@ -209,10 +214,7 @@ pub fn export_full_calibration(
     let (t_meas_lo, t_meas_hi) = extents.temperature_min_max;
     let t_lo = t_meas_lo - 1.0;
     let t_hi = t_meas_hi + 1.0;
-    let correction = surface
-        .fitted()
-        .to_model4d(t_lo, t_hi)
-        .map_err(|e| ArtifactExportError::InvalidSurface(e.to_string()))?;
+    let correction = surface.fitted().to_model4d(t_lo, t_hi)?;
 
     // Physical config.
     let reflector = DataReflectorGeometry {

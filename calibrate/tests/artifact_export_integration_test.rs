@@ -514,13 +514,14 @@ fn export_write_load(
 /// That combination is the one with history. **D15** was an upper-edge collapse in
 /// `bspline_basis` at a domain maximum: fitting and serving agreed everywhere except at an
 /// endpoint, and the fitted surface was corrupted across the whole top knot span while every
-/// interior probe stayed clean. Until #93 moves fitting onto the core stencil, the fit-side
-/// and core evaluators remain different code, so their endpoint conventions need this guard.
+/// interior probe stayed clean. Fitting and serving now share one core layout and stencil
+/// (#93, #95), so there is one endpoint convention; this guard keeps an artifact that came
+/// off disk honest at the edges regardless.
 ///
 /// The probe grid is **derived from the served knot vectors** rather than hand-listed, so it
 /// lands exactly on every executable-axis knot — the clamped ends *and* the interior ones —
 /// plus a midpoint in each span. The wire temperature knots are checked separately because
-/// schema 5.1 retains that field but exposes no runtime temperature query. Deriving the grid
+/// schema 5 retains that field but exposes no runtime temperature query. Deriving the grid
 /// also means it follows the fixture: change the knot counts and the probes move with them
 /// instead of quietly going stale.
 #[test]

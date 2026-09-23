@@ -95,6 +95,10 @@ pub enum FrequencyCorrectionError {
 
     #[error("B-spline fitting failed: {0}")]
     FittingError(String),
+
+    /// The core layout refused the surface this module described (GitHub issue #95).
+    #[error("Invalid correction-surface construction: {0}")]
+    InvalidSurface(#[from] antenna_core::data::types::ValidationError),
 }
 
 /// Result type for frequency correction operations.
@@ -189,8 +193,7 @@ pub fn fit_frequency_correction(frequencies: &[f64], residuals: &[f64]) -> Resul
         ClampedAxis::flat(E_CONE_AXIS_DEG.0, E_CONE_AXIS_DEG.1),
         frequency_axis(frequencies, BORESIGHT_SPLINE_ORDER),
         BORESIGHT_SPLINE_ORDER,
-    )
-    .map_err(|error| FrequencyCorrectionError::FittingError(error.to_string()))?;
+    )?;
 
     // Replicate each frequency's control point across every flat angular layer, in the
     // canonical coefficient order the layout declares — E-clock fastest, then E-cone, then
@@ -201,12 +204,9 @@ pub fn fit_frequency_correction(frequencies: &[f64], residuals: &[f64]) -> Resul
         .iter()
         .flat_map(|&residual| std::iter::repeat_n(residual, n_e_clock * n_e_cone))
         .collect();
-    let fitted = FittedCorrectionSurface::new(layout, coefficients)
-        .map_err(|error| FrequencyCorrectionError::FittingError(error.to_string()))?;
+    let fitted = FittedCorrectionSurface::new(layout, coefficients)?;
 
-    fitted
-        .to_model4d(TEMPERATURE_AXIS_K.0, TEMPERATURE_AXIS_K.1)
-        .map_err(|error| FrequencyCorrectionError::FittingError(error.to_string()))
+    Ok(fitted.to_model4d(TEMPERATURE_AXIS_K.0, TEMPERATURE_AXIS_K.1)?)
 }
 
 /// Validates input data for B-spline fitting.

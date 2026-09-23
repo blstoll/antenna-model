@@ -142,7 +142,7 @@ struct AxisLayout {
 
 impl AxisLayout {
     fn support(&self, order: usize) -> (f64, f64) {
-        (self.knots[order - 1], self.knots[self.knots.len() - order])
+        support_interval(&self.knots, order)
     }
 
     /// The non-zero basis functions at `value`, or `None` outside support.
@@ -273,21 +273,6 @@ impl CorrectionSurfaceLayout {
     /// The validated frequency knot vector, in canonical axis order.
     pub fn knots_frequency(&self) -> &[f64] {
         &self.axes[2].knots
-    }
-
-    /// The closed E-clock interval the surface can be evaluated over, in degrees.
-    pub fn support_e_clock(&self) -> (f64, f64) {
-        self.axes[0].support(self.order)
-    }
-
-    /// The closed E-cone interval the surface can be evaluated over, in degrees.
-    pub fn support_e_cone(&self) -> (f64, f64) {
-        self.axes[1].support(self.order)
-    }
-
-    /// The closed frequency interval the surface can be evaluated over, in MHz.
-    pub fn support_frequency(&self) -> (f64, f64) {
-        self.axes[2].support(self.order)
     }
 
     /// Compute the sparse basis stencil for a domain query.
@@ -450,57 +435,74 @@ fn validated_axis(
     order: usize,
 ) -> std::result::Result<AxisLayout, DataValidationError> {
     let knots = structurally_valid_knots(name, coefficient_count, knots, order)?;
-    let invalid = |reason: String| invalid_knots(name, reason);
 
     // Rule 5. Checked before the multiplicity rules so a degenerate axis is named for what
     // it is rather than for its first run's length.
-    let (lower, upper) = (knots[order - 1], knots[knots.len() - order]);
+    let (lower, upper) = support_interval(&knots, order);
     if lower >= upper {
-        return Err(invalid(format!(
-            "empty support: the axis spans [{lower}, {upper}], so no query can be evaluated \
-             on it; a dimension the surface does not vary in needs a flat axis over a real \
-             interval, not a degenerate one"
-        )));
+        return Err(invalid_knots(
+            name,
+            format!(
+                "empty support: the axis spans [{lower}, {upper}], so no query can be \
+                 evaluated on it; a dimension the surface does not vary in needs a flat axis \
+                 over a real interval, not a degenerate one"
+            ),
+        ));
     }
 
     // Rules 6 and 7, run by run over the (known non-decreasing) vector.
     let max_interior = (order - 1).max(1);
-    let mut start = 0;
-    while start < knots.len() {
-        let end = start
-            + knots[start..]
-                .iter()
-                .take_while(|&&knot| knot == knots[start])
-                .count();
-        let multiplicity = end - start;
-        let is_end_run = start == 0 || end == knots.len();
-
-        if is_end_run && multiplicity != order {
-            return Err(invalid(format!(
-                "a clamped knot vector must repeat each bound exactly {order} times: value {} \
-                 at index {start} repeats {multiplicity} times. More gives basis function \
-                 B_{start} zero-width support, making it identically zero, and is what an \
-                 interior knot placed on a bound becomes (roadmap D19)",
-                knots[start]
-            )));
-        }
-        if !is_end_run && multiplicity > max_interior {
-            return Err(invalid(format!(
-                "interior knot {} at index {start} repeats {multiplicity} times; the maximum \
-                 for order {order} is {max_interior} (multiplicity {order} splits the spline)",
-                knots[start]
-            )));
-        }
-        start = end;
-    }
+    let run_count = knots.chunk_by(|a, b| a == b).count();
+    knots
+        .chunk_by(|a, b| a == b)
+        .scan(0, |start, run| {
+            let run_start = *start;
+            *start += run.len();
+            Some((run_start, run))
+        })
+        .enumerate()
+        .try_for_each(|(run_index, (start, run))| {
+            let multiplicity = run.len();
+            let is_end_run = run_index == 0 || run_index + 1 == run_count;
+            if is_end_run && multiplicity != order {
+                Err(invalid_knots(
+                    name,
+                    format!(
+                        "a clamped knot vector must repeat each bound exactly {order} times: \
+                         value {} at index {start} repeats {multiplicity} times. More gives \
+                         basis function B_{start} zero-width support, making it identically \
+                         zero, and is what an interior knot placed on a bound becomes \
+                         (roadmap D19)",
+                        run[0]
+                    ),
+                ))
+            } else if !is_end_run && multiplicity > max_interior {
+                Err(invalid_knots(
+                    name,
+                    format!(
+                        "interior knot {} at index {start} repeats {multiplicity} times; the \
+                         maximum for order {order} is {max_interior} (multiplicity {order} \
+                         splits the spline)",
+                        run[0]
+                    ),
+                ))
+            } else {
+                Ok(())
+            }
+        })?;
 
     Ok(AxisLayout { knots })
 }
 
-fn invalid_knots(name: &'static str, reason: String) -> DataValidationError {
+/// The closed interval a clamped knot vector can be evaluated over.
+fn support_interval(knots: &[f64], order: usize) -> (f64, f64) {
+    (knots[order - 1], knots[knots.len() - order])
+}
+
+fn invalid_knots(name: &'static str, reason: impl Into<String>) -> DataValidationError {
     DataValidationError::InvalidKnotVector {
         dimension: name.to_string(),
-        reason,
+        reason: reason.into(),
     }
 }
 
@@ -514,29 +516,37 @@ fn structurally_valid_knots(
     knots: Vec<f64>,
     order: usize,
 ) -> std::result::Result<Vec<f64>, DataValidationError> {
-    let invalid = |reason: String| invalid_knots(name, reason);
     if coefficient_count == 0 {
-        return Err(invalid("coefficient count must be non-zero".to_string()));
+        return Err(invalid_knots(name, "coefficient count must be non-zero"));
     }
     let expected_knots = coefficient_count
         .checked_add(order)
-        .ok_or_else(|| invalid("coefficient count + spline order overflows usize".to_string()))?;
+        .ok_or_else(|| invalid_knots(name, "coefficient count + spline order overflows usize"))?;
     if knots.len() != expected_knots {
-        return Err(invalid(format!(
-            "knot vector length {} != shape {coefficient_count} + order {order}",
-            knots.len()
-        )));
+        return Err(invalid_knots(
+            name,
+            format!(
+                "knot vector length {} != shape {coefficient_count} + order {order}",
+                knots.len()
+            ),
+        ));
     }
     if let Some((index, knot)) = knots.iter().enumerate().find(|(_, knot)| !knot.is_finite()) {
-        return Err(invalid(format!("knot {index} is not finite ({knot})")));
+        return Err(invalid_knots(
+            name,
+            format!("knot {index} is not finite ({knot})"),
+        ));
     }
     if let Some(index) = knots.windows(2).position(|window| window[0] > window[1]) {
-        return Err(invalid(format!(
-            "knot vector is not non-decreasing: knots[{index}]={} > knots[{}]={}",
-            knots[index],
-            index + 1,
-            knots[index + 1]
-        )));
+        return Err(invalid_knots(
+            name,
+            format!(
+                "knot vector is not non-decreasing: knots[{index}]={} > knots[{}]={}",
+                knots[index],
+                index + 1,
+                knots[index + 1]
+            ),
+        ));
     }
     Ok(knots)
 }
@@ -943,9 +953,6 @@ mod tests {
             [5, 3, 4],
             "shape is interior + order per axis"
         );
-        assert_eq!(layout.support_e_clock(), (0.0, 10.0));
-        assert_eq!(layout.support_e_cone(), (0.0, 20.0));
-        assert_eq!(layout.support_frequency(), (8_000.0, 9_000.0));
     }
 
     #[test]

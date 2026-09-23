@@ -88,6 +88,11 @@ pub enum CorrectionSurfaceError {
     #[error("Invalid knot vector: {reason}")]
     InvalidKnotVector { reason: String },
 
+    /// The core layout refused the placed axes. Carries the typed core error, which names
+    /// the axis and the invariant it broke (GitHub issue #95).
+    #[error("Invalid correction-surface layout: {0}")]
+    InvalidLayout(#[from] antenna_core::data::types::ValidationError),
+
     #[error("Singular matrix in least squares fitting: {reason}")]
     SingularMatrix { reason: String },
 
@@ -119,7 +124,8 @@ pub type Result<T> = std::result::Result<T, CorrectionSurfaceError>;
 ///
 /// The knot vectors, the coefficient shape and every knot-vector invariant belong to
 /// [`CorrectionSurfaceLayout::clamped`]; this crate supplies only where the interior knots
-/// go.
+/// go. What this function adds is the one conversion between the two crates' order types:
+/// [`CorrectionSurfaceParams::spline_order`] is a `usize`, the wire's is a `u8`.
 fn correction_layout(
     e_clock: ClampedAxis,
     e_cone: ClampedAxis,
@@ -127,14 +133,17 @@ fn correction_layout(
     spline_order: usize,
 ) -> Result<CorrectionSurfaceLayout> {
     let spline_order =
-        u8::try_from(spline_order).map_err(|_| CorrectionSurfaceError::InvalidKnotVector {
-            reason: format!("spline order {spline_order} does not fit the core wire type"),
+        u8::try_from(spline_order).map_err(|_| CorrectionSurfaceError::InvalidParameter {
+            param: "spline_order".to_string(),
+            value: spline_order as f64,
+            reason: "does not fit the artifact's u8 spline order".to_string(),
         })?;
-    CorrectionSurfaceLayout::clamped(e_clock, e_cone, frequency, spline_order).map_err(|error| {
-        CorrectionSurfaceError::InvalidKnotVector {
-            reason: error.to_string(),
-        }
-    })
+    Ok(CorrectionSurfaceLayout::clamped(
+        e_clock,
+        e_cone,
+        frequency,
+        spline_order,
+    )?)
 }
 
 // ============================================================================
@@ -586,11 +595,11 @@ pub fn fit_correction_surface(
     let [n_clock, n_cone, n_freq] = layout.shape();
 
     debug!(
-        "Number of basis functions: freq={}, cone={}, clock={} (total: {})",
         n_freq,
         n_cone,
         n_clock,
-        layout.coefficient_count()
+        n_coefficients = layout.coefficient_count(),
+        "placed correction-surface basis functions"
     );
 
     // The real data-sufficiency requirement (roadmap D20).
@@ -1772,6 +1781,23 @@ mod tests {
         let (measurements, predictions) = grid_over_cone_span(12, 12, 12, max_cone_deg);
         fit_correction_surface(&measurements, &predictions, &shipped_shape_params())
             .expect("fit should succeed")
+    }
+
+    /// Full mode fits **cubic** surfaces: order 4 (`order = degree + 1`). GitHub issue #95
+    /// moved knot construction into core without changing that, and boresight's order-3
+    /// (quadratic) correction is pinned separately in `frequency_correction`. Checked on the
+    /// shipped parameters, on the fitted surface, and on the wire artifact, so a change to
+    /// any of the three fails here.
+    #[test]
+    fn full_mode_fits_cubic_order_4_surfaces() {
+        assert_eq!(CorrectionSurfaceParams::shipped().spline_order, 4);
+        let surface = fitted_surface(24.0);
+        assert_eq!(surface.spline_order(), 4);
+        let wire = surface
+            .fitted()
+            .to_model4d(289.0, 291.0)
+            .expect("wire construction");
+        assert_eq!(wire.spline_order, 4);
     }
 
     /// The delivered knot spacing is what the surface can actually follow, and it is not the
