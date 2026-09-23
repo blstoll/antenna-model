@@ -1902,16 +1902,6 @@ reject — restamping a wrong artifact launders it past the new gate. (For C13 t
 "the feed's axial offset is not the focal length"; a lateral offset is legitimate, and one of
 these two fixtures has one.)
 
-**5.2 (GitHub issue #95, 2026-09-22) tightens knot-vector validation without moving a
-byte.** Every executable correction-surface axis must now satisfy one invariant set, owned by
-`antenna_core::model::correction_surface`: exactly `shape + order` finite, non-decreasing
-knots; a non-empty support; each bound repeated exactly `order` times; and no interior knot
-repeated more than `order - 1` times. The last three were previously enforced only by the
-fitter, so an artifact could hold a layout the fitter would never build. Every producer in
-`calibrate` already complied, so no artifact it wrote is newly rejected; container version 4
-and the postcard layout are unchanged, and valid 5.0/5.1 artifacts load under the minor-version
-policy.
-
 **5.1 (GitHub issue #92, 2026-09-20) tightens validation without moving a byte.**
 Schema-5 artifacts retain the historical temperature fields, but every temperature
 coefficient slab must now be identical. The executable correction surface is therefore a
@@ -1920,6 +1910,14 @@ returns no correction rather than extending a boundary polynomial. This is a MIN
 container version 4 and the postcard layout are unchanged. Valid 5.0 artifacts load under
 the loader's minor-version policy, while a temperature-varying surface is rejected during
 artifact validation with the differing slab and coefficient named.
+
+**#95 (2026-09-22) tightened knot-vector validation with no schema bump.** Every executable
+correction-surface axis must now satisfy one invariant set, owned by
+`antenna_core::model::correction_surface`: exactly `shape + order` finite, non-decreasing
+knots; a non-empty support; each bound repeated exactly `order` times; and no interior knot
+repeated more than `order - 1` times. The last three were previously enforced only by the
+fitter. Every producer in `calibrate` already complied, so no artifact it wrote is newly
+rejected, and the stamp stays 5.1 by decision.
 
 **5.0 (D21, 2026-08-04) is the first bump here that fixes no wrong number.** It added
 `CalibrationMetadata.angular_resolution` — what the fitted correction surface's knots can

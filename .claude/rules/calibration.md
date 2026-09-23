@@ -61,15 +61,11 @@ full and boresight mode (D2).
 
 - **Container** — the ANTC header `u32` (`ANTC_ARTIFACT_VERSION` = **4**), readable before the
   decode.
-- **Schema** — `metadata.format_version` (`CALIBRATION_SCHEMA_VERSION` = **"5.2"**), readable
+- **Schema** — `metadata.format_version` (`CALIBRATION_SCHEMA_VERSION` = **"5.1"**), readable
   only after it. A foreign MAJOR is a hard error.
 
 Recent bumps cover the versioning cases, and they moved the axes differently:
 
-- **#95 (5.2 / container 4)** moved the fitter's knot-vector rules (finite, exact length,
-  non-empty support, end multiplicity `== order`, interior `<= order-1`) into the core layout,
-  so the loader enforces the same invariant set the fitter builds to. No bytes moved and every
-  producer already complied, so it is MINOR-only.
 - **#92 (5.1 / container 4)** tightened correction-surface validation without moving any
   bytes: every synthetic temperature slab must be identical, runtime evaluation uses only
   E-clock/E-cone/frequency, and outside fitted support has no numeric correction. Valid 5.0
@@ -77,6 +73,11 @@ Recent bumps cover the versioning cases, and they moved the axes differently:
   **#93 made no version movement:** `calibrate` now consumes that same core evaluator.
   `OutsideSupport` still has no correction value; validation retains the typed disposition and
   scores the physics-only prediction, matching served behavior without changing artifact bytes.
+  **#95 made no version movement either**, although it did tighten loading: the fitter's
+  knot-vector rules (finite, exact `shape + order` length, non-empty support, end
+  multiplicity `== order`, interior `<= order-1`) moved into the core layout, so the loader
+  enforces the invariant set the fitter builds to. Every producer already complied, so no
+  artifact this codebase wrote is newly rejected; bumping for it was decided against.
 - **D21 (5.0 / container 4)** added `metadata.angular_resolution` and **fixes no wrong number
   at all** — every 4.0 artifact means what it said and no consumer reads the new field. But
   postcard is positional, so a 4.0 payload is short by the `Option` discriminant and everything

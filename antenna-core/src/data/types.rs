@@ -44,18 +44,6 @@ use std::fmt;
 ///
 /// # History
 ///
-/// - **5.2 (2026-09-22, GitHub issue #95)** — every executable correction-surface axis must
-///   satisfy the one knot-vector invariant set in [`crate::model::correction_surface`]:
-///   exactly `shape + order` finite, non-decreasing knots, a non-empty support, each bound
-///   repeated exactly `order` times, and interior multiplicity at most `order - 1`. The
-///   loader used to check length (`>=`) and ordering only; the rest were the fitter's. No
-///   byte moves and no field changes meaning, so this is MINOR-only and
-///   [`crate::data::loader::ANTC_ARTIFACT_VERSION`] remains 4. Every schema-5 producer in
-///   `calibrate` already wrote knot vectors that satisfy the set — full mode has enforced
-///   the multiplicity rules since D19 and boresight has written flat axes since D13 — so no
-///   artifact this codebase produced is newly rejected. Valid 5.0/5.1 artifacts load under
-///   the minor-version policy.
-///
 /// - **5.1 (2026-09-20, GitHub issue #92)** — schema-5 correction surfaces are accepted
 ///   only when every synthetic temperature coefficient slab is identical. Runtime queries
 ///   are three-dimensional (E-clock, E-cone, frequency), and a query outside fitted support
@@ -124,7 +112,7 @@ use std::fmt;
 ///   a wrong artifact past the gate this bump exists to close. (One of them carries a 5 cm
 ///   *lateral* design offset, which is legitimate and is what this field is for; the C13
 ///   signature is specifically an axial component equal to the focal length.)
-pub const CALIBRATION_SCHEMA_VERSION: &str = "5.2";
+pub const CALIBRATION_SCHEMA_VERSION: &str = "5.1";
 
 /// Complete calibration data for a single antenna-feed combination (v2.0 physics-based).
 ///

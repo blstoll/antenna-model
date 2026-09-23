@@ -21,11 +21,11 @@ in full in that document), run with
 from the *after* revision.
 
 Running the harness from the after revision matters here: it decodes the **before**
-artifacts through the tightened 5.2 loader, so a pass also shows that artifacts written by
+artifacts through the tightened loader, so a pass also shows that artifacts written by
 the previous producers satisfy the new invariant set.
 
 Normalization: `metadata.calibration_date` and `metadata.format_version` are blanked (the
-latter moves 5.1 → 5.2 in this change), and both artifacts are re-encoded through
+schema stamp stays 5.1; it is blanked for parity with #94), and both artifacts are re-encoded through
 `encode_calibration_artifact`, which recomputes the CRC32 over the normalized payload.
 
 ## Result
@@ -35,12 +35,13 @@ latter moves 5.1 → 5.2 in this change), and both artifacts are re-encoded thro
 | `calibrate --report` JSON | byte-identical | (no report emitted) |
 | Raw artifact bytes (`cmp -l`) | 14 bytes differ | 15 bytes differ |
 | Normalized re-encode (timestamp, schema stamp, CRC) | **identical, 39 417 bytes** | **identical, 3 378 bytes** |
-| Before artifact loads under the 5.2 invariant set | yes | yes |
+| Before artifact loads under the tightened invariant set | yes | yes |
 | 1331 probes over interior points **and** exact axis boundaries | max `\|Δ\|` = **0.0 dB** | max `\|Δ\|` = **0.0 dB** |
 | Probe magnitude (non-vacuity guard) | max `\|correction\|` = 18.07 dB | max `\|correction\|` = 0.87 dB |
 
-The raw differences are the RFC-3339 timestamp, the `"5.1"`→`"5.2"` stamp, and the CRC32
-covering them. The tolerance the harness asserts is `1e-9` dB; the measured difference is
+The raw differences were measured with a 5.2 stamp that was later dropped (the schema
+stays 5.1 by decision); they are the RFC-3339 timestamp, that stamp, and the CRC32 covering
+them. None survives normalization, and the stamp is blanked either way. The tolerance the harness asserts is `1e-9` dB; the measured difference is
 exactly zero because the knot vectors, shapes and solve are unchanged — only *where* the
 knot vectors are assembled and validated moved. Boresight mode stays order 3 (quadratic):
 its frequency knot vector and coefficients are bit-identical.
