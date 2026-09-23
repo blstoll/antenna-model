@@ -450,10 +450,7 @@ fn validated_axis(
     order: usize,
 ) -> std::result::Result<AxisLayout, DataValidationError> {
     let knots = structurally_valid_knots(name, coefficient_count, knots, order)?;
-    let invalid = |reason: String| DataValidationError::InvalidKnotVector {
-        dimension: name.to_string(),
-        reason,
-    };
+    let invalid = |reason: String| invalid_knots(name, reason);
 
     // Rule 5. Checked before the multiplicity rules so a degenerate axis is named for what
     // it is rather than for its first run's length.
@@ -489,7 +486,7 @@ fn validated_axis(
         }
         if !is_end_run && multiplicity > max_interior {
             return Err(invalid(format!(
-                "Interior knot {} at index {start} repeats {multiplicity} times; the maximum \
+                "interior knot {} at index {start} repeats {multiplicity} times; the maximum \
                  for order {order} is {max_interior} (multiplicity {order} splits the spline)",
                 knots[start]
             )));
@@ -498,6 +495,13 @@ fn validated_axis(
     }
 
     Ok(AxisLayout { knots })
+}
+
+fn invalid_knots(name: &'static str, reason: String) -> DataValidationError {
+    DataValidationError::InvalidKnotVector {
+        dimension: name.to_string(),
+        reason,
+    }
 }
 
 /// Rules 2–4 of the invariant set: the structure any wire axis must have to be read at all.
@@ -510,10 +514,7 @@ fn structurally_valid_knots(
     knots: Vec<f64>,
     order: usize,
 ) -> std::result::Result<Vec<f64>, DataValidationError> {
-    let invalid = |reason: String| DataValidationError::InvalidKnotVector {
-        dimension: name.to_string(),
-        reason,
-    };
+    let invalid = |reason: String| invalid_knots(name, reason);
     if coefficient_count == 0 {
         return Err(invalid("coefficient count must be non-zero".to_string()));
     }
@@ -1013,14 +1014,20 @@ mod tests {
     #[test]
     fn an_interior_knot_repeated_order_times_is_rejected() {
         let error = layout_error([4, 2, 2], vec![0.0, 0.0, 5.0, 5.0, 10.0, 10.0], 2);
-        assert_e_clock_rejected(error, "Interior knot 5");
+        assert_e_clock_rejected(error, "interior knot 5");
     }
 
     #[test]
     fn a_producer_interior_knot_on_a_bound_is_rejected_not_absorbed() {
         // D19's mechanism: quantile placement hands back the bound itself as an "interior"
-        // knot, which clamping turns into multiplicity order + 1.
-        for interior in [vec![0.0], vec![10.0], vec![-1.0], vec![11.0]] {
+        // knot, which clamping turns into multiplicity order + 1. A knot outside the bounds
+        // breaks the ordering instead. Either way the knot is refused, never absorbed.
+        for (interior, reason) in [
+            (vec![0.0], "exactly 2 times"),
+            (vec![10.0], "exactly 2 times"),
+            (vec![-1.0], "non-decreasing"),
+            (vec![11.0], "non-decreasing"),
+        ] {
             let error = CorrectionSurfaceLayout::clamped(
                 ClampedAxis::new(0.0, 10.0, interior.clone()),
                 ClampedAxis::new(0.0, 20.0, vec![]),
@@ -1028,12 +1035,23 @@ mod tests {
                 2,
             )
             .expect_err("a non-interior knot must be rejected");
-            assert!(
-                matches!(&error, DataValidationError::InvalidKnotVector { dimension, .. }
-                    if dimension == "E-clock"),
-                "interior {interior:?}: {error}"
-            );
+            assert_e_clock_rejected(error, reason);
         }
+    }
+
+    #[test]
+    fn order_one_admits_single_interior_knots_and_refuses_repeats() {
+        // Piecewise constant: an interior knot at multiplicity 1 (= order) is the only way an
+        // order-1 axis has more than one piece, so rule 7 admits it; a repeat is refused.
+        let layout = |knots: Vec<f64>| {
+            let unit = vec![0.0, 1.0];
+            CorrectionSurfaceLayout::new([knots.len() - 1, 1, 1], knots, unit.clone(), unit, 1)
+        };
+        layout(vec![0.0, 5.0, 10.0]).expect("one interior knot at order 1");
+        assert_e_clock_rejected(
+            layout(vec![0.0, 5.0, 5.0, 10.0]).expect_err("repeated interior knot at order 1"),
+            "interior knot 5",
+        );
     }
 
     #[test]

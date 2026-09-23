@@ -351,8 +351,9 @@ mod tests {
     ///
     /// The boresight-mode frequency correction used to be **structurally
     /// unloadable**: its azimuth/elevation/temperature axes were `order` equal
-    /// knots over one coefficient layer, and `BSplineModel4D::validate` requires
-    /// `knots.len() >= shape + order` on every axis. The service loader runs that
+    /// knots over one coefficient layer, and `BSplineModel4D::validate` required
+    /// `knots.len() >= shape + order` on every axis (since issue #95: exactly
+    /// `shape + order`, with a non-empty support). The service loader runs that
     /// validation on every artifact (`AntennaCalibration::validate` →
     /// `correction.validate()`), so any boresight run whose residuals tripped the
     /// 0.5 dB fitting threshold wrote a `.bin` the service refused to load.
