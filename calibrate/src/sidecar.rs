@@ -270,7 +270,10 @@ mod tests {
             model_only_rmse: 1.0,
             model_only_max_error: 2.0,
             model_only_r_squared: 0.8,
-            corrected_rmse: 0.5,
+            served_behavior_rmse: 0.5,
+            in_support_correction_rmse: Some(0.4),
+            out_of_support_points: 1,
+            out_of_support_proportion: 0.1,
             corrected_max_error: 1.0,
             corrected_r_squared: 0.95,
             rmse_improvement_percent: 50.0,
@@ -315,10 +318,36 @@ mod tests {
         export_validation_json(&test_validation_report(), &path).expect("export report");
 
         let text = std::fs::read_to_string(&path).expect("read report");
+        let json: serde_json::Value = serde_json::from_str(&text).expect("parse JSON");
+        assert!(json.get("corrected_rmse").is_none());
+        assert!(json["served_behavior_rmse"].is_number());
+
         let parsed: ValidationReport = serde_json::from_str(&text).expect("parse report");
         assert_eq!(parsed.num_points, 10);
-        assert!((parsed.corrected_rmse - 0.5).abs() < 1e-12);
+        assert!((parsed.served_behavior_rmse - 0.5).abs() < 1e-12);
+        assert_eq!(parsed.in_support_correction_rmse, Some(0.4));
+        assert_eq!(parsed.out_of_support_points, 1);
+        assert_eq!(parsed.out_of_support_proportion, 0.1);
         assert!(parsed.meets_accuracy_requirements);
+    }
+
+    #[test]
+    fn a_report_with_no_in_support_points_serializes_null_not_zero() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("report_no_support.json");
+        let mut report = test_validation_report();
+        report.in_support_correction_rmse = None;
+        report.out_of_support_points = report.num_points;
+        report.out_of_support_proportion = 1.0;
+
+        export_validation_json(&report, &path).expect("export report");
+        let text = std::fs::read_to_string(&path).expect("read report");
+        let json: serde_json::Value = serde_json::from_str(&text).expect("parse JSON");
+        assert!(json["in_support_correction_rmse"].is_null());
+        assert_eq!(json["out_of_support_points"], report.num_points);
+
+        let parsed: ValidationReport = serde_json::from_str(&text).expect("round-trip report");
+        assert_eq!(parsed.in_support_correction_rmse, None);
     }
 
     /// A report whose cross-validation scored **nothing** must still round-trip.
@@ -337,27 +366,24 @@ mod tests {
         let path = dir.path().join("report_no_folds.json");
 
         let mut report = test_validation_report();
-        report.cross_validation = Some(CrossValidationResults {
-            num_folds: 2,
-            fold_rmse_values: vec![],
-            failed_folds: vec![
-                FoldFailure {
-                    fold: 1,
-                    training_points: 5,
-                    reason: "fold 1/2 could not refit".to_string(),
-                },
-                FoldFailure {
-                    fold: 2,
-                    training_points: 5,
-                    reason: "fold 2/2 could not refit".to_string(),
-                },
-            ],
-            unsupported_validation_points: 0,
-            mean_rmse: None,
-            std_rmse: None,
-            min_rmse: None,
-            max_rmse: None,
-        });
+        report.cross_validation = Some(
+            CrossValidationResults::from_fold_results(
+                vec![],
+                vec![
+                    FoldFailure {
+                        fold: 1,
+                        training_points: 5,
+                        reason: "fold 1/2 could not refit".to_string(),
+                    },
+                    FoldFailure {
+                        fold: 2,
+                        training_points: 5,
+                        reason: "fold 2/2 could not refit".to_string(),
+                    },
+                ],
+            )
+            .expect("complete fold outcomes"),
+        );
 
         export_validation_json(&report, &path).expect("export report");
         let text = std::fs::read_to_string(&path).expect("read report");
@@ -366,10 +392,10 @@ mod tests {
 
         let cv = parsed.cross_validation.expect("cross-validation present");
         assert!(
-            cv.mean_rmse.is_none(),
+            cv.mean_rmse().is_none(),
             "no fold scored, so there is no mean"
         );
-        assert_eq!(cv.failed_folds.len(), 2);
+        assert_eq!(cv.failed_folds().len(), 2);
         assert!(!cv.is_complete());
     }
 

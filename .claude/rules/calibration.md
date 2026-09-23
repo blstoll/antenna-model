@@ -218,19 +218,20 @@ antenna under D20's sufficiency check. See
 
 ### 4. Validate (`validator.rs`)
 
-Cross-validation; ensure <1 dB error in main lobe / first sidelobe. Validation uses the fitted
-core surface outcome directly: `Applied(correction_db)` scores physics plus correction, while
-`OutsideSupport` scores physics-only and remains typed until support accounting. The existing
-`corrected_*` report fields therefore describe **served behavior** despite their legacy names.
-Issue #96 owns the separate in-support metric, in-sample and per-fold support counts/proportions,
-and the corresponding structured-report field names.
+Validation uses the fitted core surface outcome directly: `Applied(correction_db)` scores
+physics plus correction, while `OutsideSupport` scores physics-only and remains typed through
+support accounting. Issue **#96** makes both claims visible in the report: `served_behavior_rmse`
+covers every point, `in_support_correction_rmse` covers only `Applied`, and out-of-support count
+and proportion accompany both the in-sample report and every scored fold. Zero in-support points
+is `None`/JSON `null`, never zero or a non-finite sentinel. These RMSEs are diagnostics only;
+artifact acceptance remains the configured main-lobe and first-sidelobe **maximum-error** policy.
 
-**Folds are strided — point `i` is held out by fold `i % K`** (D22), through the single shared
-definition `correction_surface::is_held_out`. **There are two k-fold implementations** and both
-must use it: `validator::perform_cross_validation`, and `correction_surface::cross_validate`
-inside `fit_correction_surface` — the latter is the one `--validate` reaches *first*, because
-`main::surface_fitting_params` sets `cross_validation_folds` straight from the flag. D22's first
-cut fixed only the validator, which left the decided behaviour unreachable from the CLI.
+**Folds are strided — point `i` is held out by fold `i % K`** (D22), through
+`correction_surface::is_held_out`. Issue **#96** removed the duplicate validator-side fold loop:
+`correction_surface::cross_validate` is the sole authority for assignment, refitting, support
+accounting, and scoring. The fitted `CorrectionSurface` retains that one result; fit statistics
+and `ValidationReport` consume it without recomputing folds. `main::surface_fitting_params` sets
+`cross_validation_folds` straight from `--validate`, and inner fold fits always disable nested CV.
 
 Folds used to be contiguous slices of the input file, so on a grid-ordered measurement set the
 edge folds held out a whole axis slab and scored an *extrapolation*: 10.07 / 0.56 / 0.12 / 0.64 /
@@ -238,11 +239,12 @@ edge folds held out a whole axis slab and scored an *extrapolation*: 10.07 / 0.5
 re-sorted the same measurements. Striding is deterministic and invariant to which axis varies
 fastest; its known bias is the opposite one (optimistic on a dense grid).
 
-**Read `fold_rmse_values`, not just the mean** — the mean alone hid a 100× spread, and
-`format_summary` prints every fold for that reason. A fold whose training split cannot be fitted
-is **recorded and reported, not fatal**: since D20 an underdetermined fit is a hard error and a
-fold trains on `(1 − 1/folds)` of the data, so aborting made `--validate` *remove* an artifact
-the same command without it produces. See
+**Read `scored_folds`, not just the mean** — each entry carries served and in-support RMSE plus
+its out-of-support count/proportion, and `format_summary` prints every fold. The compatibility
+`fold_rmse_values` vector contains only the served-behavior projection. A fold whose training
+split cannot be fitted is **recorded and reported, not fatal**: since D20 an underdetermined fit
+is a hard error and a fold trains on `(1 − 1/folds)` of the data, so aborting made `--validate`
+*remove* an artifact the same command without it produces. See
 `docs/findings-2026-08-02-cross-validation-fold-assignment.md`.
 
 ### 5. Serialize

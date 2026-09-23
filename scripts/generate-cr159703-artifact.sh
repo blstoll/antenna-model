@@ -91,7 +91,7 @@ echo "==> step 2/2: fit the correction surface and write the artifact"
 # Folds are STRIDED (point i is held out by fold i % 5), so each fold's training set spans
 # every frequency in the file and every fold scores an interpolation. Measured here after
 # roadmap D22 landed (2026-08-03): fold RMSEs 0.029 / 0.031 / 0.031 / 0.060 / 0.046 dB
-# against an in-sample corrected_rmse of 0.027 dB.
+# against an in-sample served_behavior_rmse of 0.027 dB.
 #
 # Until D22 the validator cut folds as CONTIGUOUS slices of the input file, and this file is
 # written frequency-major, so the first and last folds held out an entire frequency slab and

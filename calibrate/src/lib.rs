@@ -51,8 +51,8 @@ pub use parser::{
 };
 
 pub use validator::{
-    validate_calibration, AngularRegionStats, CrossValidationResults, FrequencyBandStats,
-    OutlierPoint, ValidationConfig, ValidationError, ValidationReport,
+    validate_calibration, AngularRegionStats, CrossValidationFoldResult, CrossValidationResults,
+    FrequencyBandStats, OutlierPoint, ValidationConfig, ValidationError, ValidationReport,
 };
 
 pub use sidecar::{

@@ -506,7 +506,9 @@ fn assert_service_loadable_corrected_artifact(scenario: &UntunedScenario) {
 fn assert_correction_beats_the_uncorrected_model(scenario: &UntunedScenario) {
     let report = &scenario.report;
     let model_only = report["model_only_rmse"].as_f64().expect("model_only_rmse");
-    let corrected = report["corrected_rmse"].as_f64().expect("corrected_rmse");
+    let corrected = report["served_behavior_rmse"]
+        .as_f64()
+        .expect("served_behavior_rmse");
 
     println!("model-only RMSE {model_only:.4} dB, corrected {corrected:.4} dB");
     assert!(
@@ -553,7 +555,7 @@ fn assert_correction_beats_the_uncorrected_model(scenario: &UntunedScenario) {
 /// What actually limits recovery here is overfitting from an underdetermined fit: the
 /// shipped configuration has 600 coefficients (6·10·10 after D19) fitting only 288
 /// measurement points, so the surface can interpolate every data point almost exactly
-/// (`corrected_rmse` 0.0058 dB, see the ceiling assertion above) while oscillating between
+/// (`served_behavior_rmse` 0.0058 dB, see the ceiling assertion above) while oscillating between
 /// them — which is exactly what these off-grid probes are catching. That is tracked
 /// separately from the endpoint defect, as roadmap unit **D20**: the fitter's
 /// data-sufficiency check tests `(spline_order+1)^3 = 125` points as the minimum, when the
@@ -669,17 +671,33 @@ fn cli_cv_three_folds_reports_finite_scores() {
         });
     assert_eq!(reported as usize, FOLDS, "requested CV fold count");
 
-    let values = report["cross_validation"]["fold_rmse_values"]
+    let folds = report["cross_validation"]["scored_folds"]
         .as_array()
-        .expect("fold_rmse_values");
-    assert_eq!(values.len(), FOLDS, "one RMSE per fold");
-    for (index, value) in values.iter().enumerate() {
-        let score = value
+        .expect("scored_folds");
+    assert_eq!(folds.len(), FOLDS, "one result per fold");
+    for (index, fold) in folds.iter().enumerate() {
+        let served = fold["served_behavior_rmse"]
             .as_f64()
-            .unwrap_or_else(|| panic!("CV fold {index} score is not numeric: {value}"));
+            .unwrap_or_else(|| panic!("CV fold {index} served RMSE is not numeric: {fold}"));
+        let in_support = fold["in_support_correction_rmse"]
+            .as_f64()
+            .unwrap_or_else(|| {
+                panic!("CV fold {index} unexpectedly has no fitted support: {fold}")
+            });
+        assert!(served.is_finite() && in_support.is_finite());
+        assert!(fold["out_of_support_points"].as_u64().is_some());
+        assert!(fold["out_of_support_proportion"].as_f64().is_some());
+    }
+
+    let output = run.output();
+    for text in [
+        "validation in-support correction RMSE",
+        "validation correction-surface support",
+        "cross-validation fold metrics",
+    ] {
         assert!(
-            score.is_finite(),
-            "CV fold {index} score is not finite: {score}"
+            output.contains(text),
+            "CLI text output omitted {text:?}:\n{output}"
         );
     }
 }
@@ -700,7 +718,7 @@ fn assert_cross_validation_was_not_requested(scenario: &UntunedScenario) {
     );
 
     for field in [
-        "corrected_rmse",
+        "served_behavior_rmse",
         "main_lobe_max_error",
         "first_sidelobe_max_error",
     ] {
