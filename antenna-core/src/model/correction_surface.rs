@@ -1,10 +1,96 @@
-//! Correction-surface layout and evaluation (GitHub issue #92).
+//! Correction-surface layout, construction, and evaluation (GitHub issues #92, #95).
 //!
 //! This module is the mathematical owner of fitted residual surfaces. Callers use
 //! domain coordinates (E-clock, E-cone, and frequency); schema 5's synthetic
-//! temperature axis is confined to the wire adapter in this module.
+//! temperature axis is confined to the wire adapter in this module
+//! ([`FittedCorrectionSurface::from_model4d`] / [`FittedCorrectionSurface::to_model4d`]).
+//!
+//! # One place constructs a layout, one place defines its invariants
+//!
+//! A producer describes each axis as a [`ClampedAxis`] — its bounds and its interior knots —
+//! and [`CorrectionSurfaceLayout::clamped`] builds the knot vectors and the coefficient
+//! shape from that description. *Where* the interior knots go (quantiles, uniform spacing,
+//! minimum-spacing policy) is the producer's fitting policy and stays in `calibrate`; the
+//! knot vector itself, and the shape that must agree with it, are built only here.
+//!
+//! Every executable axis — however it was built, and including every axis decoded from an
+//! artifact — satisfies one invariant set, enforced by the layout constructors:
+//!
+//! 1. **Order** — `spline_order` (`= degree + 1`) is in `1..=10`.
+//! 2. **Shape** — the axis has at least one coefficient, and its knot vector has exactly
+//!    `coefficients + order` knots. A longer vector would leave basis positions with no
+//!    coefficient; a shorter one would leave coefficients with no basis function.
+//! 3. **Finite** — every knot is finite.
+//! 4. **Non-decreasing** — knots never decrease.
+//! 5. **Non-empty support** — the evaluable interval `[lower, upper]` has `lower < upper`.
+//! 6. **Clamped ends** — each bound repeats *exactly* `order` times. Fewer leaves the spline
+//!    unclamped at its bound; more gives a basis function zero-width support, making it
+//!    identically zero (roadmap D19). With the knots non-decreasing this is also what makes
+//!    every other knot strictly interior to `(lower, upper)`.
+//! 7. **Interior multiplicity** — an interior knot repeats at most `order - 1` times
+//!    (continuity reduced to C⁰ at worst); multiplicity `order` splits the spline into
+//!    disconnected pieces. Order 1 is piecewise constant by definition, so an order-1
+//!    interior knot may appear once.
+//!
+//! Rules 1–4 used to be the loader's ("artifact rules") and 5–7 the fitter's ("fitting
+//! rules"). They are one set now: an artifact can only hold a layout the fitter could have
+//! built, so a surface's support is always `[lower, upper]` of its [`ClampedAxis`].
+//!
+//! Schema 5's synthetic temperature axis is not executable — no query has a temperature
+//! coordinate — so it is held to the same rules only when this module *writes* it; on
+//! decode it must satisfy rules 1–4 and carry identical slabs (issue #92). Issue #98 retires
+//! it.
 
 use crate::data::types::{BSplineModel4D, ValidationError as DataValidationError};
+
+/// A producer's description of one clamped B-spline axis: its bounds and interior knots.
+///
+/// This is the only way a producer states an axis. The knot vector — `order` copies of
+/// `lower`, the interior knots, `order` copies of `upper` — and the axis's coefficient count
+/// (`interior + order`) are derived from it by [`CorrectionSurfaceLayout::clamped`], so a
+/// producer cannot state a shape that disagrees with its knots. Nothing is validated here;
+/// the layout validates the knot vector it builds against the module's invariant set.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClampedAxis {
+    lower: f64,
+    upper: f64,
+    interior: Vec<f64>,
+}
+
+impl ClampedAxis {
+    /// An axis clamped to `[lower, upper]` with the given interior knots, in increasing order.
+    pub fn new(lower: f64, upper: f64, interior: Vec<f64>) -> Self {
+        Self {
+            lower,
+            upper,
+            interior,
+        }
+    }
+
+    /// A *flat* axis over `[lower, upper]`, for a dimension the surface does not vary in.
+    ///
+    /// One interior knot at the midpoint gives `order + 1` coefficient layers. A producer
+    /// that fills every layer identically makes the surface exactly constant along the axis
+    /// everywhere in `[lower, upper]`, because the basis is a partition of unity.
+    ///
+    /// The alternative — one layer over `order` equal knots — has empty support whatever its
+    /// length, so the axis would have nothing to evaluate over; that is rule 5, and this is
+    /// why a collapsed dimension needs more than one layer (roadmap D13).
+    pub fn flat(lower: f64, upper: f64) -> Self {
+        Self::new(lower, upper, vec![0.5 * (lower + upper)])
+    }
+
+    fn coefficient_count(&self, order: usize) -> usize {
+        self.interior.len() + order
+    }
+
+    fn knot_vector(&self, order: usize) -> Vec<f64> {
+        std::iter::repeat_n(self.lower, order)
+            .chain(self.interior.iter().copied())
+            .chain(std::iter::repeat_n(self.upper, order))
+            .collect()
+    }
+}
 
 /// One non-zero contribution to a correction-surface coefficient.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -52,14 +138,18 @@ impl CorrectionEvaluation {
 #[derive(Debug, Clone, PartialEq)]
 struct AxisLayout {
     knots: Vec<f64>,
-    coefficient_count: usize,
 }
 
 impl AxisLayout {
     fn support(&self, order: usize) -> (f64, f64) {
-        (self.knots[order - 1], self.knots[self.knots.len() - order])
+        support_interval(&self.knots, order)
     }
 
+    /// The non-zero basis functions at `value`, or `None` outside support.
+    ///
+    /// The invariant set makes every in-support index a real coefficient: the knot vector
+    /// has exactly `coefficient_count + order` knots, so the highest span is
+    /// `coefficient_count - 1` and `span + local - (order - 1)` never exceeds it.
     fn active_basis(&self, value: f64, order: usize) -> Option<Vec<(usize, f64)>> {
         let (lower, upper) = self.support(order);
         if !value.is_finite() || !(lower..=upper).contains(&value) {
@@ -67,16 +157,14 @@ impl AxisLayout {
         }
 
         let span = find_knot_span(&self.knots, value, order);
-        let active = evaluate_basis_functions(&self.knots, span, value, order)
-            .into_iter()
-            .enumerate()
-            .filter(|(_, weight)| *weight != 0.0)
-            .map(|(local, weight)| {
-                let coefficient_index = span + local - (order - 1);
-                (coefficient_index < self.coefficient_count).then_some((coefficient_index, weight))
-            })
-            .collect::<Option<Vec<_>>>()?;
-        (!active.is_empty()).then_some(active)
+        Some(
+            evaluate_basis_functions(&self.knots, span, value, order)
+                .into_iter()
+                .enumerate()
+                .filter(|(_, weight)| *weight != 0.0)
+                .map(|(local, weight)| (span + local - (order - 1), weight))
+                .collect(),
+        )
     }
 }
 
@@ -95,6 +183,32 @@ pub struct CorrectionSurfaceLayout {
 }
 
 impl CorrectionSurfaceLayout {
+    /// Build a layout from each axis's producer description — the constructor every
+    /// producer uses. Knot vectors and shape are derived here, then validated against the
+    /// module's invariant set.
+    pub fn clamped(
+        e_clock: ClampedAxis,
+        e_cone: ClampedAxis,
+        frequency: ClampedAxis,
+        spline_order: u8,
+    ) -> std::result::Result<Self, DataValidationError> {
+        validate_order(spline_order)?;
+        let order = spline_order as usize;
+        Self::new(
+            [
+                e_clock.coefficient_count(order),
+                e_cone.coefficient_count(order),
+                frequency.coefficient_count(order),
+            ],
+            e_clock.knot_vector(order),
+            e_cone.knot_vector(order),
+            frequency.knot_vector(order),
+            spline_order,
+        )
+    }
+
+    /// Accept an explicit shape and knot vectors — the decoded-artifact path. Held to the
+    /// same invariant set as [`Self::clamped`]; see the module docs.
     pub fn new(
         shape: [usize; 3],
         knots_e_clock: Vec<f64>,
@@ -235,6 +349,46 @@ impl FittedCorrectionSurface {
         Self::new(layout, coefficients)
     }
 
+    /// Construct schema 5's 4D wire type around this surface — the inverse of
+    /// [`Self::from_model4d`].
+    ///
+    /// This is construction, not conversion: the canonical slab *is* the wire slab, under
+    /// the historical field names `knots_azimuth := E-clock` and
+    /// `knots_elevation := E-cone` (issue #94). The synthetic temperature axis is a
+    /// [`ClampedAxis::flat`] axis over `[temperature_lower_k, temperature_upper_k]` with the
+    /// slab replicated verbatim across its `order + 1` layers, so the wire surface is
+    /// temperature-independent. The written temperature axis is held to the full invariant
+    /// set, so an empty or non-finite interval is refused.
+    pub fn to_model4d(
+        &self,
+        temperature_lower_k: f64,
+        temperature_upper_k: f64,
+    ) -> std::result::Result<BSplineModel4D, DataValidationError> {
+        let order = self.layout.order;
+        let temperature = ClampedAxis::flat(temperature_lower_k, temperature_upper_k);
+        let n_temperature = temperature.coefficient_count(order);
+        let knots_temperature = validated_axis(
+            "temperature",
+            n_temperature,
+            temperature.knot_vector(order),
+            order,
+        )?
+        .knots;
+
+        let [n_e_clock, n_e_cone, n_frequency] = self.layout.shape;
+        Ok(BSplineModel4D {
+            coefficients: (0..n_temperature)
+                .flat_map(|_| self.coefficients.iter().copied())
+                .collect(),
+            shape: [n_e_clock, n_e_cone, n_frequency, n_temperature],
+            knots_azimuth: self.layout.knots_e_clock().to_vec(),
+            knots_elevation: self.layout.knots_e_cone().to_vec(),
+            knots_frequency: self.layout.knots_frequency().to_vec(),
+            knots_temperature,
+            spline_order: self.layout.spline_order(),
+        })
+    }
+
     pub fn layout(&self) -> &CorrectionSurfaceLayout {
         &self.layout
     }
@@ -273,46 +427,128 @@ fn validate_order(spline_order: u8) -> std::result::Result<(), DataValidationErr
     Ok(())
 }
 
+/// Validate an executable axis against the module's whole invariant set.
 fn validated_axis(
     name: &'static str,
     coefficient_count: usize,
     knots: Vec<f64>,
     order: usize,
 ) -> std::result::Result<AxisLayout, DataValidationError> {
-    if coefficient_count == 0 {
-        return Err(DataValidationError::InvalidKnotVector {
-            dimension: name.to_string(),
-            reason: "coefficient count must be non-zero".to_string(),
-        });
-    }
-    let minimum_knots = coefficient_count.checked_add(order).ok_or_else(|| {
-        DataValidationError::InvalidKnotVector {
-            dimension: name.to_string(),
-            reason: "coefficient count + spline order overflows usize".to_string(),
-        }
-    })?;
-    if knots.len() < minimum_knots {
-        return Err(DataValidationError::InvalidKnotVector {
-            dimension: name.to_string(),
-            reason: format!(
-                "knot vector length {} < shape {} + order {}",
-                knots.len(),
-                coefficient_count,
-                order
+    let knots = structurally_valid_knots(name, coefficient_count, knots, order)?;
+
+    // Rule 5. Checked before the multiplicity rules so a degenerate axis is named for what
+    // it is rather than for its first run's length.
+    let (lower, upper) = support_interval(&knots, order);
+    if lower >= upper {
+        return Err(invalid_knots(
+            name,
+            format!(
+                "empty support: the axis spans [{lower}, {upper}], so no query can be \
+                 evaluated on it; a dimension the surface does not vary in needs a flat axis \
+                 over a real interval, not a degenerate one"
             ),
-        });
-    }
-    if !knots.windows(2).all(|window| window[0] <= window[1]) {
-        return Err(DataValidationError::InvalidKnotVector {
-            dimension: name.to_string(),
-            reason: "knot vector is not non-decreasing".to_string(),
-        });
+        ));
     }
 
-    Ok(AxisLayout {
-        knots,
-        coefficient_count,
-    })
+    // Rules 6 and 7, run by run over the (known non-decreasing) vector. A run starts wherever
+    // a knot differs from its predecessor and ends where the next one starts.
+    let max_interior = (order - 1).max(1);
+    let run_starts: Vec<usize> = (0..knots.len())
+        .filter(|&index| index == 0 || knots[index] != knots[index - 1])
+        .collect();
+    let run_ends = run_starts.iter().skip(1).copied().chain([knots.len()]);
+    run_starts
+        .iter()
+        .copied()
+        .zip(run_ends)
+        .try_for_each(|(start, end)| {
+            let multiplicity = end - start;
+            let is_end_run = start == 0 || end == knots.len();
+            if is_end_run && multiplicity != order {
+                Err(invalid_knots(
+                    name,
+                    format!(
+                        "a clamped knot vector must repeat each bound exactly {order} times: \
+                         value {} at index {start} repeats {multiplicity} times. More gives \
+                         basis function B_{start} zero-width support, making it identically \
+                         zero, and is what an interior knot placed on a bound becomes \
+                         (roadmap D19)",
+                        knots[start]
+                    ),
+                ))
+            } else if !is_end_run && multiplicity > max_interior {
+                Err(invalid_knots(
+                    name,
+                    format!(
+                        "interior knot {} at index {start} repeats {multiplicity} times; the \
+                         maximum for order {order} is {max_interior} (multiplicity {order} \
+                         splits the spline)",
+                        knots[start]
+                    ),
+                ))
+            } else {
+                Ok(())
+            }
+        })?;
+
+    Ok(AxisLayout { knots })
+}
+
+/// The closed interval a clamped knot vector can be evaluated over.
+fn support_interval(knots: &[f64], order: usize) -> (f64, f64) {
+    (knots[order - 1], knots[knots.len() - order])
+}
+
+fn invalid_knots(name: &'static str, reason: impl Into<String>) -> DataValidationError {
+    DataValidationError::InvalidKnotVector {
+        dimension: name.to_string(),
+        reason: reason.into(),
+    }
+}
+
+/// Rules 2–4 of the invariant set: the structure any wire axis must have to be read at all.
+///
+/// The only axis held to these alone is schema 5's synthetic temperature axis on decode;
+/// see the module docs.
+fn structurally_valid_knots(
+    name: &'static str,
+    coefficient_count: usize,
+    knots: Vec<f64>,
+    order: usize,
+) -> std::result::Result<Vec<f64>, DataValidationError> {
+    if coefficient_count == 0 {
+        return Err(invalid_knots(name, "coefficient count must be non-zero"));
+    }
+    let expected_knots = coefficient_count
+        .checked_add(order)
+        .ok_or_else(|| invalid_knots(name, "coefficient count + spline order overflows usize"))?;
+    if knots.len() != expected_knots {
+        return Err(invalid_knots(
+            name,
+            format!(
+                "knot vector length {} != shape {coefficient_count} + order {order}",
+                knots.len()
+            ),
+        ));
+    }
+    if let Some((index, knot)) = knots.iter().enumerate().find(|(_, knot)| !knot.is_finite()) {
+        return Err(invalid_knots(
+            name,
+            format!("knot {index} is not finite ({knot})"),
+        ));
+    }
+    if let Some(index) = knots.windows(2).position(|window| window[0] > window[1]) {
+        return Err(invalid_knots(
+            name,
+            format!(
+                "knot vector is not non-decreasing: knots[{index}]={} > knots[{}]={}",
+                knots[index],
+                index + 1,
+                knots[index + 1]
+            ),
+        ));
+    }
+    Ok(knots)
 }
 
 /// Validate schema 5's wire representation through the same adapter used to prepare it.
@@ -335,12 +571,13 @@ fn schema5_layout(
         ["azimuth", "elevation", "frequency"],
         model.spline_order,
     )?;
-    let order = model.spline_order as usize;
-    validated_axis(
+    // The synthetic temperature axis is never evaluated, so decode holds it to the
+    // structural rules only (module docs); `to_model4d` writes it to the full set.
+    structurally_valid_knots(
         "temperature",
         model.shape[3],
         model.knots_temperature.clone(),
-        order,
+        model.spline_order as usize,
     )?;
 
     let slab_size = layout.coefficient_count();
@@ -623,45 +860,6 @@ mod tests {
     }
 
     #[test]
-    fn surplus_knot_basis_positions_are_outside_fitted_support() {
-        // Schema 5 historically admitted knot vectors longer than shape + order. The
-        // mathematical basis then contains positions with no serialized coefficient.
-        // Those regions are unsupported; they must not alias onto the final coefficient.
-        let layout = CorrectionSurfaceLayout::new(
-            [2, 2, 2],
-            vec![0.0, 0.0, 0.0, 10.0, 10.0, 10.0],
-            vec![0.0, 0.0, 20.0, 20.0],
-            vec![8_000.0, 8_000.0, 9_000.0, 9_000.0],
-            2,
-        )
-        .unwrap();
-        let surface = FittedCorrectionSurface::new(layout, vec![7.0; 8]).unwrap();
-
-        assert_eq!(
-            surface.evaluate(7.5, 10.0, 8_500.0),
-            CorrectionEvaluation::OutsideSupport
-        );
-    }
-
-    #[test]
-    fn degenerate_executable_axis_has_no_fitted_value() {
-        let layout = CorrectionSurfaceLayout::new(
-            [2, 2, 2],
-            vec![0.0, 0.0, 0.0, 0.0],
-            vec![0.0, 0.0, 20.0, 20.0],
-            vec![8_000.0, 8_000.0, 9_000.0, 9_000.0],
-            2,
-        )
-        .unwrap();
-        let surface = FittedCorrectionSurface::new(layout, vec![7.0; 8]).unwrap();
-
-        assert_eq!(
-            surface.evaluate(0.0, 10.0, 8_500.0),
-            CorrectionEvaluation::OutsideSupport
-        );
-    }
-
-    #[test]
     fn schema5_adapter_rejects_temperature_varying_coefficients() {
         let model = BSplineModel4D {
             coefficients: vec![1.0; 8].into_iter().chain(vec![2.0; 8]).collect(),
@@ -700,5 +898,267 @@ mod tests {
             surface.evaluate(5.0, 10.0, 8_500.0),
             CorrectionEvaluation::Applied(1.5)
         );
+    }
+
+    // ------------------------------------------------------------------------
+    // Construction and the one invariant set (GitHub issue #95)
+    // ------------------------------------------------------------------------
+
+    fn layout_error(
+        shape: [usize; 3],
+        knots_e_clock: Vec<f64>,
+        spline_order: u8,
+    ) -> DataValidationError {
+        CorrectionSurfaceLayout::new(
+            shape,
+            knots_e_clock,
+            vec![0.0, 0.0, 20.0, 20.0],
+            vec![8_000.0, 8_000.0, 9_000.0, 9_000.0],
+            spline_order,
+        )
+        .expect_err("the E-clock axis violates the invariant set")
+    }
+
+    fn assert_e_clock_rejected(error: DataValidationError, needle: &str) {
+        match &error {
+            DataValidationError::InvalidKnotVector { dimension, reason } => {
+                assert_eq!(dimension, "E-clock", "error must name the axis: {error}");
+                assert!(reason.contains(needle), "expected {needle:?} in: {error}");
+            }
+            other => panic!("expected InvalidKnotVector, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_clamped_axis_builds_the_knot_vector_and_shape_the_producer_described() {
+        let layout = CorrectionSurfaceLayout::clamped(
+            ClampedAxis::new(0.0, 10.0, vec![4.0, 6.0]),
+            ClampedAxis::new(0.0, 20.0, vec![]),
+            ClampedAxis::new(8_000.0, 9_000.0, vec![8_500.0]),
+            3,
+        )
+        .unwrap();
+
+        assert_eq!(
+            layout.knots_e_clock(),
+            &[0.0, 0.0, 0.0, 4.0, 6.0, 10.0, 10.0, 10.0]
+        );
+        assert_eq!(layout.knots_e_cone(), &[0.0, 0.0, 0.0, 20.0, 20.0, 20.0]);
+        assert_eq!(
+            layout.knots_frequency(),
+            &[8_000.0, 8_000.0, 8_000.0, 8_500.0, 9_000.0, 9_000.0, 9_000.0]
+        );
+        assert_eq!(
+            layout.shape(),
+            [5, 3, 4],
+            "shape is interior + order per axis"
+        );
+    }
+
+    #[test]
+    fn a_flat_axis_is_order_plus_one_identical_layers_over_its_whole_span() {
+        let order = 3;
+        let layout = CorrectionSurfaceLayout::clamped(
+            ClampedAxis::flat(0.0, 360.0),
+            ClampedAxis::flat(0.0, 180.0),
+            ClampedAxis::new(8_000.0, 9_000.0, vec![]),
+            order,
+        )
+        .unwrap();
+        assert_eq!(
+            layout.knots_e_clock(),
+            &[0.0, 0.0, 0.0, 180.0, 360.0, 360.0, 360.0]
+        );
+        assert_eq!(layout.shape(), [4, 4, 3]);
+
+        // Constant along both flat axes: every angular layer carries its frequency's value.
+        let per_frequency = [1.0, -2.0, 0.5];
+        let coefficients = per_frequency
+            .iter()
+            .flat_map(|&value| std::iter::repeat_n(value, 16))
+            .collect();
+        let surface = FittedCorrectionSurface::new(layout, coefficients).unwrap();
+        let reference = surface.evaluate(0.0, 0.0, 8_300.0).correction_db().unwrap();
+        for (clock, cone) in [(360.0, 180.0), (17.0, 93.0), (180.0, 0.0), (359.9, 179.9)] {
+            let value = surface
+                .evaluate(clock, cone, 8_300.0)
+                .correction_db()
+                .unwrap();
+            assert!(
+                (value - reference).abs() < 1e-12,
+                "({clock}, {cone}): {value}"
+            );
+        }
+    }
+
+    #[test]
+    fn legitimate_interior_repeats_up_to_order_minus_one_are_admitted() {
+        // Order 4: an interior knot may repeat up to 3 times (C⁰ there).
+        CorrectionSurfaceLayout::clamped(
+            ClampedAxis::new(0.0, 10.0, vec![5.0, 5.0, 5.0]),
+            ClampedAxis::new(0.0, 20.0, vec![]),
+            ClampedAxis::new(8_000.0, 9_000.0, vec![]),
+            4,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn an_end_knot_repeated_more_than_order_times_is_rejected() {
+        // The pre-D19 fitter's defect: a bound at multiplicity order + 1 gives one basis
+        // function zero-width support. Shape agrees with length, so only the multiplicity
+        // rule can catch it.
+        let error = layout_error([3, 2, 2], vec![0.0, 0.0, 0.0, 10.0, 10.0], 2);
+        assert_e_clock_rejected(error, "exactly 2 times");
+    }
+
+    #[test]
+    fn an_end_knot_repeated_fewer_than_order_times_is_rejected() {
+        let error = layout_error([3, 2, 2], vec![0.0, 4.0, 6.0, 10.0, 10.0], 2);
+        assert_e_clock_rejected(error, "exactly 2 times");
+    }
+
+    #[test]
+    fn an_interior_knot_repeated_order_times_is_rejected() {
+        let error = layout_error([4, 2, 2], vec![0.0, 0.0, 5.0, 5.0, 10.0, 10.0], 2);
+        assert_e_clock_rejected(error, "interior knot 5");
+    }
+
+    #[test]
+    fn a_producer_interior_knot_on_a_bound_is_rejected_not_absorbed() {
+        // D19's mechanism: quantile placement hands back the bound itself as an "interior"
+        // knot, which clamping turns into multiplicity order + 1. A knot outside the bounds
+        // breaks the ordering instead. Either way the knot is refused, never absorbed.
+        for (interior, reason) in [
+            (vec![0.0], "exactly 2 times"),
+            (vec![10.0], "exactly 2 times"),
+            (vec![-1.0], "non-decreasing"),
+            (vec![11.0], "non-decreasing"),
+        ] {
+            let error = CorrectionSurfaceLayout::clamped(
+                ClampedAxis::new(0.0, 10.0, interior.clone()),
+                ClampedAxis::new(0.0, 20.0, vec![]),
+                ClampedAxis::new(8_000.0, 9_000.0, vec![]),
+                2,
+            )
+            .expect_err("a non-interior knot must be rejected");
+            assert_e_clock_rejected(error, reason);
+        }
+    }
+
+    #[test]
+    fn order_one_admits_single_interior_knots_and_refuses_repeats() {
+        // Piecewise constant: an interior knot at multiplicity 1 (= order) is the only way an
+        // order-1 axis has more than one piece, so rule 7 admits it; a repeat is refused.
+        let layout = |knots: Vec<f64>| {
+            let unit = vec![0.0, 1.0];
+            CorrectionSurfaceLayout::new([knots.len() - 1, 1, 1], knots, unit.clone(), unit, 1)
+        };
+        layout(vec![0.0, 5.0, 10.0]).expect("one interior knot at order 1");
+        assert_e_clock_rejected(
+            layout(vec![0.0, 5.0, 5.0, 10.0]).expect_err("repeated interior knot at order 1"),
+            "interior knot 5",
+        );
+    }
+
+    #[test]
+    fn a_non_finite_knot_is_rejected() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let error = layout_error([3, 2, 2], vec![0.0, 0.0, bad, 10.0, 10.0], 2);
+            assert_e_clock_rejected(error, "not finite");
+        }
+        // An infinite *bound* would give an unbounded support.
+        let error = layout_error([2, 2, 2], vec![0.0, 0.0, f64::INFINITY, f64::INFINITY], 2);
+        assert_e_clock_rejected(error, "not finite");
+    }
+
+    #[test]
+    fn a_knot_vector_whose_length_disagrees_with_shape_is_rejected() {
+        // Surplus knots: schema 5 used to admit `len > shape + order`, leaving basis
+        // positions with no coefficient. No producer ever wrote one.
+        let error = layout_error([2, 2, 2], vec![0.0, 0.0, 5.0, 10.0, 10.0], 2);
+        assert_e_clock_rejected(error, "shape 2 + order 2");
+        // Too short.
+        let error = layout_error([3, 2, 2], vec![0.0, 0.0, 10.0, 10.0], 2);
+        assert_e_clock_rejected(error, "shape 3 + order 2");
+    }
+
+    #[test]
+    fn an_axis_with_empty_support_is_rejected() {
+        let degenerate = layout_error([2, 2, 2], vec![0.0, 0.0, 0.0, 0.0], 2);
+        assert_e_clock_rejected(degenerate, "empty support");
+
+        let flat_over_a_point = CorrectionSurfaceLayout::clamped(
+            ClampedAxis::flat(5.0, 5.0),
+            ClampedAxis::new(0.0, 20.0, vec![]),
+            ClampedAxis::new(8_000.0, 9_000.0, vec![]),
+            2,
+        )
+        .expect_err("a flat axis over a point has nothing to evaluate over");
+        assert!(flat_over_a_point.to_string().contains("empty support"));
+    }
+
+    #[test]
+    fn a_decreasing_knot_vector_is_rejected() {
+        let error = layout_error([3, 2, 2], vec![0.0, 0.0, 12.0, 10.0, 10.0], 2);
+        assert_e_clock_rejected(error, "non-decreasing");
+    }
+
+    #[test]
+    fn the_wire_adapter_round_trips_a_fitted_surface_exactly() {
+        let layout = CorrectionSurfaceLayout::clamped(
+            ClampedAxis::new(0.0, 8.0, vec![4.0]),
+            ClampedAxis::new(0.0, 15.0, vec![5.0, 10.0]),
+            ClampedAxis::new(8_000.0, 9_000.0, vec![]),
+            2,
+        )
+        .unwrap();
+        let coefficients: Vec<f64> = (0..24).map(|index| index as f64 * 0.25).collect();
+        let surface = FittedCorrectionSurface::new(layout, coefficients.clone()).unwrap();
+
+        let model = surface.to_model4d(280.0, 300.0).unwrap();
+        assert_eq!(
+            model.shape,
+            [3, 4, 2, 3],
+            "flat temperature axis: order + 1 layers"
+        );
+        assert_eq!(
+            model.knots_temperature,
+            vec![280.0, 280.0, 290.0, 300.0, 300.0]
+        );
+        for slab in model.coefficients.chunks(24) {
+            assert_eq!(
+                slab,
+                coefficients.as_slice(),
+                "every slab is the canonical slab"
+            );
+        }
+        model.validate().unwrap();
+        assert_eq!(
+            FittedCorrectionSurface::from_model4d(&model).unwrap(),
+            surface
+        );
+    }
+
+    #[test]
+    fn the_wire_adapter_refuses_an_empty_or_non_finite_temperature_interval() {
+        let layout = CorrectionSurfaceLayout::clamped(
+            ClampedAxis::new(0.0, 10.0, vec![]),
+            ClampedAxis::new(0.0, 20.0, vec![]),
+            ClampedAxis::new(8_000.0, 9_000.0, vec![]),
+            2,
+        )
+        .unwrap();
+        let surface = FittedCorrectionSurface::new(layout, vec![0.0; 8]).unwrap();
+        for (lower, upper) in [(290.0, 290.0), (300.0, 280.0), (f64::NAN, 300.0)] {
+            let error = surface
+                .to_model4d(lower, upper)
+                .expect_err("temperature interval must be real and non-empty");
+            assert!(
+                matches!(&error, DataValidationError::InvalidKnotVector { dimension, .. }
+                    if dimension == "temperature"),
+                "[{lower}, {upper}]: {error}"
+            );
+        }
     }
 }

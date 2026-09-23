@@ -538,7 +538,8 @@ pub struct BSplineModel4D {
     /// Knot vector for temperature dimension (Kelvin)
     pub knots_temperature: Vec<f64>,
 
-    /// B-spline order (degree + 1). Typically 3 for cubic splines.
+    /// B-spline order (degree + 1): 4 is cubic, 3 is quadratic. Full-mode fits write 4;
+    /// boresight frequency corrections write 3 (see `calibrate::frequency_correction`).
     pub spline_order: u8,
 }
 
@@ -551,7 +552,8 @@ impl BSplineModel4D {
     /// Validates that the model is internally consistent.
     ///
     /// Schema-5 wire fields are adapted through the correction-surface module so
-    /// layout, coefficient indexing, and the flat-temperature invariant have one owner.
+    /// layout, coefficient indexing, the knot-vector invariant set, and the
+    /// flat-temperature invariant have one owner (issues #92, #95).
     pub fn validate(&self) -> Result<(), ValidationError> {
         crate::model::correction_surface::validate_model4d(self)
     }
@@ -1620,7 +1622,7 @@ impl BSplineModel4DBuilder {
             knots_temperature: self
                 .knots_temperature
                 .ok_or("knots_temperature is required")?,
-            spline_order: self.spline_order.unwrap_or(3), // Default to cubic
+            spline_order: self.spline_order.unwrap_or(3), // order 3 = degree 2: quadratic
         })
     }
 }
@@ -2054,12 +2056,12 @@ mod tests {
 
     #[test]
     fn test_bspline_model_validate() {
-        // Valid model
+        // Valid model: every axis clamped at order 3 with exactly shape + order knots.
         let valid_model = BSplineModel4D {
-            coefficients: vec![1.0; 24],
-            shape: [2, 3, 2, 2],
+            coefficients: vec![1.0; 108],
+            shape: [3, 4, 3, 3],
             knots_azimuth: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
-            knots_elevation: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            knots_elevation: vec![0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0],
             knots_frequency: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
             knots_temperature: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
             spline_order: 3,
@@ -2068,51 +2070,47 @@ mod tests {
 
         // Invalid: coefficient size doesn't match shape
         let invalid_model = BSplineModel4D {
-            coefficients: vec![1.0; 20], // Should be 24
-            shape: [2, 3, 2, 2],
-            knots_azimuth: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
-            knots_elevation: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-            knots_frequency: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
-            knots_temperature: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
-            spline_order: 3,
+            coefficients: vec![1.0; 100],
+            ..valid_model.clone()
         };
-        assert!(invalid_model.validate().is_err());
+        assert!(matches!(
+            invalid_model.validate(),
+            Err(ValidationError::InconsistentShape {
+                expected: 108,
+                actual: 100
+            })
+        ));
 
         // Invalid: knot vector too short
         let invalid_model = BSplineModel4D {
-            coefficients: vec![1.0; 24],
-            shape: [2, 3, 2, 2],
-            knots_azimuth: vec![0.0, 1.0], // Too short
-            knots_elevation: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-            knots_frequency: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
-            knots_temperature: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
-            spline_order: 3,
+            knots_azimuth: vec![0.0, 1.0],
+            ..valid_model.clone()
         };
-        assert!(invalid_model.validate().is_err());
+        assert!(matches!(
+            invalid_model.validate(),
+            Err(ValidationError::InvalidKnotVector { ref dimension, .. }) if dimension == "azimuth"
+        ));
 
         // Invalid: knot vector not non-decreasing
         let invalid_model = BSplineModel4D {
-            coefficients: vec![1.0; 24],
-            shape: [2, 3, 2, 2],
-            knots_azimuth: vec![0.0, 1.0, 0.5, 1.0, 1.0, 1.0], // Not non-decreasing
-            knots_elevation: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-            knots_frequency: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
-            knots_temperature: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
-            spline_order: 3,
+            knots_azimuth: vec![0.0, 0.0, 0.0, 1.0, 0.5, 1.0],
+            ..valid_model.clone()
         };
-        assert!(invalid_model.validate().is_err());
+        assert!(matches!(
+            invalid_model.validate(),
+            Err(ValidationError::InvalidKnotVector { ref reason, .. })
+                if reason.contains("non-decreasing")
+        ));
 
         // Invalid: spline order out of range
         let invalid_model = BSplineModel4D {
-            coefficients: vec![1.0; 24],
-            shape: [2, 3, 2, 2],
-            knots_azimuth: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
-            knots_elevation: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0],
-            knots_frequency: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
-            knots_temperature: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
             spline_order: 0,
+            ..valid_model
         };
-        assert!(invalid_model.validate().is_err());
+        assert_eq!(
+            invalid_model.validate(),
+            Err(ValidationError::InvalidSplineOrder(0))
+        );
     }
 
     #[test]
@@ -2783,12 +2781,12 @@ mod tests {
     // BSpline validation tests (ANTC-hardening, Task 5)
     // ============================================================================
 
-    /// Helper: build a minimal valid order-3 BSplineModel4D (shape [2,2,2,1]).
+    /// Helper: build a minimal valid order-3 BSplineModel4D (shape [3,3,3,3]).
     fn make_valid_bspline() -> BSplineModel4D {
         BSplineModel4D {
-            coefficients: vec![0.0; 8],
-            shape: [2, 2, 2, 1],
-            // knot vector length must be >= shape[i] + spline_order
+            coefficients: vec![0.0; 81],
+            shape: [3, 3, 3, 3],
+            // knot vector length must be exactly shape[i] + spline_order (issue #95)
             knots_azimuth: vec![0.0, 0.0, 0.0, 360.0, 360.0, 360.0],
             knots_elevation: vec![0.0, 0.0, 0.0, 90.0, 90.0, 90.0],
             knots_frequency: vec![8000.0, 8000.0, 8000.0, 9000.0, 9000.0, 9000.0],
@@ -2851,16 +2849,16 @@ mod tests {
     #[test]
     fn test_bspline_validate_rejects_coefficient_shape_mismatch() {
         let mut model = make_valid_bspline();
-        // shape says 2*2*2*1 = 8 coefficients, but we give 7
-        model.coefficients = vec![0.0; 7];
+        // shape says 3*3*3*3 = 81 coefficients, but we give 80
+        model.coefficients = vec![0.0; 80];
         assert!(
             model.validate().is_err(),
             "Expected validation to fail for coefficient/shape mismatch"
         );
         match model.validate().unwrap_err() {
             ValidationError::InconsistentShape { expected, actual } => {
-                assert_eq!(expected, 8);
-                assert_eq!(actual, 7);
+                assert_eq!(expected, 81);
+                assert_eq!(actual, 80);
             }
             other => panic!("Expected InconsistentShape, got {:?}", other),
         }

@@ -514,13 +514,14 @@ fn export_write_load(
 /// That combination is the one with history. **D15** was an upper-edge collapse in
 /// `bspline_basis` at a domain maximum: fitting and serving agreed everywhere except at an
 /// endpoint, and the fitted surface was corrupted across the whole top knot span while every
-/// interior probe stayed clean. Until #93 moves fitting onto the core stencil, the fit-side
-/// and core evaluators remain different code, so their endpoint conventions need this guard.
+/// interior probe stayed clean. Fitting and serving now share one core layout and stencil
+/// (#93, #95), so there is one endpoint convention; this guard keeps an artifact that came
+/// off disk honest at the edges regardless.
 ///
 /// The probe grid is **derived from the served knot vectors** rather than hand-listed, so it
 /// lands exactly on every executable-axis knot — the clamped ends *and* the interior ones —
 /// plus a midpoint in each span. The wire temperature knots are checked separately because
-/// schema 5.1 retains that field but exposes no runtime temperature query. Deriving the grid
+/// schema 5 retains that field but exposes no runtime temperature query. Deriving the grid
 /// also means it follows the fixture: change the knot counts and the probes move with them
 /// instead of quietly going stale.
 #[test]
@@ -616,25 +617,23 @@ fn the_round_trip_agrees_at_every_axis_boundary_after_a_service_load() {
 /// both refusals are asserted below rather than asserted about:
 ///
 /// - **Full mode** — a dataset whose rows all share a frequency has zero range on that axis,
-///   and `generate_knot_vector` refuses it (`max_val - min_val < min_spacing`) rather than
+///   and `place_knots` refuses it (`max_val - min_val < min_spacing`) rather than
 ///   building a degenerate knot vector.
-/// - **Boresight mode** — `fit_frequency_correction` needs **≥ 4** frequencies for its cubic
-///   B-spline and returns `InsufficientData` below that, so a single-frequency boresight run
+/// - **Boresight mode** — `fit_frequency_correction` needs **≥ 4** frequencies for its
+///   quadratic B-spline and returns `InsufficientData` below that, so a single-frequency boresight run
 ///   writes an artifact with no correction surface at all.
 ///
 /// An earlier version of this comment claimed boresight mode *is* the single-frequency
-/// artifact, "collapsing the frequency axis with `flat_axis`". That was wrong, and worth
-/// recording because it is an easy misreading: boresight collapses **azimuth, elevation and
-/// temperature** with `flat_axis` and *fits* frequency like any other axis.
+/// artifact, "collapsing the frequency axis with a flat axis". That was wrong, and worth
+/// recording because it is an easy misreading: boresight collapses **E-clock, E-cone and
+/// temperature** with `ClampedAxis::flat` and *fits* frequency like any other axis.
 ///
 /// What both refusals are protecting is not obvious, so it belongs here. A degenerate axis —
-/// `order` equal knots — would pass `BSplineModel4D::validate`, which checks knot-vector
-/// *length* and not span width, and would then evaluate to a **zero correction at every
-/// frequency**: the evaluable span `[knots[order-1], knots[len-order]]` is empty, so every
-/// Cox-de Boor denominator vanishes and every basis value with it. That is the D13/D26
-/// signature — an artifact that loads clean, reports healthy, and silently applies nothing.
-/// It is exactly why `flat_axis` exists (see its doc comment) and why the fitter's range
-/// check exists, and it is why these two refusals are the coverage this edge case admits.
+/// `order` equal knots — has an empty evaluable span, so it would evaluate to a **zero
+/// correction at every frequency**. That is the D13/D26 signature — an artifact that loads
+/// clean, reports healthy, and silently applies nothing. Until issue #95 the loader checked
+/// knot-vector *length* and not span width, so the fitter's range check was the only
+/// refusal; the core layout's invariant set now rejects an empty-support axis as well.
 ///
 /// What full mode *can* express is the minimum coefficient count: zero interior knots, so the
 /// frequency axis carries exactly `spline_order` = 4 coefficients rather than 5. That is the

@@ -17,27 +17,30 @@
 //! - Output: 4D B-spline that varies only along frequency, shape
 //!   `[order+1, order+1, N_freq, order+1]`
 //! - Threshold: Only fit if max(abs(residuals)) > 0.5 dB
-//! - Method: Cubic B-spline with uniform knot spacing
+//! - Method: **quadratic** B-spline (order 3) whose control points are the residuals
+//!   themselves, with interior knots at evenly spaced interior measured frequencies
+//!
+//! # The spline is quadratic, and that is deliberate for now
+//!
+//! In this repository `order = degree + 1`, so the order 3 written here is **degree 2**.
+//! Until GitHub issue #95 this module's comments called it cubic, and the served numbers
+//! have always been quadratic. #95 preserved that behavior and fixed the description:
+//! changing the boresight fit to cubic (order 4) changes served values, which is a separate
+//! decision, not an incidental side effect of moving constructors. Full-mode fitting is
+//! cubic, order 4 (`CorrectionSurfaceParams::shipped`).
 //!
 //! # Why the collapsed axes are *flat*, not degenerate
 //!
-//! Until 2026-07-31 the three non-frequency axes were built as `order` equal
-//! knots over a single coefficient layer — a genuinely degenerate axis. Such an
-//! artifact **could not be loaded by the service at all**: `BSplineModel4D::
-//! validate` requires `knots.len() >= shape + order` per axis and the loader
-//! runs it on every artifact, so any boresight run whose residuals tripped the
-//! 0.5 dB threshold produced a `.bin` the service rejected. Lengthening the
-//! degenerate vectors would have satisfied the length check while leaving the
-//! evaluable span `[knots[order-1], knots[len-order]]` empty, so the axes are
-//! now built by [`artifact_export::flat_axis`](crate::artifact_export) — the
-//! same construction full mode uses for its temperature axis — which replicates
-//! the coefficient layer over a real interval. See roadmap unit D13.
+//! The E-clock and E-cone axes are [`ClampedAxis::flat`]: `order + 1` identical coefficient
+//! layers over a real span, so the surface is exactly constant along them. Until 2026-07-31
+//! they were one layer over `order` equal knots — an axis with nothing to evaluate over,
+//! which the service loader rejected, so every boresight run that tripped the 0.5 dB
+//! threshold wrote a `.bin` the service refused (roadmap D13). The core layout now refuses
+//! that construction itself (issue #95).
 
 use antenna_core::data::types::BSplineModel4D;
-use antenna_core::model::{CorrectionSurfaceLayout, FittedCorrectionSurface};
+use antenna_core::model::{ClampedAxis, CorrectionSurfaceLayout, FittedCorrectionSurface};
 use thiserror::Error;
-
-use crate::artifact_export::{flat_axis, to_schema5_model};
 
 /// Span of the flat E-clock axis, in degrees.
 ///
@@ -71,10 +74,17 @@ const E_CONE_AXIS_DEG: (f64, f64) = (0.0, 180.0);
 /// coordinate. See [`E_CLOCK_AXIS_DEG`].
 const TEMPERATURE_AXIS_K: (f64, f64) = (0.0, 1000.0);
 
+/// The boresight frequency correction's spline order: 3, i.e. **quadratic** (degree 2).
+///
+/// Preserved, not chosen: see the module docs. Moving to cubic is a served-value change.
+const BORESIGHT_SPLINE_ORDER: u8 = 3;
+
 /// Error types for frequency correction fitting.
 #[derive(Debug, Error)]
 pub enum FrequencyCorrectionError {
-    #[error("Insufficient data points: need at least 4 points for cubic B-spline, got {0}")]
+    /// Four points, not the three an order-3 spline needs: a floor kept from when this fit
+    /// was believed cubic, preserved with the rest of the served behavior (issue #95).
+    #[error("Insufficient data points: need at least 4 frequency points, got {0}")]
     InsufficientData(usize),
 
     #[error("Invalid frequency range: min={min} >= max={max}")]
@@ -85,6 +95,10 @@ pub enum FrequencyCorrectionError {
 
     #[error("B-spline fitting failed: {0}")]
     FittingError(String),
+
+    /// The core layout refused the surface this module described (GitHub issue #95).
+    #[error("Invalid correction-surface construction: {0}")]
+    InvalidSurface(#[from] antenna_core::data::types::ValidationError),
 }
 
 /// Result type for frequency correction operations.
@@ -130,20 +144,16 @@ pub fn should_fit_correction(residuals: &[f64]) -> bool {
     max_abs_residual > THRESHOLD_DB
 }
 
-/// Fits a 1D frequency-only correction surface and converts to a 4D B-spline
-/// that is flat in every axis but frequency.
+/// Fits a 1D frequency-only correction surface and packages it as schema 5's 4D wire type,
+/// flat in every axis but frequency.
 ///
-/// This function creates a cubic B-spline of the frequency-dependent residuals
-/// and packages it as a `BSplineModel4D` for the service's correction-surface
-/// evaluation code.
-///
-/// The resulting 4D B-spline has:
+/// The spline is **quadratic** (order 3 = degree 2; see the module docs), with the residuals
+/// used directly as its frequency control points. The resulting 4D B-spline has:
 /// - shape = `[F, F, N_freq, F]` with `F = spline_order + 1`, where `N_freq` is
 ///   the number of frequency control points
 /// - Frequency dimension: proper B-spline with `N_freq` control points
-/// - Azimuth, elevation and temperature: **flat** axes (identical coefficient
-///   layers over a real span, see the module docs) so the surface is exactly
-///   constant along them
+/// - E-clock, E-cone and temperature: **flat** axes (identical coefficient layers over a
+///   real span, see the module docs) so the surface is exactly constant along them
 ///
 /// # Arguments
 ///
@@ -157,10 +167,10 @@ pub fn should_fit_correction(residuals: &[f64]) -> bool {
 /// # Errors
 ///
 /// Returns error if:
-/// - Fewer than 4 data points (minimum for cubic B-spline)
+/// - Fewer than 4 data points
 /// - Frequencies not monotonically increasing
 /// - Any NaN or Inf values in input
-/// - B-spline fitting fails
+/// - B-spline construction fails
 ///
 /// # Example
 ///
@@ -171,47 +181,32 @@ pub fn should_fit_correction(residuals: &[f64]) -> bool {
 /// let residuals = vec![0.8, 0.6, 0.5, 0.7];
 ///
 /// let correction = fit_frequency_correction(&frequencies, &residuals).unwrap();
+/// assert_eq!(correction.spline_order, 3); // quadratic
 /// assert_eq!(correction.shape, [4, 4, 4, 4]); // flat, flat, 4 frequencies, flat
 /// correction.validate().expect("the service loader must accept this");
 /// ```
 pub fn fit_frequency_correction(frequencies: &[f64], residuals: &[f64]) -> Result<BSplineModel4D> {
-    // Validate inputs
     validate_inputs(frequencies, residuals)?;
 
-    // For simplicity, use the measured points as control points directly
-    let n_freq = frequencies.len();
-    let spline_order: u8 = 3; // Cubic B-spline
-    let order = spline_order as usize;
-
-    let knots_frequency = create_knot_vector(frequencies, spline_order);
-
-    // The two angular axes this correction does not vary along. Flat, not degenerate:
-    // identical coefficient layers over a real span (see the module docs).
-    let (n_e_clock, knots_e_clock) = flat_axis(E_CLOCK_AXIS_DEG.0, E_CLOCK_AXIS_DEG.1, order);
-    let (n_e_cone, knots_e_cone) = flat_axis(E_CONE_AXIS_DEG.0, E_CONE_AXIS_DEG.1, order);
-
-    let layout = CorrectionSurfaceLayout::new(
-        [n_e_clock, n_e_cone, n_freq],
-        knots_e_clock,
-        knots_e_cone,
-        knots_frequency,
-        spline_order,
-    )
-    .map_err(|error| FrequencyCorrectionError::FittingError(error.to_string()))?;
+    let layout = CorrectionSurfaceLayout::clamped(
+        ClampedAxis::flat(E_CLOCK_AXIS_DEG.0, E_CLOCK_AXIS_DEG.1),
+        ClampedAxis::flat(E_CONE_AXIS_DEG.0, E_CONE_AXIS_DEG.1),
+        frequency_axis(frequencies, BORESIGHT_SPLINE_ORDER),
+        BORESIGHT_SPLINE_ORDER,
+    )?;
 
     // Replicate each frequency's control point across every flat angular layer, in the
     // canonical coefficient order the layout declares — E-clock fastest, then E-cone, then
     // frequency. The synthetic temperature axis is the wire adapter's business, not this
     // module's (GitHub issue #94).
+    let [n_e_clock, n_e_cone, _] = layout.shape();
     let coefficients = residuals
         .iter()
         .flat_map(|&residual| std::iter::repeat_n(residual, n_e_clock * n_e_cone))
         .collect();
-    let fitted = FittedCorrectionSurface::new(layout, coefficients)
-        .map_err(|error| FrequencyCorrectionError::FittingError(error.to_string()))?;
+    let fitted = FittedCorrectionSurface::new(layout, coefficients)?;
 
-    to_schema5_model(&fitted, TEMPERATURE_AXIS_K.0, TEMPERATURE_AXIS_K.1)
-        .map_err(|error| FrequencyCorrectionError::FittingError(error.to_string()))
+    Ok(fitted.to_model4d(TEMPERATURE_AXIS_K.0, TEMPERATURE_AXIS_K.1)?)
 }
 
 /// Validates input data for B-spline fitting.
@@ -225,7 +220,7 @@ fn validate_inputs(frequencies: &[f64], residuals: &[f64]) -> Result<()> {
         )));
     }
 
-    // Check we have at least 4 points for cubic B-spline
+    // At least 4 points (see `InsufficientData` for why four)
     let n_points = frequencies.len();
     if n_points < 4 {
         return Err(FrequencyCorrectionError::InsufficientData(n_points));
@@ -249,56 +244,19 @@ fn validate_inputs(frequencies: &[f64], residuals: &[f64]) -> Result<()> {
     Ok(())
 }
 
-/// Creates a knot vector for a B-spline with given data points and order.
+/// The frequency axis: clamped to the measured sweep, with one control point per sample.
 ///
-/// For cubic B-splines (order 3), uses clamped knot vector with multiplicity
-/// at the endpoints for interpolation.
-///
-/// # Arguments
-///
-/// * `data_points` - Sorted array of data point locations
-/// * `order` - B-spline order (degree + 1)
-///
-/// # Returns
-///
-/// Knot vector with length = n_points + order
-fn create_knot_vector(data_points: &[f64], order: u8) -> Vec<f64> {
-    let n = data_points.len();
-    let k = order as usize;
-    let total_knots = n + k;
-    let mut knots = Vec::with_capacity(total_knots);
-
-    // Clamped B-spline: repeat first and last knots k times
-    // This ensures the spline interpolates the endpoints
-
-    // Repeat first value k times
-    for _ in 0..k {
-        knots.push(data_points[0]);
-    }
-
-    // Internal knots: total - 2k knots
-    // For a clamped B-spline with n control points and order k:
-    // - First k knots are at x[0]
-    // - Last k knots are at x[n-1]
-    // - Internal knots: total - 2k = n + k - 2k = n - k
-    let num_internal = total_knots - 2 * k;
-
-    // Distribute internal knots uniformly among interior data points
-    // For simplicity, use evenly spaced interior data points
-    if num_internal > 0 {
-        for i in 1..=num_internal {
-            // Map index to data point index proportionally
-            let idx = (i * (n - 1)) / (num_internal + 1);
-            knots.push(data_points[idx.min(n - 1)]);
-        }
-    }
-
-    // Repeat last value k times
-    for _ in 0..k {
-        knots.push(data_points[n - 1]);
-    }
-
-    knots
+/// `n` control points at order `k` need `n - k` interior knots; they are placed on evenly
+/// spaced *interior* measured frequencies, which keeps them strictly inside the sweep
+/// (the frequencies are strictly increasing). This is placement policy only — the core
+/// layout builds and validates the knot vector (GitHub issue #95).
+fn frequency_axis(frequencies: &[f64], spline_order: u8) -> ClampedAxis {
+    let n = frequencies.len();
+    let num_interior = n.saturating_sub(spline_order as usize);
+    let interior = (1..=num_interior)
+        .map(|i| frequencies[(i * (n - 1)) / (num_interior + 1)])
+        .collect();
+    ClampedAxis::new(frequencies[0], frequencies[n - 1], interior)
 }
 
 #[cfg(test)]
@@ -393,8 +351,9 @@ mod tests {
     ///
     /// The boresight-mode frequency correction used to be **structurally
     /// unloadable**: its azimuth/elevation/temperature axes were `order` equal
-    /// knots over one coefficient layer, and `BSplineModel4D::validate` requires
-    /// `knots.len() >= shape + order` on every axis. The service loader runs that
+    /// knots over one coefficient layer, and `BSplineModel4D::validate` required
+    /// `knots.len() >= shape + order` on every axis (since issue #95: exactly
+    /// `shape + order`, with a non-empty support). The service loader runs that
     /// validation on every artifact (`AntennaCalibration::validate` →
     /// `correction.validate()`), so any boresight run whose residuals tripped the
     /// 0.5 dB fitting threshold wrote a `.bin` the service refused to load.
@@ -563,23 +522,52 @@ mod tests {
         ));
     }
 
+    /// The frequency knot vector the boresight producer has always written, byte for byte:
+    /// order 3, clamped to the sweep, interior knots on evenly spaced interior samples.
+    /// Preserved through the move onto the core layout (GitHub issue #95).
     #[test]
-    fn test_create_knot_vector_cubic() {
-        let data_points = vec![100.0, 200.0, 300.0, 400.0, 500.0];
-        let knots = create_knot_vector(&data_points, 3);
+    fn the_frequency_knot_vector_is_preserved_through_the_core_layout() {
+        let frequencies = vec![100.0, 200.0, 300.0, 400.0, 500.0];
+        let residuals = vec![0.5, 0.6, 0.4, 0.7, 0.5];
+        let bspline = fit_frequency_correction(&frequencies, &residuals).unwrap();
 
-        // For 5 points with order 3: should have 5 + 3 = 8 knots
-        assert_eq!(knots.len(), 8);
+        assert_eq!(
+            bspline.knots_frequency,
+            vec![100.0, 100.0, 100.0, 200.0, 300.0, 500.0, 500.0, 500.0]
+        );
+    }
 
-        // First 3 should be the first data point
-        assert_eq!(knots[0], 100.0);
-        assert_eq!(knots[1], 100.0);
-        assert_eq!(knots[2], 100.0);
+    /// Pins the spline order this module intentionally preserves: **order 3, quadratic**
+    /// (degree 2), not the cubic its comments claimed before issue #95. Moving to cubic is a
+    /// served-value decision, so it must fail this test rather than slip in.
+    ///
+    /// Numerically, not just by the stamp: on one knot span a degree-2 polynomial has a
+    /// vanishing third finite difference and a non-vanishing second one. A cubic surface
+    /// fails the first check; a linear one fails the second.
+    #[test]
+    fn the_boresight_frequency_correction_is_quadratic_order_3() {
+        let frequencies = vec![100.0, 200.0, 300.0, 400.0, 500.0];
+        let residuals = vec![0.0, 2.0, -1.0, 3.0, 0.5];
+        let bspline = fit_frequency_correction(&frequencies, &residuals).unwrap();
+        assert_eq!(bspline.spline_order, BORESIGHT_SPLINE_ORDER);
+        assert_eq!(BORESIGHT_SPLINE_ORDER, 3);
 
-        // Last 3 should be the last data point
-        assert_eq!(knots[5], 500.0);
-        assert_eq!(knots[6], 500.0);
-        assert_eq!(knots[7], 500.0);
+        let surface = FittedCorrectionSurface::from_model4d(&bspline).unwrap();
+        // Four equally spaced samples inside the single span [300, 500].
+        let v: Vec<f64> = [320.0, 360.0, 400.0, 440.0]
+            .iter()
+            .map(|&f| applied_value(&surface, 0.0, 0.0, f))
+            .collect();
+        let second = v[2] - 2.0 * v[1] + v[0];
+        let third = v[3] - 3.0 * v[2] + 3.0 * v[1] - v[0];
+        assert!(
+            third.abs() < 1e-12,
+            "degree > 2 on one span: third difference {third}"
+        );
+        assert!(
+            second.abs() > 1e-3,
+            "degree < 2 on one span: second difference {second}"
+        );
     }
 
     #[test]
@@ -652,7 +640,7 @@ mod tests {
             frequencies[frequencies.len() - 1]
         );
 
-        // For clamped cubic B-spline, first and last knots should be repeated 3 times
+        // Clamped at order 3: first and last knots are repeated exactly 3 times
         assert_eq!(bspline.knots_frequency[0], bspline.knots_frequency[1]);
         assert_eq!(bspline.knots_frequency[1], bspline.knots_frequency[2]);
 

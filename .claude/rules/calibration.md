@@ -73,6 +73,11 @@ Recent bumps cover the versioning cases, and they moved the axes differently:
   **#93 made no version movement:** `calibrate` now consumes that same core evaluator.
   `OutsideSupport` still has no correction value; validation retains the typed disposition and
   scores the physics-only prediction, matching served behavior without changing artifact bytes.
+  **#95 made no version movement either**, although it did tighten loading: the fitter's
+  knot-vector rules (finite, exact `shape + order` length, non-empty support, end
+  multiplicity `== order`, interior `<= order-1`) moved into the core layout, so the loader
+  enforces the invariant set the fitter builds to. Every producer already complied, so no
+  artifact this codebase wrote is newly rejected; bumping for it was decided against.
 - **D21 (5.0 / container 4)** added `metadata.angular_resolution` and **fixes no wrong number
   at all** — every 4.0 artifact means what it said and no consumer reads the new field. But
   postcard is positional, so a 4.0 payload is short by the `Option` discriminant and everything
@@ -169,7 +174,14 @@ not absolute gain.**
 - **Adaptive knots are strictly interior** (D19): a knot equal to an axis bound became
   multiplicity `order+1` after clamping, giving that basis function zero-width support, so 37.5%
   of the shipped configuration's coefficients were attached to identically-zero functions.
-  `validate_knot_vector` enforces end multiplicity `== order` and interior `<= order-1`.
+  The core layout (`antenna_core::model::correction_surface`) enforces end multiplicity
+  `== order` and interior `<= order-1`, as part of the **one** knot-vector invariant set every
+  executable axis — fitted or decoded from an artifact — satisfies (issue #95). `calibrate`
+  owns only *placement policy*: `place_knots` returns a `ClampedAxis` (bounds + interior
+  knots) and `CorrectionSurfaceLayout::clamped` builds the knot vectors and shape from it.
+- **Spline order is `degree + 1`.** Full mode fits cubic, order 4. Boresight's frequency
+  correction is order 3 — **quadratic** — and always has been despite comments calling it
+  cubic until #95. Moving it to cubic changes served values; it is a separate decision.
 - **The angular knots are absolute while the pattern scale is `λ/D`** — 0.06°–5.4° across the
   antennas in this tree — so on anything but a broad-beam antenna the surface carries the
   residual's *envelope trend*, not its lobe structure, and **in-sample RMSE structurally cannot

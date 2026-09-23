@@ -566,16 +566,16 @@ mod tests {
         let mut calibration = create_test_calibration(CalibrationStatus::FullyCalibrated {
             accuracy_estimate_db: 1.0,
         });
-        // Valid order-3 B-spline knot vectors matching the temperature-independent
-        // correction test above, so the surface actually evaluates.
+        // Valid order-2 clamped knot vectors (exactly shape + order knots per axis) matching
+        // the temperature-independent correction test above, so the surface evaluates.
         calibration.correction_surface = Some(crate::data::types::BSplineModel4D {
             coefficients: vec![1.0; 2 * 2 * 2],
             shape: [2, 2, 2, 1],
-            knots_azimuth: vec![0.0, 0.0, 0.0, 360.0, 360.0, 360.0],
-            knots_elevation: vec![0.0, 0.0, 0.0, 90.0, 90.0, 90.0],
-            knots_frequency: vec![8000.0, 8000.0, 8000.0, 9000.0, 9000.0, 9000.0],
-            knots_temperature: vec![290.0, 290.0, 290.0, 290.0, 290.0, 290.0],
-            spline_order: 3,
+            knots_azimuth: vec![0.0, 0.0, 360.0, 360.0],
+            knots_elevation: vec![0.0, 0.0, 90.0, 90.0],
+            knots_frequency: vec![8000.0, 8000.0, 9000.0, 9000.0],
+            knots_temperature: vec![290.0, 290.0, 290.0],
+            spline_order: 2,
         });
         repo.add_calibration(calibration);
 
@@ -620,11 +620,11 @@ mod tests {
         calibration_with_surface.correction_surface = Some(crate::data::types::BSplineModel4D {
             coefficients: vec![0.0; 2 * 2 * 2],
             shape: [2, 2, 2, 1],
-            knots_azimuth: vec![0.0, 0.0, 0.0, 360.0, 360.0, 360.0],
-            knots_elevation: vec![0.0, 0.0, 0.0, 90.0, 90.0, 90.0],
-            knots_frequency: vec![8000.0, 8000.0, 8000.0, 9000.0, 9000.0, 9000.0],
-            knots_temperature: vec![290.0, 290.0, 290.0, 290.0, 290.0, 290.0],
-            spline_order: 3,
+            knots_azimuth: vec![0.0, 0.0, 360.0, 360.0],
+            knots_elevation: vec![0.0, 0.0, 90.0, 90.0],
+            knots_frequency: vec![8000.0, 8000.0, 9000.0, 9000.0],
+            knots_temperature: vec![290.0, 290.0, 290.0],
+            spline_order: 2,
         });
         assert!(calibration_with_surface.correction_surface.is_some());
         repo_calibrated.add_calibration(calibration_with_surface);
@@ -779,11 +779,11 @@ mod tests {
         calibration_with_surface.correction_surface = Some(crate::data::types::BSplineModel4D {
             coefficients: vec![0.0; 2 * 2 * 2],
             shape: [2, 2, 2, 1],
-            knots_azimuth: vec![0.0, 0.0, 0.0, 360.0, 360.0, 360.0],
-            knots_elevation: vec![0.0, 0.0, 0.0, 90.0, 90.0, 90.0],
-            knots_frequency: vec![8000.0, 8000.0, 8000.0, 9000.0, 9000.0, 9000.0],
-            knots_temperature: vec![290.0, 290.0, 290.0, 290.0, 290.0, 290.0],
-            spline_order: 3,
+            knots_azimuth: vec![0.0, 0.0, 360.0, 360.0],
+            knots_elevation: vec![0.0, 0.0, 90.0, 90.0],
+            knots_frequency: vec![8000.0, 8000.0, 9000.0, 9000.0],
+            knots_temperature: vec![290.0, 290.0, 290.0],
+            spline_order: 2,
         });
         repo_calibrated.add_calibration(calibration_with_surface);
         let response_calibrated = compute_gain_from_request(&request, &repo_calibrated).unwrap();
@@ -829,11 +829,11 @@ mod tests {
         calibration.correction_surface = Some(crate::data::types::BSplineModel4D {
             coefficients: vec![0.0; 2 * 2 * 2],
             shape: [2, 2, 2, 1],
-            knots_azimuth: vec![0.0, 0.0, 0.0, 5.0, 5.0, 5.0],
-            knots_elevation: vec![0.0, 0.0, 0.0, 5.0, 5.0, 5.0],
-            knots_frequency: vec![8000.0, 8000.0, 8000.0, 9000.0, 9000.0, 9000.0],
-            knots_temperature: vec![290.0, 290.0, 290.0, 290.0, 290.0, 290.0],
-            spline_order: 3,
+            knots_azimuth: vec![0.0, 0.0, 5.0, 5.0],
+            knots_elevation: vec![0.0, 0.0, 5.0, 5.0],
+            knots_frequency: vec![8000.0, 8000.0, 9000.0, 9000.0],
+            knots_temperature: vec![290.0, 290.0, 290.0],
+            spline_order: 2,
         });
         repo.add_calibration(calibration);
 
@@ -1055,11 +1055,11 @@ mod tests {
         calibration.correction_surface = Some(crate::data::types::BSplineModel4D {
             coefficients: vec![0.0; 8],
             shape: [2, 2, 2, 1],
-            knots_azimuth: vec![0.0, 0.0, 0.0, 10.0, 10.0],
-            knots_elevation: vec![0.0, 0.0, 0.0, 10.0, 10.0],
-            knots_frequency: vec![8000.0, 8000.0, 8000.0, 9000.0, 9000.0],
-            knots_temperature: vec![290.0, 290.0, 290.0, 290.0],
-            spline_order: 3,
+            knots_azimuth: vec![0.0, 0.0, 10.0, 10.0],
+            knots_elevation: vec![0.0, 0.0, 10.0, 10.0],
+            knots_frequency: vec![8000.0, 8000.0, 9000.0, 9000.0],
+            knots_temperature: vec![290.0, 290.0, 290.0],
+            spline_order: 2,
         });
         repo.add_calibration(calibration);
 

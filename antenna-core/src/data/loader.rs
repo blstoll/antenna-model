@@ -650,10 +650,10 @@ mod tests {
         let mut calibration = create_test_calibration();
 
         let correction = BSplineModel4D::builder()
-            .coefficients(vec![1.0; 24])
-            .shape([2, 3, 2, 2])
+            .coefficients(vec![1.0; 108])
+            .shape([3, 4, 3, 3])
             .knots_azimuth(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
-            .knots_elevation(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0])
+            .knots_elevation(vec![0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0])
             .knots_frequency(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
             .knots_temperature(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
             .build()

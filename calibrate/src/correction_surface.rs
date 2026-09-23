@@ -36,7 +36,8 @@ use crate::parser::MeasurementPoint;
 use antenna_core::data::types::AngularResolution;
 use antenna_core::model::phase::wavelength_from_frequency;
 use antenna_core::model::{
-    BasisStencilOutcome, CorrectionEvaluation, CorrectionSurfaceLayout, FittedCorrectionSurface,
+    BasisStencilOutcome, ClampedAxis, CorrectionEvaluation, CorrectionSurfaceLayout,
+    FittedCorrectionSurface,
 };
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
@@ -87,6 +88,11 @@ pub enum CorrectionSurfaceError {
     #[error("Invalid knot vector: {reason}")]
     InvalidKnotVector { reason: String },
 
+    /// The core layout refused the placed axes. Carries the typed core error, which names
+    /// the axis and the invariant it broke (GitHub issue #95).
+    #[error("Invalid correction-surface layout: {0}")]
+    InvalidLayout(#[from] antenna_core::data::types::ValidationError),
+
     #[error("Singular matrix in least squares fitting: {reason}")]
     SingularMatrix { reason: String },
 
@@ -114,27 +120,30 @@ pub enum CorrectionSurfaceError {
 
 pub type Result<T> = std::result::Result<T, CorrectionSurfaceError>;
 
+/// Build the core layout from this fitter's placed axes (GitHub issue #95).
+///
+/// The knot vectors, the coefficient shape and every knot-vector invariant belong to
+/// [`CorrectionSurfaceLayout::clamped`]; this crate supplies only where the interior knots
+/// go. What this function adds is the one conversion between the two crates' order types:
+/// [`CorrectionSurfaceParams::spline_order`] is a `usize`, the wire's is a `u8`.
 fn correction_layout(
-    shape: [usize; 3],
-    knots_eclock: &[f64],
-    knots_econe: &[f64],
-    knots_frequency: &[f64],
+    e_clock: ClampedAxis,
+    e_cone: ClampedAxis,
+    frequency: ClampedAxis,
     spline_order: usize,
 ) -> Result<CorrectionSurfaceLayout> {
     let spline_order =
-        u8::try_from(spline_order).map_err(|_| CorrectionSurfaceError::InvalidKnotVector {
-            reason: format!("spline order {spline_order} does not fit the core wire type"),
+        u8::try_from(spline_order).map_err(|_| CorrectionSurfaceError::InvalidParameter {
+            param: "spline_order".to_string(),
+            value: spline_order as f64,
+            reason: "does not fit the artifact's u8 spline order".to_string(),
         })?;
-    CorrectionSurfaceLayout::new(
-        shape,
-        knots_eclock.to_vec(),
-        knots_econe.to_vec(),
-        knots_frequency.to_vec(),
+    Ok(CorrectionSurfaceLayout::clamped(
+        e_clock,
+        e_cone,
+        frequency,
         spline_order,
-    )
-    .map_err(|error| CorrectionSurfaceError::InvalidKnotVector {
-        reason: error.to_string(),
-    })
+    )?)
 }
 
 // ============================================================================
@@ -257,8 +266,8 @@ pub struct ResidualPoint {
 /// The geometry and the coefficients are the core [`FittedCorrectionSurface`] the solve
 /// produced — this type keeps no second copy of them and no second indexing law. Export is
 /// therefore *construction* of the schema-5 wire adapter from this surface (see
-/// [`crate::artifact_export::to_schema5_model`]), never conversion between two mathematical
-/// surface models with their own coefficient orders (GitHub issue #94).
+/// [`FittedCorrectionSurface::to_model4d`]), never conversion between two mathematical
+/// surface models with their own coefficient orders (GitHub issues #94, #95).
 #[derive(Debug, Clone)]
 pub struct CorrectionSurface {
     /// The solved surface: validated layout plus coefficients in core's canonical
@@ -394,7 +403,7 @@ pub fn assess_angular_resolution(
     // and no amount of clock resolution means anything. `f64::INFINITY` is the honest value
     // for a boresight-only cone axis and propagates to "resolved" through the ratio, which
     // is correct: there is no clock structure there to miss. A surface from
-    // `fit_correction_surface` cannot reach it — `generate_knot_vector` refuses a cone span
+    // `fit_correction_surface` cannot reach it — `place_knots` refuses a cone span
     // below the minimum spacing, so the outermost angle above is always non-zero — but this
     // function assesses any `CorrectionSurface` it is handed, so the branch stays.
     let sin_outermost_cone = outermost_cone_deg.to_radians().sin();
@@ -445,7 +454,7 @@ pub fn assess_angular_resolution(
 ///   opposite — no structure to resolve, the best case — and a surface degenerate on both
 ///   computed `INF/INF = NaN` straight into the artifact's metadata and its `PartialEq`.
 ///
-/// Neither case is reachable from [`fit_correction_surface`] (`generate_knot_vector` rejects
+/// Neither case is reachable from [`fit_correction_surface`] (`place_knots` rejects
 /// a data range below the minimum spacing, and the fit refuses non-finite input), but this
 /// module's assessment is public and grades any [`CorrectionSurface`] it is handed.
 fn widest_knot_gap(knots: &[f64], axis: &str) -> Result<f64> {
@@ -559,52 +568,38 @@ pub fn fit_correction_surface(
     let initial_rmse = compute_rmse(&residuals.iter().map(|r| r.residual_db).collect::<Vec<_>>());
     info!("Initial RMSE (model only): {:.3} dB", initial_rmse);
 
-    // Generate knot vectors
-    let knots_freq = generate_knot_vector(
-        &residuals
-            .iter()
-            .map(|r| r.frequency_mhz)
-            .collect::<Vec<_>>(),
+    // Place each axis's interior knots (fitting policy, this crate's), then let the core
+    // layout build the knot vectors and shape from them (geometry, core's — issue #95).
+    let place = |values: Vec<f64>, num_knots: usize, min_spacing: f64| {
+        place_knots(&values, num_knots, params.adaptive_knots, min_spacing)
+    };
+    let frequency_axis = place(
+        residuals.iter().map(|r| r.frequency_mhz).collect(),
         params.num_knots_frequency,
-        params.spline_order,
-        params.adaptive_knots,
         params.min_knot_spacing_frequency,
     )?;
-
-    let knots_cone = generate_knot_vector(
-        &residuals.iter().map(|r| r.e_cone_deg).collect::<Vec<_>>(),
+    let cone_axis = place(
+        residuals.iter().map(|r| r.e_cone_deg).collect(),
         params.num_knots_econe,
-        params.spline_order,
-        params.adaptive_knots,
         params.min_knot_spacing_econe,
     )?;
-
-    let knots_clock = generate_knot_vector(
-        &residuals.iter().map(|r| r.e_clock_deg).collect::<Vec<_>>(),
+    let clock_axis = place(
+        residuals.iter().map(|r| r.e_clock_deg).collect(),
         params.num_knots_eclock,
-        params.spline_order,
-        params.adaptive_knots,
         params.min_knot_spacing_eclock,
     )?;
 
-    info!(
-        "Generated knot vectors: freq={}, cone={}, clock={}",
-        knots_freq.len(),
-        knots_cone.len(),
-        knots_clock.len()
-    );
-
-    // Compute number of B-spline basis functions
-    let n_freq = knots_freq.len() - params.spline_order;
-    let n_cone = knots_cone.len() - params.spline_order;
-    let n_clock = knots_clock.len() - params.spline_order;
+    // Fitting and serving consume this one layout, so they share the same support, span,
+    // basis, and coefficient-index laws.
+    let layout = correction_layout(clock_axis, cone_axis, frequency_axis, params.spline_order)?;
+    let [n_clock, n_cone, n_freq] = layout.shape();
 
     debug!(
-        "Number of basis functions: freq={}, cone={}, clock={} (total: {})",
         n_freq,
         n_cone,
         n_clock,
-        n_freq * n_cone * n_clock
+        n_coefficients = layout.coefficient_count(),
+        "placed correction-surface basis functions"
     );
 
     // The real data-sufficiency requirement (roadmap D20).
@@ -622,7 +617,7 @@ pub fn fit_correction_surface(
     // surface. That is a hard error rather than a warning by decision: a warning here
     // repeats the class of defect D11 was, a real problem reported through a channel
     // nobody reads.
-    let n_coefficients = n_freq * n_cone * n_clock;
+    let n_coefficients = layout.coefficient_count();
     if residuals.len() < n_coefficients {
         return Err(CorrectionSurfaceError::UnderdeterminedFit {
             n_coefficients,
@@ -633,15 +628,6 @@ pub fn fit_correction_surface(
         });
     }
 
-    // Build the shared core layout once. Fitting and serving now consume the same sparse
-    // stencil and therefore the same support, span, basis, and coefficient-index laws.
-    let layout = correction_layout(
-        [n_clock, n_cone, n_freq],
-        &knots_clock,
-        &knots_cone,
-        &knots_freq,
-        params.spline_order,
-    )?;
     let coefficients = fit_bspline_coefficients(&residuals, &layout, params.regularization)?;
 
     // The solve already ran in the artifact's canonical coefficient order, so the fitted
@@ -695,21 +681,24 @@ pub fn fit_correction_surface(
 // Knot Vector Generation
 // ============================================================================
 
-/// Generate a knot vector for a given dimension
+/// Place one axis's knots: its bounds and interior knots, from the data on that axis.
+///
+/// This is fitting *policy* — how many knots to request, quantile or uniform placement, the
+/// minimum spacing — and it stays in this crate. The result is a [`ClampedAxis`], which the
+/// core layout turns into a knot vector and validates against its invariant set (GitHub
+/// issue #95), so nothing here builds or checks a knot vector.
 ///
 /// # Arguments
 /// * `data` - Data points in this dimension
 /// * `num_knots` - Target number of internal knots
-/// * `order` - Spline order
 /// * `adaptive` - Use adaptive placement based on data density
 /// * `min_spacing` - Minimum spacing between knots
-fn generate_knot_vector(
+fn place_knots(
     data: &[f64],
     num_knots: usize,
-    order: usize,
     adaptive: bool,
     min_spacing: f64,
-) -> Result<Vec<f64>> {
+) -> Result<ClampedAxis> {
     if data.is_empty() {
         return Err(CorrectionSurfaceError::InsufficientData {
             min_required: 1,
@@ -731,23 +720,17 @@ fn generate_knot_vector(
         });
     }
 
-    let mut internal_knots = if adaptive {
+    let internal_knots = if adaptive {
         generate_adaptive_knots(&sorted_data, num_knots, min_spacing)?
     } else {
         generate_uniform_knots(min_val, max_val, num_knots)
     };
 
-    // Ensure minimum spacing
-    internal_knots = enforce_min_spacing(&internal_knots, min_spacing);
-
-    // Build full knot vector with repeated end knots
-    let mut knots = vec![min_val; order];
-    knots.extend_from_slice(&internal_knots);
-    knots.extend(vec![max_val; order]);
-
-    validate_knot_vector(&knots, order)?;
-
-    Ok(knots)
+    Ok(ClampedAxis::new(
+        min_val,
+        max_val,
+        enforce_min_spacing(&internal_knots, min_spacing),
+    ))
 }
 
 /// Generate uniformly spaced internal knots
@@ -764,7 +747,7 @@ fn generate_uniform_knots(min: f64, max: f64, num_knots: usize) -> Vec<f64> {
 ///
 /// # Interior placement (roadmap D19)
 ///
-/// Every knot returned here is *internal*: [`generate_knot_vector`] clamps the vector by
+/// Every knot returned here is *internal*: the core layout clamps the vector by
 /// prepending and appending `order` copies of the data bounds, so a knot equal to a bound
 /// would arrive at multiplicity `order + 1`. The basis function `B_{i,order}` has support
 /// `[t_i, t_{i+order}]`, which at that multiplicity is zero-width — the function is
@@ -837,90 +820,6 @@ fn enforce_min_spacing(knots: &[f64], min_spacing: f64) -> Vec<f64> {
     }
 
     result
-}
-
-/// Validate that a knot vector is valid for B-spline interpolation
-///
-/// # Multiplicity (roadmap D19)
-///
-/// Length and monotonicity were the only checks until 2026-08-02, which let the fitter's own
-/// adaptive placement ship vectors with end multiplicity `order + 1` — see
-/// [`generate_adaptive_knots`] for the mechanism and
-/// `docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md` for the history. The
-/// two rules added here are the ones that make a clamped vector well-formed:
-///
-/// * **Each end must repeat exactly `order` times.** Fewer leaves the spline unclamped (it
-///   would not interpolate its end coefficient at the bound); more creates a zero-width
-///   support and therefore an identically-zero basis function.
-/// * **An interior knot may repeat at most `order - 1` times.** That is a legitimate
-///   continuity reduction, down to C⁰ at `order - 1`. Multiplicity `order` splits the spline
-///   into disconnected pieces, which this fitter never intends.
-///
-/// A fully degenerate vector (every knot equal) fails the first rule, before the shared core
-/// layout can be constructed.
-fn validate_knot_vector(knots: &[f64], order: usize) -> Result<()> {
-    if knots.len() < 2 * order {
-        return Err(CorrectionSurfaceError::InvalidKnotVector {
-            reason: format!(
-                "Knot vector too short: {} knots for order {}",
-                knots.len(),
-                order
-            ),
-        });
-    }
-
-    // Check non-decreasing
-    for i in 1..knots.len() {
-        if knots[i] < knots[i - 1] {
-            return Err(CorrectionSurfaceError::InvalidKnotVector {
-                reason: format!(
-                    "Knot vector not non-decreasing: knots[{}]={} > knots[{}]={}",
-                    i - 1,
-                    knots[i - 1],
-                    i,
-                    knots[i]
-                ),
-            });
-        }
-    }
-
-    // Check multiplicity, run by run over the (now known non-decreasing) vector.
-    let mut start = 0;
-    while start < knots.len() {
-        let mut end = start + 1;
-        while end < knots.len() && knots[end] == knots[start] {
-            end += 1;
-        }
-        let multiplicity = end - start;
-        let is_end_run = start == 0 || end == knots.len();
-
-        if is_end_run {
-            if multiplicity != order {
-                return Err(CorrectionSurfaceError::InvalidKnotVector {
-                    reason: format!(
-                        "Clamped knot vector must repeat each bound exactly {order} times: \
-                         value {} at index {start} repeats {multiplicity} times. A bound \
-                         repeated more than {order} times gives basis function B_{start} a \
-                         zero-width support, making it identically zero (roadmap D19)",
-                        knots[start]
-                    ),
-                });
-            }
-        } else if multiplicity >= order {
-            return Err(CorrectionSurfaceError::InvalidKnotVector {
-                reason: format!(
-                    "Interior knot {} at index {start} repeats {multiplicity} times; the \
-                     maximum for order {order} is {} (multiplicity {order} splits the spline)",
-                    knots[start],
-                    order - 1
-                ),
-            });
-        }
-
-        start = end;
-    }
-
-    Ok(())
 }
 
 // ============================================================================
@@ -1514,7 +1413,7 @@ fn validate_fitting_inputs(
         });
     }
 
-    // The minimum knot spacings are what `generate_knot_vector`'s span guard compares a
+    // The minimum knot spacings are what `place_knots`'s span guard compares a
     // data range against (`max - min < min_spacing`). At zero or negative that comparison
     // can never fire, so a fully degenerate axis — every value equal — would be accepted and
     // produce a knot vector with no two distinct knots. Everything downstream assumes that
@@ -1620,23 +1519,11 @@ mod tests {
         assert!((residuals[1].residual_db - 0.2).abs() < 1e-10);
     }
 
-    #[test]
-    fn test_validate_knot_vector() {
-        let valid = vec![0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 3.0, 3.0];
-        assert!(validate_knot_vector(&valid, 3).is_ok());
-
-        let invalid_short = vec![0.0, 0.0, 1.0];
-        assert!(validate_knot_vector(&invalid_short, 3).is_err());
-
-        let invalid_order = vec![0.0, 2.0, 1.0, 3.0];
-        assert!(validate_knot_vector(&invalid_order, 2).is_err());
-    }
-
     // ========================================================================
     // D19 — adaptive knots must land in the strict interior
     //
     // `generate_adaptive_knots` placed internal knots at data quantiles with no
-    // constraint that the result be interior, and `generate_knot_vector` then clamps
+    // constraint that the result be interior, and the clamped vector then
     // by prepending/appending `order` copies of the bounds. A quantile that landed ON
     // a bound therefore became multiplicity `order + 1`, whose basis function
     // `B_{i,order}` has support `[t_i, t_{i+order}]` of ZERO width — identically zero
@@ -1666,6 +1553,28 @@ mod tests {
         (fd, cd, kd)
     }
 
+    /// The knot vector the core layout builds for one placed axis.
+    fn delivered_knots(axis: ClampedAxis, order: usize) -> Vec<f64> {
+        let unit = || ClampedAxis::new(0.0, 1.0, vec![]);
+        correction_layout(axis, unit(), unit(), order)
+            .expect("a placed axis must build a valid core layout")
+            .knots_e_clock()
+            .to_vec()
+    }
+
+    /// Whether the core layout's invariant set admits `knots` as an axis of `order`.
+    fn core_accepts(knots: &[f64], order: usize) -> bool {
+        let unit: Vec<f64> = [vec![0.0; order], vec![1.0; order]].concat();
+        CorrectionSurfaceLayout::new(
+            [knots.len() - order, order, order],
+            knots.to_vec(),
+            unit.clone(),
+            unit,
+            order as u8,
+        )
+        .is_ok()
+    }
+
     /// Indices of basis functions whose support `[t_i, t_{i+order}]` has zero width.
     fn identically_zero_basis(knots: &[f64], order: usize) -> Vec<usize> {
         (0..knots.len() - order)
@@ -1675,8 +1584,9 @@ mod tests {
 
     /// The negative control for the multiplicity guard, per P13: a check nobody has
     /// seen fail is not evidence of anything. These are the knot vectors the fitter
-    /// ACTUALLY produced on 2026-08-02, before this fix — `validate_knot_vector` passed
-    /// every one of them, and must now reject the two that are defective.
+    /// ACTUALLY produced on 2026-08-02, before this fix — the validator of the day passed
+    /// every one of them, and the core layout must now reject the two that are defective
+    /// (the rule moved there in GitHub issue #95; its generic controls live beside it).
     #[test]
     fn multiplicity_guard_rejects_the_knot_vectors_the_fitter_used_to_produce() {
         let order = 4;
@@ -1698,9 +1608,9 @@ mod tests {
                  or this control is not testing what it claims"
             );
             assert!(
-                validate_knot_vector(knots, order).is_err(),
-                "{name}: validate_knot_vector must reject end multiplicity {} for order \
-                 {order}; it accepted this vector before D19",
+                !core_accepts(knots, order),
+                "{name}: the core layout must reject end multiplicity {} for order \
+                 {order}; it was accepted before D19",
                 order + 1
             );
         }
@@ -1711,42 +1621,9 @@ mod tests {
         ];
         assert!(identically_zero_basis(&pre_fix_cone, order).is_empty());
         assert!(
-            validate_knot_vector(&pre_fix_cone, order).is_ok(),
+            core_accepts(&pre_fix_cone, order),
             "the cone axis was never defective and must not be rejected"
         );
-    }
-
-    /// An interior knot may repeat up to `order - 1` times (that is a legitimate
-    /// continuity reduction, down to C⁰); `order` times splits the spline into
-    /// disconnected pieces and is not something this fitter ever intends to produce.
-    #[test]
-    fn multiplicity_guard_admits_legitimate_interior_repeats() {
-        let order = 4;
-
-        let c0_knot = vec![0.0, 0.0, 0.0, 0.0, 5.0, 5.0, 5.0, 10.0, 10.0, 10.0, 10.0];
-        assert!(
-            validate_knot_vector(&c0_knot, order).is_ok(),
-            "interior multiplicity {} (= order - 1) is legitimate",
-            order - 1
-        );
-
-        let split = vec![
-            0.0, 0.0, 0.0, 0.0, 5.0, 5.0, 5.0, 5.0, 10.0, 10.0, 10.0, 10.0,
-        ];
-        assert!(
-            validate_knot_vector(&split, order).is_err(),
-            "interior multiplicity {order} (= order) splits the spline and must be rejected"
-        );
-    }
-
-    /// A fully degenerate vector (every knot equal) makes every basis function return
-    /// 0 rather than summing to a partition of unity — recorded as item 3 of
-    /// `docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md`'s "Still
-    /// open" and guarded only upstream until now. The multiplicity check closes it here
-    /// too, at no extra cost.
-    #[test]
-    fn multiplicity_guard_rejects_a_fully_degenerate_axis() {
-        assert!(validate_knot_vector(&[5.0; 8], 4).is_err());
     }
 
     #[test]
@@ -1759,8 +1636,11 @@ mod tests {
             ("cone", &cd, 6, 2.0),
             ("clock", &kd, 8, 5.0),
         ] {
-            let knots = generate_knot_vector(data, num_knots, order, true, min_spacing)
-                .unwrap_or_else(|e| panic!("{name}: knot generation failed: {e}"));
+            let knots = delivered_knots(
+                place_knots(data, num_knots, true, min_spacing)
+                    .unwrap_or_else(|e| panic!("{name}: knot placement failed: {e}")),
+                order,
+            );
 
             let lo = knots[0];
             let hi = knots[knots.len() - 1];
@@ -1778,10 +1658,6 @@ mod tests {
             assert!(
                 identically_zero_basis(&knots, order).is_empty(),
                 "{name}: every basis function must have non-zero support, got {knots:?}"
-            );
-            assert!(
-                validate_knot_vector(&knots, order).is_ok(),
-                "{name}: the generator must produce vectors its own validator accepts"
             );
         }
     }
@@ -1812,8 +1688,11 @@ mod tests {
 
         let mut n_coefficients = 1;
         for (name, data, num_knots, min_spacing, expected_basis) in axes {
-            let knots = generate_knot_vector(data, num_knots, order, true, min_spacing)
-                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            let knots = delivered_knots(
+                place_knots(data, num_knots, true, min_spacing)
+                    .unwrap_or_else(|e| panic!("{name}: {e}")),
+                order,
+            );
             let n_basis = knots.len() - order;
 
             assert_eq!(
@@ -1835,7 +1714,7 @@ mod tests {
     #[test]
     fn adaptive_knots_are_unchanged_on_the_axis_that_was_already_correct() {
         let (_, cd, _) = d12_axis_data();
-        let knots = generate_knot_vector(&cd, 6, 4, true, 2.0).expect("cone knots");
+        let knots = delivered_knots(place_knots(&cd, 6, true, 2.0).expect("cone knots"), 4);
 
         assert_eq!(
             knots,
@@ -1902,6 +1781,23 @@ mod tests {
         let (measurements, predictions) = grid_over_cone_span(12, 12, 12, max_cone_deg);
         fit_correction_surface(&measurements, &predictions, &shipped_shape_params())
             .expect("fit should succeed")
+    }
+
+    /// Full mode fits **cubic** surfaces: order 4 (`order = degree + 1`). GitHub issue #95
+    /// moved knot construction into core without changing that, and boresight's order-3
+    /// (quadratic) correction is pinned separately in `frequency_correction`. Checked on the
+    /// shipped parameters, on the fitted surface, and on the wire artifact, so a change to
+    /// any of the three fails here.
+    #[test]
+    fn full_mode_fits_cubic_order_4_surfaces() {
+        assert_eq!(CorrectionSurfaceParams::shipped().spline_order, 4);
+        let surface = fitted_surface(24.0);
+        assert_eq!(surface.spline_order(), 4);
+        let wire = surface
+            .fitted()
+            .to_model4d(289.0, 291.0)
+            .expect("wire construction");
+        assert_eq!(wire.spline_order, 4);
     }
 
     /// The delivered knot spacing is what the surface can actually follow, and it is not the
@@ -2171,45 +2067,35 @@ mod tests {
     }
 
     /// The clock axis received none of the emptiness/finiteness validation its siblings got.
-    /// It now goes through the same gate, and the assessment refuses rather than reporting.
+    /// It now goes through the same gate, and a degenerate clock axis is refused rather
+    /// than reported.
     ///
-    /// The degenerate axis is built through the real constructor, because the surface carries
-    /// no knot vector of its own to corrupt any more (GitHub issue #94): a run of equal knots
-    /// is a *valid* layout that resolves nothing, which is exactly the case the assessment
-    /// must refuse. A non-finite knot cannot reach here at all — the core layout rejects a
-    /// knot vector that is not non-decreasing — so its coverage sits where it is reachable,
-    /// on `widest_knot_gap` in `a_non_finite_knot_gap_is_refused_not_skipped_over`.
+    /// Since GitHub issue #95 that gate is the core layout's invariant set, which refuses an
+    /// axis with empty support at construction — so a degenerate clock axis cannot become a
+    /// surface, and the assessment is never handed one. `widest_knot_gap`'s own refusal of a
+    /// degenerate or non-finite vector stays covered where it is reachable, in
+    /// `a_degenerate_axis_is_refused_so_infinity_keeps_one_meaning` and
+    /// `a_non_finite_knot_gap_is_refused_not_skipped_over`.
     #[test]
     fn the_clock_axis_is_validated_like_its_siblings() {
         let surface = fitted_surface(24.0);
-        let degenerate_clock = CorrectionSurface::new(
-            FittedCorrectionSurface::new(
-                correction_layout(
-                    surface.shape(),
-                    &vec![7.0; surface.knots_e_clock().len()],
-                    surface.knots_e_cone(),
-                    surface.knots_frequency(),
-                    surface.spline_order(),
-                )
-                .expect("a run of equal knots is a valid layout"),
-                surface.coefficients().to_vec(),
-            )
-            .expect("coefficient count is unchanged"),
-            surface.fit_stats.clone(),
-        );
-
-        let err = assess_angular_resolution(&degenerate_clock, 8.0)
-            .expect_err("a degenerate clock axis must be refused");
+        let err = correction_layout(
+            ClampedAxis::new(7.0, 7.0, vec![]),
+            ClampedAxis::new(0.0, 24.0, vec![]),
+            ClampedAxis::new(400.0, 700.0, vec![]),
+            surface.spline_order(),
+        )
+        .expect_err("a degenerate clock axis must be refused");
         assert!(
             format!("{err}").contains("E-clock"),
             "the error must name the offending axis, got: {err}"
         );
 
-        // Control: untouched, it assesses fine.
+        // Control: a real surface assesses fine.
         assert!(assess_angular_resolution(&surface, 8.0).is_ok());
     }
 
-    /// Finding 4: the span guard in `generate_knot_vector` is `max - min < min_spacing`,
+    /// Finding 4: the span guard in `place_knots` is `max - min < min_spacing`,
     /// which at zero or negative spacing can never fire. Everything downstream — this
     /// module's own prose, and roadmap D25's reachability argument — assumed it always holds.
     #[test]
@@ -2585,33 +2471,25 @@ mod tests {
     // docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md
     // ========================================================================
 
-    /// Clamped knot vector on `[lo, hi]` with `n_internal` evenly spaced internal knots.
-    fn clamped_knots(lo: f64, hi: f64, n_internal: usize, order: usize) -> Vec<f64> {
-        let mut k = vec![lo; order];
-        for i in 1..=n_internal {
-            k.push(lo + (hi - lo) * i as f64 / (n_internal + 1) as f64);
-        }
-        k.extend(std::iter::repeat_n(hi, order));
-        k
+    /// Clamped axis on `[lo, hi]` with `n_internal` evenly spaced internal knots.
+    fn uniform_axis(lo: f64, hi: f64, n_internal: usize) -> ClampedAxis {
+        ClampedAxis::new(lo, hi, generate_uniform_knots(lo, hi, n_internal))
     }
 
     /// A surface whose coefficients are all 1.0. A correct B-spline basis is a partition
     /// of unity, so this must evaluate to exactly 1.0 everywhere in its domain — including
     /// on the boundary.
     fn unit_surface(order: usize) -> CorrectionSurface {
-        let knots_frequency = clamped_knots(400.0, 700.0, 2, order);
-        let knots_econe = clamped_knots(0.0, 24.0, 4, order);
-        let knots_eclock = clamped_knots(0.0, 315.0, 6, order);
-        let shape = [
-            knots_eclock.len() - order,
-            knots_econe.len() - order,
-            knots_frequency.len() - order,
-        ];
-        let layout = correction_layout(shape, &knots_eclock, &knots_econe, &knots_frequency, order)
-            .expect("a clamped layout");
-        let fitted =
-            FittedCorrectionSurface::new(layout, vec![1.0; shape[0] * shape[1] * shape[2]])
-                .expect("coefficients sized to the layout");
+        let layout = correction_layout(
+            uniform_axis(0.0, 315.0, 6),
+            uniform_axis(0.0, 24.0, 4),
+            uniform_axis(400.0, 700.0, 2),
+            order,
+        )
+        .expect("a clamped layout");
+        let coefficients = vec![1.0; layout.coefficient_count()];
+        let fitted = FittedCorrectionSurface::new(layout, coefficients)
+            .expect("coefficients sized to the layout");
 
         CorrectionSurface::new(
             fitted,
@@ -2769,7 +2647,7 @@ mod least_squares_tests {
         pts
     }
 
-    /// (knots_freq, knots_cone, knots_clock, order) — clamped, as `generate_knot_vector` builds them.
+    /// (knots_freq, knots_cone, knots_clock, order) — clamped, as the core layout builds them.
     fn fixture_knots() -> (Vec<f64>, Vec<f64>, Vec<f64>, usize) {
         (
             vec![
@@ -2783,18 +2661,22 @@ mod least_squares_tests {
 
     fn fixture_layout() -> CorrectionSurfaceLayout {
         let (knots_frequency, knots_cone, knots_clock, order) = fixture_knots();
-        correction_layout(
-            [
-                knots_clock.len() - order,
-                knots_cone.len() - order,
-                knots_frequency.len() - order,
-            ],
-            &knots_clock,
-            &knots_cone,
-            &knots_frequency,
+        let axis = |knots: &[f64]| {
+            ClampedAxis::new(
+                knots[0],
+                knots[knots.len() - 1],
+                knots[order..knots.len() - order].to_vec(),
+            )
+        };
+        let layout = correction_layout(
+            axis(&knots_clock),
+            axis(&knots_cone),
+            axis(&knots_frequency),
             order,
         )
-        .unwrap()
+        .unwrap();
+        assert_eq!(layout.knots_frequency(), knots_frequency.as_slice());
+        layout
     }
 
     /// Dense construction of `(B^T B + λI, B^T r)`, materializing the design matrix
