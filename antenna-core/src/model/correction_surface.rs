@@ -450,20 +450,20 @@ fn validated_axis(
         ));
     }
 
-    // Rules 6 and 7, run by run over the (known non-decreasing) vector.
+    // Rules 6 and 7, run by run over the (known non-decreasing) vector. A run starts wherever
+    // a knot differs from its predecessor and ends where the next one starts.
     let max_interior = (order - 1).max(1);
-    let run_count = knots.chunk_by(|a, b| a == b).count();
-    knots
-        .chunk_by(|a, b| a == b)
-        .scan(0, |start, run| {
-            let run_start = *start;
-            *start += run.len();
-            Some((run_start, run))
-        })
-        .enumerate()
-        .try_for_each(|(run_index, (start, run))| {
-            let multiplicity = run.len();
-            let is_end_run = run_index == 0 || run_index + 1 == run_count;
+    let run_starts: Vec<usize> = (0..knots.len())
+        .filter(|&index| index == 0 || knots[index] != knots[index - 1])
+        .collect();
+    let run_ends = run_starts.iter().skip(1).copied().chain([knots.len()]);
+    run_starts
+        .iter()
+        .copied()
+        .zip(run_ends)
+        .try_for_each(|(start, end)| {
+            let multiplicity = end - start;
+            let is_end_run = start == 0 || end == knots.len();
             if is_end_run && multiplicity != order {
                 Err(invalid_knots(
                     name,
@@ -473,7 +473,7 @@ fn validated_axis(
                          basis function B_{start} zero-width support, making it identically \
                          zero, and is what an interior knot placed on a bound becomes \
                          (roadmap D19)",
-                        run[0]
+                        knots[start]
                     ),
                 ))
             } else if !is_end_run && multiplicity > max_interior {
@@ -483,7 +483,7 @@ fn validated_axis(
                         "interior knot {} at index {start} repeats {multiplicity} times; the \
                          maximum for order {order} is {max_interior} (multiplicity {order} \
                          splits the spline)",
-                        run[0]
+                        knots[start]
                     ),
                 ))
             } else {
