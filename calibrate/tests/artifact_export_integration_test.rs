@@ -616,25 +616,23 @@ fn the_round_trip_agrees_at_every_axis_boundary_after_a_service_load() {
 /// both refusals are asserted below rather than asserted about:
 ///
 /// - **Full mode** — a dataset whose rows all share a frequency has zero range on that axis,
-///   and `generate_knot_vector` refuses it (`max_val - min_val < min_spacing`) rather than
+///   and `place_knots` refuses it (`max_val - min_val < min_spacing`) rather than
 ///   building a degenerate knot vector.
-/// - **Boresight mode** — `fit_frequency_correction` needs **≥ 4** frequencies for its cubic
-///   B-spline and returns `InsufficientData` below that, so a single-frequency boresight run
+/// - **Boresight mode** — `fit_frequency_correction` needs **≥ 4** frequencies for its
+///   quadratic B-spline and returns `InsufficientData` below that, so a single-frequency boresight run
 ///   writes an artifact with no correction surface at all.
 ///
 /// An earlier version of this comment claimed boresight mode *is* the single-frequency
-/// artifact, "collapsing the frequency axis with `flat_axis`". That was wrong, and worth
-/// recording because it is an easy misreading: boresight collapses **azimuth, elevation and
-/// temperature** with `flat_axis` and *fits* frequency like any other axis.
+/// artifact, "collapsing the frequency axis with a flat axis". That was wrong, and worth
+/// recording because it is an easy misreading: boresight collapses **E-clock, E-cone and
+/// temperature** with `ClampedAxis::flat` and *fits* frequency like any other axis.
 ///
 /// What both refusals are protecting is not obvious, so it belongs here. A degenerate axis —
-/// `order` equal knots — would pass `BSplineModel4D::validate`, which checks knot-vector
-/// *length* and not span width, and would then evaluate to a **zero correction at every
-/// frequency**: the evaluable span `[knots[order-1], knots[len-order]]` is empty, so every
-/// Cox-de Boor denominator vanishes and every basis value with it. That is the D13/D26
-/// signature — an artifact that loads clean, reports healthy, and silently applies nothing.
-/// It is exactly why `flat_axis` exists (see its doc comment) and why the fitter's range
-/// check exists, and it is why these two refusals are the coverage this edge case admits.
+/// `order` equal knots — has an empty evaluable span, so it would evaluate to a **zero
+/// correction at every frequency**. That is the D13/D26 signature — an artifact that loads
+/// clean, reports healthy, and silently applies nothing. Until issue #95 the loader checked
+/// knot-vector *length* and not span width, so the fitter's range check was the only
+/// refusal; the core layout's invariant set now rejects an empty-support axis as well.
 ///
 /// What full mode *can* express is the minimum coefficient count: zero interior knots, so the
 /// frequency axis carries exactly `spline_order` = 4 coefficients rather than 5. That is the

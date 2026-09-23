@@ -7,7 +7,9 @@ This example demonstrates how to use the frequency correction module to fit a 1D
 The frequency correction module (`calibrate/src/frequency_correction.rs`) provides functionality to:
 
 1. **Determine if correction is needed**: Check if residuals exceed 0.5 dB threshold
-2. **Fit 1D B-spline**: Create a cubic B-spline correction across frequency dimension
+2. **Fit 1D B-spline**: Create a quadratic (order 3) B-spline correction across frequency
+   dimension. In this repository `order = degree + 1`; this correction has always been
+   quadratic, and was mislabelled cubic until issue #95
 3. **Convert to a flat-axis 4D B-spline**: Package as a 4D B-spline for service compatibility
 
 ## When to Use
@@ -97,12 +99,12 @@ BSplineModel4D {
     knots_temperature: [0.0,   0.0,   0.0,   500.0, 1000.0, 1000.0, 1000.0],
 
     // Frequency dimension (proper B-spline)
-    knots_frequency: [f_min, ..., f_max],  // Clamped cubic B-spline
+    knots_frequency: [f_min, ..., f_max],  // Clamped quadratic B-spline
 
     // Each residual replicated across every flat layer, in the service's
     // idx = i_az + n_az * (i_el + n_el * (i_freq + n_freq * i_temp)) layout
     coefficients: vec![...; 4 * 4 * N_freq * 4],
-    spline_order: 3,  // Cubic
+    spline_order: 3,  // Quadratic (degree 2)
 }
 ```
 
@@ -115,13 +117,14 @@ dimension, and it is how this module worked until 2026-07-31. It is wrong twice 
    `knots.len() >= shape + order` on every axis, and the loader validates every artifact.
    Every boresight run whose residuals cleared the 0.5 dB threshold produced a `.bin` the
    service rejected outright.
-2. **Lengthening the knot vector is not a fix.** The evaluator's span is
-   `[knots[order-1], knots[len-order]]`, which stays empty for a single coefficient layer
-   however long the vector is. An empty span drives every basis function to zero, so the
-   correction evaluates to 0 dB — a silent failure that looks like a healthy artifact.
+2. **Lengthening the knot vector is not a fix.** A single coefficient layer has an empty
+   evaluable span however long its knot vector is. An empty span drives every basis
+   function to zero, so the correction evaluates to 0 dB — a silent failure that looks like
+   a healthy artifact.
 
 Both are avoided by growing the layer count alongside the knot vector, which is what
-`artifact_export::flat_axis(lo, hi, order)` does. The flat spans deliberately cover the
+`antenna_core::model::ClampedAxis::flat(lo, hi)` does; since issue #95 the core layout
+refuses an empty-support axis outright. The flat spans deliberately cover the
 whole queryable domain so a surface that is constant along an axis never reports a
 spurious "extrapolated" warning; the boresight-only claim is carried by the artifact's
 `calibration_coverage`, which is where the evaluator enforces it.

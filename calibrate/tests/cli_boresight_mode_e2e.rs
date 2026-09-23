@@ -319,10 +319,11 @@ fn boresight_coverage_is_written_as_an_on_axis_cone() {
 
 /// The correction the artifact carries must also *evaluate* to something real at boresight.
 ///
-/// A "fix" that only lengthened the degenerate knot vectors would satisfy the loader and
-/// still fail here: an axis whose evaluable span `[knots[order-1], knots[len-order]]` is
-/// empty drives its basis functions to zero and collapses the correction to 0 dB, which
-/// would look exactly like a correctly-loaded surface that happens to correct nothing.
+/// A "fix" that only lengthened the degenerate knot vectors once satisfied the loader and
+/// would still fail here: an axis with an empty evaluable span drives its basis functions to
+/// zero and collapses the correction to 0 dB, which would look exactly like a
+/// correctly-loaded surface that happens to correct nothing. (Since issue #95 the loader
+/// refuses such an axis too; this test pins the served value independently.)
 #[test]
 fn the_carried_frequency_correction_evaluates_to_a_real_value() {
     let run = run_boresight_over(RIPPLED_BORESIGHT_CSV);

@@ -45,7 +45,7 @@
 //! skipping *both* integrity checks, the container version gate and the CRC32. It was kept
 //! afterwards to stay compatible with artifacts written before D2. That compatibility turned
 //! out to be empty: the schema gate below runs on every artifact regardless of framing, and
-//! [`crate::data::types::CALIBRATION_SCHEMA_VERSION`] has since moved 2.0 → 3.0 → 4.0 → 5.1,
+//! [`crate::data::types::CALIBRATION_SCHEMA_VERSION`] has since moved 2.0 → 3.0 → 4.0 → 5.2,
 //! so every artifact the fallback existed for is refused on the schema axis anyway. It could
 //! therefore only ever succeed on a bare postcard encoding at the *current* schema.
 //!
@@ -650,10 +650,10 @@ mod tests {
         let mut calibration = create_test_calibration();
 
         let correction = BSplineModel4D::builder()
-            .coefficients(vec![1.0; 24])
-            .shape([2, 3, 2, 2])
+            .coefficients(vec![1.0; 108])
+            .shape([3, 4, 3, 3])
             .knots_azimuth(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
-            .knots_elevation(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0])
+            .knots_elevation(vec![0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0])
             .knots_frequency(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
             .knots_temperature(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
             .build()

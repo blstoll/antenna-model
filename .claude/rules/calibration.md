@@ -61,11 +61,15 @@ full and boresight mode (D2).
 
 - **Container** — the ANTC header `u32` (`ANTC_ARTIFACT_VERSION` = **4**), readable before the
   decode.
-- **Schema** — `metadata.format_version` (`CALIBRATION_SCHEMA_VERSION` = **"5.1"**), readable
+- **Schema** — `metadata.format_version` (`CALIBRATION_SCHEMA_VERSION` = **"5.2"**), readable
   only after it. A foreign MAJOR is a hard error.
 
 Recent bumps cover the versioning cases, and they moved the axes differently:
 
+- **#95 (5.2 / container 4)** moved the fitter's knot-vector rules (finite, exact length,
+  non-empty support, end multiplicity `== order`, interior `<= order-1`) into the core layout,
+  so the loader enforces the same invariant set the fitter builds to. No bytes moved and every
+  producer already complied, so it is MINOR-only.
 - **#92 (5.1 / container 4)** tightened correction-surface validation without moving any
   bytes: every synthetic temperature slab must be identical, runtime evaluation uses only
   E-clock/E-cone/frequency, and outside fitted support has no numeric correction. Valid 5.0
@@ -169,7 +173,14 @@ not absolute gain.**
 - **Adaptive knots are strictly interior** (D19): a knot equal to an axis bound became
   multiplicity `order+1` after clamping, giving that basis function zero-width support, so 37.5%
   of the shipped configuration's coefficients were attached to identically-zero functions.
-  `validate_knot_vector` enforces end multiplicity `== order` and interior `<= order-1`.
+  The core layout (`antenna_core::model::correction_surface`) enforces end multiplicity
+  `== order` and interior `<= order-1`, as part of the **one** knot-vector invariant set every
+  executable axis — fitted or decoded from an artifact — satisfies (issue #95). `calibrate`
+  owns only *placement policy*: `place_knots` returns a `ClampedAxis` (bounds + interior
+  knots) and `CorrectionSurfaceLayout::clamped` builds the knot vectors and shape from it.
+- **Spline order is `degree + 1`.** Full mode fits cubic, order 4. Boresight's frequency
+  correction is order 3 — **quadratic** — and always has been despite comments calling it
+  cubic until #95. Moving it to cubic changes served values; it is a separate decision.
 - **The angular knots are absolute while the pattern scale is `λ/D`** — 0.06°–5.4° across the
   antennas in this tree — so on anything but a broad-beam antenna the surface carries the
   residual's *envelope trend*, not its lobe structure, and **in-sample RMSE structurally cannot

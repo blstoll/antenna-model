@@ -163,7 +163,7 @@ pub use coordinates_3d::{
 };
 
 pub use correction_surface::{
-    BasisStencil, BasisStencilEntry, BasisStencilOutcome, CorrectionEvaluation,
+    BasisStencil, BasisStencilEntry, BasisStencilOutcome, ClampedAxis, CorrectionEvaluation,
     CorrectionSurfaceLayout, FittedCorrectionSurface,
 };
 

@@ -351,7 +351,8 @@ frequency_mhz,g_over_t_db,temperature_k
 
 **Requirements:**
 - Header row required
-- Minimum 4 measurement points (for cubic B-spline fitting)
+- Minimum 4 measurement points (the frequency correction is a quadratic, order-3 B-spline;
+  the floor of 4 predates that being stated correctly and is preserved — issue #95)
 - Recommended: 10-50 points for good frequency coverage
 - All measurements at azimuth=0°, elevation=0° (boresight)
 - Frequency range should cover or be within feed's operating range
@@ -772,7 +773,7 @@ The full calibration tool performs:
 3. **Compute residuals**: `residual = measured - physics_model`
 4. **Fit correction surface** (3D B-spline to residuals)
    - E-clock, E-cone, and frequency
-   - Cubic B-spline interpolation; export adds only the schema-5 flat temperature wire axis
+   - Cubic (order 4) B-spline fit; export adds only the schema-5 flat temperature wire axis
 5. **Cross-validation** (if `--validate` flag)
    - Split data into training/test sets
    - Verify <1 dB error in main lobe and first sidelobe
@@ -796,7 +797,7 @@ Parameter Tuning:
   Improvement: 78%
 
 Correction Surface Fitting:
-  B-spline order: 3 (cubic)
+  B-spline order: 4 (cubic)
   Control points: 48 × 15 × 10 = 7200
   Knot spacing: Adaptive (denser near boresight)
   Final residual RMSE: 0.32 dB
@@ -1900,6 +1901,16 @@ is bit-identical. Check first that the artifact does not carry the defect the bu
 reject — restamping a wrong artifact launders it past the new gate. (For C13 that check is
 "the feed's axial offset is not the focal length"; a lateral offset is legitimate, and one of
 these two fixtures has one.)
+
+**5.2 (GitHub issue #95, 2026-09-22) tightens knot-vector validation without moving a
+byte.** Every executable correction-surface axis must now satisfy one invariant set, owned by
+`antenna_core::model::correction_surface`: exactly `shape + order` finite, non-decreasing
+knots; a non-empty support; each bound repeated exactly `order` times; and no interior knot
+repeated more than `order - 1` times. The last three were previously enforced only by the
+fitter, so an artifact could hold a layout the fitter would never build. Every producer in
+`calibrate` already complied, so no artifact it wrote is newly rejected; container version 4
+and the postcard layout are unchanged, and valid 5.0/5.1 artifacts load under the minor-version
+policy.
 
 **5.1 (GitHub issue #92, 2026-09-20) tightens validation without moving a byte.**
 Schema-5 artifacts retain the historical temperature fields, but every temperature
