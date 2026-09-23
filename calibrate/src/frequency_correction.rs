@@ -34,11 +34,12 @@
 //! the coefficient layer over a real interval. See roadmap unit D13.
 
 use antenna_core::data::types::BSplineModel4D;
+use antenna_core::model::{CorrectionSurfaceLayout, FittedCorrectionSurface};
 use thiserror::Error;
 
-use crate::artifact_export::flat_axis;
+use crate::artifact_export::{flat_axis, to_schema5_model};
 
-/// Span of the flat azimuth axis, in degrees.
+/// Span of the flat E-clock axis, in degrees.
 ///
 /// The three constants below bound axes the fitted surface is **constant**
 /// along, so their only job is to cover every value the service can ever query.
@@ -58,16 +59,16 @@ use crate::artifact_export::flat_axis;
 /// and so rejected the very point it was meant to cover: the azimuth of a
 /// boresight-aimed query is `atan2` on float noise (measured: 63.43°). See
 /// `boresight_calibration::build_calibration_artifact`.
-const AZIMUTH_AXIS_DEG: (f64, f64) = (0.0, 360.0);
+const E_CLOCK_AXIS_DEG: (f64, f64) = (0.0, 360.0);
 
-/// Span of the flat elevation axis, in degrees. Elevation reaches the service's
+/// Span of the flat E-cone axis, in degrees. E-cone reaches the service's
 /// correction surface as a **polar angle from boresight** (0° on axis), so the
-/// full range is `[0, 180]`. See [`AZIMUTH_AXIS_DEG`].
-const ELEVATION_AXIS_DEG: (f64, f64) = (0.0, 180.0);
+/// full range is `[0, 180]`. See [`E_CLOCK_AXIS_DEG`].
+const E_CONE_AXIS_DEG: (f64, f64) = (0.0, 180.0);
 
 /// Span of the synthetic flat temperature wire axis, in Kelvin. Schema 5.1 keeps
 /// these knots for byte compatibility, but the evaluator has no temperature query
-/// coordinate. See [`AZIMUTH_AXIS_DEG`].
+/// coordinate. See [`E_CLOCK_AXIS_DEG`].
 const TEMPERATURE_AXIS_K: (f64, f64) = (0.0, 1000.0);
 
 /// Error types for frequency correction fitting.
@@ -184,38 +185,33 @@ pub fn fit_frequency_correction(frequencies: &[f64], residuals: &[f64]) -> Resul
 
     let knots_frequency = create_knot_vector(frequencies, spline_order);
 
-    // The three axes this correction does not vary along. Flat, not degenerate:
+    // The two angular axes this correction does not vary along. Flat, not degenerate:
     // identical coefficient layers over a real span (see the module docs).
-    let (n_az, knots_azimuth) = flat_axis(AZIMUTH_AXIS_DEG.0, AZIMUTH_AXIS_DEG.1, order);
-    let (n_el, knots_elevation) = flat_axis(ELEVATION_AXIS_DEG.0, ELEVATION_AXIS_DEG.1, order);
-    let (n_temp, knots_temperature) = flat_axis(TEMPERATURE_AXIS_K.0, TEMPERATURE_AXIS_K.1, order);
+    let (n_e_clock, knots_e_clock) = flat_axis(E_CLOCK_AXIS_DEG.0, E_CLOCK_AXIS_DEG.1, order);
+    let (n_e_cone, knots_e_cone) = flat_axis(E_CONE_AXIS_DEG.0, E_CONE_AXIS_DEG.1, order);
 
-    // Replicate the residual control points across every flat layer, in the 4D
-    // flat-index layout the service evaluates:
-    //   idx = i_az + n_az * (i_el + n_el * (i_freq + n_freq * i_temp))
-    let mut coefficients = vec![0.0_f64; n_az * n_el * n_freq * n_temp];
-    for i_temp in 0..n_temp {
-        for (i_freq, &residual) in residuals.iter().enumerate() {
-            for i_el in 0..n_el {
-                for i_az in 0..n_az {
-                    let idx = i_az + n_az * (i_el + n_el * (i_freq + n_freq * i_temp));
-                    coefficients[idx] = residual;
-                }
-            }
-        }
-    }
-
-    let bspline = BSplineModel4D {
-        coefficients,
-        shape: [n_az, n_el, n_freq, n_temp],
-        knots_azimuth,
-        knots_elevation,
+    let layout = CorrectionSurfaceLayout::new(
+        [n_e_clock, n_e_cone, n_freq],
+        knots_e_clock,
+        knots_e_cone,
         knots_frequency,
-        knots_temperature,
         spline_order,
-    };
+    )
+    .map_err(|error| FrequencyCorrectionError::FittingError(error.to_string()))?;
 
-    Ok(bspline)
+    // Replicate each frequency's control point across every flat angular layer, in the
+    // canonical coefficient order the layout declares — E-clock fastest, then E-cone, then
+    // frequency. The synthetic temperature axis is the wire adapter's business, not this
+    // module's (GitHub issue #94).
+    let coefficients = residuals
+        .iter()
+        .flat_map(|&residual| std::iter::repeat_n(residual, n_e_clock * n_e_cone))
+        .collect();
+    let fitted = FittedCorrectionSurface::new(layout, coefficients)
+        .map_err(|error| FrequencyCorrectionError::FittingError(error.to_string()))?;
+
+    to_schema5_model(&fitted, TEMPERATURE_AXIS_K.0, TEMPERATURE_AXIS_K.1)
+        .map_err(|error| FrequencyCorrectionError::FittingError(error.to_string()))
 }
 
 /// Validates input data for B-spline fitting.
@@ -378,10 +374,10 @@ mod tests {
         assert!(bspline.knots_frequency.len() >= frequencies.len());
 
         // Each flat axis spans its full documented interval.
-        assert_eq!(bspline.knots_azimuth.first(), Some(&AZIMUTH_AXIS_DEG.0));
-        assert_eq!(bspline.knots_azimuth.last(), Some(&AZIMUTH_AXIS_DEG.1));
-        assert_eq!(bspline.knots_elevation.first(), Some(&ELEVATION_AXIS_DEG.0));
-        assert_eq!(bspline.knots_elevation.last(), Some(&ELEVATION_AXIS_DEG.1));
+        assert_eq!(bspline.knots_azimuth.first(), Some(&E_CLOCK_AXIS_DEG.0));
+        assert_eq!(bspline.knots_azimuth.last(), Some(&E_CLOCK_AXIS_DEG.1));
+        assert_eq!(bspline.knots_elevation.first(), Some(&E_CONE_AXIS_DEG.0));
+        assert_eq!(bspline.knots_elevation.last(), Some(&E_CONE_AXIS_DEG.1));
         assert_eq!(
             bspline.knots_temperature.first(),
             Some(&TEMPERATURE_AXIS_K.0)

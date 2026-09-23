@@ -146,6 +146,21 @@ impl CorrectionSurfaceLayout {
         self.order as u8
     }
 
+    /// The validated E-clock knot vector, in canonical axis order.
+    pub fn knots_e_clock(&self) -> &[f64] {
+        &self.axes[0].knots
+    }
+
+    /// The validated E-cone knot vector, in canonical axis order.
+    pub fn knots_e_cone(&self) -> &[f64] {
+        &self.axes[1].knots
+    }
+
+    /// The validated frequency knot vector, in canonical axis order.
+    pub fn knots_frequency(&self) -> &[f64] {
+        &self.axes[2].knots
+    }
+
     /// Compute the sparse basis stencil for a domain query.
     ///
     /// Exact support boundaries are included. A query outside any axis returns
@@ -222,6 +237,11 @@ impl FittedCorrectionSurface {
 
     pub fn layout(&self) -> &CorrectionSurfaceLayout {
         &self.layout
+    }
+
+    /// The fitted coefficients, in the layout's canonical E-clock-fastest order.
+    pub fn coefficients(&self) -> &[f64] {
+        &self.coefficients
     }
 
     pub fn evaluate(
@@ -456,6 +476,55 @@ mod tests {
             assert_eq!(entry.coefficient_index, expected_index);
             assert!((entry.basis_weight - 0.125).abs() < 1e-12);
         }
+    }
+
+    /// The canonical index law, pinned on a layout whose axes have *different* sizes.
+    ///
+    /// `[2, 2, 2]` cannot tell E-clock-fastest from any transposition of it — every stride
+    /// is the same number. Here the strides are 1, 3 and 12, so a surface indexed in any
+    /// other order reads a different coefficient. Each probe sits on one axis's upper
+    /// boundary and the others' lower boundary, where exactly one basis function per axis is
+    /// active, so the evaluated value *is* the coefficient index the law selects
+    /// (GitHub issue #94).
+    #[test]
+    fn the_canonical_index_law_is_e_clock_fastest_then_e_cone_then_frequency() {
+        let shape = [3, 4, 2];
+        let layout = CorrectionSurfaceLayout::new(
+            shape,
+            vec![0.0, 0.0, 4.0, 8.0, 8.0],
+            vec![0.0, 0.0, 5.0, 10.0, 15.0, 15.0],
+            vec![8_000.0, 8_000.0, 9_000.0, 9_000.0],
+            2,
+        )
+        .unwrap();
+        let coefficients: Vec<f64> = (0..shape[0] * shape[1] * shape[2])
+            .map(|index| index as f64)
+            .collect();
+        let surface = FittedCorrectionSurface::new(layout, coefficients).unwrap();
+
+        let value = |clock, cone, frequency| {
+            surface
+                .evaluate(clock, cone, frequency)
+                .correction_db()
+                .expect("probe must be in support")
+        };
+
+        assert_eq!(value(0.0, 0.0, 8_000.0), 0.0, "origin is coefficient 0");
+        assert_eq!(
+            value(8.0, 0.0, 8_000.0),
+            (shape[0] - 1) as f64,
+            "E-clock has stride 1"
+        );
+        assert_eq!(
+            value(0.0, 15.0, 8_000.0),
+            (shape[0] * (shape[1] - 1)) as f64,
+            "E-cone has stride n_e_clock"
+        );
+        assert_eq!(
+            value(0.0, 0.0, 9_000.0),
+            (shape[0] * shape[1] * (shape[2] - 1)) as f64,
+            "frequency has stride n_e_clock * n_e_cone"
+        );
     }
 
     #[test]

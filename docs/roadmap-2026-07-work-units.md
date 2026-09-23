@@ -3659,8 +3659,10 @@ troubleshooting now distinguishes the two rejection messages and adds the CRC on
 > points at the guard — the misattribution that sent this unit hunting a recursion that never
 > existed is precisely what an unnamed thread buys you.
 
-- **Entrance / read first:** `calibrate/src/artifact_export.rs` (`to_bspline_4d` —
-  dimension remap + coefficient reindex + synthetic flat temperature axis),
+- **Entrance / read first:** `calibrate/src/artifact_export.rs` (`to_bspline_4d`, renamed
+  `to_schema5_model` by issue #94 — wire-field renaming + synthetic flat temperature axis;
+  the coefficient reindex this unit described is gone, the fit solves in the canonical
+  order),
   `calibrate/src/correction_surface.rs` (3D), `model/correction_interpolator.rs` (4D
   consumer).
 - **Exit criteria:** a test that fits a small synthetic surface in calibrate → exports →
