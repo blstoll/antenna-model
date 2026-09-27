@@ -28,9 +28,9 @@
 //! Run with:
 //!   cargo test -p antenna-model --test reference_validation -- --nocapture --test-threads=1
 
+use antenna_core::types::AntennaCalibration;
 use antenna_model::config::CalibrationConfig;
 use antenna_model::data::repository::CalibrationRepository;
-use antenna_model::data::AntennaCalibration;
 use antenna_model::model::{
     compute_gain_db, edge_taper_db, AntennaConfiguration, FeedParameters, FeedPosition,
     IntegrationParams, MeshParameters, ReflectorGeometry,

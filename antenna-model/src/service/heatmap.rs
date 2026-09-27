@@ -686,7 +686,7 @@ mod tests {
     /// Verify that a grid with partial failures returns a valid response without NaN values.
     #[test]
     fn test_partial_failures_no_nan_in_response() {
-        use antenna_core::data::types::{
+        use antenna_core::types::{
             AntennaCalibration, BSplineModel4D, CalibrationMetadata, CalibrationStatus,
             FeedParameters, MeshParameters, PhysicalAntennaConfig, ReflectorGeometry,
             ValidityRanges,
@@ -806,7 +806,7 @@ mod tests {
     /// from actual successful point outcomes rather than surface existence.
     #[test]
     fn mixed_coverage_heatmap_reports_partial_correction() {
-        use antenna_core::data::types::{
+        use antenna_core::types::{
             AntennaCalibration, BSplineModel4D, CalibrationCoverage, CalibrationMetadata,
             CalibrationStatus, FeedParameters, PhysicalAntennaConfig, ReflectorGeometry,
             ValidityRanges,
@@ -970,7 +970,7 @@ mod tests {
     /// must match the `/gain` gain for the reconstructed identical `GainRequest`.
     #[test]
     fn test_heatmap_consistent_with_gain_endpoint_for_uncalibrated_antenna() {
-        use crate::data::types::{
+        use antenna_core::types::{
             AntennaCalibration, CalibrationMetadata, CalibrationStatus, FeedParameters,
             MeshParameters, PhysicalAntennaConfig, ReflectorGeometry, ValidityRanges,
         };

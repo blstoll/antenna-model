@@ -3,11 +3,11 @@
 //! This exercises the on-disk round-trip that matters for the service:
 //! build a 3D correction surface, convert + assemble an `AntennaCalibration`,
 //! write it with the ANTC header used by full mode, then load it back through
-//! the service loader (`antenna_model::data::loader::load_calibration_artifact`).
+//! the service loader (`antenna_core::data::loader::load_calibration_artifact`).
 
+use antenna_core::data::loader::load_calibration_artifact;
 use antenna_core::model::FittedCorrectionSurface;
-use antenna_model::data::loader::load_calibration_artifact;
-use antenna_model::data::types::CALIBRATION_SCHEMA_VERSION;
+use antenna_core::types::CALIBRATION_SCHEMA_VERSION;
 use calibrate::artifact_export::{export_full_calibration, ExportPhysicalParams};
 use calibrate::correction_surface::{
     assess_angular_resolution, fit_correction_surface, CorrectionSurfaceParams,
@@ -61,10 +61,7 @@ fn build_measurements() -> Vec<MeasurementPoint> {
 /// version to 3, failing with "unsupported ANTC artifact version 2" from a test whose
 /// subject is the correction surface. Calling the real writer means the framing and both
 /// version stamps can never be this test's problem again.
-fn write_antc(
-    calibration: &antenna_model::data::types::AntennaCalibration,
-    path: &std::path::Path,
-) {
+fn write_antc(calibration: &antenna_core::types::AntennaCalibration, path: &std::path::Path) {
     calibrate::artifact_export::write_calibration_artifact(calibration, path).expect("write");
 }
 
@@ -151,7 +148,7 @@ fn test_full_export_loads_via_service() {
     // Status is FullyCalibrated.
     assert!(matches!(
         loaded.calibration_status,
-        Some(antenna_model::data::types::CalibrationStatus::FullyCalibrated { .. })
+        Some(antenna_core::types::CalibrationStatus::FullyCalibrated { .. })
     ));
 }
 
@@ -162,7 +159,7 @@ fn test_full_export_loads_via_service() {
 /// itself is defined once.
 fn fit_export_write_load() -> (
     calibrate::correction_surface::CorrectionSurface,
-    antenna_model::data::types::BSplineModel4D,
+    antenna_core::types::BSplineModel4D,
 ) {
     let measurements = build_measurements();
     let predictions = vec![0.0; measurements.len()];
@@ -476,7 +473,7 @@ fn round_trip_physical() -> ExportPhysicalParams {
 fn export_write_load(
     surface: &calibrate::correction_surface::CorrectionSurface,
     measurements: &[MeasurementPoint],
-) -> antenna_model::data::types::BSplineModel4D {
+) -> antenna_core::types::BSplineModel4D {
     let calibration = export_full_calibration(
         "integ_antenna",
         "x_band",

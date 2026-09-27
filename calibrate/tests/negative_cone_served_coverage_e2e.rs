@@ -28,9 +28,9 @@
 //! Serving both isolates the correction term exactly, and pins that it is evaluated at the
 //! served direction rather than clamped to a knot-vector edge.
 
+use antenna_core::types::AntennaCalibration;
 use antenna_model::api::schemas::{GainRequest, GainResponse, Position3D};
 use antenna_model::data::repository::CalibrationRepository;
-use antenna_model::data::types::AntennaCalibration;
 use antenna_model::model::geodetic_to_ecef;
 use antenna_model::service::compute_gain_from_request;
 use calibrate::artifact_export::{export_full_calibration, ExportPhysicalParams};

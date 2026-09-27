@@ -19,7 +19,7 @@
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::data::types::{CalibrationCoverage, CalibrationStatus};
+use antenna_core::types::{CalibrationCoverage, CalibrationStatus};
 
 /// The response-warning vocabulary (roadmap unit C8 stage 3).
 ///
@@ -1824,7 +1824,7 @@ mod tests {
 
     #[test]
     fn test_calibration_status_info_from_fully_calibrated() {
-        use crate::data::types::CalibrationStatus;
+        use antenna_core::types::CalibrationStatus;
 
         let status = CalibrationStatus::FullyCalibrated {
             accuracy_estimate_db: 1.0,
@@ -1846,7 +1846,7 @@ mod tests {
 
     #[test]
     fn test_calibration_status_info_from_partially_calibrated() {
-        use crate::data::types::{CalibrationCoverage, CalibrationStatus};
+        use antenna_core::types::{CalibrationCoverage, CalibrationStatus};
 
         let coverage = CalibrationCoverage {
             azimuth_range: (0.0, 0.0),
@@ -1884,7 +1884,7 @@ mod tests {
 
     #[test]
     fn test_calibration_status_info_from_uncalibrated() {
-        use crate::data::types::CalibrationStatus;
+        use antenna_core::types::CalibrationStatus;
 
         let status = CalibrationStatus::Uncalibrated {
             accuracy_estimate_db: 3.0,
@@ -1907,7 +1907,7 @@ mod tests {
 
     #[test]
     fn test_calibration_status_info_serialization_fully_calibrated() {
-        use crate::data::types::CalibrationStatus;
+        use antenna_core::types::CalibrationStatus;
 
         let status = CalibrationStatus::FullyCalibrated {
             accuracy_estimate_db: 1.0,
@@ -1931,7 +1931,7 @@ mod tests {
 
     #[test]
     fn test_calibration_status_info_serialization_partially_calibrated() {
-        use crate::data::types::{CalibrationCoverage, CalibrationStatus};
+        use antenna_core::types::{CalibrationCoverage, CalibrationStatus};
 
         let coverage = CalibrationCoverage {
             azimuth_range: (0.0, 360.0),
@@ -1964,7 +1964,7 @@ mod tests {
 
     #[test]
     fn test_calibration_status_info_serialization_uncalibrated() {
-        use crate::data::types::CalibrationStatus;
+        use antenna_core::types::CalibrationStatus;
 
         let status = CalibrationStatus::Uncalibrated {
             accuracy_estimate_db: 3.0,
@@ -2017,7 +2017,7 @@ mod tests {
 
     #[test]
     fn test_coverage_info_from_calibration_coverage() {
-        use crate::data::types::CalibrationCoverage;
+        use antenna_core::types::CalibrationCoverage;
 
         let coverage = CalibrationCoverage {
             azimuth_range: (0.0, 360.0),
@@ -2038,7 +2038,7 @@ mod tests {
 
     #[test]
     fn test_coverage_info_boresight_only_detection() {
-        use crate::data::types::CalibrationCoverage;
+        use antenna_core::types::CalibrationCoverage;
 
         // Boresight only - single spatial point
         let boresight_coverage = CalibrationCoverage {
@@ -2067,7 +2067,7 @@ mod tests {
 
     #[test]
     fn test_coverage_info_serialization() {
-        use crate::data::types::CalibrationCoverage;
+        use antenna_core::types::CalibrationCoverage;
 
         let coverage = CalibrationCoverage {
             azimuth_range: (0.0, 360.0),
@@ -2093,7 +2093,7 @@ mod tests {
 
     #[test]
     fn test_gain_response_with_calibration_status() {
-        use crate::data::types::CalibrationStatus;
+        use antenna_core::types::CalibrationStatus;
 
         let status = CalibrationStatus::FullyCalibrated {
             accuracy_estimate_db: 1.0,

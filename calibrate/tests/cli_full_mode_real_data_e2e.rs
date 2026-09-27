@@ -51,9 +51,9 @@
 mod support;
 
 use antenna_core::model::coordinates_3d::compute_emitter_direction_with_attitude;
+use antenna_core::types::{AntennaCalibration, CalibrationStatus};
 use antenna_model::api::schemas::{GainRequest, GainResponse, Position3D};
 use antenna_model::data::repository::CalibrationRepository;
-use antenna_model::data::types::{AntennaCalibration, CalibrationStatus};
 use antenna_model::model::coordinates_3d::geodetic_to_ecef;
 use antenna_model::service::compute_gain_from_request;
 use serde_json::Value;
@@ -236,7 +236,7 @@ impl GeneratedGrid {
 impl CalibrationRun {
     /// Load through the **service's** loader, not calibrate's own round-trip code.
     fn load(&self) -> AntennaCalibration {
-        antenna_model::data::loader::load_calibration_artifact(&self.artifact).unwrap_or_else(|e| {
+        antenna_core::data::loader::load_calibration_artifact(&self.artifact).unwrap_or_else(|e| {
             panic!(
                 "the service loader must accept the full-mode artifact calibrate just wrote: \
                  {e}\n{}",

@@ -418,7 +418,7 @@ impl IntegrationParams {
 
     /// Set the two gates that key off the P11 "physics is uncorrected" predicate.
     ///
-    /// `physics_is_uncorrected` is [`crate::data::types::AntennaCalibration::physics_is_uncorrected`]
+    /// `physics_is_uncorrected` is [`crate::types::AntennaCalibration::physics_is_uncorrected`]
     /// — true iff the artifact carries **no** correction surface. Both
     /// [`Self::apply_spillover`] and [`Self::apply_sidelobe_floor`] are gated on exactly
     /// that predicate when deriving the params for a **served gain**, and this setter is how

@@ -23,7 +23,7 @@
 //! as a JSON number and a non-finite one as the string `"Infinity"` / `"-Infinity"` /
 //! `"NaN"`, and reads both forms back. The artifact keeps its own encoding untouched —
 //! `AngularResolution` gains no serde attribute, which would corrupt the positional
-//! postcard format (see the note atop `antenna_core::data::types`).
+//! postcard format (see the note atop `antenna_core::types`).
 //!
 //! `ValidationReport` solved the same problem the other way and correctly so: its
 //! cross-validation aggregates are `Option<f64>` because there the meaning *is* absence —
@@ -40,7 +40,7 @@
 //! fields. Nothing here writes a binary artifact.
 
 use crate::validator::ValidationReport;
-use antenna_core::data::types::AngularResolution;
+use antenna_core::types::AngularResolution;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
@@ -165,7 +165,7 @@ mod json_f64 {
 /// positional format. The mirror is private and structurally identical, so adding a field
 /// to `AngularResolution` is a compile error here rather than a silently dropped field.
 mod angular_resolution_json {
-    use antenna_core::data::types::AngularResolution;
+    use antenna_core::types::AngularResolution;
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
     #[derive(Serialize, Deserialize)]

@@ -249,7 +249,7 @@ fn create_error_response(request: &GainRequest, error: AntennaModelError) -> Gai
 mod tests {
     use super::*;
     use crate::api::schemas::Position3D;
-    use crate::data::types::{
+    use antenna_core::types::{
         AntennaCalibration, CalibrationMetadata, FeedParameters, MeshParameters,
         PhysicalAntennaConfig, ReflectorGeometry, ValidityRanges,
     };

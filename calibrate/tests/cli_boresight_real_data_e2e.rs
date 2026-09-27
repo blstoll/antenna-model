@@ -55,11 +55,9 @@
 //! its artifact carries a correction and the service serves it with the same gates off that
 //! calibrate already used — the branch that was consistent all along.
 
+use antenna_core::types::{AntennaCalibration, CalibrationStatus, CALIBRATION_SCHEMA_VERSION};
 use antenna_model::api::schemas::{GainRequest, GainResponse, Position3D};
 use antenna_model::data::repository::CalibrationRepository;
-use antenna_model::data::types::{
-    AntennaCalibration, CalibrationStatus, CALIBRATION_SCHEMA_VERSION,
-};
 use antenna_model::model::FittedCorrectionSurface;
 use antenna_model::service::compute_gain_from_request;
 use antenna_model::warnings::WarningCode;
@@ -165,7 +163,7 @@ impl RealDataRun {
 
     /// Load through the **service's** loader, not calibrate's own round-trip code.
     fn load(&self) -> AntennaCalibration {
-        antenna_model::data::loader::load_calibration_artifact(&self.artifact).unwrap_or_else(|e| {
+        antenna_core::data::loader::load_calibration_artifact(&self.artifact).unwrap_or_else(|e| {
             panic!(
                 "the service loader must accept the artifact calibrate just wrote: {e}\n{}",
                 self.output()

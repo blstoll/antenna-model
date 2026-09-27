@@ -254,7 +254,7 @@ antennas:
 Note `feeds[].position` is the feed's design offset **from the focal point**, not
 a vertex-origin position — an on-axis feed is `[0, 0, 0]`. Reading it the other
 way puts the feed at `z ≈ 2f` and costs ~27 dB of boresight gain; see the field's
-doc comment in `antenna-core/src/data/types.rs`.
+doc comment in `antenna-core/src/types/physical_config.rs`.
 
 ## API Usage
 

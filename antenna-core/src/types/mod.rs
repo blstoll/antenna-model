@@ -1,0 +1,45 @@
+//! Calibration-artifact data types: what one `.bin` artifact carries for one
+//! antenna-feed combination.
+//!
+//! [`AntennaCalibration`] is the root; every other type here is reachable from it.
+//! Construct values with each type's `builder()` and check them with `validate()`.
+//!
+//! # Wire format: postcard is positional
+//!
+//! Artifacts are encoded with [`postcard`], which is non-self-describing and decodes
+//! fields by position. On any type reachable from [`AntennaCalibration`], do **not**
+//! add `#[serde(skip_serializing_if = ...)]`, `#[serde(skip)]`, `#[serde(flatten)]`, or
+//! untagged/internally-tagged enums: a conditionally omitted field shifts every field
+//! after it and decodes into the wrong values without error. `#[serde(default)]` alone
+//! is harmless. Adding, removing, reordering, or retyping a field changes the layout and
+//! requires a schema MAJOR and container bump — see [`CALIBRATION_SCHEMA_VERSION`].
+
+mod angular_resolution;
+mod antenna_calibration;
+mod bspline_model;
+mod calibration_coverage;
+mod calibration_status;
+mod measurement_density;
+mod metadata;
+mod parameter_source;
+mod physical_config;
+mod validation_error;
+mod validity_ranges;
+
+pub use angular_resolution::{AngularResolution, MIN_KNOTS_PER_LOBE_PERIOD};
+pub use antenna_calibration::{AntennaCalibration, AntennaCalibrationBuilder};
+pub use bspline_model::{BSplineModel4D, BSplineModel4DBuilder};
+pub use calibration_coverage::{
+    CalibrationCoverage, CalibrationCoverageBuilder, BORESIGHT_COVERAGE_CONE_DEG,
+};
+pub use calibration_status::CalibrationStatus;
+pub use measurement_density::MeasurementDensity;
+pub use metadata::{CalibrationMetadata, CalibrationMetadataBuilder, CALIBRATION_SCHEMA_VERSION};
+pub use parameter_source::ParameterSource;
+pub use physical_config::{
+    FeedParameters, FeedParametersBuilder, MeshParameters, MeshParametersBuilder,
+    PhysicalAntennaConfig, PhysicalAntennaConfigBuilder, ReflectorGeometry,
+    ReflectorGeometryBuilder,
+};
+pub use validation_error::ValidationError;
+pub use validity_ranges::{ValidityRanges, ValidityRangesBuilder};

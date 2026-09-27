@@ -24,9 +24,6 @@ pub mod service;
 // this crate — keeps resolving unchanged.
 pub use antenna_core::{error, model, warnings};
 
-// Re-export commonly used types for convenience
-pub use data::{AntennaCalibration, BSplineModel4D, CalibrationMetadata, ValidityRanges};
-
 pub use config::{AntennaConfig, ServiceConfig};
 
 // Re-export the response-warning vocabulary (roadmap C8 stage 3)

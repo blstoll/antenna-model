@@ -89,8 +89,9 @@ the dep-graph script.
 
 Work may originate from either **roadmap units** with IDs (`D21`, `P13`, `C15`, `F6`, `S3`)
 defined in `docs/roadmap-2026-07-work-units.md` or tickets in this repository's issue tracker.
-Code comments, docs and commit subjects cite whichever source governs the change (for example,
-`D21` or `#60`). Never commit to `main` — branch first. For implementing a roadmap unit and
+Commit subjects, PR bodies, and docs cite the source that governs a change (for example `D21` or `#60`). Rustdoc states what an item is and how to use it. Code comments explain what the code can't — pitfalls, non-obvious constraints.
+
+Never commit to `main` — branch first. For implementing a roadmap unit and
 opening its PR, use the `roadmap-unit` skill.
 
 ## Architecture
@@ -108,9 +109,10 @@ Three members (roadmap D4). The split is an enforced boundary, not just layout �
 
 Two things about this that the code will not tell you:
 
-- `antenna-model` glob-re-exports what moved to core, so both paths compile forever and
-  nothing will ever flag the older one. **The canonical home of a physics or artifact type
-  is `antenna_core::…` — prefer that path in new code.**
+- **Calibration-artifact types have exactly one path: `antenna_core::types::…`** (#104). Neither
+  `antenna-model` nor `antenna_core::data` re-exports them; the loader is
+  `antenna_core::data::loader`. `antenna-model` still re-exports `antenna_core::{error, model,
+  warnings}`, so those compile under both paths — prefer `antenna_core::…` in new code.
 - **`calibrate` keeps `antenna-model` as a *dev*-dependency, and it must stay one.** It looks
   unused: do not remove it. `calibrate/tests/**` serve generated artifacts through the real
   service path (`service::compute_gain_from_request`), which is what caught the 27.3 dB C13
@@ -129,7 +131,7 @@ lives in `service/served_gain.rs` (issue #61). `/gain` runs through it today; `/
 uses its coverage and warning helpers and migrates onto the prepared value's cache-backed
 evaluation (added by #62) in #63. Both modules' docs carry the authoritative step-by-step
 diagram — read those rather than a copy.
-`AntennaCalibration` (`antenna-core/src/data/types.rs`) is loaded at startup from the `.bin`
+`AntennaCalibration` (`antenna-core/src/types/antenna_calibration.rs`) is loaded at startup from the `.bin`
 artifacts `antennas.yaml` names; see `.claude/rules/calibration.md` before touching it.
 
 ### Configuration System

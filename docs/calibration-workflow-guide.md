@@ -1200,7 +1200,7 @@ Single calibration status for the entire heatmap (same antenna/feed):
 
 ### 7.1 CalibrationStatus Enum
 
-The `CalibrationStatus` enum in `antenna-core/src/data/types.rs` defines three variants:
+The `CalibrationStatus` enum in `antenna-core/src/types/calibration_status.rs` defines three variants:
 
 ```rust
 pub enum CalibrationStatus {
@@ -1836,7 +1836,7 @@ confuse because they all sound like "the version" — they answer different ques
 | Axis | Type | Location | Question it answers |
 |------|------|----------|----------------------|
 | ANTC **container** version | `u32` (file header, *outside* the payload) | `ANTC_ARTIFACT_VERSION` in `data/loader.rs` | How do file bytes become a payload byte string — the `[magic][version][crc32][len]` framing and which codec decodes the payload? Bumped 1→2 on the bincode→postcard migration, 2→3 by D23's layout change (a version-2 payload is one `f64` short, and postcard reads positionally, so the decode itself cannot be trusted), 3→4 by D21's for the same reason one field earlier. |
-| **Schema** version (`format_version`) | `String` `"MAJOR.MINOR"` (*inside* the payload) | `CALIBRATION_SCHEMA_VERSION` in `data/types.rs`, stamped into `CalibrationMetadata::format_version` | What does the decoded `AntennaCalibration` **mean** — which fields exist, in what order, meaning what? |
+| **Schema** version (`format_version`) | `String` `"MAJOR.MINOR"` (*inside* the payload) | `CALIBRATION_SCHEMA_VERSION` in `antenna-core/src/types/metadata.rs`, stamped into `CalibrationMetadata::format_version` | What does the decoded `AntennaCalibration` **mean** — which fields exist, in what order, meaning what? |
 | **Physics-model** version | `u32` (inside the payload) | `CalibrationMetadata::physics_model_version` | Which `gain_physics` implementation was this artifact's correction surface fitted against? |
 
 `physics_model_version` is orthogonal to the other two: an artifact can decode
@@ -1849,7 +1849,7 @@ even though the file itself is perfectly readable. It is covered in §10.5.2.
 #### 10.5.1 Container vs schema: why both exist
 
 *(Reconciled by roadmap unit D2, 2026-07-30. Authoritative statement of the
-relationship: the module docs on `antenna-model/src/data/loader.rs`.)*
+relationship: the module docs on `antenna-core/src/data/loader.rs`.)*
 
 The two decoding-side axes are **not** redundant, and neither can be derived from
 the other, because they are readable at different moments:
@@ -1884,6 +1884,10 @@ already-written full-mode artifact means, with no way for a consumer to tell —
 old meaning costs 27.3 dB. "Documented or clarified" (MINOR, warn-and-load) does not cover it:
 a warning is not enough when the numbers are wrong. Schema went to **3.0**, container stayed
 at 2 — the axes moving independently is the scheme working, not a mistake.
+The collateral — every pre-3.0 artifact is rejected, including boresight and
+design-spec-derived ones that were always correct — was accepted because artifacts are
+regenerable by policy and no production artifact ships in-repo (D9); the fix is to re-run the
+producer. If that stops being true, revisit this decision.
 
 **Stamp the constant, never a literal — and derive test stamps from it too.** The 3.0 bump
 found seven hardcoded copies of the version: three producers writing `"2.0"` by hand
@@ -1895,7 +1899,12 @@ default. All of them now derive from `CALIBRATION_SCHEMA_VERSION`.
 
 **Committed `.bin` fixtures must be carried across a bump.** Two exist —
 `antenna-model/tests/fixtures/calibration_data/test_uncalibrated_{x,s}band_boresight.bin`,
-legacy headerless files the postcard migration already regenerated once. For 3.0 they were
+which the postcard migration already regenerated once. They were headerless until D27
+(2026-08-14) removed the loader's headerless fallback and reframed both in place: a 20-byte
+ANTC prepend, payload bytes untouched. Restamping them for a future bump therefore means
+re-encoding the *payload* and re-framing it with `loader::encode_calibration_artifact`, not
+rewriting the file whole. Because they are carried across bumps this way rather than by re-running
+`calibrate`, the regeneration commands in `antenna-model/tests/README.md` do not reproduce them. For 3.0 they were
 **restamped, not rewritten**: decoded, `format_version` set, re-encoded, so every other value
 is bit-identical. Check first that the artifact does not carry the defect the bump exists to
 reject — restamping a wrong artifact launders it past the new gate. (For C13 that check is
@@ -1988,15 +1997,13 @@ this build thinks they mean, so nothing should read them.
 (`export_full_calibration`) and boresight mode (`build_calibration_artifact`)
 alike, so the two producers cannot drift apart on framing. Until 2026-07-30
 boresight mode wrote a bare `postcard::to_allocvec` with no magic, no container
-version and no CRC; the service accepted it only through the legacy headerless
-fallback below. Round-tripped by `calibrate/tests/cli_full_mode_e2e.rs` and
+version and no CRC; the service accepted it only through a legacy headerless
+fallback, since removed (below). Round-tripped by `calibrate/tests/cli_full_mode_e2e.rs` and
 `calibrate/tests/cli_boresight_mode_e2e.rs`, one per producer.
 
-**The headerless reader is backward compatibility only.** `load_calibration_artifact`
-still accepts a payload with no ANTC header (no magic → decode the whole file).
-Nothing this repo produces relies on that path any more, and it is not a supported
-output format: such a file has no container stamp to check and no checksum, so its
-only version guard is the schema stamp inside the payload.
+**ANTC framing is required on load.** D27 (2026-08-14) removed the headerless fallback:
+a file with no ANTC magic is rejected, since it has no container stamp to check and no
+checksum.
 
 #### 10.5.2 Physics-model versioning
 

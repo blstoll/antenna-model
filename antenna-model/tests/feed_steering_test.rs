@@ -6,11 +6,11 @@
 
 use antenna_model::api::schemas::{GainRequest, Position3D};
 
-use antenna_model::data::repository::CalibrationRepository;
-use antenna_model::data::types::{
+use antenna_core::types::{
     AntennaCalibration, CalibrationMetadata, CalibrationStatus, FeedParameters, MeshParameters,
     PhysicalAntennaConfig, ReflectorGeometry, ValidityRanges,
 };
+use antenna_model::data::repository::CalibrationRepository;
 use antenna_model::service::evaluator::{
     compute_gain_from_request, compute_gain_from_request_with_budget,
 };

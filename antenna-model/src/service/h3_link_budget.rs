@@ -32,7 +32,7 @@ use crate::service::served_gain::{
 };
 use crate::service::GainCache;
 use crate::warnings::{ApiWarning, WarningCode};
-use antenna_core::data::types::AntennaCalibration;
+use antenna_core::types::AntennaCalibration;
 use rayon::prelude::*;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -433,7 +433,7 @@ fn compute_cell_result(
 mod tests {
     use super::*;
     use crate::service::test_support::install_correction_surface;
-    use antenna_core::data::types::{
+    use antenna_core::types::{
         AntennaCalibration, BSplineModel4D, CalibrationCoverage, CalibrationMetadata,
         CalibrationStatus, FeedParameters, MeshParameters, PhysicalAntennaConfig,
         ReflectorGeometry, ValidityRanges,

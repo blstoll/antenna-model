@@ -1417,10 +1417,20 @@ antenna-model/                       # Cargo workspace root (3 members, roadmap 
 │       │   ├── phase.rs             # Path / coma / mesh phase functions
 │       │   └── ray_trace.rs         # Large-feed-offset stub
 │       │
-│       └── data/                    # Calibration artifact layer
+│       ├── types/                   # Calibration-artifact types, one file per type
+│       │   ├── mod.rs               # Postcard layout rules; re-exports
+│       │   ├── antenna_calibration.rs   # AntennaCalibration (artifact root)
+│       │   ├── metadata.rs          # CalibrationMetadata, CALIBRATION_SCHEMA_VERSION
+│       │   ├── bspline_model.rs     # BSplineModel4D (correction-surface wire type)
+│       │   ├── physical_config.rs   # Reflector / feed / mesh parameters
+│       │   ├── calibration_status.rs, calibration_coverage.rs
+│       │   ├── angular_resolution.rs, validity_ranges.rs
+│       │   ├── parameter_source.rs, measurement_density.rs
+│       │   └── validation_error.rs
+│       │
+│       └── data/
 │           ├── mod.rs
-│           ├── loader.rs            # ANTC header + postcard decode
-│           └── types.rs             # AntennaCalibration and friends
+│           └── loader.rs            # ANTC header + postcard decode
 │
 ├── antenna-model/                   # REST API service (depends on antenna-core
 │   ├── Cargo.toml                   #   with the `openapi` feature)
@@ -1450,7 +1460,7 @@ antenna-model/                       # Cargo workspace root (3 members, roadmap 
 │   │   │   └── test_support.rs
 │   │   │
 │   │   ├── data/                    # Data management
-│   │   │   ├── mod.rs               # Re-exports antenna_core::data::{loader,types}
+│   │   │   ├── mod.rs
 │   │   │   └── repository.rs        # Calibration data access (service-side)
 │   │   │
 │   │   ├── config/                  # Configuration

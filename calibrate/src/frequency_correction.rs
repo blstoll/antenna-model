@@ -38,8 +38,8 @@
 //! threshold wrote a `.bin` the service refused (roadmap D13). The core layout now refuses
 //! that construction itself (issue #95).
 
-use antenna_core::data::types::BSplineModel4D;
 use antenna_core::model::{ClampedAxis, CorrectionSurfaceLayout, FittedCorrectionSurface};
+use antenna_core::types::BSplineModel4D;
 use thiserror::Error;
 
 /// Span of the flat E-clock axis, in degrees.
@@ -56,7 +56,7 @@ use thiserror::Error;
 /// spans. That coverage is an on-axis **cone**, not a point: boresight is the pole
 /// of the (azimuth, polar-angle) system, so azimuth is degenerate there and
 /// coverage constrains elevation alone, to
-/// [`BORESIGHT_COVERAGE_CONE_DEG`](antenna_core::data::types::BORESIGHT_COVERAGE_CONE_DEG).
+/// [`BORESIGHT_COVERAGE_CONE_DEG`](antenna_core::types::BORESIGHT_COVERAGE_CONE_DEG).
 /// Writing it as `az ∈ [0,0] ∧ el ∈ [0,0]` — as boresight mode did until
 /// 2026-07-31 — constrains a coordinate that carries no information at the pole,
 /// and so rejected the very point it was meant to cover: the azimuth of a
@@ -98,7 +98,7 @@ pub enum FrequencyCorrectionError {
 
     /// The core layout refused the surface this module described (GitHub issue #95).
     #[error("Invalid correction-surface construction: {0}")]
-    InvalidSurface(#[from] antenna_core::data::types::ValidationError),
+    InvalidSurface(#[from] antenna_core::types::ValidationError),
 }
 
 /// Result type for frequency correction operations.

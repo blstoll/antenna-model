@@ -18,6 +18,7 @@
 pub mod data;
 pub mod error;
 pub mod model;
+pub mod types;
 pub mod warnings;
 
 // Re-export the response-warning vocabulary (roadmap C8 stage 3)
@@ -28,6 +29,3 @@ pub use error::{
     AntennaModelError, ApiError, ApiResult, ComputationError, ComputationResult, ConfigError,
     ConfigResult, DataError, DataResult, ErrorContext, Result, ValidationError, ValidationResult,
 };
-
-// Re-export commonly used types for convenience
-pub use data::{AntennaCalibration, BSplineModel4D, CalibrationMetadata, ValidityRanges};
