@@ -3,16 +3,8 @@
 //! Companion to `cli_full_mode_e2e.rs`. Together the two files satisfy roadmap unit D2's
 //! "a round-trip test covers **both** producers": full mode goes through
 //! `artifact_export::export_full_calibration`, boresight mode through
-//! `boresight_calibration::build_calibration_artifact`, and both must now write the same
-//! ANTC container framing and load through the *service's* loader.
-//!
-//! This file exists because they did not. Until 2026-07-30 the boresight path wrote a bare
-//! `postcard::to_allocvec` — no magic, no container version, no CRC — which the service
-//! accepted only via its legacy headerless fallback. Nothing was visibly broken, which is
-//! precisely the hazard: the artifact carried no container stamp for
-//! `ANTC_ARTIFACT_VERSION` to check, so a future framing change would have mis-decoded it
-//! silently instead of being rejected, and no checksum, so corruption surfaced as wrong
-//! numbers rather than a load failure. Both are now asserted below.
+//! `boresight_calibration::build_calibration_artifact`, and both must write the same ANTC
+//! container framing — container stamp and CRC — and load through the *service's* loader.
 
 use antenna_core::data::loader::{ANTC_ARTIFACT_VERSION, ANTC_HEADER_LEN, ANTC_MAGIC};
 use antenna_core::types::{
@@ -45,12 +37,7 @@ frequency_mhz,g_over_t_db,temperature_k
 /// clears `should_fit_correction`'s 0.5 dB threshold and the run attaches a frequency
 /// correction surface.
 ///
-/// That branch was **unloadable** until 2026-07-31 (roadmap D13): `fit_frequency_correction`
-/// built its azimuth/elevation/temperature axes as `order` equal knots over a single
-/// coefficient layer, which the artifact loader rejects — so the service refused every
-/// boresight artifact that carried a correction. D2 could only pin the framing on the
-/// no-correction path for exactly that reason. This fixture exists to hold the other path
-/// open.
+/// This fixture holds the correction-carrying boresight path open (D13).
 const RIPPLED_BORESIGHT_CSV: &str = "\
 frequency_mhz,g_over_t_db,temperature_k
 7100,22.5,290
@@ -218,11 +205,7 @@ fn boresight_fixture_stays_below_the_correction_fit_threshold() {
     );
 }
 
-/// The D13 regression test at CLI level: a boresight run whose residuals trip the fitting
-/// threshold must produce an artifact the **service's own loader** accepts.
-///
-/// Before the fix this failed at `load_calibration_artifact` with an `InvalidKnotVector`
-/// on the azimuth axis — the whole boresight-plus-correction path was dead on arrival.
+/// Guards against a correction-carrying boresight artifact the service loader refuses (D13).
 #[test]
 fn a_boresight_artifact_carrying_a_frequency_correction_loads() {
     let run = run_boresight_over(RIPPLED_BORESIGHT_CSV);
@@ -289,9 +272,8 @@ fn boresight_coverage_is_written_as_an_on_axis_cone() {
     );
 
     // `CalibrationCoverage::contains_direction_at_frequency` — the type's own range
-    // test, on the azimuth a boresight-aimed query really produces. Since issue #60
-    // this IS what the served path runs: `service::served_gain::is_in_coverage` delegates
-    // here rather than carrying its own copy. The served path is asserted separately by
+    // test, on the azimuth a boresight-aimed query really produces. The served path's
+    // `service::served_gain::is_in_coverage` delegates here (#60). The served path is asserted separately by
     // `evaluator::tests::a_boresight_aimed_query_gets_the_boresight_correction_applied`.
     assert!(
         coverage.contains_direction_at_frequency(63.43, 0.0, 7800.0),
@@ -319,11 +301,9 @@ fn boresight_coverage_is_written_as_an_on_axis_cone() {
 
 /// The correction the artifact carries must also *evaluate* to something real at boresight.
 ///
-/// A "fix" that only lengthened the degenerate knot vectors once satisfied the loader and
-/// would still fail here: an axis with an empty evaluable span drives its basis functions to
-/// zero and collapses the correction to 0 dB, which would look exactly like a
-/// correctly-loaded surface that happens to correct nothing. (Since issue #95 the loader
-/// refuses such an axis too; this test pins the served value independently.)
+/// An axis with an empty evaluable span drives its basis functions to zero and collapses the
+/// correction to 0 dB, which looks like a loaded surface that corrects nothing. The loader
+/// refuses such an axis (#95); this test pins the served value independently.
 #[test]
 fn the_carried_frequency_correction_evaluates_to_a_real_value() {
     let run = run_boresight_over(RIPPLED_BORESIGHT_CSV);

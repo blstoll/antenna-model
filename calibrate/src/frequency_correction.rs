@@ -32,11 +32,8 @@
 //! # Why the collapsed axes are *flat*, not degenerate
 //!
 //! The E-clock and E-cone axes are [`ClampedAxis::flat`]: `order + 1` identical coefficient
-//! layers over a real span, so the surface is exactly constant along them. Until 2026-07-31
-//! they were one layer over `order` equal knots — an axis with nothing to evaluate over,
-//! which the service loader rejected, so every boresight run that tripped the 0.5 dB
-//! threshold wrote a `.bin` the service refused (roadmap D13). The core layout now refuses
-//! that construction itself (issue #95).
+//! layers over a real span, so the surface is exactly constant along them. One layer over
+//! `order` equal knots has nothing to evaluate over, and the core layout refuses it (D13, #95).
 
 use antenna_core::model::{ClampedAxis, CorrectionSurfaceLayout, FittedCorrectionSurface};
 use antenna_core::types::BSplineModel4D;
@@ -57,11 +54,9 @@ use thiserror::Error;
 /// of the (azimuth, polar-angle) system, so azimuth is degenerate there and
 /// coverage constrains elevation alone, to
 /// [`BORESIGHT_COVERAGE_CONE_DEG`](antenna_core::types::BORESIGHT_COVERAGE_CONE_DEG).
-/// Writing it as `az ∈ [0,0] ∧ el ∈ [0,0]` — as boresight mode did until
-/// 2026-07-31 — constrains a coordinate that carries no information at the pole,
-/// and so rejected the very point it was meant to cover: the azimuth of a
-/// boresight-aimed query is `atan2` on float noise (measured: 63.43°). See
-/// `boresight_calibration::build_calibration_artifact`.
+/// Do not write it as `az ∈ [0,0] ∧ el ∈ [0,0]`: that constrains a coordinate carrying
+/// no information at the pole, and rejects a boresight-aimed query whose azimuth is
+/// `atan2` on float noise. See `boresight_calibration::build_calibration_artifact`.
 const E_CLOCK_AXIS_DEG: (f64, f64) = (0.0, 360.0);
 
 /// Span of the flat E-cone axis, in degrees. E-cone reaches the service's
@@ -427,8 +422,7 @@ mod tests {
     /// residuals are used **as control points**, not fitted, so at interior
     /// frequencies the correction is a smoothed version of the residual sequence
     /// rather than an interpolant of it. The deviation is bounded by how fast the
-    /// residuals vary between samples. Not fixed here (this unit is about the
-    /// artifact being loadable at all); recorded on roadmap D13.
+    /// residuals vary between samples. Recorded on roadmap D13.
     #[test]
     fn frequency_control_points_are_not_interpolated() {
         // A deliberately spiky residual sequence maximises the smoothing gap.
@@ -526,7 +520,7 @@ mod tests {
     }
 
     /// Pins the spline order this module intentionally preserves: **order 3, quadratic**
-    /// (degree 2), not the cubic its comments claimed before issue #95. Moving to cubic is a
+    /// (degree 2), not cubic (#95). Moving to cubic is a
     /// served-value decision, so it must fail this test rather than slip in.
     ///
     /// Numerically, not just by the stamp: on one knot span a degree-2 polynomial has a

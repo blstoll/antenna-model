@@ -287,11 +287,7 @@ impl CalibrationRepository {
                 // (positional, non-self-describing), so these cannot become `Option`
                 // without a format bump — see roadmap D2. The API surfaces them with
                 // `#[serde(with = "nan_as_null")]`, so this NaN reaches the client as a
-                // deliberate JSON `null` (roadmap C12, 2026-07-28), matching gain_db.
-                //
-                // Note `data/loader.rs:268,275` warns on `rmse_db > 1.0` / `r_squared <
-                // 0.95`; both comparisons are false for NaN, so design-spec antennas load
-                // without a spurious quality warning. That is intended — do not "fix" it.
+                // deliberate JSON `null` (C12), matching gain_db.
                 rmse_db: f64::NAN,
                 r_squared: f64::NAN,
                 num_measurements: 0,
@@ -587,13 +583,7 @@ mod tests {
     }
 
     /// Write an artifact the way a real producer does — ANTC framing around the postcard
-    /// payload, matching `calibrate::artifact_export::write_calibration_artifact`.
-    ///
-    /// This used to write a bare `postcard::to_allocvec`, which meant every load test in this
-    /// module went down the loader's legacy headerless branch and none exercised the version
-    /// gate or the CRC32 (roadmap D27 finding 9). That branch no longer exists, so these
-    /// tests would now fail at the framing check — but the point is that they were testing
-    /// the wrong path even while they passed.
+    /// payload, matching `calibrate::artifact_export::write_calibration_artifact` (D27).
     fn write_calibration_file(calibration: &AntennaCalibration) -> NamedTempFile {
         let bytes = antenna_core::data::loader::encode_calibration_artifact(calibration).unwrap();
 
@@ -1299,8 +1289,8 @@ antennas:
         assert_eq!(x_band.validity_ranges.temperature_const, 290.0);
     }
 
-    /// Live control for the test above: the antenna-level block that used to override those
-    /// per-feed ranges is now rejected outright rather than ignored.
+    /// Live control for the test above: an antenna-level validity-ranges block is rejected,
+    /// not silently ignored (#56).
     #[test]
     fn test_uncalibrated_antenna_with_stale_validity_ranges_is_rejected() {
         let temp_dir = TempDir::new().unwrap();

@@ -354,9 +354,8 @@ fn compute_h3_link_budget_with_traversal(
 
 /// A cell's per-cell quantities, computed before the grid peak is known.
 ///
-/// `loss_db` and `total_path_loss_db` are deliberately absent: since roadmap C9 they are
-/// referenced to the peak gain over the whole grid, which cannot be known until every cell
-/// has been evaluated. Keeping them out of this struct makes the second pass mandatory —
+/// `loss_db` and `total_path_loss_db` are deliberately absent: they are referenced to the peak gain over the whole grid, which cannot be known until every cell
+/// has been evaluated (C9). Keeping them out of this struct makes the second pass mandatory —
 /// `H3CellResult` is constructed only there, so a cell cannot escape with an unfilled loss.
 struct PeakIndependentCell {
     cell_id: String,
@@ -1270,10 +1269,8 @@ mod tests {
         }
     }
 
-    /// Issue #63 regression: a severe feed offset normally selects the ray-tracing stub,
-    /// but an uncorrected rear-hemisphere direction takes the floor-only shortcut before
-    /// that dispatch. H3 must consume the served warning set and therefore must not restore
-    /// the ray-trace warning that the skipped operation never earned.
+    /// Guards against H3 inventing a ray-trace warning for a rear-floor shortcut that never
+    /// reached the ray-trace dispatch (#63).
     #[test]
     fn h3_rear_floor_shortcut_does_not_invent_ray_trace_warning() {
         use crate::data::repository::CalibrationRepository;
@@ -1377,13 +1374,10 @@ mod tests {
         }
     }
 
-    /// C9 regression: `loss_db` is referenced to the **grid peak**, not the grid centre.
+    /// Guards against referencing `loss_db` to the grid centre instead of the grid peak (C9).
     ///
-    /// The design feed is displaced laterally by 0.3 m on a 10 m / f=5 m dish (0.06·f), which
-    /// steers the beam well off the pointing target, so the peak cell is emphatically *not*
-    /// the centre cell. Under the pre-C9 centre-cell reference this geometry produced
-    /// `loss_db == 0` at the centre and **negative** losses at the stronger cells; the
-    /// assertions below fail outright on that code.
+    /// A 0.3 m lateral feed displacement on a 10 m / f=5 m dish steers the peak well off the
+    /// centre cell, so a centre reference yields negative losses at the stronger cells.
     #[test]
     fn h3_loss_is_referenced_to_the_grid_peak_not_the_centre_cell() {
         let mut calibration = make_h3_test_calibration();
@@ -1400,8 +1394,8 @@ mod tests {
         assert_eq!(response.cells.len(), 19, "n_rings=2 must yield 19 cells");
         assert_eq!(response.metadata.failed_points, 0, "no cell should fail");
 
-        // Non-vacuous: the steered beam must actually put the peak off the centre cell,
-        // otherwise this test would pass under the old rule too.
+        // Non-vacuous: the steered beam must actually put the peak off the centre cell, or a
+        // centre-referenced loss would pass too.
         let centre = response
             .cells
             .iter()

@@ -146,18 +146,8 @@ pub struct ExportPhysicalParams {
 ///
 /// What `surface`'s knots can resolve against this antenna's own `λ/D` (roadmap D21) is
 /// computed inside this function, from `physical.diameter_m` — the *same* field it stamps
-/// into the artifact's `reflector.diameter_m` a few lines below.
-///
-/// It used to be a parameter, justified by a doc comment claiming the diameter "lives on the
-/// antenna class, which this function only sees the already-flattened
-/// [`ExportPhysicalParams`] view of". That was simply false — `ExportPhysicalParams` carries
-/// `diameter_m` and this function stamps it — and the caller assessed against a second,
-/// independent read (`class.geometry.diameter_m`), so an artifact could describe one antenna
-/// in `diameter_m` and a different one in `angular_resolution`. That is the invariant C13 and
-/// D23 established two lines from here: **every parameter the fitting model uses must be in
-/// the artifact, or the artifact describes something other than what it serves.** Roadmap
-/// **D26** finding 2; taking the parameter away is what makes the two agree by construction
-/// rather than by a caller's care.
+/// into the artifact's `reflector.diameter_m` a few lines below — so the two cannot describe
+/// different antennas. Do not make it a parameter again. See D26.
 ///
 /// `served_behavior_rmse_db` describes the value the service returns at every validation point:
 /// physics plus correction in support, and physics-only outside support. The artifact's generic
@@ -234,17 +224,10 @@ pub fn export_full_calibration(
     // must already be in that convention — which is why the parser reflects a negative-cone
     // row onto `(clock + 180°, |cone|)` on the way in (`MeasurementPoint::to_polar_convention`).
     //
-    // This *was* `.max(0.0)` / `.min(90.0)`, a silent clamp, and negative E-cone is legal
-    // validated input (`MeasurementPoint::validate` admits [-90, 90]). For a one-sided cut
-    // recorded as -14°…0° the clamp collapsed the range to `(0.0, 0.0)`: the artifact then
-    // reported `is_boresight_only()` over thousands of measurements, and `contains()` admitted
-    // no elevation but exactly 0.0 — so the service applied **no correction at all** while
-    // every health signal read normal. A wholly-negative span such as -14°…-1° produced the
-    // inverted `(0.0, -1.0)`, rejecting everything by construction. Roadmap **D26** finding 1.
-    //
-    // Failing loudly here rather than clamping is deliberate: a clamp cannot distinguish
-    // "already in the right convention" from "silently truncated", which is exactly how this
-    // went unseen. If it fires, the input never went through the normalization above.
+    // Refuse rather than clamp: a clamp cannot tell "already in the polar convention" from
+    // "silently truncated", and a truncated cone extent serves no correction at all while
+    // every health signal reads normal. If this fires, the input skipped the normalization
+    // above. See D26.
     let (cone_lo, cone_hi) = domain.e_cone_deg;
     if !(0.0..=90.0).contains(&cone_lo) || !(0.0..=90.0).contains(&cone_hi) || cone_lo > cone_hi {
         return Err(ArtifactExportError::BuildFailed {
@@ -445,12 +428,8 @@ mod tests {
 
         // Sample interior points AND the exact domain boundaries of every axis
         // (fitted ranges: clock [0, 350], cone [0, 10], freq [8000, 8400]) —
-        // including the temperature boundaries of the synthetic 4D axis. Boundary
-        // sampling added 2026-07-30 after the D15 endpoint fix: interior-only
-        // sampling left the two implementations' boundary behavior uncompared (see
-        // docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md,
-        // "Why it went unnoticed"), so any future divergence at an edge would have
-        // gone unseen here.
+        // including the temperature boundaries of the synthetic 4D axis: interior-only
+        // sampling cannot see a divergence at an edge (D15).
         let clocks = [
             0.0, 10.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0, 349.0, 350.0,
         ];

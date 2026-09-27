@@ -32,9 +32,9 @@
 //!    disconnected pieces. Order 1 is piecewise constant by definition, so an order-1
 //!    interior knot may appear once.
 //!
-//! Rules 1–4 used to be the loader's ("artifact rules") and 5–7 the fitter's ("fitting
-//! rules"). They are one set now: an artifact can only hold a layout the fitter could have
-//! built, so a surface's support is always `[lower, upper]` of its [`ClampedAxis`].
+//! Artifacts and the fitter share this one set, so an artifact can only hold a layout the
+//! fitter could have built, and a surface's support is always `[lower, upper]` of its
+//! [`ClampedAxis`]. See #95.
 //!
 //! Schema 5's synthetic temperature axis is not executable — no query has a temperature
 //! coordinate — so it is held to the same rules only when this module *writes* it; on
@@ -1073,7 +1073,7 @@ mod tests {
 
     #[test]
     fn an_end_knot_repeated_more_than_order_times_is_rejected() {
-        // The pre-D19 fitter's defect: a bound at multiplicity order + 1 gives one basis
+        // A bound at multiplicity order + 1 gives one basis
         // function zero-width support. Shape agrees with length, so only the multiplicity
         // rule can catch it.
         let error = layout_error([3, 2, 2], vec![0.0, 0.0, 0.0, 10.0, 10.0], 2);
@@ -1142,8 +1142,7 @@ mod tests {
 
     #[test]
     fn a_knot_vector_whose_length_disagrees_with_shape_is_rejected() {
-        // Surplus knots: schema 5 used to admit `len > shape + order`, leaving basis
-        // positions with no coefficient. No producer ever wrote one.
+        // Surplus knots leave basis positions with no coefficient.
         let error = layout_error([2, 2, 2], vec![0.0, 0.0, 5.0, 10.0, 10.0], 2);
         assert_e_clock_rejected(error, "shape 2 + order 2");
         // Too short.

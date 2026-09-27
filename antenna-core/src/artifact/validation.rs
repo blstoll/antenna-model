@@ -9,6 +9,9 @@ use crate::types::{
 
 type Checked = Result<(), ValidationError>;
 
+/// Largest `cos^q` feed-illumination exponent an artifact may carry; real feeds sit at 6–12.
+const Q_FACTOR_MAX: f64 = 20.0;
+
 /// Checks every artifact invariant, failing on the first one broken.
 pub(super) fn validate(calibration: &AntennaCalibration) -> Checked {
     non_empty("antenna_id", &calibration.antenna_id)?;
@@ -93,13 +96,13 @@ fn reflector(reflector: &ReflectorGeometry) -> Checked {
     Ok(())
 }
 
-/// `q_factor` in `[0, 20]`; `asymmetry_factor` finite and positive.
+/// `q_factor` in `[0, Q_FACTOR_MAX]`; `asymmetry_factor` finite and positive.
 fn feed(feed: &FeedParameters) -> Checked {
-    if feed.q_factor < 0.0 || feed.q_factor > 20.0 {
+    if feed.q_factor < 0.0 || feed.q_factor > Q_FACTOR_MAX {
         return Err(invalid_parameter(
             "q_factor",
             feed.q_factor,
-            "must be between 0 and 20",
+            format!("must be between 0 and {Q_FACTOR_MAX}"),
         ));
     }
     // Mirrors `model::geometry::FeedParameters::validate`, but fails at construction
@@ -317,7 +320,9 @@ mod tests {
     #[test]
     fn feed_parameters_must_be_in_domain() {
         assert_eq!(
-            rejected_parameter(with_physical(|c| c.feed.q_factor = 21.0)),
+            rejected_parameter(with_physical(
+                |c| c.feed.q_factor = super::Q_FACTOR_MAX + 1.0
+            )),
             "q_factor"
         );
         for asymmetry in [0.0, f64::NAN, f64::INFINITY] {
@@ -373,8 +378,7 @@ mod tests {
         ));
     }
 
-    /// Guards against a meaningless recorded angular-resolution assessment loading
-    /// cleanly (D26 finding 5).
+    /// Guards against an uninterpretable angular-resolution assessment building (D26).
     #[test]
     fn an_uninterpretable_angular_resolution_is_refused() {
         let with_resolution = |resolution| {
@@ -443,11 +447,9 @@ mod tests {
         #[test]
         fn coefficient_count_must_match_shape() {
             assert_eq!(
-                rejection(with_surface(|s| s
-                    .coefficients
-                    .pop()
-                    .map(drop)
-                    .unwrap_or(()))),
+                rejection(with_surface(|s| {
+                    s.coefficients.pop();
+                })),
                 ValidationError::InconsistentShape {
                     expected: 8,
                     actual: 7
@@ -498,8 +500,7 @@ mod tests {
         }
     }
 
-    /// Coverage is an artifact invariant, contained by — not equal to — the correction
-    /// surface's fitted support (#97).
+    /// Coverage must lie within, not equal, the surface's fitted support (#97).
     mod coverage_containment {
         use super::*;
 
@@ -549,8 +550,7 @@ mod tests {
             assert_eq!(calibration.coverage(), Ok(Some(&coverage)));
         }
 
-        /// Containment is inclusive: a coverage bound equal to a support bound is inside,
-        /// and the next representable value past it on any axis is not.
+        /// Guards against containment going exclusive at a support bound (#97).
         #[test]
         fn containment_is_inclusive_at_every_support_bound() {
             type AxisOf = fn(&mut CorrectionDomain) -> &mut (f64, f64);

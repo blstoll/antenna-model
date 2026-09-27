@@ -971,8 +971,7 @@ frequency_mhz,g_over_t_db,temperature_k
 
     /// **Roadmap D23, boresight producer half.** The artifact must carry the design spec's
     /// declared `asymmetry_factor`, and `compute_predictions` must tune against the same
-    /// value — the two used to disagree by construction, since `compute_predictions`
-    /// hardcoded `1.0` while the artifact had nowhere to record anything.
+    /// value.
     ///
     /// This is the D17 rule (calibrate tunes under what the service will serve) applied to a
     /// model parameter rather than an integration gate. Its sibling per-producer guards are
@@ -1202,9 +1201,8 @@ frequency_mhz,g_over_t_db,temperature_k
 
         let correction = correction_result.unwrap();
 
-        // Verify the flat-axis 4D structure: azimuth, elevation and temperature
-        // carry order + 1 = 4 identical layers each (D13, 2026-07-31 — a single
-        // layer over degenerate knots is what the service loader used to reject).
+        // Azimuth, elevation and temperature are flat: order + 1 = 4 identical layers each,
+        // since a single layer over degenerate knots has no support (D13).
         assert_eq!(correction.shape[0], 4); // Azimuth: flat
         assert_eq!(correction.shape[1], 4); // Elevation: flat
         assert_eq!(correction.shape[2], 4); // Frequency: 4 control points
