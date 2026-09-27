@@ -20,10 +20,13 @@ mod antenna_calibration;
 mod bspline_model;
 mod calibration_coverage;
 mod calibration_status;
+mod feed_parameters;
 mod measurement_density;
+mod mesh_parameters;
 mod metadata;
 mod parameter_source;
 mod physical_config;
+mod reflector_geometry;
 mod validation_error;
 mod validity_ranges;
 
@@ -34,13 +37,12 @@ pub use calibration_coverage::{
     CalibrationCoverage, CalibrationCoverageBuilder, BORESIGHT_COVERAGE_CONE_DEG,
 };
 pub use calibration_status::CalibrationStatus;
+pub use feed_parameters::{FeedParameters, FeedParametersBuilder};
 pub use measurement_density::MeasurementDensity;
+pub use mesh_parameters::{MeshParameters, MeshParametersBuilder};
 pub use metadata::{CalibrationMetadata, CalibrationMetadataBuilder, CALIBRATION_SCHEMA_VERSION};
 pub use parameter_source::ParameterSource;
-pub use physical_config::{
-    FeedParameters, FeedParametersBuilder, MeshParameters, MeshParametersBuilder,
-    PhysicalAntennaConfig, PhysicalAntennaConfigBuilder, ReflectorGeometry,
-    ReflectorGeometryBuilder,
-};
+pub use physical_config::{PhysicalAntennaConfig, PhysicalAntennaConfigBuilder};
+pub use reflector_geometry::{ReflectorGeometry, ReflectorGeometryBuilder};
 pub use validation_error::ValidationError;
 pub use validity_ranges::{ValidityRanges, ValidityRangesBuilder};

@@ -1422,7 +1422,8 @@ antenna-model/                       # Cargo workspace root (3 members, roadmap 
 │       │   ├── antenna_calibration.rs   # AntennaCalibration (artifact root)
 │       │   ├── metadata.rs          # CalibrationMetadata, CALIBRATION_SCHEMA_VERSION
 │       │   ├── bspline_model.rs     # BSplineModel4D (correction-surface wire type)
-│       │   ├── physical_config.rs   # Reflector / feed / mesh parameters
+│       │   ├── physical_config.rs   # PhysicalAntennaConfig: reflector + feed + mesh
+│       │   ├── reflector_geometry.rs, feed_parameters.rs, mesh_parameters.rs
 │       │   ├── calibration_status.rs, calibration_coverage.rs
 │       │   ├── angular_resolution.rs, validity_ranges.rs
 │       │   ├── parameter_source.rs, measurement_density.rs
