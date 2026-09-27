@@ -76,7 +76,7 @@ pub fn encode_calibration_artifact(
 /// Load, integrity-check, version-check and validate a calibration artifact.
 ///
 /// Checks run in order: ANTC framing, container version, CRC32, postcard decode, schema
-/// version, then [`AntennaCalibration::validate`]. Any failure is a [`DataError`] naming
+/// version, then artifact validation ([`crate::artifact`]). Any failure is a [`DataError`] naming
 /// the path. A physics-model version mismatch only warns.
 ///
 /// # Example
@@ -188,13 +188,10 @@ pub fn load_calibration_artifact<P: AsRef<Path>>(path: P) -> Result<AntennaCalib
         }
     })?;
 
-    // Validate the calibration
-    calibration
-        .validate()
-        .map_err(|e| DataError::ValidationError {
-            path: path.display().to_string(),
-            reason: e.to_string(),
-        })?;
+    crate::artifact::validate(&calibration).map_err(|e| DataError::ValidationError {
+        path: path.display().to_string(),
+        reason: e.to_string(),
+    })?;
 
     // Log summary
     info!(
@@ -318,91 +315,10 @@ fn physics_model_version_mismatch(artifact: u32, current: u32) -> Option<String>
     })
 }
 
-/// Runs [`AntennaCalibration::validate`], then warns on implausible values: a frequency
-/// range outside 100–50 000 MHz, over a million correction coefficients, RMSE above 1 dB,
-/// or R² below 0.95. (Its elevation and mesh error checks repeat ones `validate` already
-/// made.)
-pub fn validate_calibration(calibration: &AntennaCalibration) -> Result<(), DataError> {
-    // Basic validation (already done in load, but can be called separately)
-    calibration
-        .validate()
-        .map_err(|e| DataError::ValidationError {
-            path: format!("{}:{}", calibration.antenna_id, calibration.feed_id),
-            reason: e.to_string(),
-        })?;
-
-    // Additional validation checks
-
-    // Check that validity ranges are reasonable
-    let freq_range = calibration.validity_ranges.frequency_min_max;
-    if freq_range.0 < 100.0 || freq_range.1 > 50000.0 {
-        warn!(
-            "Frequency range [{:.1}, {:.1}] MHz is outside typical range [100, 50000] MHz",
-            freq_range.0, freq_range.1
-        );
-    }
-
-    // Check elevation range is physically reasonable
-    let el_range = calibration.validity_ranges.elevation_min_max;
-    if el_range.0 < 0.0 || el_range.1 > 90.0 {
-        return Err(DataError::ValidationError {
-            path: format!("{}:{}", calibration.antenna_id, calibration.feed_id),
-            reason: format!(
-                "Elevation range [{:.1}, {:.1}]° is outside physical bounds [0, 90]°",
-                el_range.0, el_range.1
-            ),
-        });
-    }
-
-    // Check mesh parameters if present
-    if let Some(ref mesh) = calibration.physical_config.mesh {
-        if mesh.wire_diameter_mm >= mesh.mesh_spacing_mm {
-            return Err(DataError::ValidationError {
-                path: format!("{}:{}", calibration.antenna_id, calibration.feed_id),
-                reason: format!(
-                    "Wire diameter ({:.2} mm) must be less than mesh spacing ({:.2} mm)",
-                    mesh.wire_diameter_mm, mesh.mesh_spacing_mm
-                ),
-            });
-        }
-    }
-
-    // Check correction surface dimensions if present
-    if let Some(ref correction) = calibration.correction_surface {
-        let total_coeffs = correction.num_coefficients();
-        if total_coeffs > 1_000_000 {
-            warn!(
-                "Correction surface has {} coefficients, which may impact performance",
-                total_coeffs
-            );
-        }
-    }
-
-    // Check metadata quality metrics
-    if calibration.metadata.rmse_db > 1.0 {
-        warn!(
-            "Calibration RMSE ({:.2} dB) exceeds 1 dB accuracy target",
-            calibration.metadata.rmse_db
-        );
-    }
-
-    if calibration.metadata.r_squared < 0.95 {
-        warn!(
-            "Calibration R² ({:.3}) is below 0.95, indicating poor fit quality",
-            calibration.metadata.r_squared
-        );
-    }
-
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{
-        BSplineModel4D, CalibrationCoverage, CalibrationMetadata, FeedParameters,
-        PhysicalAntennaConfig, ReflectorGeometry, ValidityRanges,
-    };
+    use crate::types::{fixtures, BSplineModel4D, CalibrationCoverage, CalibrationStatus};
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -433,53 +349,7 @@ mod tests {
     }
 
     fn create_test_calibration() -> AntennaCalibration {
-        let metadata = CalibrationMetadata::builder()
-            .antenna_name("Test Antenna")
-            .calibration_date("2025-01-15T00:00:00Z")
-            .data_source("test_data.csv")
-            .rmse_db(0.5)
-            .r_squared(0.98)
-            .num_measurements(1000)
-            .build()
-            .unwrap();
-
-        let reflector = ReflectorGeometry::builder()
-            .diameter_m(34.0)
-            .focal_length_m(13.6)
-            .f_over_d_ratio(0.4)
-            .surface_rms_mm(0.5)
-            .build()
-            .unwrap();
-
-        let feed = FeedParameters::builder()
-            .position(0.0, 0.0, 0.1)
-            .q_factor(8.0)
-            .phase_center_offset_m(0.0)
-            .build()
-            .unwrap();
-
-        let physical_config = PhysicalAntennaConfig::builder()
-            .reflector(reflector)
-            .feed(feed)
-            .build()
-            .unwrap();
-
-        let ranges = ValidityRanges::builder()
-            .azimuth_range(0.0, 360.0)
-            .elevation_range(10.0, 80.0)
-            .frequency_range(8000.0, 8500.0)
-            .temperature(290.0)
-            .build()
-            .unwrap();
-
-        AntennaCalibration::builder()
-            .antenna_id("test_antenna")
-            .feed_id("x_band")
-            .metadata(metadata)
-            .physical_config(physical_config)
-            .validity_ranges(ranges)
-            .build()
-            .unwrap()
+        fixtures::builder().build().unwrap()
     }
 
     #[test]
@@ -545,80 +415,46 @@ mod tests {
         }
     }
 
+    /// Guards the #97 rejections at load, where a value arrives without the builder.
     #[test]
-    fn test_validate_calibration_success() {
-        let calibration = create_test_calibration();
-        assert!(validate_calibration(&calibration).is_ok());
-    }
+    fn coverage_rejections_hold_at_load() {
+        let calibrated = fixtures::calibrated().build().unwrap();
+        load_calibration_artifact(write_framed(&calibrated).path())
+            .expect("the unmodified fixture must load, or the rejections prove nothing");
 
-    #[test]
-    fn test_validate_calibration_invalid_elevation_range() {
-        let mut calibration = create_test_calibration();
-        calibration.validity_ranges.elevation_min_max = (-10.0, 100.0);
+        let rejected = |mutate: fn(&mut AntennaCalibration), expected: &str| {
+            let mut calibration = calibrated.clone();
+            mutate(&mut calibration);
+            match load_calibration_artifact(write_framed(&calibration).path()) {
+                Err(DataError::ValidationError { reason, .. }) => assert!(
+                    reason.contains(expected),
+                    "rejection must say {expected:?}: {reason}"
+                ),
+                other => panic!("expected a rejection naming {expected:?}, got {other:?}"),
+            }
+        };
 
-        let result = validate_calibration(&calibration);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_validate_calibration_with_correction_surface() {
-        let mut calibration = create_test_calibration();
-
-        let correction = BSplineModel4D::builder()
-            .coefficients(vec![1.0; 108])
-            .shape([3, 4, 3, 3])
-            .knots_azimuth(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
-            .knots_elevation(vec![0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0])
-            .knots_frequency(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
-            .knots_temperature(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
-            .build()
-            .unwrap();
-
-        calibration.correction_surface = Some(correction);
-        calibration.calibration_coverage = Some(unit_cube_coverage());
-
-        assert!(validate_calibration(&calibration).is_ok());
-    }
-
-    /// Coverage equal to the `[0, 1]³` support of the unit-knot surfaces above.
-    fn unit_cube_coverage() -> CalibrationCoverage {
-        CalibrationCoverage::builder()
-            .azimuth_range(0.0, 1.0)
-            .elevation_range(0.0, 1.0)
-            .frequency_range(0.0, 1.0)
-            .num_measurements(1000)
-            .has_correction_surface(true)
-            .build()
-            .unwrap()
-    }
-
-    /// Guards against a correction surface without coverage loading as covered everywhere (#97).
-    #[test]
-    fn a_correction_surface_without_coverage_is_rejected_at_load() {
-        let mut calibration = create_test_calibration();
-        calibration.correction_surface = Some(
-            BSplineModel4D::builder()
-                .coefficients(vec![1.0; 108])
-                .shape([3, 4, 3, 3])
-                .knots_azimuth(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
-                .knots_elevation(vec![0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0])
-                .knots_frequency(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
-                .knots_temperature(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
-                .build()
-                .unwrap(),
+        rejected(
+            |c| c.calibration_coverage = None,
+            "calibration_coverage is absent",
         );
-
-        match load_calibration_artifact(write_framed(&calibration).path()) {
-            Err(DataError::ValidationError { reason, .. }) => assert!(
-                reason.contains("calibration_coverage is absent"),
-                "rejection must name the missing record: {reason}"
-            ),
-            other => panic!("a surface without coverage must be rejected, got {other:?}"),
-        }
-
-        calibration.calibration_coverage = Some(unit_cube_coverage());
-        load_calibration_artifact(write_framed(&calibration).path())
-            .expect("the same artifact with contained coverage must load");
+        rejected(
+            |c| {
+                if let Some(coverage) = c.calibration_coverage.as_mut() {
+                    coverage.elevation_range.1 = 45.0;
+                }
+            },
+            "is not contained by the correction_surface's fitted support",
+        );
+        rejected(
+            |c| {
+                c.calibration_status = Some(CalibrationStatus::PartiallyCalibrated {
+                    accuracy_estimate_db: 1.5,
+                    coverage: CalibrationCoverage::boresight_cone((8_000.0, 8_500.0), 28, true),
+                })
+            },
+            "calibration_status.coverage and calibration_coverage disagree",
+        );
     }
 
     #[test]

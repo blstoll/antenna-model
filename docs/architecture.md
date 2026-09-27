@@ -335,11 +335,11 @@ calibration coverage       ⊆   correction-surface support   (bounds inclusive)
 Full-mode artifacts have equal extents — `calibrate` clamps the fit's knot bounds to one
 measured domain and writes coverage from that same value. Boresight artifacts deliberately do
 not: their frequency correction is flat over the whole spatial domain while coverage is the
-narrow on-axis cone. `AntennaCalibration::validate` enforces the invariant at load, and a
-surface with no coverage record is rejected rather than treated as covered everywhere. A
-`PartiallyCalibrated` status carries a serialized duplicate of the coverage; the two must be
-equal (`AntennaCalibration::coverage` is the one accessor), and producers write both from one
-value (`AntennaCalibrationBuilder::partially_calibrated`).
+narrow on-axis cone. Artifact validation (`antenna_core::artifact`) enforces the invariant at
+build and at load, and a surface with no coverage record is rejected rather than treated as
+covered everywhere. A `PartiallyCalibrated` status carries a serialized duplicate of the
+coverage; the two must be equal (`AntennaCalibration::coverage` is the one accessor), and
+producers write both from one value (`AntennaCalibrationBuilder::partially_calibrated`).
 
 The served path prepares the surface **paired with its coverage**
 (`CoveredCorrectionSurface`, built only when coverage ⊆ support), so "a surface without

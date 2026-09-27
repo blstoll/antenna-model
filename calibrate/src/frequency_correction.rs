@@ -32,11 +32,8 @@
 //! # Why the collapsed axes are *flat*, not degenerate
 //!
 //! The E-clock and E-cone axes are [`ClampedAxis::flat`]: `order + 1` identical coefficient
-//! layers over a real span, so the surface is exactly constant along them. Until 2026-07-31
-//! they were one layer over `order` equal knots — an axis with nothing to evaluate over,
-//! which the service loader rejected, so every boresight run that tripped the 0.5 dB
-//! threshold wrote a `.bin` the service refused (roadmap D13). The core layout now refuses
-//! that construction itself (issue #95).
+//! layers over a real span, so the surface is exactly constant along them. One layer over
+//! `order` equal knots has nothing to evaluate over, and the core layout refuses it (D13, #95).
 
 use antenna_core::model::{ClampedAxis, CorrectionSurfaceLayout, FittedCorrectionSurface};
 use antenna_core::types::BSplineModel4D;
@@ -57,11 +54,9 @@ use thiserror::Error;
 /// of the (azimuth, polar-angle) system, so azimuth is degenerate there and
 /// coverage constrains elevation alone, to
 /// [`BORESIGHT_COVERAGE_CONE_DEG`](antenna_core::types::BORESIGHT_COVERAGE_CONE_DEG).
-/// Writing it as `az ∈ [0,0] ∧ el ∈ [0,0]` — as boresight mode did until
-/// 2026-07-31 — constrains a coordinate that carries no information at the pole,
-/// and so rejected the very point it was meant to cover: the azimuth of a
-/// boresight-aimed query is `atan2` on float noise (measured: 63.43°). See
-/// `boresight_calibration::build_calibration_artifact`.
+/// Do not write it as `az ∈ [0,0] ∧ el ∈ [0,0]`: that constrains a coordinate carrying
+/// no information at the pole, and rejects a boresight-aimed query whose azimuth is
+/// `atan2` on float noise. See `boresight_calibration::build_calibration_artifact`.
 const E_CLOCK_AXIS_DEG: (f64, f64) = (0.0, 360.0);
 
 /// Span of the flat E-cone axis, in degrees. E-cone reaches the service's
@@ -183,7 +178,8 @@ pub fn should_fit_correction(residuals: &[f64]) -> bool {
 /// let correction = fit_frequency_correction(&frequencies, &residuals).unwrap();
 /// assert_eq!(correction.spline_order, 3); // quadratic
 /// assert_eq!(correction.shape, [4, 4, 4, 4]); // flat, flat, 4 frequencies, flat
-/// correction.validate().expect("the service loader must accept this");
+/// antenna_core::model::FittedCorrectionSurface::from_model4d(&correction)
+///     .expect("the service loader must accept this");
 /// ```
 pub fn fit_frequency_correction(frequencies: &[f64], residuals: &[f64]) -> Result<BSplineModel4D> {
     validate_inputs(frequencies, residuals)?;
@@ -346,27 +342,14 @@ mod tests {
         );
     }
 
-    /// Regression pin, inverted 2026-07-31 (roadmap D13; defect filed 2026-07-30
-    /// by the D15 review).
-    ///
-    /// The boresight-mode frequency correction used to be **structurally
-    /// unloadable**: its azimuth/elevation/temperature axes were `order` equal
-    /// knots over one coefficient layer, and `BSplineModel4D::validate` required
-    /// `knots.len() >= shape + order` on every axis (since issue #95: exactly
-    /// `shape + order`, with a non-empty support). The service loader runs that
-    /// validation on every artifact (`AntennaCalibration::validate` →
-    /// `correction.validate()`), so any boresight run whose residuals tripped the
-    /// 0.5 dB fitting threshold wrote a `.bin` the service refused to load.
-    ///
-    /// This test used to assert `is_err()` to pin the defect. It now asserts the
-    /// contract the fix established, and must never be relaxed back.
+    /// Guards against a boresight frequency correction the service loader refuses (D13).
     #[test]
     fn frequency_correction_is_accepted_by_the_service_side_validator() {
         let frequencies = vec![7100.0, 7500.0, 8000.0, 8450.0];
         let residuals = vec![0.8, 0.6, 0.5, 0.7];
         let bspline = fit_frequency_correction(&frequencies, &residuals).unwrap();
 
-        bspline.validate().expect(
+        FittedCorrectionSurface::from_model4d(&bspline).expect(
             "fit_frequency_correction must produce a surface the service loader accepts; \
              the degenerate-axis defect has regressed",
         );
@@ -439,8 +422,7 @@ mod tests {
     /// residuals are used **as control points**, not fitted, so at interior
     /// frequencies the correction is a smoothed version of the residual sequence
     /// rather than an interpolant of it. The deviation is bounded by how fast the
-    /// residuals vary between samples. Not fixed here (this unit is about the
-    /// artifact being loadable at all); recorded on roadmap D13.
+    /// residuals vary between samples. Recorded on roadmap D13.
     #[test]
     fn frequency_control_points_are_not_interpolated() {
         // A deliberately spiky residual sequence maximises the smoothing gap.
@@ -538,7 +520,7 @@ mod tests {
     }
 
     /// Pins the spline order this module intentionally preserves: **order 3, quadratic**
-    /// (degree 2), not the cubic its comments claimed before issue #95. Moving to cubic is a
+    /// (degree 2), not cubic (#95). Moving to cubic is a
     /// served-value decision, so it must fail this test rather than slip in.
     ///
     /// Numerically, not just by the stamp: on one knot span a degree-2 polynomial has a
@@ -607,7 +589,7 @@ mod tests {
         assert_eq!(bspline.shape[3], 4); // Temperature: flat
 
         assert_eq!(bspline.coefficients.len(), 4 * 4 * 20 * 4);
-        bspline.validate().expect("structure must stay loadable");
+        FittedCorrectionSurface::from_model4d(&bspline).expect("structure must stay loadable");
 
         // Every flat layer of a given frequency index carries the same residual.
         let [n_az, n_el, n_freq, n_temp] = bspline.shape;

@@ -1,10 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use super::ValidationError;
-
 /// Wire-mesh reflector parameters.
 ///
-/// Invariants, checked by [`Self::validate`]: both dimensions positive, and the wire
+/// Artifact invariants ([`crate::artifact`]): both dimensions positive, and the wire
 /// thinner than the mesh spacing.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MeshParameters {
@@ -19,35 +17,6 @@ impl MeshParameters {
     /// Creates a new builder for constructing `MeshParameters`.
     pub fn builder() -> MeshParametersBuilder {
         MeshParametersBuilder::default()
-    }
-
-    /// Checks the invariants listed on the type.
-    pub fn validate(&self) -> Result<(), ValidationError> {
-        if self.mesh_spacing_mm <= 0.0 {
-            return Err(ValidationError::InvalidPhysicalParameter {
-                parameter: "mesh_spacing_mm".to_string(),
-                value: self.mesh_spacing_mm,
-                reason: "must be positive".to_string(),
-            });
-        }
-
-        if self.wire_diameter_mm <= 0.0 {
-            return Err(ValidationError::InvalidPhysicalParameter {
-                parameter: "wire_diameter_mm".to_string(),
-                value: self.wire_diameter_mm,
-                reason: "must be positive".to_string(),
-            });
-        }
-
-        if self.wire_diameter_mm >= self.mesh_spacing_mm {
-            return Err(ValidationError::InvalidPhysicalParameter {
-                parameter: "wire_diameter_mm".to_string(),
-                value: self.wire_diameter_mm,
-                reason: "must be less than mesh_spacing_mm".to_string(),
-            });
-        }
-
-        Ok(())
     }
 }
 

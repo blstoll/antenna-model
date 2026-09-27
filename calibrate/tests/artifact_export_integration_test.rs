@@ -52,15 +52,7 @@ fn build_measurements() -> Vec<MeasurementPoint> {
     v
 }
 
-/// Write an `AntennaCalibration` with the ANTC header (matching full mode).
-/// Write an artifact through the production writer.
-///
-/// This used to hand-roll the ANTC header here with a literal `b"ANTC"` and a literal
-/// `2u32`, making it a fourth producer of the container format — the exact drift roadmap
-/// **D2** collapsed into one writer. It went stale the moment D23 bumped the container
-/// version to 3, failing with "unsupported ANTC artifact version 2" from a test whose
-/// subject is the correction surface. Calling the real writer means the framing and both
-/// version stamps can never be this test's problem again.
+/// Write an artifact through the production writer; never hand-roll the ANTC header (D2).
 fn write_antc(calibration: &antenna_core::types::AntennaCalibration, path: &std::path::Path) {
     calibrate::artifact_export::write_calibration_artifact(calibration, path).expect("write");
 }
@@ -206,8 +198,8 @@ fn the_served_surface_is_exactly_the_fitted_surface_after_a_service_load() {
 /// The wire adapter is a renaming, not a reindexing.
 ///
 /// Every schema-5 temperature slab must be the fitted coefficient vector *verbatim*, and
-/// each wire knot vector its domain axis verbatim. A reindexing loop — the thing issue #94
-/// removed — would still round-trip cleanly if the decode inverted it, so the assertion is
+/// each wire knot vector its domain axis verbatim (#94). A reindexing loop would still
+/// round-trip cleanly if the decode inverted it, so the assertion is
 /// on the wire bytes' own order rather than on what comes back out of them.
 #[test]
 fn every_wire_temperature_slab_is_the_canonical_coefficient_vector_verbatim() {
@@ -336,13 +328,7 @@ fn the_angular_resolution_assessment_round_trips_through_the_artifact() {
 
 /// The artifact's `angular_resolution` and its `diameter_m` describe the **same** dish.
 ///
-/// Roadmap **D26** finding 2. `export_full_calibration` used to take the assessment as a
-/// parameter while the caller derived it from a second, independent read of the diameter
-/// (`class.geometry.diameter_m`), so the two fields could describe different antennas — the
-/// invariant C13 and D23 established two lines away in the same function. Nothing could
-/// observe a divergence, because every call site happened to pass the matching value.
-///
-/// This test re-derives the assessment **from the artifact's own stamped diameter** and
+/// See D26. This test re-derives the assessment **from the artifact's own stamped diameter** and
 /// requires it to reproduce the artifact's own stamped assessment. The negative control is
 /// what gives it power: a different diameter must produce a different answer, so the equality
 /// above is a real constraint rather than two ways of writing a constant.
@@ -469,7 +455,7 @@ fn round_trip_physical() -> ExportPhysicalParams {
 ///
 /// Returns the loaded 4D correction surface — i.e. the object the *service* would hold,
 /// not the one the producer built, so every assertion made against it has crossed postcard,
-/// the ANTC container and `AntennaCalibration::validate`.
+/// the ANTC container and the loader's artifact validation.
 fn export_write_load(
     surface: &calibrate::correction_surface::CorrectionSurface,
     measurements: &[MeasurementPoint],
@@ -762,48 +748,22 @@ fn a_minimal_frequency_axis_round_trips_and_a_degenerate_one_is_refused() {
         &[0.8, 0.6, 0.5, 0.7],
     )
     .expect("four frequencies is the documented minimum and must fit");
-    four_frequencies
-        .validate()
+    antenna_core::model::FittedCorrectionSurface::from_model4d(&four_frequencies)
         .expect("and the result must be one the service loader accepts");
 }
 
-/// The whole round trip must run inside a **small** thread stack.
+/// The whole round trip must run inside a **small** thread stack (D3).
 ///
-/// This is the guard that lets `RUST_MIN_STACK=16777216` come out of `scripts/check.sh` and
-/// `.github/workflows/ci.yml`. That variable was added on 2026-07-09 (commit `4b439c0`)
-/// because the calibrate lib suite aborted with a stack overflow on the Linux debug build
-/// while passing on macOS, and it was attributed to "the 3D→4D round-trip B-spline
-/// evaluation", with an iterative rewrite filed as roadmap D3.
+/// Turns a Linux-debug-only stack overflow into a property that fails on every platform.
+/// `GUARD_STACK_BYTES` is set on this thread rather than inherited, so it holds whatever
+/// `RUST_MIN_STACK` the harness gives the other tests.
 ///
-/// **Measurement (2026-08-20, macOS aarch64, debug) contradicts that diagnosis rather than
-/// confirming it.** The complete round trip — fit, convert, export, write, load, evaluate —
-/// completes in a **24 KiB** thread stack, and the whole `calibrate` lib suite passes with
-/// `RUST_MIN_STACK=65536`. There was also nothing to rewrite iteratively: the then-existing
-/// service evaluator was already iterative at `4b439c0`. Issue #92 subsequently consolidated
-/// fitting and serving onto `antenna_core::model::correction_surface`'s iterative sparse
-/// stencil and removed calibrate's recursive basis copy entirely.
-///
-/// So the value of this test is not the rewrite D3 imagined — it is turning a Linux-only,
-/// CI-only symptom into a property that fails on every platform. `GUARD_STACK_BYTES` is
-/// **21× the measured floor**, and it is set explicitly on this thread rather than inherited,
-/// so it holds whatever the harness gives the other tests: `RUST_MIN_STACK` when that is set,
-/// and libtest's own default when it is not. A regression that would newly need the
-/// workaround trips here first, locally and on every platform, instead of surfacing as an
-/// abort in Linux CI.
-///
-/// Both harnesses this repo uses run a test on a worker thread named after it — verified
-/// 2026-08-20 for `cargo test` and for `cargo nextest`, which is why `RUST_MIN_STACK` still
-/// reaches the tests after D18 moved the gate onto nextest.
-///
-/// **Failure mode:** a stack overflow aborts the process (SIGABRT); it is not a catchable
-/// assertion, and for that reason this test has no negative control — you cannot ask a
-/// process to survive its own abort. The thread is named so the runtime's
-/// `thread '<name>' has overflowed its stack` line points at this test rather than at
-/// whichever unrelated test happened to be running, which is precisely the misattribution
-/// that sent D3 looking for a recursion that was never there.
+/// A stack overflow aborts the process rather than failing an assertion, so this test has
+/// no negative control. The thread is named so the runtime's overflow message points here
+/// rather than at whichever test happened to be running.
 #[test]
 fn the_round_trip_fits_in_a_small_thread_stack() {
-    /// 21× the 24 KiB floor measured for this path on 2026-08-20 (macOS aarch64, debug).
+    /// 21× the 24 KiB this path measures (macOS aarch64, debug).
     const GUARD_STACK_BYTES: usize = 512 * 1024;
 
     let handle = std::thread::Builder::new()

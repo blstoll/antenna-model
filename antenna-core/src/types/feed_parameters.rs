@@ -1,10 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use super::ValidationError;
-
 /// Feed horn parameters for the aperture integration.
 ///
-/// Invariants, checked by [`Self::validate`]: `q_factor` in `[0, 20]`;
+/// Artifact invariants ([`crate::artifact`]): `q_factor` in `[0, 20]`;
 /// `asymmetry_factor` finite and positive.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct FeedParameters {
@@ -44,29 +42,6 @@ impl FeedParameters {
     /// Creates a new builder for constructing `FeedParameters`.
     pub fn builder() -> FeedParametersBuilder {
         FeedParametersBuilder::default()
-    }
-
-    /// Checks the invariants listed on the type.
-    pub fn validate(&self) -> Result<(), ValidationError> {
-        if self.q_factor < 0.0 || self.q_factor > 20.0 {
-            return Err(ValidationError::InvalidPhysicalParameter {
-                parameter: "q_factor".to_string(),
-                value: self.q_factor,
-                reason: "must be between 0 and 20".to_string(),
-            });
-        }
-
-        // Mirrors `model::geometry::FeedParameters::validate`, but fails at artifact load
-        // instead of when a request first reaches the integrator.
-        if self.asymmetry_factor <= 0.0 || !self.asymmetry_factor.is_finite() {
-            return Err(ValidationError::InvalidPhysicalParameter {
-                parameter: "asymmetry_factor".to_string(),
-                value: self.asymmetry_factor,
-                reason: "must be positive (1.0 is a symmetric feed)".to_string(),
-            });
-        }
-
-        Ok(())
     }
 }
 

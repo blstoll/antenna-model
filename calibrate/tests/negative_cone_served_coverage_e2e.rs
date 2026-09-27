@@ -1,30 +1,21 @@
 //! A negative-E-cone measurement set must produce an artifact the service can actually use.
 //!
-//! **Roadmap D26 finding 1**, and the test the filing asked for: not "the range looks right"
-//! but *serve* such an artifact and show the correction reaching the answer.
+//! Not "the range looks right" but *serve* such an artifact and show the correction reaching
+//! the answer (D26).
 //!
 //! E-clock/E-cone are spherical coordinates about boresight, and `MeasurementPoint::validate`
 //! admits E-cone over `[-90, 90]` — a one-sided pattern cut recorded on a fixed clock plane
 //! is legal, first-class input. The served side has no such freedom: the service's elevation
 //! is a polar angle from boresight and is never negative.
 //!
-//! Before D26 the two sides were bridged by a silent clamp in `export_full_calibration`
-//! (`el_lo = min.max(0.0)`, `el_hi = max.min(90.0)`). For a `-14°…0°` cut that produced the
-//! elevation range `(0.0, 0.0)`, and every consequence was invisible:
-//!
-//! - `CalibrationCoverage::is_boresight_only()` became true over thousands of measurements;
-//! - `contains()` admitted no elevation but exactly 0.0, so the service applied **no
-//!   correction at all** and served raw physics while reporting the artifact healthy;
-//! - a wholly-negative span such as `-14°…-1°` produced the *inverted* range `(0.0, -1.0)`,
-//!   rejecting everything by construction.
-//!
-//! The fix is a convention, not a clamp: the parser reflects `(φ, −θ)` onto the identical
+//! The bridge is a convention, not a clamp: the parser reflects `(φ, −θ)` onto the identical
 //! direction `(φ + 180°, θ)` on the way in, so predictions, residuals, knots, extents and
-//! coverage all speak the polar convention the service does — and the export now *refuses*
-//! an out-of-convention extent instead of quietly truncating it.
+//! coverage all speak the service's polar convention, and export *refuses* an
+//! out-of-convention extent. A clamp would collapse a `-14°…0°` cut to `(0, 0)` coverage and
+//! serve no correction while reporting the artifact healthy.
 //!
-//! The control in `correction_is_applied_for_a_negative_cone_measurement_set` is the
-//! pre-D26 artifact itself: the same calibration with its coverage collapsed to `(0, 0)`.
+//! The control in `correction_is_applied_for_a_negative_cone_measurement_set` is the same
+//! calibration with its coverage collapsed to `(0, 0)`.
 //! Serving both isolates the correction term exactly, and pins that it is evaluated at the
 //! served direction rather than clamped to a knot-vector edge.
 
@@ -154,8 +145,6 @@ fn build_artifact() -> (AntennaCalibration, CorrectionSurface, Vec<MeasurementPo
         false,
     )
     .expect("export must succeed for a legal negative-cone measurement set");
-
-    calibration.validate().expect("artifact must validate");
     (calibration, surface, data.points)
 }
 
@@ -390,7 +379,7 @@ fn correction_is_applied_for_a_negative_cone_measurement_set() {
         "the validity range must agree with coverage"
     );
 
-    // The control: the same artifact with the coverage the pre-D26 clamp produced. Its
+    // The control: the same artifact with the coverage a clamp would produce. Its
     // correction surface is still present, so both artifacts take the identical physics
     // branch (`physics_is_uncorrected()` is false for both) and the only difference between
     // the two served numbers is the correction term.
@@ -482,8 +471,7 @@ fn correction_is_applied_for_a_negative_cone_measurement_set() {
     );
 }
 
-/// A cut that never reaches boresight — the case the clamp *inverted* into `(0.0, -1.0)`,
-/// a range that rejects everything by construction and fails artifact validation outright.
+/// Guards against a cut that never reaches boresight exporting an inverted cone range (D26).
 #[test]
 fn a_wholly_negative_cut_exports_a_range_that_contains_it() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -541,10 +529,6 @@ fn a_wholly_negative_cut_exports_a_range_that_contains_it() {
         false,
     )
     .expect("a wholly-negative cut is legal input and must export");
-
-    calibration
-        .validate()
-        .expect("the pre-D26 inverted range (0.0, -1.0) failed this outright");
 
     let coverage = calibration
         .calibration_coverage

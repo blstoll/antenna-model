@@ -15,6 +15,7 @@
 )]
 #![allow(missing_docs, missing_debug_implementations)]
 
+pub mod artifact;
 pub mod data;
 pub mod error;
 pub mod model;

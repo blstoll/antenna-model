@@ -35,10 +35,10 @@
 use crate::parser::{closed_extent, MeasurementPoint};
 use antenna_core::model::phase::wavelength_from_frequency;
 use antenna_core::model::{
-    BasisStencilOutcome, ClampedAxis, CorrectionDomain, CorrectionEvaluation,
-    CorrectionSurfaceLayout, FittedCorrectionSurface,
+    BasisStencilOutcome, ClampedAxis, CorrectionEvaluation, CorrectionSurfaceLayout,
+    FittedCorrectionSurface,
 };
-use antenna_core::types::AngularResolution;
+use antenna_core::types::{AngularResolution, CorrectionDomain};
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -874,22 +874,12 @@ pub fn assess_angular_resolution(
     // received none of the checks its two siblings got above until roadmap D26 found that a
     // NaN gap on it was silently discarded, reporting the axis as *better* resolved than it
     // is.
-    let resolution = AngularResolution {
+    Ok(AngularResolution {
         cone_knot_spacing_deg: widest_knot_gap(surface.knots_e_cone(), "E-cone")?,
         cone_lobe_period_deg,
         clock_knot_spacing_deg: widest_knot_gap(surface.knots_e_clock(), "E-clock")?,
         clock_lobe_period_deg,
-    };
-
-    // The consumer-side invariant, asserted at the point of production: every field is one
-    // the ratio accessors can divide, so `resolves_lobe_structure()` is a real verdict.
-    resolution
-        .validate()
-        .map_err(|e| CorrectionSurfaceError::InvalidKnotVector {
-            reason: format!("angular-resolution assessment is not interpretable: {e}"),
-        })?;
-
-    Ok(resolution)
+    })
 }
 
 /// The widest gap between consecutive *distinct* knots — the coarsest the basis gets, and so
@@ -898,17 +888,13 @@ pub fn assess_angular_resolution(
 /// Distinctness matters because a clamped knot vector repeats its end values `order` times;
 /// those zero-width gaps say nothing about resolution.
 ///
-/// **Every way of not having an answer is an error, never a value** (roadmap **D26**
-/// findings 3 and 5). Two things used to be encoded instead:
+/// **Every way of not having an answer is an error, never a value** (D26):
 ///
-/// - A `NaN` gap was *discarded*. The fold was `fold(0.0, f64::max)`, and `f64::max` returns
-///   the non-NaN operand, so a corrupt knot vector reported its widest *finite* gap — a
-///   smaller spacing, i.e. a **better**-resolved verdict, from input that supports no verdict
-///   at all. That is precisely the failure the D21 assessment exists to prevent.
-/// - A vector with no two distinct values returned `f64::INFINITY`, meaning "infinitely
-///   coarse". [`AngularResolution`] also uses `INFINITY` on its clock *period* to mean the
-///   opposite — no structure to resolve, the best case — and a surface degenerate on both
-///   computed `INF/INF = NaN` straight into the artifact's metadata and its `PartialEq`.
+/// - A `NaN` gap must not be skipped: `f64::max` drops the NaN operand, which would report a
+///   smaller spacing — a *better*-resolved verdict — from a corrupt knot vector.
+/// - A vector with no two distinct values must not become `f64::INFINITY`:
+///   [`AngularResolution`] reserves `INFINITY` on its clock *period* for the opposite meaning
+///   (no structure to resolve), and `INF/INF` is `NaN`.
 ///
 /// Neither case is reachable from [`fit_correction_surface`] (`place_knots` rejects
 /// a data range below the minimum spacing, and the fit refuses non-finite input), but this
@@ -1239,7 +1225,7 @@ fn generate_uniform_knots(min: f64, max: f64, num_knots: usize) -> Vec<f64> {
 /// column of `B^T B` are exactly zero (leaving the system solvable only via the ridge term).
 ///
 /// Quantile placement hits a bound whenever a bound value is common enough to own the
-/// quantile: measured 2026-08-02 on D12's fixture, whose frequency axis has four distinct
+/// quantile, as on D12's fixture, whose frequency axis has four distinct
 /// values with 72 rows each, so index `288/5 = 57` selects the minimum and `4·57 = 228` the
 /// maximum. Candidates on a bound are therefore **dropped**, not nudged inward — on an axis
 /// with four distinct values there is no fourth distinct interior position to nudge one to,
@@ -1681,28 +1667,14 @@ fn compute_r_squared(original: &[f64], corrected: &[f64]) -> f64 {
 /// Is point `index` held out by fold `fold` of `num_folds`?
 ///
 /// **The single definition of fold assignment for this crate**, used by the sole
-/// cross-validation implementation below. Before GitHub issue **#96**, a second validator-side
-/// loop could report a different answer from the fit-side run; the fitted surface now retains
-/// this implementation's result for validation reporting.
+/// cross-validation implementation below (#96).
 ///
-/// **Strided**: point `i` is held out by fold `i % num_folds`. Folds used to be contiguous
-/// slices, `[k·n/K, (k+1)·n/K)`. Measurement files are grid-ordered — frequency-major for both
-/// calibrate fixtures and for any real swept measurement — so the first and last slices held
-/// out an entire frequency slab, and scoring them made the fit **extrapolate past its own
-/// knots**. Measured on D14's 3240-row artifact at 5 folds: 10.07 / 0.56 / 0.12 / 0.64 /
-/// 10.86 dB, a mean of 4.45 ± 4.92 dB against an in-sample 0.027 dB. That number was neither
-/// generalization error nor a deliberate extrapolation test but a mixture whose proportions
-/// depended on how the input file happened to be sorted — re-sorting the same measurements
-/// changed the headline quality claim of `--validate`. Strided, the same artifact scores
-/// 0.029 / 0.031 / 0.031 / 0.060 / 0.046 dB.
-///
-/// Striding is deterministic (no RNG, no seed to record) and is invariant to which axis varies
-/// fastest, which is the property that was actually missing. Its known bias is the opposite
-/// one: on a dense grid every held-out point has near neighbours in the training set, so the
-/// score leans **optimistic** and measures interpolation quality rather than extrapolation.
-/// That is the right default for a surface whose job is interpolation, and unlike the old
-/// behaviour it is a stated property rather than a side effect of row order. A deliberate
-/// extrapolation test would have to hold out a named axis on purpose — see D22's option 3.
+/// **Strided**: point `i` is held out by fold `i % num_folds`. Do not use contiguous slices:
+/// measurement files are grid-ordered, so a slice holds out a whole axis slab and scores an
+/// extrapolation whose size depends on row order. Striding is deterministic and invariant to
+/// which axis varies fastest; its known bias is optimism on a dense grid, since it measures
+/// interpolation. A deliberate extrapolation test would hold out a named axis. See D22 and
+/// `docs/findings-2026-08-02-cross-validation-fold-assignment.md`.
 pub(crate) fn is_held_out(index: usize, fold: usize, num_folds: usize) -> bool {
     index % num_folds == fold
 }
@@ -1715,9 +1687,9 @@ thread_local! {
 /// Perform the crate's one k-fold cross-validation run (#96).
 ///
 /// Every requested fold is represented as either a scored fold or a [`FoldFailure`]. A fold
-/// refits on `(1 − 1/folds)` of the data, so since roadmap **D20** an underdetermined fit can
-/// fail even when the full-data fit succeeds. Roadmap **D22** made those failures reportable
-/// rather than fatal: `--validate` must not withhold an artifact whose own fit succeeded.
+/// refits on `(1 − 1/folds)` of the data, so an underdetermined fit (D20) can fail even when
+/// the full-data fit succeeds. Those failures are reported, not fatal: `--validate` must not
+/// withhold an artifact whose own fit succeeded (D22).
 /// The returned support-aware result is retained by [`CorrectionSurface`] and consumed by
 /// both fit statistics and [`crate::validator::ValidationReport`] without recomputation.
 fn cross_validate(
@@ -2228,46 +2200,46 @@ mod tests {
             .collect()
     }
 
-    /// The negative control for the multiplicity guard, per P13: a check nobody has
-    /// seen fail is not evidence of anything. These are the knot vectors the fitter
-    /// ACTUALLY produced on 2026-08-02, before this fix — the validator of the day passed
-    /// every one of them, and the core layout must now reject the two that are defective
-    /// (the rule moved there in GitHub issue #95; its generic controls live beside it).
+    /// Negative control for the multiplicity guard (P13): real knot vectors with end
+    /// multiplicity `order + 1` must be rejected by the core layout (D19, #95).
     #[test]
-    fn multiplicity_guard_rejects_the_knot_vectors_the_fitter_used_to_produce() {
+    fn multiplicity_guard_rejects_over_clamped_end_knots() {
         let order = 4;
 
-        // Measured pre-fix. End multiplicity 5 = order + 1 on both axes.
-        let pre_fix_frequency = vec![
+        // End multiplicity 5 = order + 1 on both axes.
+        let over_clamped_frequency = vec![
             400.0, 400.0, 400.0, 400.0, 400.0, 500.0, 600.0, 700.0, 700.0, 700.0, 700.0, 700.0,
         ];
-        let pre_fix_clock = vec![
+        let over_clamped_clock = vec![
             0.0, 0.0, 0.0, 0.0, 0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0, 315.0, 315.0,
             315.0, 315.0,
         ];
 
-        for (name, knots) in [("frequency", &pre_fix_frequency), ("clock", &pre_fix_clock)] {
+        for (name, knots) in [
+            ("frequency", &over_clamped_frequency),
+            ("clock", &over_clamped_clock),
+        ] {
             assert_eq!(
                 identically_zero_basis(knots, order),
                 vec![0, knots.len() - order - 1],
-                "{name}: the pre-fix vector must have a dead basis function at each end, \
+                "{name}: the control vector must have a dead basis function at each end, \
                  or this control is not testing what it claims"
             );
             assert!(
                 !core_accepts(knots, order),
                 "{name}: the core layout must reject end multiplicity {} for order \
-                 {order}; it was accepted before D19",
+                 {order}",
                 order + 1
             );
         }
 
-        // Positive control: the cone axis was already correct pre-fix and must stay ok.
-        let pre_fix_cone = vec![
+        // Positive control: a correctly clamped cone axis must be accepted.
+        let control_cone = vec![
             0.0, 0.0, 0.0, 0.0, 2.0, 4.0, 6.0, 12.0, 16.0, 20.0, 24.0, 24.0, 24.0, 24.0,
         ];
-        assert!(identically_zero_basis(&pre_fix_cone, order).is_empty());
+        assert!(identically_zero_basis(&control_cone, order).is_empty());
         assert!(
-            core_accepts(&pre_fix_cone, order),
+            core_accepts(&control_cone, order),
             "the cone axis was never defective and must not be rejected"
         );
     }
@@ -2308,21 +2280,9 @@ mod tests {
         }
     }
 
-    /// The headline number: what the dead basis functions cost the shipped configuration.
-    ///
-    /// Pre-D19 the D12 configuration declared **960** coefficients, of which **360 (37.5 %)**
-    /// were attached to identically-zero basis functions — serialized into every artifact and
-    /// read back by the service's 4D interpolator, carrying no information.
-    ///
-    /// The served surface is **unchanged** by their removal, and that is not a weaker result
-    /// than it sounds: a basis function that is zero everywhere contributes zero to every
-    /// evaluation, so removing it *cannot* move a value. D12's four known-answer probes
-    /// reproduce bit-for-bit across this change (0.5928 / 0.0934 / 0.0365 / 0.0934 dB), which
-    /// is the end-to-end confirmation. What D19 fixes is the representation: an honest
-    /// `shape`, and a `B^T B` that is no longer structurally rank-deficient. The remaining
-    /// probe error is underdetermination (600 coefficients against 288 points) — roadmap D20.
+    /// Guards against the shipped configuration carrying identically-zero basis functions (D19).
     #[test]
-    fn the_shipped_configuration_no_longer_carries_dead_coefficients() {
+    fn the_shipped_configuration_carries_no_dead_coefficients() {
         let order = 4;
         let (fd, cd, kd) = d12_axis_data();
 
@@ -2663,13 +2623,10 @@ mod tests {
     // D26 — the assessment refuses input it cannot measure
     // ========================================================================
 
-    /// A NaN gap used to be **discarded**, not noticed: `fold(0.0, f64::max)` returns the
-    /// non-NaN operand, so the axis reported its widest *finite* gap — a smaller spacing,
-    /// i.e. a better-resolved verdict, out of a corrupt knot vector. Roadmap D26 finding 3.
+    /// Guards against a NaN knot gap being skipped, reporting a better-resolved verdict (D26).
     #[test]
     fn a_non_finite_knot_gap_is_refused_not_skipped_over() {
-        // A vector whose *widest* real gap is 10 but which also contains a NaN. The old fold
-        // reported 10.0 and called the axis resolved to 10°.
+        // Widest real gap is 10; a NaN-skipping fold would report 10.0.
         let corrupt = vec![0.0, 10.0, f64::NAN, 12.0, 13.0];
         let err = widest_knot_gap(&corrupt, "E-clock")
             .expect_err("a NaN gap must be refused, not skipped");
@@ -2711,16 +2668,14 @@ mod tests {
             clock_lobe_period_deg: f64::INFINITY,
         };
         assert!(on_axis.clock_knots_per_lobe_period().is_infinite());
-        assert!(on_axis.validate().is_ok());
         assert!(on_axis.resolves_lobe_structure());
     }
 
-    /// The clock axis received none of the emptiness/finiteness validation its siblings got.
-    /// It now goes through the same gate, and a degenerate clock axis is refused rather
-    /// than reported.
+    /// Guards against the clock axis skipping the emptiness/finiteness gate its siblings pass
+    /// (D26).
     ///
-    /// Since GitHub issue #95 that gate is the core layout's invariant set, which refuses an
-    /// axis with empty support at construction — so a degenerate clock axis cannot become a
+    /// That gate is the core layout's invariant set (#95), which refuses an axis with empty
+    /// support at construction — so a degenerate clock axis cannot become a
     /// surface, and the assessment is never handed one. `widest_knot_gap`'s own refusal of a
     /// degenerate or non-finite vector stays covered where it is reachable, in
     /// `a_degenerate_axis_is_refused_so_infinity_keeps_one_meaning` and
@@ -2825,15 +2780,14 @@ mod tests {
         (measurements, predictions)
     }
 
-    /// The check must fire on a system the old `(spline_order + 1)^3 = 125` minimum waved
-    /// through. 216 points comfortably clears 125 and is nowhere near the 600 coefficients
-    /// the shipped full-mode configuration declares.
+    /// Guards against the fit accepting fewer points than coefficients (D20): 216 points
+    /// clears the `(order + 1)³ = 125` pre-check but not the shipped 600 coefficients.
     #[test]
     fn a_fit_with_fewer_points_than_coefficients_is_rejected() {
         let (measurements, predictions) = grid_measurements(6, 6, 6);
         assert!(
             measurements.len() > (4 + 1usize).pow(3),
-            "the fixture must clear the old 125-point minimum, or this test proves nothing"
+            "the fixture must clear the 125-point pre-check, or this test proves nothing"
         );
 
         let params = CorrectionSurfaceParams {
@@ -2886,8 +2840,7 @@ mod tests {
             .expect("a determined system must fit");
     }
 
-    /// The old pre-check is kept as a cheap early guard, not replaced — it catches obvious
-    /// garbage before any knot generation happens.
+    /// The `(order + 1)³` pre-check is a cheap early guard that runs before knot generation.
     #[test]
     fn the_cheap_pre_check_still_rejects_obviously_too_little_data() {
         let (measurements, predictions) = grid_measurements(2, 2, 2);
@@ -2989,8 +2942,7 @@ mod tests {
     }
 
     /// A fold fit inside `cross_validate` must not cross-validate in turn. The fixture is
-    /// sized so the recursion is exactly what fails, restated against the quantity roadmap
-    /// D20 made binding — the coefficient count, not the old `(4+1)³ = 125` minimum.
+    /// sized against the coefficient count (D20) so the recursion is exactly what fails.
     ///
     /// These knots declare 4 × 10 × 10 = **400** coefficients (two distinct frequencies
     /// place no interior knot, so that axis contributes `order` basis functions). 512
@@ -3162,9 +3114,7 @@ mod tests {
         )
     }
 
-    /// The regression this fixes: the basis was a partition of unity everywhere *except*
-    /// at the exact maximum of an axis, where every basis function evaluated to zero.
-    /// Measured before the fix: 1.000000000 at t=0.9999, 0.000000000 at t=1.0.
+    /// Guards against the basis vanishing at the exact maximum of an axis (D15).
     #[test]
     fn basis_is_a_partition_of_unity_on_every_face_and_corner() {
         let s = unit_surface(4);
@@ -3436,34 +3386,13 @@ mod least_squares_tests {
 
     /// Regression guard for **solver drift**: the sparse normal-equations + Cholesky path
     /// must keep agreeing with the original OpenBLAS/LAPACK (`dgesv`) implementation it
-    /// replaced. It is not an oracle for the B-spline basis itself — see the re-pin note
-    /// below.
+    /// replaced. It is not an oracle for the B-spline basis itself — see below.
     ///
-    /// **Re-pinned 2026-07-30** after the domain-maximum basis fix (see
-    /// `docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md`). This
-    /// fixture's frequency axis (`fixture_residuals`, `i in 0..8` → 8000..8700 MHz in
-    /// 100 MHz steps) reaches exactly 8700 MHz, the frequency knot vector's maximum
-    /// (`fixture_knots`). Only `i == 7` reaches 8700 MHz, so that is 6×6 = 36 of the 288
-    /// points (`j in 0..6` cone steps times `k in 0..6` clock steps at that one frequency
-    /// step); before the fix, those 36 points evaluated the basis to all zero and
-    /// contributed nothing to the normal equations, so the last frequency coefficient had
-    /// no data support and was pulled toward zero by the ridge term alone. The fit below
-    /// legitimately changed as a result — this is not solver drift, it is the fixture
-    /// actually being fit correctly for the first time.
+    /// The fixture's frequency axis reaches exactly the knot vector's maximum (8700 MHz, 36 of
+    /// the 288 points), so the pinned values depend on the basis being non-zero at the domain
+    /// maximum (D15). Coefficients are in core's canonical E-clock-fastest order.
     ///
-    /// Pre-fix (buggy basis) values, kept for the record:
-    /// `sum = 8.154347510713e1`, `sumsq = 5.590390188922e1`, `c[0] = 7.434343253931e-1`,
-    /// `c[1] = 7.358607285775e-1`, `c[mid] = 7.478379397133e-1`,
-    /// `c[last] = 1.489868817277e-1`.
-    ///
-    /// Sanity check on the new values: `sum` rose (81.54 -> 87.17) and `c[last]` rose
-    /// sharply (0.149 -> 0.566) — exactly the direction expected when a starved
-    /// coefficient regains data support instead of being suppressed by the ridge term.
-    /// This is coefficient-index-specific, not a uniform shift. Coefficients now use
-    /// core's canonical E-clock-fastest order; the final coefficient remains the corner at
-    /// every axis maximum.
-    ///
-    /// The new values are corroborated by three independent checks, not just accepted
+    /// The pinned values are corroborated by three independent checks, not just accepted
     /// as "whatever the code now emits": `fit_satisfies_normal_equations` (the solve is
     /// self-consistent, `(BᵀB + λI)c = Bᵀr`), `normal_equations_match_dense_reference`
     /// (the sparse accumulation matches a dense reference), and — the genuine basis

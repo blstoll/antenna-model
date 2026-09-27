@@ -2,8 +2,9 @@
 //! antenna-feed combination.
 //!
 //! [`AntennaCalibration`] is the root; every other type here is reachable from it.
-//! Structs are constructed with their `builder()`, whose `build()` fails naming the first
-//! required field left unset and does not validate; check a value with `validate()`.
+//! Structs are constructed with their `builder()`. [`AntennaCalibrationBuilder::build`]
+//! also validates the whole artifact (see [`crate::artifact`]); the part builders only
+//! fail naming the first required field left unset.
 //!
 //! # Wire format: postcard is positional
 //!
@@ -20,7 +21,10 @@ mod antenna_calibration;
 mod bspline_model;
 mod calibration_coverage;
 mod calibration_status;
+mod correction_domain;
 mod feed_parameters;
+#[cfg(test)]
+pub(crate) mod fixtures;
 mod measurement_density;
 mod mesh_parameters;
 mod metadata;
@@ -37,6 +41,7 @@ pub use calibration_coverage::{
     CalibrationCoverage, CalibrationCoverageBuilder, BORESIGHT_COVERAGE_CONE_DEG,
 };
 pub use calibration_status::CalibrationStatus;
+pub use correction_domain::CorrectionDomain;
 pub use feed_parameters::{FeedParameters, FeedParametersBuilder};
 pub use measurement_density::MeasurementDensity;
 pub use mesh_parameters::{MeshParameters, MeshParametersBuilder};

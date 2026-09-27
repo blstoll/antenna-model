@@ -207,8 +207,8 @@ D26 hardened the assessment against input it cannot measure: `widest_knot_gap` r
 and refuses an empty, degenerate or non-finite axis instead of reporting a number for it — a NaN
 gap used to be *discarded* by `fold(0.0, f64::max)`, reporting a **better**-resolved verdict out
 of corrupt input. `f64::INFINITY` now has exactly one meaning in `AngularResolution` (no clock
-structure to resolve, on the `sin θ → 0` path). `AngularResolution::validate` — called from
-`AntennaCalibration::validate` — refuses such an artifact at load.
+structure to resolve, on the `sin θ → 0` path). Artifact validation (`antenna_core::artifact`)
+refuses such an assessment at build and at load.
 
 **The shipped knot configuration has one owner, `CorrectionSurfaceParams::shipped()`**; it
 existed as three hand-copies, so a test could describe a shape nothing ships. And the assessment
@@ -260,6 +260,16 @@ See "Artifact wire format" above.
 
 Queries outside calibrated ranges generate warnings but still return values (extrapolated).
 The artifact's validity/coverage elevation ranges are polar-angle ranges (see D26 above).
+
+## Artifacts are validated at construction (#105)
+
+An `AntennaCalibration` comes only from `AntennaCalibrationBuilder::build` or the loader, and
+both run the one validation `antenna_core::artifact` owns — so consumers never re-check, and
+there is deliberately **no public validate function**. The service's repository inserts
+without validating. Tests that need a valid artifact start from one builder per crate —
+`antenna_core::types::fixtures` in core, `service::test_support::calibration_builder` in
+`antenna-model` — and may still mutate one afterwards to prove a rejection. See
+`docs/adr/0001-artifacts-are-validated-at-construction.md`.
 
 ## Coverage and support (issue #97)
 

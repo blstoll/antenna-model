@@ -268,10 +268,8 @@ fn export_physical_params(
         // must NOT be `(0, 0, focal_length_m)`: the service adds this offset to a steering
         // position that is *already* vertex-origin (`compute_feed_position_from_pointing`
         // → `to_feed_position_with_bdf` returns `(dx, dy, f + dz)`), so writing the focal
-        // length here placed a full-mode artifact's feed at z ≈ 2f. Measured cost on the
-        // roadmap D14 fixture (1.22 m, f/D 0.375, 12.1 GHz): boresight gain 41.09 → 13.83
-        // dBi, a 27.3 dB phantom axial defocus on every request. Roadmap unit **C13**,
-        // fixed 2026-08-02 under D14 — the unit that first served a full-mode artifact.
+        // length here places the feed at z ≈ 2f — a 27.3 dB boresight loss on the D14
+        // fixture. See C13.
         feed_position_m: (0.0, 0.0, 0.0),
         q_factor: class.feed.q_factor,
         phase_center_offset_m: 0.0,
@@ -484,11 +482,6 @@ async fn run_boresight_calibration(args: Args) -> Result<()> {
         data_source,
     )
     .context("Failed to build calibration artifact")?;
-
-    // Validate the artifact
-    calibration
-        .validate()
-        .context("Calibration artifact failed validation")?;
 
     // Serialize and save. Same ANTC container framing as full mode — one writer, so the
     // two producers cannot drift apart on version stamping or CRC (roadmap D2).
@@ -901,10 +894,6 @@ async fn run_calibration(args: Args) -> Result<()> {
     )
     .context("Failed to build service-loadable calibration artifact")?;
 
-    service_calibration
-        .validate()
-        .map_err(|e| anyhow::anyhow!("Service calibration failed validation: {}", e))?;
-
     write_calibration_artifact(&service_calibration, &args.output)
         .context("Failed to write service calibration artifact")?;
 
@@ -1106,16 +1095,11 @@ mod tests {
     /// **Roadmap C13.** The artifact's feed position is an offset **from the focal
     /// point**, so an on-axis feed is the origin — not `(0, 0, f)`.
     ///
-    /// This is the assertion that had no home: the value lived inline in
-    /// `run_calibration`, and no test served a full-mode artifact, so a frame that
-    /// disagreed with every consumer went unnoticed from the day the exporter was
-    /// written. The service adds this offset to an already-vertex-origin steering
-    /// position, so the old value put the feed a full focal length behind the focus —
-    /// 27.3 dB of boresight gain on the D14 fixture.
+    /// The service adds this offset to an already-vertex-origin steering position, so a
+    /// vertex-relative value puts the feed a full focal length behind the focus (C13).
     ///
-    /// The second assertion is the one with teeth: it fails for *exactly* the old value
-    /// on a class whose focal length is non-zero, which a bare `== (0,0,0)` would too,
-    /// but it says why, and it keeps working if the fixture class changes.
+    /// The second assertion names the vertex-relative value explicitly on a class with a
+    /// non-zero focal length, so its failure says why.
     #[test]
     fn exported_feed_position_is_focus_relative_not_vertex_relative() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("antenna_classes.yaml");
@@ -1147,12 +1131,9 @@ mod tests {
     /// `asymmetry_factor`, because that is what `compute_model_predictions` fitted the
     /// residuals against.
     ///
-    /// Deliberately runs on a class with a **non-unity** factor. Before D23 the field did
-    /// not exist and the service rebuilt the feed at the builder default of 1.0, so a
-    /// residual surface fitted against an asymmetric illumination was applied on top of a
-    /// symmetric one — worth up to 1.20 dB on this class, and it also moved the evaluation
-    /// off the azimuthal-mode integrator branch. A symmetric class cannot detect any of
-    /// that, which is why the negative control below asserts this test has power.
+    /// Deliberately runs on a class with a **non-unity** factor: a symmetric class cannot
+    /// tell the class value from the builder default of 1.0, which is why the negative
+    /// control below asserts this test has power (D23).
     #[test]
     fn exported_asymmetry_factor_is_the_class_value_not_a_symmetric_default() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("antenna_classes.yaml");

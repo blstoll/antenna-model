@@ -175,15 +175,10 @@ pub(crate) fn evaluate_gain_from_request_with_budget(
     // `docs/domain-contract.md`). Convert it into the steering displacement that
     // preparation combines with this feed's design offset.
     //
-    // This now runs BEFORE the reflector is built, where it used to run after. The
-    // precedence that matters — a coordinate fault beating `FeedNotFound` — is preserved
-    // above, and the only pair this could reorder is unreachable on the served path:
-    // `data::loader` validates every artifact as it loads it (`AntennaCalibration::validate`
-    // → `ReflectorGeometry::validate`), rejecting non-positive diameter or focal length,
-    // negative surface RMS, and out-of-band f/D — a superset of what
-    // `model::ReflectorGeometry::new` can fail on. A loaded artifact therefore cannot fail
-    // reflector construction, so no request can reach a reflector error at all, in either
-    // order.
+    // Runs before the reflector is built. Only a coordinate fault needs to beat
+    // `FeedNotFound`, which the lookup above preserves; a reflector error is unreachable
+    // because artifact validation (`antenna_core::artifact`) already rejects everything
+    // `model::ReflectorGeometry::new` can fail on.
     let (steer_x, steer_y, steer_z) = compute_feed_position_from_pointing(
         &request.feed_pointing_location,
         &request.reflector_boresight,
@@ -208,9 +203,8 @@ pub(crate) fn evaluate_gain_from_request_with_budget(
     )?;
 
     // Everything from here to the response DTO is the served-gain law, and it lives in
-    // `service::served_gain` — this endpoint no longer knows how to build the
-    // physical-optics model, gate coverage, evaluate a correction surface, or decide which
-    // warnings a direction earns.
+    // `service::served_gain`; this endpoint does not build the physical-optics model, gate
+    // coverage, evaluate a correction surface, or choose warnings (#61).
     let served = prepared.evaluate_direct(
         PreSquintDirection::new(emitter_az, emitter_el),
         if request.include_reference {
@@ -875,7 +869,7 @@ mod tests {
     /// the SAME geometry: with the reference tracking the actual's (absent)
     /// spillover, the two ideal-boresight reference gains must be numerically
     /// identical. (We compare the references directly rather than `loss_db`,
-    /// because after the F7 redesign 2026-07-16 the uncalibrated ACTUAL gain
+    /// because since F7 the uncalibrated ACTUAL gain
     /// additionally carries the statistical floor via the power sum — a separate,
     /// correct uncorrected-physics behavior gated by the same predicate as
     /// spillover — which would confound a raw `loss_db` comparison. The reference
@@ -1041,10 +1035,9 @@ mod tests {
     /// End-to-end proof that a boresight artifact's frequency correction actually
     /// reaches the served gain.
     ///
-    /// This is the assertion that catches a *silent skip*: before 2026-07-31 the
-    /// artifact loaded, carried its correction, reported `PartiallyCalibrated`, and
-    /// served raw physics — every observable except this one looked healthy. It
-    /// asserts `correction_applied` and the gain shift, not just a tolerance band.
+    /// Guards against a *silent skip* — an artifact that loads, carries its correction,
+    /// reports `PartiallyCalibrated`, and serves raw physics (D13). It asserts
+    /// `correction_applied` and the gain shift, not just a tolerance band.
     #[test]
     fn a_boresight_aimed_query_gets_the_boresight_correction_applied() {
         const CORRECTION_DB: f64 = 1.5;
@@ -1245,13 +1238,9 @@ mod tests {
     /// returns (0, 0, focal_length), so the physical offset from the focal point is
     /// (0, 0, focal_length - focal_length) = (0, 0, 0).
     ///
-    /// The OLD (angular) code also returned ~(0, 0, 0) for this case because
-    /// `feed_az - refl_az ≈ 0` — so this test alone does not discriminate.
-    /// See `test_feed_offset_is_meters_not_degrees` for the discriminating case.
-    ///
-    /// It *does* discriminate on the frame of the artifact's design offset, and that is
-    /// the second thing it now guards (roadmap **C13**, closed 2026-08-02):
-    /// `create_test_calibration` writes `position: (0, 0, 0)` for an on-axis feed —
+    /// Degrees and metres both read ~zero here, so the unit is discriminated by
+    /// `test_feed_offset_is_meters_not_degrees`. This test discriminates the frame of the
+    /// artifact's design offset (C13): `create_test_calibration` writes `position: (0, 0, 0)` for an on-axis feed —
     /// focus-relative, the convention `antennas.yaml` and the boresight producer use —
     /// against a 5 m focal length, so a vertex-relative artifact would land here at
     /// `z = 5.0` and blow the 0.05 m bound. This is the design-spec producer's half of
@@ -1292,9 +1281,8 @@ mod tests {
     /// than `reflector_boresight` (123.6 m vs 110.0 m at the same lon/lat), giving a
     /// non-zero angular offset and therefore a non-zero physical feed displacement.
     ///
-    /// The OLD code stored angular degrees (feed_az - refl_az, feed_el - refl_el),
-    /// which for this geometry differ from the physical meters values — so this test
-    /// WOULD HAVE FAILED against the old implementation.
+    /// For this geometry angular degrees (feed_az - refl_az, feed_el - refl_el) differ
+    /// from the physical metres, so a degree-valued offset fails it.
     #[test]
     fn test_feed_offset_is_meters_not_degrees() {
         let mut repo = CalibrationRepository::new();

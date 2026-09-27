@@ -27,6 +27,13 @@ pub const F_OVER_D_MIN: f64 = 0.2;
 /// Maximum supported f/D ratio (focal length / diameter). See [`F_OVER_D_MIN`].
 pub const F_OVER_D_MAX: f64 = 1.0;
 
+/// Whether `factor` is a usable E/H-plane asymmetry factor: finite and positive.
+///
+/// Shared by feed validation here and calibration-artifact validation.
+pub fn is_valid_asymmetry_factor(factor: f64) -> bool {
+    factor.is_finite() && factor > 0.0
+}
+
 /// Reflector geometry for a parabolic dish antenna
 ///
 /// This structure captures the physical dimensions and surface quality
@@ -245,11 +252,11 @@ impl FeedParameters {
             });
         }
 
-        if self.asymmetry_factor <= 0.0 {
+        if !is_valid_asymmetry_factor(self.asymmetry_factor) {
             return Err(ValidationError::InvalidValue {
                 param: "asymmetry_factor".to_string(),
                 reason: format!(
-                    "Asymmetry factor must be positive, got {}",
+                    "Asymmetry factor must be finite and positive, got {}",
                     self.asymmetry_factor
                 ),
             });

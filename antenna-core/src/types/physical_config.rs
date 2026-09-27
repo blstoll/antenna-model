@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::{FeedParameters, MeshParameters, ReflectorGeometry, ValidationError};
+use super::{FeedParameters, MeshParameters, ReflectorGeometry};
 
 /// Physical parameters of the physics model: reflector, feed, and optional mesh.
 ///
@@ -22,16 +22,6 @@ impl PhysicalAntennaConfig {
     /// Creates a new builder for constructing a `PhysicalAntennaConfig`.
     pub fn builder() -> PhysicalAntennaConfigBuilder {
         PhysicalAntennaConfigBuilder::default()
-    }
-
-    /// Validates the reflector, feed, and mesh (if any).
-    pub fn validate(&self) -> Result<(), ValidationError> {
-        self.reflector.validate()?;
-        self.feed.validate()?;
-        if let Some(ref mesh) = self.mesh {
-            mesh.validate()?;
-        }
-        Ok(())
     }
 }
 

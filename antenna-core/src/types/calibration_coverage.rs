@@ -1,7 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::ValidationError;
-use crate::model::correction_surface::CorrectionDomain;
+use super::CorrectionDomain;
 
 /// Half-angle, in degrees, of the on-axis cone that counts as boresight coverage.
 ///
@@ -16,7 +15,7 @@ pub const BORESIGHT_COVERAGE_CONE_DEG: f64 = 0.01;
 ///
 /// Coverage is contained by, never required to equal, the surface's fitted support:
 /// boresight coverage is deliberately narrower than its flat support. Containment is
-/// checked when the artifact is validated. See #97.
+/// an artifact invariant ([`crate::artifact`]). See #97.
 ///
 /// `elevation` throughout is the E-cone polar angle off boresight, never horizon
 /// elevation; all bounds are inclusive.
@@ -135,35 +134,6 @@ impl CalibrationCoverage {
         self.contains_direction(azimuth, elevation)
             && frequency >= self.frequency_range.0
             && frequency <= self.frequency_range.1
-    }
-
-    /// Checks that every range has `min <= max`.
-    pub fn validate(&self) -> Result<(), ValidationError> {
-        if self.azimuth_range.0 > self.azimuth_range.1 {
-            return Err(ValidationError::InvalidRange {
-                dimension: "azimuth".to_string(),
-                min: self.azimuth_range.0,
-                max: self.azimuth_range.1,
-            });
-        }
-
-        if self.elevation_range.0 > self.elevation_range.1 {
-            return Err(ValidationError::InvalidRange {
-                dimension: "elevation".to_string(),
-                min: self.elevation_range.0,
-                max: self.elevation_range.1,
-            });
-        }
-
-        if self.frequency_range.0 > self.frequency_range.1 {
-            return Err(ValidationError::InvalidRange {
-                dimension: "frequency".to_string(),
-                min: self.frequency_range.0,
-                max: self.frequency_range.1,
-            });
-        }
-
-        Ok(())
     }
 }
 
@@ -408,26 +378,5 @@ mod tests {
 
         assert!(!legacy.contains_direction(63.43, 0.0));
         assert!(!legacy.contains_direction_at_frequency(63.43, 0.0, 8000.0));
-    }
-
-    #[test]
-    fn test_calibration_coverage_validate() {
-        let valid_coverage = CalibrationCoverage {
-            azimuth_range: (0.0, 360.0),
-            elevation_range: (0.0, 90.0),
-            frequency_range: (7100.0, 8500.0),
-            num_measurements: 100,
-            has_correction_surface: true,
-        };
-        assert!(valid_coverage.validate().is_ok());
-
-        let invalid_coverage = CalibrationCoverage {
-            azimuth_range: (360.0, 0.0), // Invalid: min > max
-            elevation_range: (0.0, 90.0),
-            frequency_range: (7100.0, 8500.0),
-            num_measurements: 100,
-            has_correction_surface: true,
-        };
-        assert!(invalid_coverage.validate().is_err());
     }
 }

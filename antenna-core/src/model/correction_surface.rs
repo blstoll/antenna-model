@@ -32,16 +32,19 @@
 //!    disconnected pieces. Order 1 is piecewise constant by definition, so an order-1
 //!    interior knot may appear once.
 //!
-//! Rules 1–4 used to be the loader's ("artifact rules") and 5–7 the fitter's ("fitting
-//! rules"). They are one set now: an artifact can only hold a layout the fitter could have
-//! built, so a surface's support is always `[lower, upper]` of its [`ClampedAxis`].
+//! Artifacts and the fitter share this one set, so an artifact can only hold a layout the
+//! fitter could have built, and a surface's support is always `[lower, upper]` of its
+//! [`ClampedAxis`]. See #95.
 //!
 //! Schema 5's synthetic temperature axis is not executable — no query has a temperature
 //! coordinate — so it is held to the same rules only when this module *writes* it; on
 //! decode it must satisfy rules 1–4 and carry identical slabs (issue #92). Issue #98 retires
 //! it.
 
-use crate::types::{BSplineModel4D, CalibrationCoverage, ValidationError as DataValidationError};
+use crate::types::{
+    AntennaCalibration, BSplineModel4D, CalibrationCoverage, CorrectionDomain,
+    ValidationError as DataValidationError,
+};
 
 /// A producer's description of one clamped B-spline axis: its bounds and interior knots.
 ///
@@ -92,58 +95,6 @@ impl ClampedAxis {
     }
 }
 
-/// A closed box in the correction surface's query coordinates: E-clock and E-cone in
-/// degrees, frequency in MHz. Both bounds of every axis are inclusive.
-///
-/// Two different claims are stated in this shape (issue #97), and they must not be
-/// confused:
-///
-/// - **support** ([`CorrectionSurfaceLayout::support`]) — where the spline *can* be
-///   evaluated, a mathematical property of its knots;
-/// - **coverage** ([`CalibrationCoverage::domain`]) — where measurements *justify*
-///   applying the correction, an empirical claim.
-///
-/// The artifact invariant between them is containment, not equality:
-/// [`CoveredCorrectionSurface`] can only be constructed when coverage ⊆ support.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct CorrectionDomain {
-    pub e_clock_deg: (f64, f64),
-    pub e_cone_deg: (f64, f64),
-    pub frequency_mhz: (f64, f64),
-}
-
-impl CorrectionDomain {
-    /// The axes under the artifact's wire names (`azimuth_range`/`elevation_range` are the
-    /// E-clock and E-cone extents), so a validation error names the field a reader can find.
-    fn named_axes(&self) -> [(&'static str, (f64, f64)); 3] {
-        [
-            ("azimuth (E-clock)", self.e_clock_deg),
-            ("elevation (E-cone)", self.e_cone_deg),
-            ("frequency", self.frequency_mhz),
-        ]
-    }
-
-    /// Whether `inner` lies within `self` on every axis, bounds inclusive. The comparison
-    /// is written positively, so a non-finite or NaN bound in `inner` is never contained.
-    /// The error names the first axis that escapes.
-    pub fn check_contains(
-        &self,
-        inner: &CorrectionDomain,
-    ) -> std::result::Result<(), DataValidationError> {
-        self.named_axes()
-            .into_iter()
-            .zip(inner.named_axes())
-            .find(|((_, outer), (_, inner))| !(inner.0 >= outer.0 && inner.1 <= outer.1))
-            .map_or(Ok(()), |((dimension, support), (_, coverage))| {
-                Err(DataValidationError::CoverageExceedsSupport {
-                    dimension: dimension.to_string(),
-                    coverage,
-                    support,
-                })
-            })
-    }
-}
-
 /// A fitted correction surface paired with the calibration coverage that gates it.
 ///
 /// Constructing one proves the artifact invariant of issue #97: the coverage is contained
@@ -161,18 +112,40 @@ pub struct CoveredCorrectionSurface {
 }
 
 impl CoveredCorrectionSurface {
-    /// Pair `surface` with `coverage`, refusing coverage that is malformed or that extends
-    /// beyond the surface's support on any axis.
+    /// Pair `surface` with `coverage`, refusing coverage that extends beyond the surface's
+    /// support on any axis.
     pub fn new(
         surface: FittedCorrectionSurface,
         coverage: CalibrationCoverage,
     ) -> std::result::Result<Self, DataValidationError> {
-        coverage.validate()?;
         surface
             .layout()
             .support()
             .check_contains(&coverage.domain())?;
         Ok(Self { surface, coverage })
+    }
+
+    /// The artifact's executable correction surface paired with the coverage that gates
+    /// it, or `None` when the artifact carries no correction surface.
+    ///
+    /// Refuses a surface with no coverage record — it is not "covered everywhere" — and
+    /// coverage beyond the surface's fitted support. An artifact from the builder or the
+    /// loader already satisfies both, so this fails only on a hand-mutated value.
+    pub fn from_artifact(
+        calibration: &AntennaCalibration,
+    ) -> std::result::Result<Option<Self>, DataValidationError> {
+        calibration
+            .correction_surface
+            .as_ref()
+            .map(|model| {
+                let surface = FittedCorrectionSurface::from_model4d(model)?;
+                let coverage = calibration
+                    .coverage()?
+                    .cloned()
+                    .ok_or(DataValidationError::MissingCoverage)?;
+                Self::new(surface, coverage)
+            })
+            .transpose()
     }
 
     pub fn surface(&self) -> &FittedCorrectionSurface {
@@ -655,13 +628,6 @@ fn structurally_valid_knots(
     Ok(knots)
 }
 
-/// Validate schema 5's wire representation through the same adapter used to prepare it.
-pub(crate) fn validate_model4d(
-    model: &BSplineModel4D,
-) -> std::result::Result<(), DataValidationError> {
-    schema5_layout(model).map(|_| ())
-}
-
 fn schema5_layout(
     model: &BSplineModel4D,
 ) -> std::result::Result<CorrectionSurfaceLayout, DataValidationError> {
@@ -980,7 +946,6 @@ mod tests {
             error.to_string().contains("temperature slab 1"),
             "error must identify the unequal slab: {error}"
         );
-        assert_eq!(model.validate().unwrap_err(), error);
     }
 
     #[test]
@@ -995,7 +960,6 @@ mod tests {
             spline_order: 2,
         };
 
-        model.validate().unwrap();
         let surface = FittedCorrectionSurface::from_model4d(&model).unwrap();
         assert_eq!(surface.layout().shape(), [2, 2, 2]);
         assert_eq!(
@@ -1109,7 +1073,7 @@ mod tests {
 
     #[test]
     fn an_end_knot_repeated_more_than_order_times_is_rejected() {
-        // The pre-D19 fitter's defect: a bound at multiplicity order + 1 gives one basis
+        // A bound at multiplicity order + 1 gives one basis
         // function zero-width support. Shape agrees with length, so only the multiplicity
         // rule can catch it.
         let error = layout_error([3, 2, 2], vec![0.0, 0.0, 0.0, 10.0, 10.0], 2);
@@ -1178,8 +1142,7 @@ mod tests {
 
     #[test]
     fn a_knot_vector_whose_length_disagrees_with_shape_is_rejected() {
-        // Surplus knots: schema 5 used to admit `len > shape + order`, leaving basis
-        // positions with no coefficient. No producer ever wrote one.
+        // Surplus knots leave basis positions with no coefficient.
         let error = layout_error([2, 2, 2], vec![0.0, 0.0, 5.0, 10.0, 10.0], 2);
         assert_e_clock_rejected(error, "shape 2 + order 2");
         // Too short.
@@ -1237,7 +1200,6 @@ mod tests {
                 "every slab is the canonical slab"
             );
         }
-        model.validate().unwrap();
         assert_eq!(
             FittedCorrectionSurface::from_model4d(&model).unwrap(),
             surface

@@ -44,6 +44,10 @@ pub enum ArtifactExportError {
     #[error("invalid correction surface: {0}")]
     InvalidCorrectionSurface(#[from] antenna_core::types::ValidationError),
 
+    /// The assembled artifact broke an artifact invariant.
+    #[error("invalid calibration artifact: {0}")]
+    InvalidArtifact(antenna_core::types::ValidationError),
+
     /// A builder for one of the artifact sub-structures failed.
     #[error("failed to build {what}: {reason}")]
     BuildFailed {
@@ -142,18 +146,8 @@ pub struct ExportPhysicalParams {
 ///
 /// What `surface`'s knots can resolve against this antenna's own `λ/D` (roadmap D21) is
 /// computed inside this function, from `physical.diameter_m` — the *same* field it stamps
-/// into the artifact's `reflector.diameter_m` a few lines below.
-///
-/// It used to be a parameter, justified by a doc comment claiming the diameter "lives on the
-/// antenna class, which this function only sees the already-flattened
-/// [`ExportPhysicalParams`] view of". That was simply false — `ExportPhysicalParams` carries
-/// `diameter_m` and this function stamps it — and the caller assessed against a second,
-/// independent read (`class.geometry.diameter_m`), so an artifact could describe one antenna
-/// in `diameter_m` and a different one in `angular_resolution`. That is the invariant C13 and
-/// D23 established two lines from here: **every parameter the fitting model uses must be in
-/// the artifact, or the artifact describes something other than what it serves.** Roadmap
-/// **D26** finding 2; taking the parameter away is what makes the two agree by construction
-/// rather than by a caller's care.
+/// into the artifact's `reflector.diameter_m` a few lines below — so the two cannot describe
+/// different antennas. Do not make it a parameter again. See D26.
 ///
 /// `served_behavior_rmse_db` describes the value the service returns at every validation point:
 /// physics plus correction in support, and physics-only outside support. The artifact's generic
@@ -230,17 +224,10 @@ pub fn export_full_calibration(
     // must already be in that convention — which is why the parser reflects a negative-cone
     // row onto `(clock + 180°, |cone|)` on the way in (`MeasurementPoint::to_polar_convention`).
     //
-    // This *was* `.max(0.0)` / `.min(90.0)`, a silent clamp, and negative E-cone is legal
-    // validated input (`MeasurementPoint::validate` admits [-90, 90]). For a one-sided cut
-    // recorded as -14°…0° the clamp collapsed the range to `(0.0, 0.0)`: the artifact then
-    // reported `is_boresight_only()` over thousands of measurements, and `contains()` admitted
-    // no elevation but exactly 0.0 — so the service applied **no correction at all** while
-    // every health signal read normal. A wholly-negative span such as -14°…-1° produced the
-    // inverted `(0.0, -1.0)`, rejecting everything by construction. Roadmap **D26** finding 1.
-    //
-    // Failing loudly here rather than clamping is deliberate: a clamp cannot distinguish
-    // "already in the right convention" from "silently truncated", which is exactly how this
-    // went unseen. If it fires, the input never went through the normalization above.
+    // Refuse rather than clamp: a clamp cannot tell "already in the polar convention" from
+    // "silently truncated", and a truncated cone extent serves no correction at all while
+    // every health signal reads normal. If this fires, the input skipped the normalization
+    // above. See D26.
     let (cone_lo, cone_hi) = domain.e_cone_deg;
     if !(0.0..=90.0).contains(&cone_lo) || !(0.0..=90.0).contains(&cone_hi) || cone_lo > cone_hi {
         return Err(ArtifactExportError::BuildFailed {
@@ -312,37 +299,19 @@ pub fn export_full_calibration(
         .calibration_status(calibration_status)
         .calibration_coverage(coverage)
         .build()
-        .map_err(|e| ArtifactExportError::BuildFailed {
-            what: "antenna calibration".to_string(),
-            reason: e,
-        })?;
+        .map_err(ArtifactExportError::InvalidArtifact)?;
 
     Ok(calibration)
 }
 
 /// Serialize an [`AntennaCalibration`] in the ANTC container format and write it to `path`.
 ///
-/// **This is the only artifact writer in the tool.** Both producers — full-grid export
-/// (`export_full_calibration`) and boresight export (`build_calibration_artifact`) — go
-/// through it, so a boresight artifact and a full-mode artifact cannot disagree about
-/// their framing. They diverged until 2026-07-30 (roadmap D2): boresight wrote a bare
-/// `postcard::to_allocvec` with no magic, no version, and no CRC, which the service loader
-/// accepted only via its legacy headerless fallback — so a boresight artifact carried no
-/// container version stamp (a future framing change would have mis-decoded it silently
-/// instead of being rejected) and no integrity check (truncation surfaced as a decode
-/// error at best, wrong numbers at worst).
-///
-/// The framing itself is [`antenna_core::data::loader::encode_calibration_artifact`], the
-/// counterpart of the loader that reads it — so reader and writer share one definition of
-/// the container format rather than agreeing by inspection. This function contributes the
-/// file I/O and this tool's error vocabulary, nothing more. (It used to lay the header out
-/// itself from the loader's public constants, which is closer but still a copy: D23 found a
-/// *fourth* hand-rolled writer in a test carrying a hardcoded container version, which would
-/// have sailed past its own bump.)
-///
-/// Note this stamps the **container** axis only. The **schema** axis
-/// (`metadata.format_version`) rides inside the payload and is set by whichever builder
-/// produced `calibration`; see [`antenna_core::types::CALIBRATION_SCHEMA_VERSION`].
+/// The tool's only artifact writer, shared by full and boresight export so their framing
+/// cannot diverge (D2). The framing itself is
+/// [`antenna_core::data::loader::encode_calibration_artifact`]; this adds file I/O only — do
+/// not lay the header out by hand (D23, D27). Stamps the **container** axis; the **schema**
+/// axis is `metadata.format_version`, set by the builder
+/// ([`antenna_core::types::CALIBRATION_SCHEMA_VERSION`]).
 pub fn write_calibration_artifact(calibration: &AntennaCalibration, path: &Path) -> Result<()> {
     let bytes = encode_calibration_artifact(calibration).map_err(|e| {
         ArtifactExportError::SerializeFailed {
@@ -362,7 +331,7 @@ pub fn write_calibration_artifact(calibration: &AntennaCalibration, path: &Path)
 mod tests {
     use super::*;
     use crate::correction_surface::{fit_correction_surface, CorrectionSurfaceParams};
-    use antenna_core::model::FittedCorrectionSurface;
+    use antenna_core::model::{CoveredCorrectionSurface, FittedCorrectionSurface};
 
     fn applied_value(
         surface: &FittedCorrectionSurface,
@@ -434,11 +403,8 @@ mod tests {
             .fitted()
             .to_model4d(289.0, 291.0)
             .expect("wire construction should succeed");
-        assert!(
-            model.validate().is_ok(),
-            "exported 4D model failed validation: {:?}",
-            model.validate()
-        );
+        FittedCorrectionSurface::from_model4d(&model)
+            .expect("the exported 4D model must satisfy the core layout rules");
 
         // Shape mapping: spatial axes copy directly (no padding now that the
         // service's find_knot_span off-by-one is fixed); temperature axis has order+1 layers.
@@ -458,17 +424,12 @@ mod tests {
             .fitted()
             .to_model4d(t_lo, t_hi)
             .expect("wire construction should succeed");
-        assert!(model.validate().is_ok());
         let fitted = FittedCorrectionSurface::from_model4d(&model).unwrap();
 
         // Sample interior points AND the exact domain boundaries of every axis
         // (fitted ranges: clock [0, 350], cone [0, 10], freq [8000, 8400]) —
-        // including the temperature boundaries of the synthetic 4D axis. Boundary
-        // sampling added 2026-07-30 after the D15 endpoint fix: interior-only
-        // sampling left the two implementations' boundary behavior uncompared (see
-        // docs/findings-2026-07-29-correction-surface-upper-edge-collapse.md,
-        // "Why it went unnoticed"), so any future divergence at an edge would have
-        // gone unseen here.
+        // including the temperature boundaries of the synthetic 4D axis: interior-only
+        // sampling cannot see a divergence at an edge (D15).
         let clocks = [
             0.0, 10.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0, 349.0, 350.0,
         ];
@@ -565,7 +526,6 @@ mod tests {
         )
         .expect("export should succeed");
 
-        cal.validate().expect("artifact must validate");
         assert_eq!(cal.antenna_id, "test_antenna");
         assert_eq!(cal.feed_id, "x_band");
         assert!(cal.correction_surface.is_some());
@@ -626,9 +586,7 @@ mod tests {
         )
         .expect("export should succeed");
 
-        cal.validate().expect("artifact must validate");
-        let covered = cal
-            .covered_correction_surface()
+        let covered = CoveredCorrectionSurface::from_artifact(&cal)
             .expect("coverage is contained by support")
             .expect("full mode writes a surface");
         assert_eq!(covered.coverage().domain(), measured);

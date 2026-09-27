@@ -16,8 +16,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-/// The executable correction surface paired with its gating coverage, validated once at
-/// insertion (issues #92, #97). An error here is cached and surfaced per request.
+/// The executable correction surface paired with its gating coverage, prepared once at
+/// insertion (issues #92, #97). Artifacts arrive valid, so the error arm is reachable only
+/// by a hand-mutated value; it is cached and surfaced per request.
 pub(crate) type PreparedCorrection =
     std::result::Result<Option<Arc<CoveredCorrectionSurface>>, ValidationError>;
 
@@ -25,9 +26,7 @@ pub(crate) type PreparedCorrection =
 /// its fitted support contains. The single constructor both the repository cache and
 /// direct preparation use.
 pub(crate) fn prepare_correction(calibration: &AntennaCalibration) -> PreparedCorrection {
-    calibration
-        .covered_correction_surface()
-        .map(|covered| covered.map(Arc::new))
+    CoveredCorrectionSurface::from_artifact(calibration).map(|covered| covered.map(Arc::new))
 }
 
 #[derive(Debug, Clone)]
@@ -288,11 +287,7 @@ impl CalibrationRepository {
                 // (positional, non-self-describing), so these cannot become `Option`
                 // without a format bump — see roadmap D2. The API surfaces them with
                 // `#[serde(with = "nan_as_null")]`, so this NaN reaches the client as a
-                // deliberate JSON `null` (roadmap C12, 2026-07-28), matching gain_db.
-                //
-                // Note `data/loader.rs:268,275` warns on `rmse_db > 1.0` / `r_squared <
-                // 0.95`; both comparisons are false for NaN, so design-spec antennas load
-                // without a spurious quality warning. That is intended — do not "fix" it.
+                // deliberate JSON `null` (C12), matching gain_db.
                 rmse_db: f64::NAN,
                 r_squared: f64::NAN,
                 num_measurements: 0,
@@ -314,20 +309,21 @@ impl CalibrationRepository {
             // Each feed declares its own design band (#56).
             let validity_ranges = build_validity_ranges(feed_spec);
 
-            // Build calibration with Uncalibrated status
-            let calibration = AntennaCalibration {
-                antenna_id: entry.id.clone(),
-                feed_id: feed_spec.id.clone(),
-                metadata,
-                physical_config,
-                correction_surface: None,
-                validity_ranges,
-                calibration_status: Some(CalibrationStatus::Uncalibrated {
+            let calibration = AntennaCalibration::builder()
+                .antenna_id(entry.id.clone())
+                .feed_id(feed_spec.id.clone())
+                .metadata(metadata)
+                .physical_config(physical_config)
+                .validity_ranges(validity_ranges)
+                .calibration_status(CalibrationStatus::Uncalibrated {
                     accuracy_estimate_db: 3.0,
                     loss_accuracy_estimate_db: 2.0,
-                }),
-                calibration_coverage: None,
-            };
+                })
+                .build()
+                .map_err(|e| DataError::ValidationError {
+                    path: format!("design_specs of {}:{}", entry.id, feed_spec.id),
+                    reason: e.to_string(),
+                })?;
 
             self.add_calibration(calibration);
             loaded_count += 1;
@@ -341,10 +337,9 @@ impl CalibrationRepository {
         Ok(loaded_count)
     }
 
-    /// Add a calibration to the repository
+    /// Adds a calibration, replacing any for the same `(antenna_id, feed_id)`.
     ///
-    /// # Arguments
-    /// * `calibration` - Calibration to add
+    /// Does not validate: an [`AntennaCalibration`] is valid by construction.
     pub fn add_calibration(&mut self, calibration: AntennaCalibration) {
         let antenna_id = calibration.antenna_id.clone();
         let feed_id = calibration.feed_id.clone();
@@ -532,69 +527,20 @@ fn build_validity_ranges(feed_spec: &FeedSpecConfig) -> ValidityRanges {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::service::test_support::install_correction_surface;
-    use antenna_core::types::{CalibrationMetadata, FeedParameters, ReflectorGeometry};
+    use crate::service::test_support::{calibration_builder, install_correction_surface};
     use std::io::Write;
     use tempfile::{NamedTempFile, TempDir};
 
     fn create_test_calibration(antenna_id: &str, feed_id: &str) -> AntennaCalibration {
-        let metadata = CalibrationMetadata::builder()
-            .antenna_name(format!("{} {}", antenna_id, feed_id))
-            .calibration_date("2025-01-15T00:00:00Z")
-            .data_source("test_data.csv")
-            .rmse_db(0.5)
-            .r_squared(0.98)
-            .num_measurements(1000)
-            .build()
-            .unwrap();
-
-        let reflector = ReflectorGeometry::builder()
-            .diameter_m(34.0)
-            .focal_length_m(13.6)
-            .f_over_d_ratio(0.4)
-            .surface_rms_mm(0.5)
-            .build()
-            .unwrap();
-
-        let feed = FeedParameters::builder()
-            .position(0.0, 0.0, 0.1)
-            .q_factor(8.0)
-            .phase_center_offset_m(0.0)
-            .build()
-            .unwrap();
-
-        let physical_config = PhysicalAntennaConfig::builder()
-            .reflector(reflector)
-            .feed(feed)
-            .build()
-            .unwrap();
-
-        let ranges = ValidityRanges::builder()
-            .azimuth_range(0.0, 360.0)
-            .elevation_range(10.0, 80.0)
-            .frequency_range(8000.0, 8500.0)
-            .temperature(290.0)
-            .build()
-            .unwrap();
-
-        AntennaCalibration::builder()
+        calibration_builder()
             .antenna_id(antenna_id)
             .feed_id(feed_id)
-            .metadata(metadata)
-            .physical_config(physical_config)
-            .validity_ranges(ranges)
             .build()
             .unwrap()
     }
 
     /// Write an artifact the way a real producer does — ANTC framing around the postcard
-    /// payload, matching `calibrate::artifact_export::write_calibration_artifact`.
-    ///
-    /// This used to write a bare `postcard::to_allocvec`, which meant every load test in this
-    /// module went down the loader's legacy headerless branch and none exercised the version
-    /// gate or the CRC32 (roadmap D27 finding 9). That branch no longer exists, so these
-    /// tests would now fail at the framing check — but the point is that they were testing
-    /// the wrong path even while they passed.
+    /// payload, matching `calibrate::artifact_export::write_calibration_artifact` (D27).
     fn write_calibration_file(calibration: &AntennaCalibration) -> NamedTempFile {
         let bytes = antenna_core::data::loader::encode_calibration_artifact(calibration).unwrap();
 
@@ -675,7 +621,7 @@ mod tests {
         repo.add_calibration(cal);
 
         let config = repo.get_antenna_config("antenna_1", "x_band").unwrap();
-        assert_eq!(config.reflector.diameter_m, 34.0);
+        assert_eq!(config.reflector.diameter_m, 10.0);
     }
 
     #[test]
@@ -729,7 +675,7 @@ mod tests {
         repo.add_calibration(cal);
 
         let ranges = repo.get_validity_ranges("antenna_1", "x_band").unwrap();
-        assert_eq!(ranges.frequency_min_max, (8000.0, 8500.0));
+        assert_eq!(ranges.frequency_min_max, (1000.0, 10000.0));
     }
 
     #[test]
@@ -1300,8 +1246,8 @@ antennas:
         assert_eq!(x_band.validity_ranges.temperature_const, 290.0);
     }
 
-    /// Live control for the test above: the antenna-level block that used to override those
-    /// per-feed ranges is now rejected outright rather than ignored.
+    /// Live control for the test above: an antenna-level validity-ranges block is rejected,
+    /// not silently ignored (#56).
     #[test]
     fn test_uncalibrated_antenna_with_stale_validity_ranges_is_rejected() {
         let temp_dir = TempDir::new().unwrap();
