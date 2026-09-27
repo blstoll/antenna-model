@@ -1,9 +1,11 @@
 //! Shared test-only calibration fixtures for the service layer.
 
 use crate::data::types::{
-    AntennaCalibration, CalibrationMetadata, CalibrationStatus, FeedParameters, MeshParameters,
-    PhysicalAntennaConfig, ReflectorGeometry, ValidityRanges,
+    AntennaCalibration, BSplineModel4D, CalibrationCoverage, CalibrationMetadata,
+    CalibrationStatus, FeedParameters, MeshParameters, PhysicalAntennaConfig, ReflectorGeometry,
+    ValidityRanges,
 };
+use crate::model::FittedCorrectionSurface;
 /// The canonical service-layer test artifact: a 10 m / f/D 0.5 dish with a mesh, an
 /// on-axis feed, and validity ranges wide enough that nothing extrapolates by accident.
 ///
@@ -83,4 +85,24 @@ pub(crate) fn dummy_correction_surface() -> crate::data::types::BSplineModel4D {
         knots_temperature: vec![290.0, 290.0, 290.0],
         spline_order: 2,
     }
+}
+
+/// Attach `surface` to `calibration` the way a valid artifact carries one: with a coverage
+/// record its fitted support contains (issue #97).
+///
+/// A fixture that already records coverage — a partially calibrated one, or a test that
+/// narrowed it deliberately — keeps it. Otherwise the coverage is the surface's whole
+/// support, the relationship a full-mode artifact has.
+pub(crate) fn install_correction_surface(
+    calibration: &mut AntennaCalibration,
+    surface: BSplineModel4D,
+) {
+    let support = FittedCorrectionSurface::from_model4d(&surface)
+        .expect("fixture correction surface must be valid")
+        .layout()
+        .support();
+    calibration
+        .calibration_coverage
+        .get_or_insert_with(|| CalibrationCoverage::from_domain(support, 1_000, true));
+    calibration.correction_surface = Some(surface);
 }

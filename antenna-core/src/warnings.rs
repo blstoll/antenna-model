@@ -67,9 +67,8 @@ pub enum WarningCode {
     OutOfCoverage,
 
     /// `correction_not_applied` — the antenna has a correction surface but it was
-    /// not applied because the query fell outside recorded coverage or fitted support.
-    /// The message names which reason applies. The returned gain is raw physics.
-    /// Producer: `service::served_gain`.
+    /// not applied because the query fell outside its recorded calibration coverage.
+    /// The returned gain is raw physics. Producer: `service::served_gain`.
     CorrectionNotApplied,
 
     /// `uncalibrated` — the antenna has no measurement-derived calibration and is
@@ -123,8 +122,8 @@ pub enum WarningCode {
     SpilloverSignificant,
 
     /// `points_extrapolated` — grid-level summary from `/heatmap`: how many successful
-    /// point dispositions were outside calibration coverage or fitted support. The count
-    /// is derived from authoritative correction dispositions, never warning codes.
+    /// point dispositions were outside calibration coverage. The count is derived from
+    /// authoritative correction dispositions, never warning codes.
     /// Producer: `service::heatmap`.
     PointsExtrapolated,
 

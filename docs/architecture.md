@@ -317,54 +317,58 @@ gates and applies the correction surface itself (`service/h3_link_budget.rs`). I
 moves it onto the prepared value and deletes that copy; until then the two paths have to
 be kept in agreement by hand.
 
-**Coverage Checking:**
-```rust
-fn is_in_coverage(
-    coverage: &Option<CalibrationCoverage>,
-    azimuth_deg: f64,
-    elevation_deg: f64,
-    frequency_mhz: f64,
-) -> bool {
-    match coverage {
-        Some(cov) => cov.contains_direction_at_frequency(azimuth_deg, elevation_deg, frequency_mhz),
-        // No coverage restriction recorded (fully calibrated artifact): the
-        // correction surface applies everywhere it has data. Application is
-        // still gated separately on the surface existing at all.
-        None => true,
-    }
-}
+**Coverage and support (issue #97):**
+
+Two different claims share one shape (`CorrectionDomain`, a closed box in E-clock, E-cone and
+frequency):
+
+- **coverage** — where measurements justify applying the correction (`calibration_coverage`);
+- **support** — where the spline can be evaluated (`CorrectionSurfaceLayout::support`).
+
+The artifact invariant between them is containment, not equality:
+
+```
+correction surface exists  =>  calibration coverage exists
+calibration coverage       ⊆   correction-surface support   (bounds inclusive)
 ```
 
-`CalibrationCoverage` owns both coverage predicates (issue #60); the service adds
-only the `None` case. The **full** predicate above (azimuth, E-cone, frequency)
-decides whether a correction surface may be applied. The narrower **spatial**
-predicate, `contains_direction(azimuth_deg, elevation_deg)`, decides only whether
-the partial-calibration advisory reports the direction as outside the measured
-region — so an in-grid query at an uncalibrated frequency gets no correction
-without being called out-of-coverage. `ValidityRanges::contains` is a separate
-domain concept and is not calibration coverage.
+Full-mode artifacts have equal extents — `calibrate` clamps the fit's knot bounds to one
+measured domain and writes coverage from that same value. Boresight artifacts deliberately do
+not: their frequency correction is flat over the whole spatial domain while coverage is the
+narrow on-axis cone. `AntennaCalibration::validate` enforces the invariant at load, and a
+surface with no coverage record is rejected rather than treated as covered everywhere. A
+`PartiallyCalibrated` status carries a serialized duplicate of the coverage; the two must be
+equal (`AntennaCalibration::coverage` is the one accessor), and producers write both from one
+value (`AntennaCalibrationBuilder::partially_calibrated`).
+
+The served path prepares the surface **paired with its coverage**
+(`CoveredCorrectionSurface`, built only when coverage ⊆ support), so "a surface without
+coverage" is unrepresentable there. `CalibrationCoverage` owns both coverage predicates
+(issue #60): the **full** predicate `contains_direction_at_frequency` (azimuth, E-cone,
+frequency) decides whether a correction may be applied; the narrower **spatial** predicate
+`contains_direction` decides only whether the partial-calibration advisory reports the
+direction as outside the measured region — so an in-grid query at an uncalibrated frequency
+gets no correction without being called out-of-coverage. `ValidityRanges::contains` is a
+separate domain concept and is not calibration coverage.
 
 **Correction Surface Application:**
-Correction is applied only when:
-1. A validated fitted surface exists in the calibration data.
-2. The query is within calibrated coverage.
-3. The query is within the fitted E-clock, E-cone, and frequency support.
-
-Those conditions produce a `CorrectionDisposition` — the sole authority for both
-"was correction applied" and "is this result extrapolated" (issues #61 and #92). Callers
-read the disposition; they never re-derive either boolean:
+Correction is applied only when a validated fitted surface exists and the query is within
+its calibrated coverage. That produces a `CorrectionDisposition` — the sole authority for
+both "was correction applied" and "is this result extrapolated" (issues #61 and #92).
+Callers read the disposition; they never re-derive either boolean:
 
 ```rust
-let (correction_db, disposition) = match &prepared_correction_surface {
-    None if outside_partial_calibration_region(calibration, clock, cone) => {
+let (correction_db, disposition) = match &self.correction {   // Option<CoveredCorrectionSurface>
+    None if outside_partial_calibration_region(calibration, coverage, clock, cone) => {
         (0.0, CorrectionDisposition::UnavailableOutsideCoverage)
     }
     None => (0.0, CorrectionDisposition::Unavailable),
-    Some(_) if !is_in_coverage(&calibration.calibration_coverage, clock, cone, freq) => {
+    Some(c) if !c.coverage().contains_direction_at_frequency(clock, cone, freq) => {
         (0.0, CorrectionDisposition::OutsideCoverage)
     }
-    Some(surface) => match surface.evaluate(clock, cone, freq) {
+    Some(c) => match c.surface().evaluate(clock, cone, freq) {
         CorrectionEvaluation::Applied(value) => (value, CorrectionDisposition::Applied),
+        // Defensive: unreachable for a valid artifact, logged as an invariant violation.
         CorrectionEvaluation::OutsideSupport => (0.0, CorrectionDisposition::OutsideSupport),
     },
 };
@@ -375,8 +379,12 @@ let final_gain_db = physics_gain_db + correction_db;
 `Unavailable` is not extrapolated — there is no fitted surface or measured-region boundary
 to leave. For partially calibrated antennas without a surface,
 `UnavailableOutsideCoverage` preserves the measured-direction boundary and is extrapolated
-compatibility metadata. `OutsideCoverage` and `OutsideSupport` likewise return physics only
-and set `metadata.extrapolated`. The B-spline is never evaluated outside fitted support, so
+compatibility metadata. `OutsideCoverage` returns physics only and sets
+`metadata.extrapolated`. For a valid loaded artifact those, and `Applied`, are the only
+outcomes: coverage ⊆ support means a covered query is always in support. The core evaluator
+still answers `OutsideSupport` for direct queries (cross-validation evaluates held-out points
+with no coverage in play), and the served `OutsideSupport` arm remains only as a defensive
+invariant-violation branch. The B-spline is never evaluated outside fitted support, so
 `Applied` always denotes interpolation and never emits a numeric extrapolation.
 
 **Accuracy Adjustment:**

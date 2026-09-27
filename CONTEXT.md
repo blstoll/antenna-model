@@ -113,12 +113,16 @@ A fitted residual model representing measured gain minus the physical optics pre
 _Avoid_: Physical optics model, calibration artifact
 
 **Calibration artifact**:
-The versioned antenna-and-feed model produced by calibration and consumed for gain evaluation.
+The versioned antenna-and-feed model consumed for gain evaluation, produced either by calibration or from design specifications.
 _Avoid_: Measurement file, correction surface
 
 **Calibration coverage**:
-The angular and frequency region supported by calibration measurements.
-_Avoid_: Validity range
+The angular and frequency region where calibration measurements justify applying a correction. It always lies within the correction surface support.
+_Avoid_: Validity range, support
+
+**Correction surface support**:
+The angular and frequency region over which a correction surface can be evaluated. It may be wider than calibration coverage, as when a boresight correction is flat in every direction but measured only on axis.
+_Avoid_: Coverage, validity range
 
 **Fully calibrated**:
 A calibration status backed by measurements and a correction surface across the intended coverage.

@@ -32,12 +32,12 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-use crate::parser::MeasurementPoint;
+use crate::parser::{closed_extent, MeasurementPoint};
 use antenna_core::data::types::AngularResolution;
 use antenna_core::model::phase::wavelength_from_frequency;
 use antenna_core::model::{
-    BasisStencilOutcome, ClampedAxis, CorrectionEvaluation, CorrectionSurfaceLayout,
-    FittedCorrectionSurface,
+    BasisStencilOutcome, ClampedAxis, CorrectionDomain, CorrectionEvaluation,
+    CorrectionSurfaceLayout, FittedCorrectionSurface,
 };
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
@@ -270,6 +270,9 @@ pub struct CorrectionSurface {
     /// The solved surface: validated layout plus coefficients in core's canonical
     /// E-clock-fastest order.
     fitted: FittedCorrectionSurface,
+
+    /// The measured domain every axis was clamped to (issue #97).
+    measured_domain: CorrectionDomain,
 
     /// Fitting statistics.
     pub fit_stats: FitStatistics,
@@ -1021,23 +1024,37 @@ pub fn fit_correction_surface(
     let initial_rmse = compute_rmse(&residuals.iter().map(|r| r.residual_db).collect::<Vec<_>>());
     info!(model_only_rmse_db = initial_rmse, "initial model-only RMSE");
 
+    // The measured domain is computed once. It bounds every axis below, and export writes
+    // the artifact's coverage from this same value (issue #97), so full-mode support and
+    // coverage are one domain rather than two extents that agree by recomputation.
+    let measured_domain = measured_domain(&residuals);
+
     // Place each axis's interior knots (fitting policy, this crate's), then let the core
     // layout build the knot vectors and shape from them (geometry, core's — issue #95).
-    let place = |values: Vec<f64>, num_knots: usize, min_spacing: f64| {
-        place_knots(&values, num_knots, params.adaptive_knots, min_spacing)
+    let place = |values: Vec<f64>, bounds: (f64, f64), num_knots: usize, min_spacing: f64| {
+        place_knots(
+            &values,
+            bounds,
+            num_knots,
+            params.adaptive_knots,
+            min_spacing,
+        )
     };
     let frequency_axis = place(
         residuals.iter().map(|r| r.frequency_mhz).collect(),
+        measured_domain.frequency_mhz,
         params.num_knots_frequency,
         params.min_knot_spacing_frequency,
     )?;
     let cone_axis = place(
         residuals.iter().map(|r| r.e_cone_deg).collect(),
+        measured_domain.e_cone_deg,
         params.num_knots_econe,
         params.min_knot_spacing_econe,
     )?;
     let clock_axis = place(
         residuals.iter().map(|r| r.e_clock_deg).collect(),
+        measured_domain.e_clock_deg,
         params.num_knots_eclock,
         params.min_knot_spacing_eclock,
     )?;
@@ -1122,6 +1139,7 @@ pub fn fit_correction_surface(
 
     Ok(CorrectionSurface {
         fitted,
+        measured_domain,
         fit_stats: FitStatistics {
             cross_validation_rmse,
             ..fit_stats
@@ -1134,7 +1152,21 @@ pub fn fit_correction_surface(
 // Knot Vector Generation
 // ============================================================================
 
-/// Place one axis's knots: its bounds and interior knots, from the data on that axis.
+/// The closed extent of the residuals on each axis — the measured domain of a fit.
+///
+/// `validate_fitting_inputs` has already refused an empty or non-finite input, so every
+/// fold below starts from a real value.
+fn measured_domain(residuals: &[ResidualPoint]) -> CorrectionDomain {
+    let extent = |value: fn(&ResidualPoint) -> f64| closed_extent(residuals.iter().map(value));
+    CorrectionDomain {
+        e_clock_deg: extent(|r| r.e_clock_deg),
+        e_cone_deg: extent(|r| r.e_cone_deg),
+        frequency_mhz: extent(|r| r.frequency_mhz),
+    }
+}
+
+/// Place one axis's knots: its interior knots from the data on that axis, clamped to
+/// `bounds` — the measured domain's extent on that axis (issue #97).
 ///
 /// This is fitting *policy* — how many knots to request, quantile or uniform placement, the
 /// minimum spacing — and it stays in this crate. The result is a [`ClampedAxis`], which the
@@ -1143,11 +1175,13 @@ pub fn fit_correction_surface(
 ///
 /// # Arguments
 /// * `data` - Data points in this dimension
+/// * `bounds` - The measured domain on this dimension; the axis is clamped to it
 /// * `num_knots` - Target number of internal knots
 /// * `adaptive` - Use adaptive placement based on data density
 /// * `min_spacing` - Minimum spacing between knots
 fn place_knots(
     data: &[f64],
+    (min_val, max_val): (f64, f64),
     num_knots: usize,
     adaptive: bool,
     min_spacing: f64,
@@ -1161,9 +1195,6 @@ fn place_knots(
 
     let mut sorted_data = data.to_vec();
     sorted_data.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-
-    let min_val = sorted_data[0];
-    let max_val = sorted_data[sorted_data.len() - 1];
 
     if max_val - min_val < min_spacing {
         return Err(CorrectionSurfaceError::InvalidParameter {
@@ -1454,13 +1485,22 @@ fn fit_bspline_coefficients(
 // ============================================================================
 
 impl CorrectionSurface {
-    /// Pair a solved core surface with the statistics measured against it.
+    /// Pair a solved core surface with the statistics measured against it. With no fit
+    /// data to say otherwise, the surface's whole support is its measured domain.
     pub fn new(fitted: FittedCorrectionSurface, fit_stats: FitStatistics) -> Self {
         Self {
+            measured_domain: fitted.layout().support(),
             fitted,
             fit_stats,
             cross_validation: None,
         }
+    }
+
+    /// The measured domain the fit clamped every axis to, and the one value export writes
+    /// the artifact's calibration coverage from (issue #97). For a fitted surface this is
+    /// exactly the layout's support.
+    pub fn measured_domain(&self) -> CorrectionDomain {
+        self.measured_domain
     }
 
     /// The one cross-validation run performed while fitting, if requested.
@@ -2154,6 +2194,11 @@ mod tests {
         (fd, cd, kd)
     }
 
+    /// An axis's own data extent — the bounds the fitter's measured domain gives it.
+    fn extent(data: &[f64]) -> (f64, f64) {
+        closed_extent(data.iter().copied())
+    }
+
     /// The knot vector the core layout builds for one placed axis.
     fn delivered_knots(axis: ClampedAxis, order: usize) -> Vec<f64> {
         let unit = || ClampedAxis::new(0.0, 1.0, vec![]);
@@ -2238,7 +2283,7 @@ mod tests {
             ("clock", &kd, 8, 5.0),
         ] {
             let knots = delivered_knots(
-                place_knots(data, num_knots, true, min_spacing)
+                place_knots(data, extent(data), num_knots, true, min_spacing)
                     .unwrap_or_else(|e| panic!("{name}: knot placement failed: {e}")),
                 order,
             );
@@ -2290,7 +2335,7 @@ mod tests {
         let mut n_coefficients = 1;
         for (name, data, num_knots, min_spacing, expected_basis) in axes {
             let knots = delivered_knots(
-                place_knots(data, num_knots, true, min_spacing)
+                place_knots(data, extent(data), num_knots, true, min_spacing)
                     .unwrap_or_else(|e| panic!("{name}: {e}")),
                 order,
             );
@@ -2315,7 +2360,10 @@ mod tests {
     #[test]
     fn adaptive_knots_are_unchanged_on_the_axis_that_was_already_correct() {
         let (_, cd, _) = d12_axis_data();
-        let knots = delivered_knots(place_knots(&cd, 6, true, 2.0).expect("cone knots"), 4);
+        let knots = delivered_knots(
+            place_knots(&cd, extent(&cd), 6, true, 2.0).expect("cone knots"),
+            4,
+        );
 
         assert_eq!(
             knots,

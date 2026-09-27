@@ -584,10 +584,12 @@ The calibration artifacts vary based on calibration status:
      once during load/preparation, so temperature is not a query coordinate.
    - ~~Separate tables for main lobe, sidelobes, far field~~ — *not implemented.* One
      surface covers the whole fitted domain; there is no lobe-region partition.
-   - **Coverage and support**: `calibration_coverage` gates the empirical claim before
-     evaluation. Inside coverage and fitted support, the correction is applied. Outside
-     either boundary, no correction value is produced and served gain is physics-only;
-     `correction_not_applied` names the reason.
+   - **Coverage and support** (issue #97): `calibration_coverage` gates the empirical
+     claim before evaluation, and an artifact may only record coverage its fitted support
+     contains — a surface without coverage is rejected at load. Inside coverage the
+     correction is applied; outside it no correction value is produced, served gain is
+     physics-only, and `correction_not_applied` says so. Fitted support is therefore never
+     a served boundary for a valid artifact.
    - **Known limitation (roadmap D21/D24):** the angular knots are absolute while the
      pattern scale is `λ/D`, so on a narrow-beam antenna the surface carries the
      residual's *envelope trend*, not its lobe structure. Every full-mode fit now reports

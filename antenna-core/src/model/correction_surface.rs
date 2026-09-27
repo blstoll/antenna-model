@@ -41,7 +41,9 @@
 //! decode it must satisfy rules 1–4 and carry identical slabs (issue #92). Issue #98 retires
 //! it.
 
-use crate::data::types::{BSplineModel4D, ValidationError as DataValidationError};
+use crate::data::types::{
+    BSplineModel4D, CalibrationCoverage, ValidationError as DataValidationError,
+};
 
 /// A producer's description of one clamped B-spline axis: its bounds and interior knots.
 ///
@@ -89,6 +91,98 @@ impl ClampedAxis {
             .chain(self.interior.iter().copied())
             .chain(std::iter::repeat_n(self.upper, order))
             .collect()
+    }
+}
+
+/// A closed box in the correction surface's query coordinates: E-clock and E-cone in
+/// degrees, frequency in MHz. Both bounds of every axis are inclusive.
+///
+/// Two different claims are stated in this shape (issue #97), and they must not be
+/// confused:
+///
+/// - **support** ([`CorrectionSurfaceLayout::support`]) — where the spline *can* be
+///   evaluated, a mathematical property of its knots;
+/// - **coverage** ([`CalibrationCoverage::domain`]) — where measurements *justify*
+///   applying the correction, an empirical claim.
+///
+/// The artifact invariant between them is containment, not equality:
+/// [`CoveredCorrectionSurface`] can only be constructed when coverage ⊆ support.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CorrectionDomain {
+    pub e_clock_deg: (f64, f64),
+    pub e_cone_deg: (f64, f64),
+    pub frequency_mhz: (f64, f64),
+}
+
+impl CorrectionDomain {
+    /// The axes under the artifact's wire names (`azimuth_range`/`elevation_range` are the
+    /// E-clock and E-cone extents), so a validation error names the field a reader can find.
+    fn named_axes(&self) -> [(&'static str, (f64, f64)); 3] {
+        [
+            ("azimuth (E-clock)", self.e_clock_deg),
+            ("elevation (E-cone)", self.e_cone_deg),
+            ("frequency", self.frequency_mhz),
+        ]
+    }
+
+    /// Whether `inner` lies within `self` on every axis, bounds inclusive. The comparison
+    /// is written positively, so a non-finite or NaN bound in `inner` is never contained.
+    /// The error names the first axis that escapes.
+    pub fn check_contains(
+        &self,
+        inner: &CorrectionDomain,
+    ) -> std::result::Result<(), DataValidationError> {
+        self.named_axes()
+            .into_iter()
+            .zip(inner.named_axes())
+            .find(|((_, outer), (_, inner))| !(inner.0 >= outer.0 && inner.1 <= outer.1))
+            .map_or(Ok(()), |((dimension, support), (_, coverage))| {
+                Err(DataValidationError::CoverageExceedsSupport {
+                    dimension: dimension.to_string(),
+                    coverage,
+                    support,
+                })
+            })
+    }
+}
+
+/// A fitted correction surface paired with the calibration coverage that gates it.
+///
+/// Constructing one proves the artifact invariant of issue #97: the coverage is contained
+/// by the surface's fitted support. Served gating therefore reads coverage *from this
+/// value* — a correction surface with no coverage record, or with coverage the spline
+/// cannot evaluate over, is unrepresentable here, which is why a query that passes the
+/// coverage check can only fall outside support if that invariant was bypassed.
+///
+/// [`FittedCorrectionSurface::evaluate`] still answers `OutsideSupport` for direct
+/// queries: cross-validation evaluates held-out points with no coverage in play.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CoveredCorrectionSurface {
+    surface: FittedCorrectionSurface,
+    coverage: CalibrationCoverage,
+}
+
+impl CoveredCorrectionSurface {
+    /// Pair `surface` with `coverage`, refusing coverage that is malformed or that extends
+    /// beyond the surface's support on any axis.
+    pub fn new(
+        surface: FittedCorrectionSurface,
+        coverage: CalibrationCoverage,
+    ) -> std::result::Result<Self, DataValidationError> {
+        coverage.validate()?;
+        surface
+            .layout()
+            .support()
+            .check_contains(&coverage.domain())?;
+        Ok(Self { surface, coverage })
+    }
+
+    pub fn surface(&self) -> &FittedCorrectionSurface {
+        &self.surface
+    }
+
+    pub fn coverage(&self) -> &CalibrationCoverage {
+        &self.coverage
     }
 }
 
@@ -258,6 +352,18 @@ impl CorrectionSurfaceLayout {
 
     pub fn spline_order(&self) -> u8 {
         self.order as u8
+    }
+
+    /// The closed interval each axis can be evaluated over — the fitted support that
+    /// [`Self::basis_stencil`] answers `OutsideSupport` beyond.
+    pub fn support(&self) -> CorrectionDomain {
+        let [e_clock, e_cone, frequency] =
+            self.axes.each_ref().map(|axis| axis.support(self.order));
+        CorrectionDomain {
+            e_clock_deg: e_clock,
+            e_cone_deg: e_cone,
+            frequency_mhz: frequency,
+        }
     }
 
     /// The validated E-clock knot vector, in canonical axis order.

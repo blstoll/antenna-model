@@ -20,6 +20,10 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::model::correction_surface::{
+    CorrectionDomain, CoveredCorrectionSurface, FittedCorrectionSurface,
+};
+
 /// Semantic schema version of the calibration payload this build reads and writes.
 ///
 /// This is the **schema axis** of an artifact's two version axes; the other is the ANTC
@@ -192,6 +196,46 @@ impl AntennaCalibration {
         self.correction_surface.is_none()
     }
 
+    /// The one calibration-coverage claim this artifact makes (issue #97).
+    ///
+    /// A `PartiallyCalibrated` status carries coverage too, a serialized duplicate of
+    /// `calibration_coverage`. Producers write both from one value
+    /// ([`AntennaCalibrationBuilder::partially_calibrated`]); this accessor refuses an
+    /// artifact whose copies disagree, so served gating and response reporting cannot read
+    /// different coverage claims. `calibration_coverage` is the authority.
+    pub fn coverage(&self) -> Result<Option<&CalibrationCoverage>, ValidationError> {
+        match &self.calibration_status {
+            Some(CalibrationStatus::PartiallyCalibrated { coverage, .. })
+                if self.calibration_coverage.as_ref() != Some(coverage) =>
+            {
+                Err(ValidationError::CoverageRecordsDisagree)
+            }
+            _ => Ok(self.calibration_coverage.as_ref()),
+        }
+    }
+
+    /// The executable correction surface paired with the coverage that gates it, or `None`
+    /// when the artifact carries no correction surface.
+    ///
+    /// Refuses a surface with no coverage record — it is **not** treated as covered
+    /// everywhere — and coverage that extends beyond the surface's fitted support
+    /// (issue #97). See [`CoveredCorrectionSurface`].
+    pub fn covered_correction_surface(
+        &self,
+    ) -> Result<Option<CoveredCorrectionSurface>, ValidationError> {
+        self.correction_surface
+            .as_ref()
+            .map(|model| {
+                let surface = FittedCorrectionSurface::from_model4d(model)?;
+                let coverage = self
+                    .coverage()?
+                    .cloned()
+                    .ok_or(ValidationError::MissingCoverage)?;
+                CoveredCorrectionSurface::new(surface, coverage)
+            })
+            .transpose()
+    }
+
     /// Validates that the calibration data is internally consistent.
     pub fn validate(&self) -> Result<(), ValidationError> {
         // Validate antenna ID is not empty
@@ -207,11 +251,6 @@ impl AntennaCalibration {
         // Validate physical configuration
         self.physical_config.validate()?;
 
-        // Validate correction surface if present
-        if let Some(ref correction) = self.correction_surface {
-            correction.validate()?;
-        }
-
         // Validate validity ranges
         self.validity_ranges.validate()?;
 
@@ -219,6 +258,11 @@ impl AntennaCalibration {
         if let Some(ref coverage) = self.calibration_coverage {
             coverage.validate()?;
         }
+
+        // Issue #97: one coverage claim, and a correction surface only with coverage its
+        // support contains. Constructing the covered surface validates the surface too.
+        self.coverage()?;
+        self.covered_correction_surface()?;
 
         // Validate the recorded angular-resolution assessment if present. Nothing else in
         // this method reads `metadata`, which is exactly how a `0.0` knot spacing could ride
@@ -1038,6 +1082,54 @@ impl CalibrationCoverage {
         CalibrationCoverageBuilder::default()
     }
 
+    /// Coverage over a measured domain — the full-mode construction, where one measured
+    /// domain is also the correction surface's fitted support (issue #97).
+    pub fn from_domain(
+        domain: CorrectionDomain,
+        num_measurements: usize,
+        has_correction_surface: bool,
+    ) -> Self {
+        Self {
+            azimuth_range: domain.e_clock_deg,
+            elevation_range: domain.e_cone_deg,
+            frequency_range: domain.frequency_mhz,
+            num_measurements,
+            has_correction_surface,
+        }
+    }
+
+    /// Boresight coverage: the on-axis cone of [`BORESIGHT_COVERAGE_CONE_DEG`], azimuth
+    /// unconstrained because it is degenerate at the pole, over the measured frequency span.
+    ///
+    /// Deliberately narrower than the boresight frequency correction's flat spatial
+    /// support: the correction is *evaluable* in every direction, but is *measured* only
+    /// here. That is valid because coverage is contained by support (issue #97).
+    pub fn boresight_cone(
+        frequency_range: (f64, f64),
+        num_measurements: usize,
+        has_correction_surface: bool,
+    ) -> Self {
+        Self::from_domain(
+            CorrectionDomain {
+                e_clock_deg: (0.0, 360.0),
+                e_cone_deg: (0.0, BORESIGHT_COVERAGE_CONE_DEG),
+                frequency_mhz: frequency_range,
+            },
+            num_measurements,
+            has_correction_surface,
+        )
+    }
+
+    /// The covered region in the correction surface's query coordinates, so it can be
+    /// compared with fitted support (issue #97).
+    pub fn domain(&self) -> CorrectionDomain {
+        CorrectionDomain {
+            e_clock_deg: self.azimuth_range,
+            e_cone_deg: self.elevation_range,
+            frequency_mhz: self.frequency_range,
+        }
+    }
+
     /// Checks if this is boresight-only coverage — an on-axis polar cone.
     ///
     /// **Azimuth is deliberately ignored.** Boresight is the pole of the
@@ -1291,6 +1383,21 @@ pub enum ValidationError {
         value: f64,
         reason: String,
     },
+
+    /// A correction surface is present with no calibration coverage record (issue #97).
+    MissingCoverage,
+
+    /// Calibration coverage extends beyond the correction surface's fitted support on
+    /// `dimension` (issue #97). Containment is inclusive at both bounds.
+    CoverageExceedsSupport {
+        dimension: String,
+        coverage: (f64, f64),
+        support: (f64, f64),
+    },
+
+    /// A `PartiallyCalibrated` status carries coverage that differs from the artifact's
+    /// `calibration_coverage` (issue #97).
+    CoverageRecordsDisagree,
 }
 
 impl fmt::Display for ValidationError {
@@ -1356,6 +1463,28 @@ impl fmt::Display for ValidationError {
                     field, value, reason
                 )
             }
+            ValidationError::MissingCoverage => write!(
+                f,
+                "correction_surface is present but calibration_coverage is absent; a \
+                 correction may only be applied where measurements justify it, so the \
+                 artifact must record that coverage — regenerate it with calibrate"
+            ),
+            ValidationError::CoverageExceedsSupport {
+                dimension,
+                coverage,
+                support,
+            } => write!(
+                f,
+                "calibration_coverage {} range [{}, {}] is not contained by the \
+                 correction_surface's fitted support [{}, {}]; coverage must lie within \
+                 support (bounds inclusive)",
+                dimension, coverage.0, coverage.1, support.0, support.1
+            ),
+            ValidationError::CoverageRecordsDisagree => write!(
+                f,
+                "calibration_status.coverage and calibration_coverage disagree; a \
+                 PartiallyCalibrated artifact must carry the same coverage in both"
+            ),
         }
     }
 }
@@ -1416,6 +1545,20 @@ impl AntennaCalibrationBuilder {
     pub fn calibration_coverage(mut self, coverage: CalibrationCoverage) -> Self {
         self.calibration_coverage = Some(coverage);
         self
+    }
+
+    /// Mark the artifact `PartiallyCalibrated`, writing its status coverage and
+    /// `calibration_coverage` from the one `coverage` value (issue #97).
+    pub fn partially_calibrated(
+        self,
+        accuracy_estimate_db: f64,
+        coverage: CalibrationCoverage,
+    ) -> Self {
+        self.calibration_status(CalibrationStatus::PartiallyCalibrated {
+            accuracy_estimate_db,
+            coverage: coverage.clone(),
+        })
+        .calibration_coverage(coverage)
     }
 
     pub fn build(self) -> Result<AntennaCalibration, String> {
@@ -3074,5 +3217,254 @@ mod tests {
             clock_lobe_period_deg: f64::INFINITY,
         });
         assert!(cal.validate().is_ok());
+    }
+
+    /// Issue #97: calibration coverage is an artifact invariant, contained by — not equal
+    /// to — the correction surface's fitted support.
+    mod coverage_containment {
+        use super::*;
+        use crate::model::FittedCorrectionSurface;
+        use crate::model::{ClampedAxis, CorrectionDomain, CorrectionSurfaceLayout};
+
+        const FULL_MODE: CorrectionDomain = CorrectionDomain {
+            e_clock_deg: (10.0, 80.0),
+            e_cone_deg: (0.5, 30.0),
+            frequency_mhz: (8_000.0, 8_500.0),
+        };
+
+        /// A flat surface whose support is exactly `support` on every axis.
+        fn surface_over(support: CorrectionDomain) -> BSplineModel4D {
+            let flat = |(lower, upper): (f64, f64)| ClampedAxis::flat(lower, upper);
+            let layout = CorrectionSurfaceLayout::clamped(
+                flat(support.e_clock_deg),
+                flat(support.e_cone_deg),
+                flat(support.frequency_mhz),
+                4,
+            )
+            .unwrap();
+            let coefficients = vec![0.5; layout.coefficient_count()];
+            FittedCorrectionSurface::new(layout, coefficients)
+                .unwrap()
+                .to_model4d(280.0, 300.0)
+                .unwrap()
+        }
+
+        fn metadata() -> CalibrationMetadata {
+            CalibrationMetadata::builder()
+                .antenna_name("Test")
+                .calibration_date("2026-09-26")
+                .data_source("test.csv")
+                .rmse_db(0.5)
+                .r_squared(0.98)
+                .num_measurements(100)
+                .build()
+                .unwrap()
+        }
+
+        fn base() -> AntennaCalibrationBuilder {
+            AntennaCalibration::builder()
+                .antenna_id("test_antenna")
+                .feed_id("primary")
+                .metadata(metadata())
+                .physical_config(create_test_physical_config())
+                .validity_ranges(
+                    ValidityRanges::builder()
+                        .azimuth_range(0.0, 360.0)
+                        .elevation_range(0.0, 90.0)
+                        .frequency_range(8_000.0, 8_500.0)
+                        .temperature(290.0)
+                        .build()
+                        .unwrap(),
+                )
+        }
+
+        /// A full-mode artifact: surface support and coverage are one measured domain.
+        fn full_mode(support: CorrectionDomain, coverage: CorrectionDomain) -> AntennaCalibration {
+            base()
+                .correction_surface(surface_over(support))
+                .calibration_status(CalibrationStatus::FullyCalibrated {
+                    accuracy_estimate_db: 0.5,
+                })
+                .calibration_coverage(CalibrationCoverage::from_domain(coverage, 100, true))
+                .build()
+                .unwrap()
+        }
+
+        fn assert_exceeds(calibration: &AntennaCalibration, axis: &str) {
+            match calibration.validate() {
+                Err(ValidationError::CoverageExceedsSupport { ref dimension, .. })
+                    if dimension == axis => {}
+                other => panic!("expected coverage to exceed support on {axis}, got {other:?}"),
+            }
+        }
+
+        #[test]
+        fn full_mode_coverage_equal_to_support_loads() {
+            let calibration = full_mode(FULL_MODE, FULL_MODE);
+            assert_eq!(calibration.validate(), Ok(()));
+            let covered = calibration
+                .covered_correction_surface()
+                .unwrap()
+                .expect("a surface is present");
+            assert_eq!(covered.surface().layout().support(), FULL_MODE);
+            assert_eq!(covered.coverage().domain(), FULL_MODE);
+        }
+
+        #[test]
+        fn boresight_coverage_is_a_strict_subset_of_its_flat_support() {
+            let support = CorrectionDomain {
+                e_clock_deg: (0.0, 360.0),
+                e_cone_deg: (0.0, 180.0),
+                frequency_mhz: (7_100.0, 8_500.0),
+            };
+            let coverage = CalibrationCoverage::boresight_cone((7_100.0, 8_500.0), 28, true);
+            assert!(coverage.is_boresight_only());
+            assert_ne!(
+                coverage.domain(),
+                support,
+                "boresight coverage is deliberately narrower"
+            );
+
+            let calibration = base()
+                .correction_surface(surface_over(support))
+                .partially_calibrated(1.5, coverage.clone())
+                .build()
+                .unwrap();
+
+            assert_eq!(calibration.validate(), Ok(()));
+            assert_eq!(calibration.coverage(), Ok(Some(&coverage)));
+        }
+
+        /// Containment is inclusive: a coverage bound equal to a support bound is inside,
+        /// and the next representable value past it on any axis is not.
+        #[test]
+        fn containment_is_inclusive_at_every_support_bound() {
+            assert_eq!(full_mode(FULL_MODE, FULL_MODE).validate(), Ok(()));
+
+            type AxisOf = fn(&mut CorrectionDomain) -> &mut (f64, f64);
+            let axes: [(&str, AxisOf); 3] = [
+                ("azimuth (E-clock)", |d| &mut d.e_clock_deg),
+                ("elevation (E-cone)", |d| &mut d.e_cone_deg),
+                ("frequency", |d| &mut d.frequency_mhz),
+            ];
+            for (name, axis) in axes {
+                let mut below = FULL_MODE;
+                axis(&mut below).0 = axis(&mut below).0.next_down();
+                assert_exceeds(&full_mode(FULL_MODE, below), name);
+
+                let mut above = FULL_MODE;
+                axis(&mut above).1 = axis(&mut above).1.next_up();
+                assert_exceeds(&full_mode(FULL_MODE, above), name);
+            }
+        }
+
+        #[test]
+        fn non_finite_coverage_is_not_contained() {
+            let mut coverage = FULL_MODE;
+            coverage.frequency_mhz.1 = f64::NAN;
+            assert_exceeds(&full_mode(FULL_MODE, coverage), "frequency");
+        }
+
+        #[test]
+        fn a_correction_surface_without_coverage_is_rejected() {
+            let calibration = base()
+                .correction_surface(surface_over(FULL_MODE))
+                .calibration_status(CalibrationStatus::FullyCalibrated {
+                    accuracy_estimate_db: 0.5,
+                })
+                .build()
+                .unwrap();
+
+            let error = calibration.validate().unwrap_err();
+            assert_eq!(error, ValidationError::MissingCoverage);
+            let message = error.to_string();
+            assert!(
+                message.contains("calibration_coverage") && message.contains("correction_surface"),
+                "the error must name the fields involved: {message}"
+            );
+        }
+
+        #[test]
+        fn coverage_is_not_required_without_a_correction_surface() {
+            let calibration = base()
+                .calibration_status(CalibrationStatus::Uncalibrated {
+                    accuracy_estimate_db: 3.0,
+                    loss_accuracy_estimate_db: 2.0,
+                })
+                .build()
+                .unwrap();
+            assert_eq!(calibration.validate(), Ok(()));
+            assert_eq!(calibration.covered_correction_surface(), Ok(None));
+        }
+
+        #[test]
+        fn the_exceeds_error_names_the_axis_and_both_intervals() {
+            let mut coverage = FULL_MODE;
+            coverage.e_cone_deg.1 = 45.0;
+            let message = full_mode(FULL_MODE, coverage)
+                .validate()
+                .unwrap_err()
+                .to_string();
+            for expected in ["elevation (E-cone)", "45", "30", "calibration_coverage"] {
+                assert!(
+                    message.contains(expected),
+                    "{expected:?} missing from: {message}"
+                );
+            }
+        }
+
+        #[test]
+        fn disagreeing_duplicate_partial_coverage_is_rejected() {
+            let status_coverage =
+                CalibrationCoverage::boresight_cone((7_100.0, 8_500.0), 28, false);
+            let other = CalibrationCoverage::from_domain(FULL_MODE, 28, false);
+
+            let disagreeing = base()
+                .calibration_status(CalibrationStatus::PartiallyCalibrated {
+                    accuracy_estimate_db: 1.5,
+                    coverage: status_coverage.clone(),
+                })
+                .calibration_coverage(other)
+                .build()
+                .unwrap();
+            assert_eq!(
+                disagreeing.validate(),
+                Err(ValidationError::CoverageRecordsDisagree)
+            );
+            assert_eq!(
+                disagreeing.coverage(),
+                Err(ValidationError::CoverageRecordsDisagree)
+            );
+
+            let missing_top_level = base()
+                .calibration_status(CalibrationStatus::PartiallyCalibrated {
+                    accuracy_estimate_db: 1.5,
+                    coverage: status_coverage,
+                })
+                .build()
+                .unwrap();
+            let error = missing_top_level.validate().unwrap_err();
+            assert_eq!(error, ValidationError::CoverageRecordsDisagree);
+            assert!(error.to_string().contains("calibration_status"));
+        }
+
+        #[test]
+        fn partially_calibrated_construction_writes_both_records_from_one_value() {
+            let coverage = CalibrationCoverage::boresight_cone((7_100.0, 8_500.0), 28, false);
+            let calibration = base()
+                .partially_calibrated(1.5, coverage.clone())
+                .build()
+                .unwrap();
+
+            assert_eq!(
+                calibration.calibration_status,
+                Some(CalibrationStatus::PartiallyCalibrated {
+                    accuracy_estimate_db: 1.5,
+                    coverage: coverage.clone(),
+                })
+            );
+            assert_eq!(calibration.calibration_coverage, Some(coverage));
+            assert_eq!(calibration.validate(), Ok(()));
+        }
     }
 }

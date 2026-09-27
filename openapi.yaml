@@ -1299,8 +1299,9 @@ components:
         extrapolated:
           type: boolean
           description: |-
-            Whether a present correction surface was not applied because the query was
-            outside calibration coverage or fitted support.
+            Whether the served gain is physics extrapolated outside calibration coverage: a
+            present correction surface was not applied there, or a partially calibrated
+            antenna was queried outside its measured region.
         spillover_loss_db:
           type:
           - number

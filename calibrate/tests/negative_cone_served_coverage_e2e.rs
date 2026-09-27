@@ -569,11 +569,10 @@ fn export_refuses_measurements_that_never_went_through_the_normalization() {
     std::fs::write(&csv_path, negative_cone_csv()).expect("write csv");
     let data = parse_measurements_sync(csv_path.to_str().expect("utf-8")).expect("parse");
     let predictions = vec![0.0; data.points.len()];
-    let surface =
-        fit_correction_surface(&data.points, &predictions, &fitting_params()).expect("surface fit");
 
-    // Hand the exporter the *unnormalized* rows, as a library caller bypassing the parser
-    // would.
+    // Fit on the *unnormalized* rows, as a library caller bypassing the parser would. The
+    // export states the fit's measured domain as the artifact's coverage (issue #97), so
+    // that domain is what carries the out-of-convention extent to the guard.
     let raw: Vec<MeasurementPoint> = data
         .points
         .iter()
@@ -587,6 +586,8 @@ fn export_refuses_measurements_that_never_went_through_the_normalization() {
             )
         })
         .collect();
+    let surface =
+        fit_correction_surface(&raw, &predictions, &fitting_params()).expect("surface fit");
 
     let physical = ExportPhysicalParams {
         diameter_m: DIAMETER_M,

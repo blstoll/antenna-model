@@ -477,8 +477,8 @@ pub fn validate_calibration(calibration: &AntennaCalibration) -> Result<(), Data
 mod tests {
     use super::*;
     use crate::data::types::{
-        BSplineModel4D, CalibrationMetadata, FeedParameters, PhysicalAntennaConfig,
-        ReflectorGeometry, ValidityRanges,
+        BSplineModel4D, CalibrationCoverage, CalibrationMetadata, FeedParameters,
+        PhysicalAntennaConfig, ReflectorGeometry, ValidityRanges,
     };
     use std::io::Write;
     use tempfile::NamedTempFile;
@@ -660,8 +660,51 @@ mod tests {
             .unwrap();
 
         calibration.correction_surface = Some(correction);
+        calibration.calibration_coverage = Some(unit_cube_coverage());
 
         assert!(validate_calibration(&calibration).is_ok());
+    }
+
+    /// Coverage equal to the `[0, 1]³` support of the unit-knot surfaces above.
+    fn unit_cube_coverage() -> CalibrationCoverage {
+        CalibrationCoverage::builder()
+            .azimuth_range(0.0, 1.0)
+            .elevation_range(0.0, 1.0)
+            .frequency_range(0.0, 1.0)
+            .num_measurements(1000)
+            .has_correction_surface(true)
+            .build()
+            .unwrap()
+    }
+
+    /// Issue #97: a correction surface without a coverage record is refused at load with
+    /// an actionable reason — not treated as covered everywhere, not warned-and-loaded.
+    #[test]
+    fn a_correction_surface_without_coverage_is_rejected_at_load() {
+        let mut calibration = create_test_calibration();
+        calibration.correction_surface = Some(
+            BSplineModel4D::builder()
+                .coefficients(vec![1.0; 108])
+                .shape([3, 4, 3, 3])
+                .knots_azimuth(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
+                .knots_elevation(vec![0.0, 0.0, 0.0, 0.5, 1.0, 1.0, 1.0])
+                .knots_frequency(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
+                .knots_temperature(vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0])
+                .build()
+                .unwrap(),
+        );
+
+        match load_calibration_artifact(write_framed(&calibration).path()) {
+            Err(DataError::ValidationError { reason, .. }) => assert!(
+                reason.contains("calibration_coverage is absent"),
+                "rejection must name the missing record: {reason}"
+            ),
+            other => panic!("a surface without coverage must be rejected, got {other:?}"),
+        }
+
+        calibration.calibration_coverage = Some(unit_cube_coverage());
+        load_calibration_artifact(write_framed(&calibration).path())
+            .expect("the same artifact with contained coverage must load");
     }
 
     #[test]
@@ -945,6 +988,16 @@ mod tests {
             knots_temperature: vec![280.0, 280.0, 300.0, 300.0],
             spline_order: 2,
         });
+        calibration.calibration_coverage = Some(
+            CalibrationCoverage::builder()
+                .azimuth_range(0.0, 10.0)
+                .elevation_range(0.0, 20.0)
+                .frequency_range(8_000.0, 9_000.0)
+                .num_measurements(1000)
+                .has_correction_surface(true)
+                .build()
+                .unwrap(),
+        );
 
         let loaded = load_calibration_artifact(write_framed(&calibration).path())
             .expect("valid schema 5.0 surface must load under the minor-version policy");
