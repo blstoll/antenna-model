@@ -49,7 +49,7 @@ antenna-model/
 │       │                   #   edge_cases, fft, geometry, illumination, integration, mesh,
 │       │                   #   pattern, phase, ray_trace
 │       ├── types/          # Calibration-artifact types, one file per type
-│       ├── data/           # ANTC artifact loader
+│       ├── artifact/       # ANTC read/write (decode, encode) + artifact validation
 │       ├── error.rs        # Shared error vocabulary
 │       └── warnings.rs     # Shared WarningCode / ApiWarning vocabulary
 │
@@ -58,7 +58,7 @@ antenna-model/
 │       ├── api/            # REST layer (poem framework: routes, handlers, middleware)
 │       ├── service/        # Business logic (evaluator, batch, cache, heatmap,
 │       │                   #   h3_link_budget, validator)
-│       ├── data/           # repository.rs (types/loader re-exported from antenna-core)
+│       ├── data/           # repository.rs (loads artifacts via antenna_core::artifact)
 │       ├── config/         # Configuration system
 │       └── main.rs         # Service entry point
 │

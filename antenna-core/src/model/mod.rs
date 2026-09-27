@@ -35,8 +35,8 @@ pub mod ray_trace;
 /// Correction surfaces are fitted to `measured − physics` residuals, so any change
 /// that alters `gain_physics` output for identical inputs invalidates surfaces fitted
 /// against the older model. Calibration artifacts record the version they were fitted
-/// against (`CalibrationMetadata::physics_model_version`) and the loader warns on
-/// mismatch (`data/loader.rs`).
+/// against (`CalibrationMetadata::physics_model_version`) and
+/// [`crate::artifact::decode`] warns on mismatch.
 ///
 /// # Bump policy
 /// Bump whenever a change alters `gain_physics` output for identical inputs

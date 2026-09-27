@@ -27,15 +27,7 @@ pub fn encode(calibration: &AntennaCalibration) -> Vec<u8> {
     #[allow(clippy::expect_used)]
     let payload =
         postcard::to_allocvec(calibration).expect("derived Serialize into a Vec is infallible");
-
-    [
-        ANTC_MAGIC.as_slice(),
-        &ANTC_ARTIFACT_VERSION.to_le_bytes(),
-        &crc32fast::hash(&payload).to_le_bytes(),
-        &(payload.len() as u64).to_le_bytes(),
-        &payload,
-    ]
-    .concat()
+    Header::for_payload(&payload).frame(&payload)
 }
 
 /// Decodes ANTC container bytes into a valid artifact — the entry point for any loader.
@@ -113,64 +105,133 @@ fn io_error(path: &Path, source: std::io::Error) -> ArtifactError {
     }
 }
 
+/// The ANTC header's fields. [`Header::frame`] and [`Header::split`] are the one definition
+/// of their layout.
+#[derive(Debug, Clone, Copy)]
+struct Header {
+    version: u32,
+    crc: u32,
+    payload_len: u64,
+}
+
+impl Header {
+    /// The header this build writes for `payload`.
+    fn for_payload(payload: &[u8]) -> Self {
+        Self {
+            version: ANTC_ARTIFACT_VERSION,
+            crc: crc32fast::hash(payload),
+            payload_len: payload.len() as u64,
+        }
+    }
+
+    /// This header followed by `payload`.
+    fn frame(self, payload: &[u8]) -> Vec<u8> {
+        [
+            ANTC_MAGIC.as_slice(),
+            &self.version.to_le_bytes(),
+            &self.crc.to_le_bytes(),
+            &self.payload_len.to_le_bytes(),
+            payload,
+        ]
+        .concat()
+    }
+
+    /// The header opening `bytes` and everything after it; `None` without magic and a full
+    /// header.
+    fn split(bytes: &[u8]) -> Option<(Self, &[u8])> {
+        let rest = bytes.strip_prefix(ANTC_MAGIC.as_slice())?;
+        let (version, rest) = rest.split_first_chunk()?;
+        let (crc, rest) = rest.split_first_chunk()?;
+        let (payload_len, rest) = rest.split_first_chunk()?;
+        let header = Self {
+            version: u32::from_le_bytes(*version),
+            crc: u32::from_le_bytes(*crc),
+            payload_len: u64::from_le_bytes(*payload_len),
+        };
+        Some((header, rest))
+    }
+}
+
 /// Splits ANTC bytes into the container version and a CRC-checked payload.
 fn unframe(bytes: &[u8]) -> Result<(u32, &[u8]), FramingError> {
-    let (header, rest) = bytes
-        .split_first_chunk::<ANTC_HEADER_LEN>()
-        .filter(|(header, _)| header.starts_with(ANTC_MAGIC))
-        .ok_or(FramingError::MissingHeader)?;
-    let field = |at: usize| [header[at], header[at + 1], header[at + 2], header[at + 3]];
-    let version = u32::from_le_bytes(field(4));
-    let expected_crc = u32::from_le_bytes(field(8));
-    let declared = u64::from_le_bytes([
-        header[12], header[13], header[14], header[15], header[16], header[17], header[18],
-        header[19],
-    ]);
-
-    let payload = usize::try_from(declared)
+    let (header, rest) = Header::split(bytes).ok_or(FramingError::MissingHeader)?;
+    let payload = usize::try_from(header.payload_len)
         .ok()
         .and_then(|len| rest.get(..len))
         .ok_or(FramingError::Truncated {
-            declared,
+            declared: header.payload_len,
             available: rest.len(),
         })?;
-    let actual_crc = crc32fast::hash(payload);
-    if actual_crc != expected_crc {
-        return Err(FramingError::CrcMismatch {
-            expected: expected_crc,
-            actual: actual_crc,
-        });
-    }
-    Ok((version, payload))
+    let actual = crc32fast::hash(payload);
+    (actual == header.crc)
+        .then_some((header.version, payload))
+        .ok_or(FramingError::CrcMismatch {
+            expected: header.crc,
+            actual,
+        })
 }
 
-/// Splits a `MAJOR.MINOR` stamp; anything else is `None`, never "probably fine".
-fn parse_schema_version(version: &str) -> Option<(u32, u32)> {
-    let (major, minor) = version.split_once('.')?;
-    if minor.contains('.') {
-        return None;
+/// A `MAJOR.MINOR` calibration schema stamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SchemaVersion {
+    major: u32,
+    minor: u32,
+}
+
+/// The schema this build reads, parsed from [`CALIBRATION_SCHEMA_VERSION`] so one constant
+/// governs writing and reading. A malformed constant fails the build.
+const SUPPORTED_SCHEMA: SchemaVersion = match SchemaVersion::parse(CALIBRATION_SCHEMA_VERSION) {
+    Some(version) => version,
+    None => panic!("CALIBRATION_SCHEMA_VERSION must be MAJOR.MINOR"),
+};
+
+impl SchemaVersion {
+    /// Parses exactly two unsigned decimal integers joined by one `.`; anything else is
+    /// `None`, never "probably fine".
+    const fn parse(stamp: &str) -> Option<Self> {
+        match leading_number(stamp.as_bytes()) {
+            Some((major, [b'.', rest @ ..])) => match leading_number(rest) {
+                Some((minor, [])) => Some(Self { major, minor }),
+                _ => None,
+            },
+            _ => None,
+        }
     }
-    Some((major.parse().ok()?, minor.parse().ok()?))
+}
+
+/// The non-empty run of ASCII digits opening `bytes` as a `u32`, and the bytes after it.
+const fn leading_number(bytes: &[u8]) -> Option<(u32, &[u8])> {
+    const fn accumulate(bytes: &[u8], value: u32) -> Option<(u32, &[u8])> {
+        match bytes {
+            [digit @ b'0'..=b'9', rest @ ..] => match value.checked_mul(10) {
+                Some(shifted) => match shifted.checked_add((*digit - b'0') as u32) {
+                    Some(value) => accumulate(rest, value),
+                    None => None,
+                },
+                None => None,
+            },
+            _ => Some((value, bytes)),
+        }
+    }
+    match bytes {
+        [b'0'..=b'9', ..] => accumulate(bytes, 0),
+        _ => None,
+    }
 }
 
 /// Rejects a foreign or unreadable schema major; warns on a differing minor.
-///
-/// The supported version is parsed from [`CALIBRATION_SCHEMA_VERSION`] rather than restated,
-/// so one constant governs writing and reading.
-fn check_schema_version(artifact: &str) -> Result<(), VersionError> {
-    let (major, minor) =
-        parse_schema_version(artifact).ok_or_else(|| VersionError::UnreadableSchema {
-            found: artifact.to_string(),
-        })?;
-    let supported = parse_schema_version(CALIBRATION_SCHEMA_VERSION);
-    if supported.map(|(supported_major, _)| supported_major) != Some(major) {
+fn check_schema_version(stamp: &str) -> Result<(), VersionError> {
+    let found = SchemaVersion::parse(stamp).ok_or_else(|| VersionError::UnreadableSchema {
+        found: stamp.to_string(),
+    })?;
+    if found.major != SUPPORTED_SCHEMA.major {
         return Err(VersionError::SchemaMajor {
-            found: artifact.to_string(),
+            found: stamp.to_string(),
         });
     }
-    if supported.map(|(_, supported_minor)| supported_minor) != Some(minor) {
+    if found.minor != SUPPORTED_SCHEMA.minor {
         warn!(
-            artifact_schema = artifact,
+            artifact_schema = stamp,
             build_schema = CALIBRATION_SCHEMA_VERSION,
             "calibration schema differs in MINOR; layout is compatible, loading"
         );
@@ -183,16 +244,10 @@ mod tests {
     use super::*;
     use crate::types::{fixtures, BSplineModel4D, CalibrationCoverage, CalibrationStatus};
 
-    /// ANTC bytes around an arbitrary payload — the raw escape hatch for framing tests only.
-    fn frame(payload: &[u8], version: u32, crc: u32) -> Vec<u8> {
-        [
-            ANTC_MAGIC.as_slice(),
-            &version.to_le_bytes(),
-            &crc.to_le_bytes(),
-            &(payload.len() as u64).to_le_bytes(),
-            payload,
-        ]
-        .concat()
+    /// Re-frames an encoded artifact with one header field changed.
+    fn reframed(bytes: &[u8], change: impl FnOnce(Header) -> Header) -> Vec<u8> {
+        let (header, payload) = Header::split(bytes).unwrap();
+        change(header).frame(payload)
     }
 
     fn valid() -> AntennaCalibration {
@@ -204,7 +259,12 @@ mod tests {
     }
 
     fn major() -> u32 {
-        parse_schema_version(CALIBRATION_SCHEMA_VERSION).unwrap().0
+        SUPPORTED_SCHEMA.major
+    }
+
+    #[test]
+    fn header_is_antc_header_len_bytes() {
+        assert_eq!(Header::for_payload(&[]).frame(&[]).len(), ANTC_HEADER_LEN);
     }
 
     #[test]
@@ -261,10 +321,13 @@ mod tests {
 
     #[test]
     fn declared_length_beyond_the_data_is_truncated() {
-        let mut bytes = encode(&valid());
-        let available = bytes.len() - ANTC_HEADER_LEN;
+        let encoded = encode(&valid());
+        let available = encoded.len() - ANTC_HEADER_LEN;
         let declared = available as u64 + 100;
-        bytes[12..20].copy_from_slice(&declared.to_le_bytes());
+        let bytes = reframed(&encoded, |header| Header {
+            payload_len: declared,
+            ..header
+        });
         match decode(&bytes) {
             Err(ArtifactError::Framing(FramingError::Truncated {
                 declared: d,
@@ -290,8 +353,10 @@ mod tests {
     fn foreign_container_version_is_rejected() {
         // Derived, never a literal, so it stays "unsupported" when the version moves.
         let unsupported = ANTC_ARTIFACT_VERSION + 1;
-        let mut bytes = encode(&valid());
-        bytes[4..8].copy_from_slice(&unsupported.to_le_bytes());
+        let bytes = reframed(&encode(&valid()), |header| Header {
+            version: unsupported,
+            ..header
+        });
         match decode(&bytes) {
             Err(ArtifactError::Version(VersionError::Container { found })) => {
                 assert_eq!(found, unsupported)
@@ -305,7 +370,7 @@ mod tests {
     fn intact_but_undecodable_payload_is_refused() {
         let full = payload(&valid());
         let truncated = &full[..full.len() / 2];
-        let bytes = frame(truncated, ANTC_ARTIFACT_VERSION, crc32fast::hash(truncated));
+        let bytes = Header::for_payload(truncated).frame(truncated);
         assert!(matches!(
             decode(&bytes),
             Err(ArtifactError::Framing(FramingError::Undecodable(_)))
@@ -358,27 +423,36 @@ mod tests {
 
     #[test]
     fn differing_schema_minor_loads() {
-        let (major, minor) = parse_schema_version(CALIBRATION_SCHEMA_VERSION).unwrap();
+        let SchemaVersion { major, minor } = SUPPORTED_SCHEMA;
         let mut calibration = valid();
         calibration.metadata.format_version = format!("{major}.{}", minor + 9);
         assert_eq!(decode(&encode(&calibration)).unwrap(), calibration);
     }
 
-    /// Guards against an unparseable constant making every artifact a schema-major error.
     #[test]
-    fn supported_schema_version_constant_is_parseable() {
-        assert!(parse_schema_version(CALIBRATION_SCHEMA_VERSION).is_some());
+    fn this_builds_schema_stamp_is_accepted() {
         assert!(check_schema_version(CALIBRATION_SCHEMA_VERSION).is_ok());
     }
 
     #[test]
     fn schema_version_parses_only_major_dot_minor() {
-        assert_eq!(parse_schema_version("2.0"), Some((2, 0)));
-        assert_eq!(parse_schema_version("10.37"), Some((10, 37)));
+        let version = |major, minor| Some(SchemaVersion { major, minor });
+        assert_eq!(SchemaVersion::parse("2.0"), version(2, 0));
+        assert_eq!(SchemaVersion::parse("10.37"), version(10, 37));
         for bad in [
-            "2", "2.0.1", "", ".", "2.", ".0", "v2.0", "two.zero", "-1.0", "2.0 ",
+            "2",
+            "2.0.1",
+            "",
+            ".",
+            "2.",
+            ".0",
+            "v2.0",
+            "two.zero",
+            "-1.0",
+            "2.0 ",
+            "4294967296.0",
         ] {
-            assert_eq!(parse_schema_version(bad), None, "{bad:?} must not parse");
+            assert_eq!(SchemaVersion::parse(bad), None, "{bad:?} must not parse");
         }
     }
 

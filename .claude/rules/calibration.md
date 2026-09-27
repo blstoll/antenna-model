@@ -105,8 +105,7 @@ Recent bumps cover the versioning cases, and they moved the axes differently:
   test carrying a literal `2u32`.
 - **There is exactly one definition of the framing** (D27): `antenna_core::artifact::encode`,
   beside the `decode` that reads it. `write` wraps it with file I/O; test helpers use it too.
-  **Do not lay the header out by hand** — that is how the repo accumulated a fourth copy and
-  then a fifth that wrote no header at all.
+  **Do not lay the header out by hand.**
 - **ANTC framing is required on load.** The legacy headerless fallback is gone.
 - **Do NOT add `#[serde(skip_serializing_if)]` / `skip` / `flatten` to any serialized
   calibration type** — postcard is positional and non-self-describing, so those attributes

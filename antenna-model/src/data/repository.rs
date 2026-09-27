@@ -186,7 +186,7 @@ impl CalibrationRepository {
                 let calibration_path = config.data_directory.join(calibration_file);
                 let calibration =
                     artifact::read(&calibration_path).map_err(|source| DataError::Artifact {
-                        path: calibration_path.display().to_string(),
+                        path: calibration_path.clone(),
                         source,
                     })?;
 

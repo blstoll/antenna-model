@@ -13,11 +13,11 @@ authors.workspace = true
 openapi = ["dep:utoipa"]
 
 [dependencies]
-# What each non-obvious dep is here for, after D4's model/ + data/ move:
+# What each non-obvious dep is here for:
 # num-complex backs the aperture integrand, the mixed-radix FFT and the far-field
 # pattern (model/{integration,fft,pattern,ray_trace}.rs); postcard + crc32fast are
-# the ANTC artifact wire format and its header checksum (data/loader.rs); tracing
-# is used across model/ and the loader. Cargo does not warn on unused manifest
+# the ANTC artifact wire format and its header checksum (artifact/codec.rs); tracing
+# is used across model/ and artifact/. Cargo does not warn on unused manifest
 # deps, so this list is checked by grep, not by the compiler — and by the weight
 # assertion in scripts/assert-calibrate-dep-graph.sh, which is what stops a
 # non-web-stack dependency from creeping back in unnoticed (roadmap D27).
