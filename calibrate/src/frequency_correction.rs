@@ -183,7 +183,8 @@ pub fn should_fit_correction(residuals: &[f64]) -> bool {
 /// let correction = fit_frequency_correction(&frequencies, &residuals).unwrap();
 /// assert_eq!(correction.spline_order, 3); // quadratic
 /// assert_eq!(correction.shape, [4, 4, 4, 4]); // flat, flat, 4 frequencies, flat
-/// correction.validate().expect("the service loader must accept this");
+/// antenna_core::model::FittedCorrectionSurface::from_model4d(&correction)
+///     .expect("the service loader must accept this");
 /// ```
 pub fn fit_frequency_correction(frequencies: &[f64], residuals: &[f64]) -> Result<BSplineModel4D> {
     validate_inputs(frequencies, residuals)?;
@@ -346,27 +347,14 @@ mod tests {
         );
     }
 
-    /// Regression pin, inverted 2026-07-31 (roadmap D13; defect filed 2026-07-30
-    /// by the D15 review).
-    ///
-    /// The boresight-mode frequency correction used to be **structurally
-    /// unloadable**: its azimuth/elevation/temperature axes were `order` equal
-    /// knots over one coefficient layer, and `BSplineModel4D::validate` required
-    /// `knots.len() >= shape + order` on every axis (since issue #95: exactly
-    /// `shape + order`, with a non-empty support). The service loader runs that
-    /// validation on every artifact (`AntennaCalibration::validate` →
-    /// `correction.validate()`), so any boresight run whose residuals tripped the
-    /// 0.5 dB fitting threshold wrote a `.bin` the service refused to load.
-    ///
-    /// This test used to assert `is_err()` to pin the defect. It now asserts the
-    /// contract the fix established, and must never be relaxed back.
+    /// Guards against a boresight frequency correction the service loader refuses (D13).
     #[test]
     fn frequency_correction_is_accepted_by_the_service_side_validator() {
         let frequencies = vec![7100.0, 7500.0, 8000.0, 8450.0];
         let residuals = vec![0.8, 0.6, 0.5, 0.7];
         let bspline = fit_frequency_correction(&frequencies, &residuals).unwrap();
 
-        bspline.validate().expect(
+        FittedCorrectionSurface::from_model4d(&bspline).expect(
             "fit_frequency_correction must produce a surface the service loader accepts; \
              the degenerate-axis defect has regressed",
         );
@@ -607,7 +595,7 @@ mod tests {
         assert_eq!(bspline.shape[3], 4); // Temperature: flat
 
         assert_eq!(bspline.coefficients.len(), 4 * 4 * 20 * 4);
-        bspline.validate().expect("structure must stay loadable");
+        FittedCorrectionSurface::from_model4d(&bspline).expect("structure must stay loadable");
 
         // Every flat layer of a given frequency index carries the same residual.
         let [n_az, n_el, n_freq, n_temp] = bspline.shape;

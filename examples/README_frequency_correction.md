@@ -113,7 +113,7 @@ BSplineModel4D {
 A one-layer axis over `order` equal knots looks like the obvious way to collapse a
 dimension, and it is how this module worked until 2026-07-31. It is wrong twice over:
 
-1. **The service refuses to load it.** `BSplineModel4D::validate` requires exactly
+1. **The service refuses to load it.** Artifact validation requires exactly
    `knots.len() == shape + order` and a non-empty support on every executable axis (issue
    #95; it checked only `>=` before), and the loader validates every artifact.
    Every boresight run whose residuals cleared the 0.5 dB threshold produced a `.bin` the

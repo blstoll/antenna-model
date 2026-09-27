@@ -469,7 +469,7 @@ fn round_trip_physical() -> ExportPhysicalParams {
 ///
 /// Returns the loaded 4D correction surface — i.e. the object the *service* would hold,
 /// not the one the producer built, so every assertion made against it has crossed postcard,
-/// the ANTC container and `AntennaCalibration::validate`.
+/// the ANTC container and the loader's artifact validation.
 fn export_write_load(
     surface: &calibrate::correction_surface::CorrectionSurface,
     measurements: &[MeasurementPoint],
@@ -762,8 +762,7 @@ fn a_minimal_frequency_axis_round_trips_and_a_degenerate_one_is_refused() {
         &[0.8, 0.6, 0.5, 0.7],
     )
     .expect("four frequencies is the documented minimum and must fit");
-    four_frequencies
-        .validate()
+    antenna_core::model::FittedCorrectionSurface::from_model4d(&four_frequencies)
         .expect("and the result must be one the service loader accepts");
 }
 

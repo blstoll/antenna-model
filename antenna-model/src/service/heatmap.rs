@@ -844,7 +844,7 @@ mod tests {
             })
             .validity_ranges(ValidityRanges {
                 azimuth_min_max: (0.0, 360.0),
-                elevation_min_max: (0.0, 180.0),
+                elevation_min_max: (0.0, 90.0),
                 frequency_min_max: (8000.0, 9000.0),
                 temperature_const: 290.0,
             })

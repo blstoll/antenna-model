@@ -761,16 +761,9 @@ pub fn build_calibration_artifact(
         .build()
         .map_err(|e| anyhow::anyhow!("Failed to build physical antenna config: {}", e))?;
 
-    // Boresight coverage is an on-axis polar CONE, not the point (az=0, el=0).
-    //
-    // Boresight is the pole of the (azimuth, polar-angle) system: azimuth is
-    // degenerate there — every azimuth value names the same direction, and a query
-    // aimed exactly at boresight gets its azimuth from `atan2` on two components
-    // that are float noise (measured: 63.43° on a realistic ECEF geometry). The old
-    // `azimuth_range = (0, 0)` encoding therefore constrained a coordinate carrying
-    // no information, and `is_in_coverage` rejected the very point the coverage was
-    // meant to describe — so the fitted frequency correction was never applied.
-    // Azimuth unconstrained + a small elevation cone is the truthful claim.
+    // Boresight coverage is an on-axis polar cone, not the point (az=0, el=0): azimuth is
+    // degenerate at the pole, and constraining it rejects exact-boresight queries whose
+    // azimuth is `atan2` on float noise. See `CalibrationCoverage::boresight_cone`.
     let freq_range = measurements.frequency_range();
     let validity_ranges = ValidityRangesBuilder::default()
         .azimuth_range(0.0, 360.0) // degenerate at the pole: unconstrained
@@ -783,8 +776,8 @@ pub fn build_calibration_artifact(
     // Calibration coverage (boresight only) — same cone encoding, and this is the one the
     // evaluator actually gates the correction surface on. It is deliberately narrower than
     // the frequency correction's flat spatial support (`frequency_correction`'s axis
-    // constants): evaluable everywhere, measured only on axis. Coverage ⊆ support is the
-    // artifact invariant, checked at load (issue #97).
+    // constants): evaluable everywhere, measured only on axis. Coverage ⊆ support is an
+    // artifact invariant, checked by `build()` (#97).
     let coverage = CalibrationCoverage::boresight_cone(
         freq_range,
         measurements.points.len(),
@@ -854,6 +847,7 @@ pub fn build_calibration_artifact(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use antenna_core::model::{CoveredCorrectionSurface, FittedCorrectionSurface};
 
     fn create_test_design_specs() -> DesignSpecs {
         use crate::design_specs_loader::{FeedSpecs, MeshSpecs, ReflectorSpecs};
@@ -1042,9 +1036,7 @@ frequency_mhz,g_over_t_db,temperature_k
         )
         .expect("build artifact");
 
-        artifact.validate().expect("boresight artifact must load");
-        let covered = artifact
-            .covered_correction_surface()
+        let covered = CoveredCorrectionSurface::from_artifact(&artifact)
             .expect("coverage is contained by support")
             .expect("a correction surface was attached");
         let coverage = covered.coverage().domain();
@@ -1217,8 +1209,7 @@ frequency_mhz,g_over_t_db,temperature_k
         assert_eq!(correction.shape[1], 4); // Elevation: flat
         assert_eq!(correction.shape[2], 4); // Frequency: 4 control points
         assert_eq!(correction.shape[3], 4); // Temperature: flat
-        correction
-            .validate()
+        FittedCorrectionSurface::from_model4d(&correction)
             .expect("a fitted frequency correction must load through the service");
 
         // Verify it can be stored in BoresightCalibrationResult

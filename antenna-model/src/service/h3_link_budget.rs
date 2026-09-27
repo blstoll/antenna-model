@@ -579,10 +579,8 @@ mod tests {
             knots_temperature: vec![280.0, 280.0, 300.0, 300.0],
             spline_order: 2,
         };
-        // Verify the model passes structural validation before returning.
-        surface
-            .validate()
-            .expect("constant_surface_db: BSplineModel4D failed validate()");
+        crate::model::FittedCorrectionSurface::from_model4d(&surface)
+            .expect("constant_surface_db must satisfy the core layout rules");
         surface
     }
 

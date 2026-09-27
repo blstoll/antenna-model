@@ -44,6 +44,10 @@ pub enum ArtifactExportError {
     #[error("invalid correction surface: {0}")]
     InvalidCorrectionSurface(#[from] antenna_core::types::ValidationError),
 
+    /// The assembled artifact broke an artifact invariant.
+    #[error("invalid calibration artifact: {0}")]
+    InvalidArtifact(antenna_core::types::ValidationError),
+
     /// A builder for one of the artifact sub-structures failed.
     #[error("failed to build {what}: {reason}")]
     BuildFailed {
@@ -312,37 +316,19 @@ pub fn export_full_calibration(
         .calibration_status(calibration_status)
         .calibration_coverage(coverage)
         .build()
-        .map_err(|e| ArtifactExportError::BuildFailed {
-            what: "antenna calibration".to_string(),
-            reason: e,
-        })?;
+        .map_err(ArtifactExportError::InvalidArtifact)?;
 
     Ok(calibration)
 }
 
 /// Serialize an [`AntennaCalibration`] in the ANTC container format and write it to `path`.
 ///
-/// **This is the only artifact writer in the tool.** Both producers — full-grid export
-/// (`export_full_calibration`) and boresight export (`build_calibration_artifact`) — go
-/// through it, so a boresight artifact and a full-mode artifact cannot disagree about
-/// their framing. They diverged until 2026-07-30 (roadmap D2): boresight wrote a bare
-/// `postcard::to_allocvec` with no magic, no version, and no CRC, which the service loader
-/// accepted only via its legacy headerless fallback — so a boresight artifact carried no
-/// container version stamp (a future framing change would have mis-decoded it silently
-/// instead of being rejected) and no integrity check (truncation surfaced as a decode
-/// error at best, wrong numbers at worst).
-///
-/// The framing itself is [`antenna_core::data::loader::encode_calibration_artifact`], the
-/// counterpart of the loader that reads it — so reader and writer share one definition of
-/// the container format rather than agreeing by inspection. This function contributes the
-/// file I/O and this tool's error vocabulary, nothing more. (It used to lay the header out
-/// itself from the loader's public constants, which is closer but still a copy: D23 found a
-/// *fourth* hand-rolled writer in a test carrying a hardcoded container version, which would
-/// have sailed past its own bump.)
-///
-/// Note this stamps the **container** axis only. The **schema** axis
-/// (`metadata.format_version`) rides inside the payload and is set by whichever builder
-/// produced `calibration`; see [`antenna_core::types::CALIBRATION_SCHEMA_VERSION`].
+/// The tool's only artifact writer, shared by full and boresight export so their framing
+/// cannot diverge (D2). The framing itself is
+/// [`antenna_core::data::loader::encode_calibration_artifact`]; this adds file I/O only — do
+/// not lay the header out by hand (D23, D27). Stamps the **container** axis; the **schema**
+/// axis is `metadata.format_version`, set by the builder
+/// ([`antenna_core::types::CALIBRATION_SCHEMA_VERSION`]).
 pub fn write_calibration_artifact(calibration: &AntennaCalibration, path: &Path) -> Result<()> {
     let bytes = encode_calibration_artifact(calibration).map_err(|e| {
         ArtifactExportError::SerializeFailed {
@@ -362,7 +348,7 @@ pub fn write_calibration_artifact(calibration: &AntennaCalibration, path: &Path)
 mod tests {
     use super::*;
     use crate::correction_surface::{fit_correction_surface, CorrectionSurfaceParams};
-    use antenna_core::model::FittedCorrectionSurface;
+    use antenna_core::model::{CoveredCorrectionSurface, FittedCorrectionSurface};
 
     fn applied_value(
         surface: &FittedCorrectionSurface,
@@ -434,11 +420,8 @@ mod tests {
             .fitted()
             .to_model4d(289.0, 291.0)
             .expect("wire construction should succeed");
-        assert!(
-            model.validate().is_ok(),
-            "exported 4D model failed validation: {:?}",
-            model.validate()
-        );
+        FittedCorrectionSurface::from_model4d(&model)
+            .expect("the exported 4D model must satisfy the core layout rules");
 
         // Shape mapping: spatial axes copy directly (no padding now that the
         // service's find_knot_span off-by-one is fixed); temperature axis has order+1 layers.
@@ -458,7 +441,6 @@ mod tests {
             .fitted()
             .to_model4d(t_lo, t_hi)
             .expect("wire construction should succeed");
-        assert!(model.validate().is_ok());
         let fitted = FittedCorrectionSurface::from_model4d(&model).unwrap();
 
         // Sample interior points AND the exact domain boundaries of every axis
@@ -565,7 +547,6 @@ mod tests {
         )
         .expect("export should succeed");
 
-        cal.validate().expect("artifact must validate");
         assert_eq!(cal.antenna_id, "test_antenna");
         assert_eq!(cal.feed_id, "x_band");
         assert!(cal.correction_surface.is_some());
@@ -626,9 +607,7 @@ mod tests {
         )
         .expect("export should succeed");
 
-        cal.validate().expect("artifact must validate");
-        let covered = cal
-            .covered_correction_surface()
+        let covered = CoveredCorrectionSurface::from_artifact(&cal)
             .expect("coverage is contained by support")
             .expect("full mode writes a surface");
         assert_eq!(covered.coverage().domain(), measured);

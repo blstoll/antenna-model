@@ -178,12 +178,11 @@ pub(crate) fn evaluate_gain_from_request_with_budget(
     // This now runs BEFORE the reflector is built, where it used to run after. The
     // precedence that matters — a coordinate fault beating `FeedNotFound` — is preserved
     // above, and the only pair this could reorder is unreachable on the served path:
-    // `data::loader` validates every artifact as it loads it (`AntennaCalibration::validate`
-    // → `ReflectorGeometry::validate`), rejecting non-positive diameter or focal length,
-    // negative surface RMS, and out-of-band f/D — a superset of what
-    // `model::ReflectorGeometry::new` can fail on. A loaded artifact therefore cannot fail
-    // reflector construction, so no request can reach a reflector error at all, in either
-    // order.
+    // every artifact is validated at construction (`antenna_core::artifact`), rejecting
+    // non-positive diameter or focal length, negative surface RMS, and out-of-band f/D — a
+    // superset of what `model::ReflectorGeometry::new` can fail on. A served artifact
+    // therefore cannot fail reflector construction, so no request can reach a reflector
+    // error at all, in either order.
     let (steer_x, steer_y, steer_z) = compute_feed_position_from_pointing(
         &request.feed_pointing_location,
         &request.reflector_boresight,

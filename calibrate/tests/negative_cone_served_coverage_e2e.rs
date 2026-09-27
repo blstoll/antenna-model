@@ -154,8 +154,6 @@ fn build_artifact() -> (AntennaCalibration, CorrectionSurface, Vec<MeasurementPo
         false,
     )
     .expect("export must succeed for a legal negative-cone measurement set");
-
-    calibration.validate().expect("artifact must validate");
     (calibration, surface, data.points)
 }
 
@@ -540,11 +538,8 @@ fn a_wholly_negative_cut_exports_a_range_that_contains_it() {
         0.5,
         false,
     )
+    // Export validates; the pre-D26 inverted range (0.0, -1.0) failed there outright.
     .expect("a wholly-negative cut is legal input and must export");
-
-    calibration
-        .validate()
-        .expect("the pre-D26 inverted range (0.0, -1.0) failed this outright");
 
     let coverage = calibration
         .calibration_coverage

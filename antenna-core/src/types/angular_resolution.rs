@@ -1,7 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-use super::ValidationError;
-
 /// Knots per lobe period below which a correction surface cannot follow the pattern's
 /// lobe structure on an axis.
 ///
@@ -22,7 +20,7 @@ pub const MIN_KNOTS_PER_LOBE_PERIOD: f64 = 2.0;
 /// not the requested minimum. Lobe periods are the worst case in coverage: the highest
 /// calibrated frequency and, for clock, the outermost `|cone|` angle.
 ///
-/// Invariants, checked by [`Self::validate`]: both spacings and the cone period are
+/// Artifact invariants ([`crate::artifact`]): both spacings and the cone period are
 /// finite and positive; the clock period is positive and may be `INFINITY`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AngularResolution {
@@ -66,42 +64,6 @@ impl AngularResolution {
     /// Knots per lobe period on the clock axis, at the outermost calibrated cone angle.
     pub fn clock_knots_per_lobe_period(&self) -> f64 {
         knots_per_lobe_period(self.clock_lobe_period_deg, self.clock_knot_spacing_deg)
-    }
-
-    /// Checks the invariants listed on the type, so a deserialized assessment that
-    /// cannot be interpreted is refused at load rather than reported on.
-    pub fn validate(&self) -> Result<(), ValidationError> {
-        for (name, spacing) in [
-            ("cone_knot_spacing_deg", self.cone_knot_spacing_deg),
-            ("clock_knot_spacing_deg", self.clock_knot_spacing_deg),
-        ] {
-            if !(spacing.is_finite() && spacing > 0.0) {
-                return Err(ValidationError::InvalidAngularResolution {
-                    field: name.to_string(),
-                    value: spacing,
-                    reason: "knot spacing must be finite and positive".to_string(),
-                });
-            }
-        }
-        if !(self.cone_lobe_period_deg.is_finite() && self.cone_lobe_period_deg > 0.0) {
-            return Err(ValidationError::InvalidAngularResolution {
-                field: "cone_lobe_period_deg".to_string(),
-                value: self.cone_lobe_period_deg,
-                reason: "lobe period must be finite and positive".to_string(),
-            });
-        }
-        // Infinity is legal here, so the `is_finite() && > 0.0` form above cannot be
-        // used; the explicit NaN test keeps visible what is being excluded.
-        if self.clock_lobe_period_deg.is_nan() || self.clock_lobe_period_deg <= 0.0 {
-            return Err(ValidationError::InvalidAngularResolution {
-                field: "clock_lobe_period_deg".to_string(),
-                value: self.clock_lobe_period_deg,
-                reason: "lobe period must be positive (infinite is legal: no clock \
-                         structure on axis)"
-                    .to_string(),
-            });
-        }
-        Ok(())
     }
 
     /// Whether **both** angular axes clear [`MIN_KNOTS_PER_LOBE_PERIOD`].
@@ -224,10 +186,6 @@ mod tests {
                 !cone_bad.resolves_lobe_structure(),
                 "cone spacing {bad} must not read as resolved"
             );
-            assert!(
-                cone_bad.validate().is_err(),
-                "cone spacing {bad} must be refused by validate()"
-            );
 
             let clock_bad = AngularResolution {
                 cone_knot_spacing_deg: 0.5,
@@ -236,7 +194,6 @@ mod tests {
             };
             assert_eq!(clock_bad.clock_knots_per_lobe_period(), 0.0);
             assert!(!clock_bad.resolves_lobe_structure());
-            assert!(clock_bad.validate().is_err());
         }
     }
 
@@ -252,7 +209,6 @@ mod tests {
         assert!(!both_degenerate.cone_knots_per_lobe_period().is_nan());
         assert!(!both_degenerate.clock_knots_per_lobe_period().is_nan());
         assert!(!both_degenerate.resolves_lobe_structure());
-        assert!(both_degenerate.validate().is_err());
         // The struct still compares equal to itself, which a NaN field would not.
         assert_eq!(both_degenerate, both_degenerate.clone());
     }

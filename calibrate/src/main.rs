@@ -485,11 +485,6 @@ async fn run_boresight_calibration(args: Args) -> Result<()> {
     )
     .context("Failed to build calibration artifact")?;
 
-    // Validate the artifact
-    calibration
-        .validate()
-        .context("Calibration artifact failed validation")?;
-
     // Serialize and save. Same ANTC container framing as full mode — one writer, so the
     // two producers cannot drift apart on version stamping or CRC (roadmap D2).
     write_calibration_artifact(&calibration, &args.output)
@@ -900,10 +895,6 @@ async fn run_calibration(args: Args) -> Result<()> {
         args.tune_parameters,
     )
     .context("Failed to build service-loadable calibration artifact")?;
-
-    service_calibration
-        .validate()
-        .map_err(|e| anyhow::anyhow!("Service calibration failed validation: {}", e))?;
 
     write_calibration_artifact(&service_calibration, &args.output)
         .context("Failed to write service calibration artifact")?;

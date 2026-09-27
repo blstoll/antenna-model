@@ -16,8 +16,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-/// The executable correction surface paired with its gating coverage, validated once at
-/// insertion (issues #92, #97). An error here is cached and surfaced per request.
+/// The executable correction surface paired with its gating coverage, prepared once at
+/// insertion (issues #92, #97). Artifacts arrive valid, so the error arm is reachable only
+/// by a hand-mutated value; it is cached and surfaced per request.
 pub(crate) type PreparedCorrection =
     std::result::Result<Option<Arc<CoveredCorrectionSurface>>, ValidationError>;
 
@@ -25,9 +26,7 @@ pub(crate) type PreparedCorrection =
 /// its fitted support contains. The single constructor both the repository cache and
 /// direct preparation use.
 pub(crate) fn prepare_correction(calibration: &AntennaCalibration) -> PreparedCorrection {
-    calibration
-        .covered_correction_surface()
-        .map(|covered| covered.map(Arc::new))
+    CoveredCorrectionSurface::from_artifact(calibration).map(|covered| covered.map(Arc::new))
 }
 
 #[derive(Debug, Clone)]
@@ -314,20 +313,21 @@ impl CalibrationRepository {
             // Each feed declares its own design band (#56).
             let validity_ranges = build_validity_ranges(feed_spec);
 
-            // Build calibration with Uncalibrated status
-            let calibration = AntennaCalibration {
-                antenna_id: entry.id.clone(),
-                feed_id: feed_spec.id.clone(),
-                metadata,
-                physical_config,
-                correction_surface: None,
-                validity_ranges,
-                calibration_status: Some(CalibrationStatus::Uncalibrated {
+            let calibration = AntennaCalibration::builder()
+                .antenna_id(entry.id.clone())
+                .feed_id(feed_spec.id.clone())
+                .metadata(metadata)
+                .physical_config(physical_config)
+                .validity_ranges(validity_ranges)
+                .calibration_status(CalibrationStatus::Uncalibrated {
                     accuracy_estimate_db: 3.0,
                     loss_accuracy_estimate_db: 2.0,
-                }),
-                calibration_coverage: None,
-            };
+                })
+                .build()
+                .map_err(|e| DataError::ValidationError {
+                    path: format!("design_specs of {}:{}", entry.id, feed_spec.id),
+                    reason: e.to_string(),
+                })?;
 
             self.add_calibration(calibration);
             loaded_count += 1;
@@ -341,10 +341,9 @@ impl CalibrationRepository {
         Ok(loaded_count)
     }
 
-    /// Add a calibration to the repository
+    /// Adds a calibration, replacing any for the same `(antenna_id, feed_id)`.
     ///
-    /// # Arguments
-    /// * `calibration` - Calibration to add
+    /// Does not validate: an [`AntennaCalibration`] is valid by construction.
     pub fn add_calibration(&mut self, calibration: AntennaCalibration) {
         let antenna_id = calibration.antenna_id.clone();
         let feed_id = calibration.feed_id.clone();

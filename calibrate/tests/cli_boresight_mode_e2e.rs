@@ -47,7 +47,7 @@ frequency_mhz,g_over_t_db,temperature_k
 ///
 /// That branch was **unloadable** until 2026-07-31 (roadmap D13): `fit_frequency_correction`
 /// built its azimuth/elevation/temperature axes as `order` equal knots over a single
-/// coefficient layer, which `BSplineModel4D::validate` rejects — so the service refused every
+/// coefficient layer, which the artifact loader rejects — so the service refused every
 /// boresight artifact that carried a correction. D2 could only pin the framing on the
 /// no-correction path for exactly that reason. This fixture exists to hold the other path
 /// open.

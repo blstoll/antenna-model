@@ -1,14 +1,12 @@
 use serde::{Deserialize, Serialize};
 
-use super::ValidationError;
-
 /// Nominal parameter ranges, reported in antenna metadata.
 ///
 /// Informational only: queries outside them are neither rejected nor warned about.
 /// Correction application and extrapolation warnings are governed by
 /// [`super::CalibrationCoverage`] and the correction surface's fitted support.
 ///
-/// Invariants, checked by [`Self::validate`]: every range has `min <= max`; elevation
+/// Artifact invariants ([`crate::artifact`]): every range has `min <= max`; elevation
 /// (a polar angle off boresight) lies in `[0, 90]`; temperature is positive.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ValidityRanges {
@@ -29,47 +27,6 @@ impl ValidityRanges {
     /// Creates a new builder for constructing `ValidityRanges`.
     pub fn builder() -> ValidityRangesBuilder {
         ValidityRangesBuilder::default()
-    }
-
-    /// Checks the invariants listed on the type.
-    pub fn validate(&self) -> Result<(), ValidationError> {
-        if self.azimuth_min_max.0 > self.azimuth_min_max.1 {
-            return Err(ValidationError::InvalidRange {
-                dimension: "azimuth".to_string(),
-                min: self.azimuth_min_max.0,
-                max: self.azimuth_min_max.1,
-            });
-        }
-
-        if self.elevation_min_max.0 > self.elevation_min_max.1 {
-            return Err(ValidationError::InvalidRange {
-                dimension: "elevation".to_string(),
-                min: self.elevation_min_max.0,
-                max: self.elevation_min_max.1,
-            });
-        }
-
-        if self.frequency_min_max.0 > self.frequency_min_max.1 {
-            return Err(ValidationError::InvalidRange {
-                dimension: "frequency".to_string(),
-                min: self.frequency_min_max.0,
-                max: self.frequency_min_max.1,
-            });
-        }
-
-        if self.elevation_min_max.0 < 0.0 || self.elevation_min_max.1 > 90.0 {
-            return Err(ValidationError::InvalidRange {
-                dimension: "elevation".to_string(),
-                min: self.elevation_min_max.0,
-                max: self.elevation_min_max.1,
-            });
-        }
-
-        if self.temperature_const <= 0.0 {
-            return Err(ValidationError::InvalidTemperature(self.temperature_const));
-        }
-
-        Ok(())
     }
 
     /// Whether a query point lies within all three ranges, bounds inclusive.
@@ -147,44 +104,6 @@ mod tests {
         assert_eq!(ranges.elevation_min_max, (0.0, 90.0));
         assert_eq!(ranges.frequency_min_max, (8000.0, 8500.0));
         assert_eq!(ranges.temperature_const, 290.0);
-    }
-
-    #[test]
-    fn test_validity_ranges_validate() {
-        let valid_ranges = ValidityRanges {
-            azimuth_min_max: (0.0, 360.0),
-            elevation_min_max: (0.0, 90.0),
-            frequency_min_max: (8000.0, 8500.0),
-            temperature_const: 290.0,
-        };
-        assert!(valid_ranges.validate().is_ok());
-
-        // Invalid: min > max
-        let invalid_ranges = ValidityRanges {
-            azimuth_min_max: (360.0, 0.0),
-            elevation_min_max: (0.0, 90.0),
-            frequency_min_max: (8000.0, 8500.0),
-            temperature_const: 290.0,
-        };
-        assert!(invalid_ranges.validate().is_err());
-
-        // Invalid: elevation out of range
-        let invalid_ranges = ValidityRanges {
-            azimuth_min_max: (0.0, 360.0),
-            elevation_min_max: (-10.0, 90.0),
-            frequency_min_max: (8000.0, 8500.0),
-            temperature_const: 290.0,
-        };
-        assert!(invalid_ranges.validate().is_err());
-
-        // Invalid: negative temperature
-        let invalid_ranges = ValidityRanges {
-            azimuth_min_max: (0.0, 360.0),
-            elevation_min_max: (0.0, 90.0),
-            frequency_min_max: (8000.0, 8500.0),
-            temperature_const: -10.0,
-        };
-        assert!(invalid_ranges.validate().is_err());
     }
 
     #[test]

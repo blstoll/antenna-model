@@ -35,10 +35,10 @@
 use crate::parser::{closed_extent, MeasurementPoint};
 use antenna_core::model::phase::wavelength_from_frequency;
 use antenna_core::model::{
-    BasisStencilOutcome, ClampedAxis, CorrectionDomain, CorrectionEvaluation,
-    CorrectionSurfaceLayout, FittedCorrectionSurface,
+    BasisStencilOutcome, ClampedAxis, CorrectionEvaluation, CorrectionSurfaceLayout,
+    FittedCorrectionSurface,
 };
-use antenna_core::types::AngularResolution;
+use antenna_core::types::{AngularResolution, CorrectionDomain};
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -874,22 +874,12 @@ pub fn assess_angular_resolution(
     // received none of the checks its two siblings got above until roadmap D26 found that a
     // NaN gap on it was silently discarded, reporting the axis as *better* resolved than it
     // is.
-    let resolution = AngularResolution {
+    Ok(AngularResolution {
         cone_knot_spacing_deg: widest_knot_gap(surface.knots_e_cone(), "E-cone")?,
         cone_lobe_period_deg,
         clock_knot_spacing_deg: widest_knot_gap(surface.knots_e_clock(), "E-clock")?,
         clock_lobe_period_deg,
-    };
-
-    // The consumer-side invariant, asserted at the point of production: every field is one
-    // the ratio accessors can divide, so `resolves_lobe_structure()` is a real verdict.
-    resolution
-        .validate()
-        .map_err(|e| CorrectionSurfaceError::InvalidKnotVector {
-            reason: format!("angular-resolution assessment is not interpretable: {e}"),
-        })?;
-
-    Ok(resolution)
+    })
 }
 
 /// The widest gap between consecutive *distinct* knots — the coarsest the basis gets, and so
@@ -2711,7 +2701,6 @@ mod tests {
             clock_lobe_period_deg: f64::INFINITY,
         };
         assert!(on_axis.clock_knots_per_lobe_period().is_infinite());
-        assert!(on_axis.validate().is_ok());
         assert!(on_axis.resolves_lobe_structure());
     }
 
