@@ -1,7 +1,7 @@
 //! Full-calibration artifact export.
 //!
 //! This module assembles a complete [`AntennaCalibration`] artifact that the antenna-model
-//! service can load via `load_calibration_artifact`.
+//! service can load; `antenna_core::artifact::write` writes it.
 //!
 //! # The correction surface is constructed in core
 //!
@@ -17,7 +17,6 @@
 //! (`azimuth_range`/`elevation_range`) for the E-clock and E-cone extents, which is why the
 //! builders below translate them.
 
-use antenna_core::data::loader::encode_calibration_artifact;
 use antenna_core::types::{
     AngularResolution, AntennaCalibration, AntennaCalibrationBuilder, CalibrationCoverage,
     CalibrationMetadataBuilder, CalibrationStatus, FeedParameters as DataFeedParameters,
@@ -30,7 +29,6 @@ use antenna_core::model::PHYSICS_MODEL_VERSION;
 
 use crate::correction_surface::{assess_angular_resolution, CorrectionSurface};
 use crate::parser::{closed_extent, MeasurementPoint};
-use std::path::Path;
 
 /// Errors that can occur while exporting a full-calibration artifact.
 #[derive(Debug, thiserror::Error)]
@@ -53,22 +51,6 @@ pub enum ArtifactExportError {
     BuildFailed {
         /// Which structure failed to build.
         what: String,
-        /// The underlying reason.
-        reason: String,
-    },
-
-    /// The artifact could not be postcard-encoded.
-    #[error("failed to serialize calibration artifact: {reason}")]
-    SerializeFailed {
-        /// The underlying reason.
-        reason: String,
-    },
-
-    /// The encoded artifact could not be written to disk.
-    #[error("failed to write artifact to {path}: {reason}")]
-    WriteFailed {
-        /// Destination path.
-        path: String,
         /// The underlying reason.
         reason: String,
     },
@@ -302,29 +284,6 @@ pub fn export_full_calibration(
         .map_err(ArtifactExportError::InvalidArtifact)?;
 
     Ok(calibration)
-}
-
-/// Serialize an [`AntennaCalibration`] in the ANTC container format and write it to `path`.
-///
-/// The tool's only artifact writer, shared by full and boresight export so their framing
-/// cannot diverge (D2). The framing itself is
-/// [`antenna_core::data::loader::encode_calibration_artifact`]; this adds file I/O only — do
-/// not lay the header out by hand (D23, D27). Stamps the **container** axis; the **schema**
-/// axis is `metadata.format_version`, set by the builder
-/// ([`antenna_core::types::CALIBRATION_SCHEMA_VERSION`]).
-pub fn write_calibration_artifact(calibration: &AntennaCalibration, path: &Path) -> Result<()> {
-    let bytes = encode_calibration_artifact(calibration).map_err(|e| {
-        ArtifactExportError::SerializeFailed {
-            reason: e.to_string(),
-        }
-    })?;
-
-    std::fs::write(path, &bytes).map_err(|e| ArtifactExportError::WriteFailed {
-        path: path.display().to_string(),
-        reason: e.to_string(),
-    })?;
-
-    Ok(())
 }
 
 #[cfg(test)]

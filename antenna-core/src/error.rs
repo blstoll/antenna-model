@@ -112,6 +112,14 @@ pub enum DataError {
         source: io::Error,
     },
 
+    /// A calibration artifact file could not be read or decoded into a valid artifact.
+    #[error("failed to load calibration artifact {path}: {source}")]
+    Artifact {
+        path: String,
+        #[source]
+        source: crate::artifact::ArtifactError,
+    },
+
     /// General data loading error
     #[error("failed to load calibration from {path}: {reason}")]
     LoadError { path: String, reason: String },

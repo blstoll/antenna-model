@@ -1835,7 +1835,7 @@ confuse because they all sound like "the version" — they answer different ques
 
 | Axis | Type | Location | Question it answers |
 |------|------|----------|----------------------|
-| ANTC **container** version | `u32` (file header, *outside* the payload) | `ANTC_ARTIFACT_VERSION` in `data/loader.rs` | How do file bytes become a payload byte string — the `[magic][version][crc32][len]` framing and which codec decodes the payload? Bumped 1→2 on the bincode→postcard migration, 2→3 by D23's layout change (a version-2 payload is one `f64` short, and postcard reads positionally, so the decode itself cannot be trusted), 3→4 by D21's for the same reason one field earlier. |
+| ANTC **container** version | `u32` (file header, *outside* the payload) | `ANTC_ARTIFACT_VERSION` in `antenna_core::artifact` | How do file bytes become a payload byte string — the `[magic][version][crc32][len]` framing and which codec decodes the payload? Bumped 1→2 on the bincode→postcard migration, 2→3 by D23's layout change (a version-2 payload is one `f64` short, and postcard reads positionally, so the decode itself cannot be trusted), 3→4 by D21's for the same reason one field earlier. |
 | **Schema** version (`format_version`) | `String` `"MAJOR.MINOR"` (*inside* the payload) | `CALIBRATION_SCHEMA_VERSION` in `antenna-core/src/types/metadata.rs`, stamped into `CalibrationMetadata::format_version` | What does the decoded `AntennaCalibration` **mean** — which fields exist, in what order, meaning what? |
 | **Physics-model** version | `u32` (inside the payload) | `CalibrationMetadata::physics_model_version` | Which `gain_physics` implementation was this artifact's correction surface fitted against? |
 
@@ -1849,7 +1849,7 @@ even though the file itself is perfectly readable. It is covered in §10.5.2.
 #### 10.5.1 Container vs schema: why both exist
 
 *(Reconciled by roadmap unit D2, 2026-07-30. Authoritative statement of the
-relationship: the module docs on `antenna-core/src/data/loader.rs`.)*
+relationship: the module docs on `antenna-core/src/artifact/mod.rs`.)*
 
 The two decoding-side axes are **not** redundant, and neither can be derived from
 the other, because they are readable at different moments:
@@ -1902,7 +1902,7 @@ default. All of them now derive from `CALIBRATION_SCHEMA_VERSION`.
 which the postcard migration already regenerated once. They were headerless until D27
 (2026-08-14) removed the loader's headerless fallback and reframed both in place: a 20-byte
 ANTC prepend, payload bytes untouched. Restamping them for a future bump therefore means
-re-encoding the *payload* and re-framing it with `loader::encode_calibration_artifact`, not
+re-encoding the *payload* and re-framing it with `antenna_core::artifact::encode`, not
 rewriting the file whole. Because they are carried across bumps this way rather than by re-running
 `calibrate`, the regeneration commands in `antenna-model/tests/README.md` do not reproduce them. For 3.0 they were
 **restamped, not rewritten**: decoded, `format_version` set, re-encoded, so every other value
@@ -1971,21 +1971,23 @@ were in that state during the C13 bump. The same pass found
 `artifact_export_integration_test::write_antc` hand-rolling the ANTC header with a literal
 `b"ANTC"` and `2u32`, making it a fourth producer of the container format that D2's
 single-writer rule was supposed to have eliminated. **Derive every version stamp from its
-constant, and write artifacts only through `artifact_export::write_calibration_artifact`.**
+constant, and write artifacts only through `antenna_core::artifact::write` (or `encode`).**
 
 A layout change bumps **both**: the schema MAJOR because the meaning changed, and
 the container version because existing files can no longer be decoded. Do not bump
 either axis for a change that does not appear in this table — see the constants'
 doc comments before deciding.
 
-**Loader enforcement** (`load_calibration_artifact`):
+**Loader enforcement** (`antenna_core::artifact::decode`, in check order):
 
 | Condition | Result |
 |---|---|
-| Container version ≠ `ANTC_ARTIFACT_VERSION` | **Error** — `unsupported ANTC artifact version N` |
-| CRC32 over the payload disagrees with the header | **Error** — `CRC32 mismatch — artifact corrupted` |
-| Schema MAJOR ≠ this build's | **Error** — `incompatible calibration schema version`, naming both |
-| Schema stamp not parseable as `MAJOR.MINOR` | **Error** — refuses to interpret the artifact |
+| No ANTC header, or declared length exceeds the data | **Error** — `ArtifactError::Framing` |
+| CRC32 over the payload disagrees with the header | **Error** — `ArtifactError::Framing` (`CRC32 mismatch — artifact corrupted`) |
+| Container version ≠ `ANTC_ARTIFACT_VERSION` | **Error** — `ArtifactError::Version` |
+| Payload does not decode | **Error** — `ArtifactError::Framing` |
+| Schema MAJOR ≠ this build's, or stamp not `MAJOR.MINOR` | **Error** — `ArtifactError::Version`, naming both versions |
+| Artifact invariant broken | **Error** — `ArtifactError::Validation`, carrying the typed `ValidationError` |
 | Schema MINOR differs | **Warn**, loads |
 
 The schema check runs *before* this build's validation rules and before any field
@@ -1993,7 +1995,7 @@ is logged: if the major does not match, those fields do not necessarily mean wha
 this build thinks they mean, so nothing should read them.
 
 **Both writers stamp both axes.** `calibrate` has exactly one artifact writer,
-`artifact_export::write_calibration_artifact`, used by full mode
+`antenna_core::artifact::write`, used by full mode
 (`export_full_calibration`) and boresight mode (`build_calibration_artifact`)
 alike, so the two producers cannot drift apart on framing. Until 2026-07-30
 boresight mode wrote a bare `postcard::to_allocvec` with no magic, no container
@@ -2021,7 +2023,7 @@ fields, correction-surface fitting improvements, etc.).
   *current* `PHYSICS_MODEL_VERSION`, since design-spec antennas compute live
   against the running physics model rather than a pre-fitted correction surface.
 
-**Loader behavior:** `data/loader.rs` compares `metadata.physics_model_version`
+**Loader behavior:** `antenna_core::artifact::decode` compares `metadata.physics_model_version`
 against the running service's `PHYSICS_MODEL_VERSION` and emits a `warn!` (never
 an error — unlike a schema MAJOR mismatch, which *is* an error: a stale physics
 model still decodes to fields that mean exactly what they say, it is the fitted

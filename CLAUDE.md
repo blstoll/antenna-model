@@ -112,9 +112,10 @@ Three members (roadmap D4). The split is an enforced boundary, not just layout �
 Two things about this that the code will not tell you:
 
 - **Calibration-artifact types have exactly one path: `antenna_core::types::…`** (#104). Neither
-  `antenna-model` nor `antenna_core::data` re-exports them; the loader is
-  `antenna_core::data::loader`. `antenna-model` still re-exports `antenna_core::{error, model,
-  warnings}`, so those compile under both paths — prefer `antenna_core::…` in new code.
+  `antenna-model` nor `antenna_core::artifact` re-exports them. Reading and writing artifacts
+  is `antenna_core::artifact` alone (#106): `decode`/`encode` for bytes, `read`/`write` for
+  files. `antenna-model` still re-exports `antenna_core::{error, model, warnings}`, so those
+  compile under both paths — prefer `antenna_core::…` in new code.
 - **`calibrate` keeps `antenna-model` as a *dev*-dependency, and it must stay one.** It looks
   unused: do not remove it. `calibrate/tests/**` serve generated artifacts through the real
   service path (`service::compute_gain_from_request`), which is what caught the 27.3 dB C13

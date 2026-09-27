@@ -13,7 +13,7 @@ type Checked = Result<(), ValidationError>;
 const Q_FACTOR_MAX: f64 = 20.0;
 
 /// Checks every artifact invariant, failing on the first one broken.
-pub(crate) fn validate(calibration: &AntennaCalibration) -> Checked {
+pub(super) fn validate(calibration: &AntennaCalibration) -> Checked {
     non_empty("antenna_id", &calibration.antenna_id)?;
     non_empty("feed_id", &calibration.feed_id)?;
     physical_config(&calibration.physical_config)?;

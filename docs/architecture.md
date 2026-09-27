@@ -1429,9 +1429,11 @@ antenna-model/                       # Cargo workspace root (3 members, roadmap 
 │       │   ├── parameter_source.rs, measurement_density.rs
 │       │   └── validation_error.rs
 │       │
-│       └── data/
-│           ├── mod.rs
-│           └── loader.rs            # ANTC header + postcard decode
+│       └── artifact/                # The one path bytes ↔ trusted AntennaCalibration
+│           ├── mod.rs               # Version axes; builder's validating build()
+│           ├── codec.rs             # ANTC framing: decode/encode, read/write
+│           ├── error.rs             # ArtifactError: Framing/Version/Io/Validation
+│           └── validation.rs        # The one artifact validation
 │
 ├── antenna-model/                   # REST API service (depends on antenna-core
 │   ├── Cargo.toml                   #   with the `openapi` feature)

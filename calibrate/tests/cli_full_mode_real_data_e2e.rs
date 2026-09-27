@@ -236,7 +236,7 @@ impl GeneratedGrid {
 impl CalibrationRun {
     /// Load through the **service's** loader, not calibrate's own round-trip code.
     fn load(&self) -> AntennaCalibration {
-        antenna_core::data::loader::load_calibration_artifact(&self.artifact).unwrap_or_else(|e| {
+        antenna_core::artifact::read(&self.artifact).unwrap_or_else(|e| {
             panic!(
                 "the service loader must accept the full-mode artifact calibrate just wrote: \
                  {e}\n{}",
