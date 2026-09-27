@@ -2203,7 +2203,7 @@ mod tests {
     /// Negative control for the multiplicity guard (P13): real knot vectors with end
     /// multiplicity `order + 1` must be rejected by the core layout (D19, #95).
     #[test]
-    fn multiplicity_guard_rejects_the_knot_vectors_the_fitter_used_to_produce() {
+    fn multiplicity_guard_rejects_over_clamped_end_knots() {
         let order = 4;
 
         // End multiplicity 5 = order + 1 on both axes.
@@ -2282,7 +2282,7 @@ mod tests {
 
     /// Guards against the shipped configuration carrying identically-zero basis functions (D19).
     #[test]
-    fn the_shipped_configuration_no_longer_carries_dead_coefficients() {
+    fn the_shipped_configuration_carries_no_dead_coefficients() {
         let order = 4;
         let (fd, cd, kd) = d12_axis_data();
 
