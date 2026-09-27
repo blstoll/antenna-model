@@ -11,7 +11,7 @@
 
 #![allow(dead_code)] // Not every consumer of this module uses every helper.
 
-use antenna_model::data::types::BSplineModel4D;
+use antenna_core::types::BSplineModel4D;
 use antenna_model::model::{
     compute_g_over_t, AntennaConfiguration, AntennaConfigurationBuilder, FeedParametersBuilder,
     FittedCorrectionSurface, IntegrationParams, MeshParametersBuilder, ReflectorGeometryBuilder,

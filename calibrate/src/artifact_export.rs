@@ -18,7 +18,7 @@
 //! builders below translate them.
 
 use antenna_core::data::loader::encode_calibration_artifact;
-use antenna_core::data::types::{
+use antenna_core::types::{
     AngularResolution, AntennaCalibration, AntennaCalibrationBuilder, CalibrationCoverage,
     CalibrationMetadataBuilder, CalibrationStatus, FeedParameters as DataFeedParameters,
     MeasurementDensity, MeshParameters as DataMeshParameters, ParameterSource,
@@ -42,7 +42,7 @@ pub enum ArtifactExportError {
     /// The core wire adapter refused to construct the correction surface's wire form.
     /// Carries the typed core error, which names the axis (GitHub issue #95).
     #[error("invalid correction surface: {0}")]
-    InvalidCorrectionSurface(#[from] antenna_core::data::types::ValidationError),
+    InvalidCorrectionSurface(#[from] antenna_core::types::ValidationError),
 
     /// A builder for one of the artifact sub-structures failed.
     #[error("failed to build {what}: {reason}")]
@@ -342,7 +342,7 @@ pub fn export_full_calibration(
 ///
 /// Note this stamps the **container** axis only. The **schema** axis
 /// (`metadata.format_version`) rides inside the payload and is set by whichever builder
-/// produced `calibration`; see [`antenna_core::data::types::CALIBRATION_SCHEMA_VERSION`].
+/// produced `calibration`; see [`antenna_core::types::CALIBRATION_SCHEMA_VERSION`].
 pub fn write_calibration_artifact(calibration: &AntennaCalibration, path: &Path) -> Result<()> {
     let bytes = encode_calibration_artifact(calibration).map_err(|e| {
         ArtifactExportError::SerializeFailed {

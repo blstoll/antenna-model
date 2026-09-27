@@ -644,7 +644,7 @@ mod tests {
 
     /// Helper function to create a test calibration repository with sample data
     fn create_test_repository() -> crate::data::repository::CalibrationRepository {
-        use crate::data::types::{
+        use antenna_core::types::{
             AntennaCalibration, CalibrationMetadata, FeedParameters, MeshParameters,
             PhysicalAntennaConfig, ReflectorGeometry, ValidityRanges,
         };
@@ -868,7 +868,7 @@ mod tests {
         let calibration = json_value.get("calibration").object();
         assert_eq!(
             calibration.get("version").string(),
-            crate::data::types::CALIBRATION_SCHEMA_VERSION
+            antenna_core::types::CALIBRATION_SCHEMA_VERSION
         );
         assert_eq!(calibration.get("rmse_db").f64(), 0.5);
 
@@ -1102,7 +1102,7 @@ mod tests {
     #[tokio::test]
     async fn test_antenna_details_with_uncalibrated_status() {
         use crate::config::ServiceConfig;
-        use crate::data::types::{
+        use antenna_core::types::{
             AntennaCalibration, CalibrationMetadata, CalibrationStatus, FeedParameters,
             PhysicalAntennaConfig, ReflectorGeometry, ValidityRanges,
         };
@@ -1260,7 +1260,7 @@ mod tests {
     #[tokio::test]
     async fn test_antenna_details_with_partially_calibrated_status() {
         use crate::config::ServiceConfig;
-        use crate::data::types::{
+        use antenna_core::types::{
             AntennaCalibration, CalibrationCoverage, CalibrationMetadata, CalibrationStatus,
             FeedParameters, PhysicalAntennaConfig, ReflectorGeometry, ValidityRanges,
         };
@@ -1380,7 +1380,7 @@ mod tests {
     #[tokio::test]
     async fn test_antenna_details_with_fully_calibrated_status() {
         use crate::config::ServiceConfig;
-        use crate::data::types::{
+        use antenna_core::types::{
             AntennaCalibration, CalibrationMetadata, CalibrationStatus, FeedParameters,
             PhysicalAntennaConfig, ReflectorGeometry, ValidityRanges,
         };
@@ -1479,7 +1479,7 @@ mod tests {
     #[tokio::test]
     async fn test_antenna_details_backward_compatibility_without_status() {
         use crate::config::ServiceConfig;
-        use crate::data::types::{
+        use antenna_core::types::{
             AntennaCalibration, CalibrationMetadata, FeedParameters, PhysicalAntennaConfig,
             ReflectorGeometry, ValidityRanges,
         };

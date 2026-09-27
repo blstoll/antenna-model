@@ -3,14 +3,14 @@
 //! This module provides thread-safe access to loaded calibration data.
 
 use crate::config::{AntennaConfig, AntennaConfigEntry, CalibrationConfig, FeedSpecConfig};
-use crate::data::loader::load_calibration_artifact;
-use crate::data::types::{
+use crate::error::DataError;
+use crate::model::CoveredCorrectionSurface;
+use antenna_core::data::loader::load_calibration_artifact;
+use antenna_core::types::{
     AntennaCalibration, BSplineModel4D, CalibrationMetadata, CalibrationStatus, FeedParameters,
     MeshParameters, PhysicalAntennaConfig, ReflectorGeometry, ValidationError, ValidityRanges,
     CALIBRATION_SCHEMA_VERSION,
 };
-use crate::error::DataError;
-use crate::model::CoveredCorrectionSurface;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -262,7 +262,7 @@ impl CalibrationRepository {
                 phase_center_offset_m: feed_spec.phase_center_offset_m,
                 axial_defocus_m: feed_spec.axial_defocus_m,
                 // Roadmap D23: the design spec is the declared source for this, and it
-                // must reach the served model — see the field's docs in `data::types`.
+                // must reach the served model — see `antenna_core::types::FeedParameters`.
                 asymmetry_factor: feed_spec.asymmetry_factor,
             };
 
@@ -301,8 +301,8 @@ impl CalibrationRepository {
                 correction_improvement_db: None,
                 parameters_tuned: false,
                 antenna_class: None,
-                parameters_source: Some(crate::data::types::ParameterSource::DesignSpecifications),
-                measurement_density: Some(crate::data::types::MeasurementDensity::None),
+                parameters_source: Some(antenna_core::types::ParameterSource::DesignSpecifications),
+                measurement_density: Some(antenna_core::types::MeasurementDensity::None),
                 physics_model_version: crate::model::PHYSICS_MODEL_VERSION,
                 // No correction surface was fitted, so there are no knots whose angular
                 // resolution could be assessed (roadmap D21). `None` here means "not
@@ -532,8 +532,8 @@ fn build_validity_ranges(feed_spec: &FeedSpecConfig) -> ValidityRanges {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::types::{CalibrationMetadata, FeedParameters, ReflectorGeometry};
     use crate::service::test_support::install_correction_surface;
+    use antenna_core::types::{CalibrationMetadata, FeedParameters, ReflectorGeometry};
     use std::io::Write;
     use tempfile::{NamedTempFile, TempDir};
 

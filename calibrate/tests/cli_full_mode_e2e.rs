@@ -2,7 +2,7 @@
 
 mod support;
 
-use antenna_core::AntennaCalibration;
+use antenna_core::types::AntennaCalibration;
 use calibrate::{AntennaClassRegistry, CorrectionSurfaceParams};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -415,7 +415,7 @@ fn run_untuned_scenario() -> UntunedScenario {
 
     // The scenario must cross the SERVICE loader boundary, not just calibrate's own
     // round-trip code.
-    let calibration = antenna_model::data::loader::load_calibration_artifact(&run.artifact)
+    let calibration = antenna_core::data::loader::load_calibration_artifact(&run.artifact)
         .expect("the service loader must accept a freshly written full-mode artifact");
     let report = run.report_json();
 
@@ -887,7 +887,7 @@ fn cli_tuned_run_recovers_the_surface_rms_perturbation() {
         "the metadata sidecar should record that tuning ran"
     );
 
-    let calibration = antenna_model::data::loader::load_calibration_artifact(&run.artifact)
+    let calibration = antenna_core::data::loader::load_calibration_artifact(&run.artifact)
         .expect("load artifact");
 
     // The data-layer ReflectorGeometry stores millimetres already — no conversion.

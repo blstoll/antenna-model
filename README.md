@@ -48,7 +48,8 @@ antenna-model/
 │       ├── model/          # bessel, coordinates, coordinates_3d, correction_surface,
 │       │                   #   edge_cases, fft, geometry, illumination, integration, mesh,
 │       │                   #   pattern, phase, ray_trace
-│       ├── data/           # Artifact layer: types.rs + loader.rs (ANTC container)
+│       ├── types/          # Calibration-artifact types, one file per type
+│       ├── data/           # ANTC artifact loader
 │       ├── error.rs        # Shared error vocabulary
 │       └── warnings.rs     # Shared WarningCode / ApiWarning vocabulary
 │
@@ -254,7 +255,7 @@ antennas:
 Note `feeds[].position` is the feed's design offset **from the focal point**, not
 a vertex-origin position — an on-axis feed is `[0, 0, 0]`. Reading it the other
 way puts the feed at `z ≈ 2f` and costs ~27 dB of boresight gain; see the field's
-doc comment in `antenna-core/src/data/types.rs`.
+doc comment in `antenna-core/src/types/feed_parameters.rs`.
 
 ## API Usage
 

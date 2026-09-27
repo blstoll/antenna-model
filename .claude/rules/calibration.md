@@ -3,6 +3,7 @@ description: Calibration pipeline, artifact schema/container version axes, and w
 paths:
   - "calibrate/**"
   - "antenna-core/src/data/**"
+  - "antenna-core/src/types/**"
   - "calibration_data/**"
   - "scripts/generate-cr159703-artifact.sh"
 ---
@@ -106,7 +107,7 @@ Recent bumps cover the versioning cases, and they moved the axes differently:
 - **ANTC framing is required on load.** The legacy headerless fallback is gone.
 - **Do NOT add `#[serde(skip_serializing_if)]` / `skip` / `flatten` to any serialized
   calibration type** — postcard is positional and non-self-describing, so those attributes
-  silently corrupt the format. See the note atop `data/types.rs`.
+  silently corrupt the format. See the module docs of `antenna_core::types`.
 
 Read `data/loader.rs`'s module docs and `docs/calibration-workflow-guide.md` §10.5.1 before
 touching either.

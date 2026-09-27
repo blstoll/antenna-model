@@ -264,7 +264,7 @@ fn export_physical_params(
         //
         // `FeedParameters.position` is the feed's **design offset from the focal point**,
         // not its vertex-origin position — see the field's doc comment in
-        // `antenna_core::data::types`. "At the focus" is therefore the origin, and this
+        // `antenna_core::types`. "At the focus" is therefore the origin, and this
         // must NOT be `(0, 0, focal_length_m)`: the service adds this offset to a steering
         // position that is *already* vertex-origin (`compute_feed_position_from_pointing`
         // → `to_feed_position_with_bdf` returns `(dx, dy, f + dz)`), so writing the focal

@@ -30,16 +30,16 @@ use tracing::{debug, info};
 
 use crate::design_specs_loader::{DesignSpecs, TuningBounds};
 use crate::frequency_correction;
-use antenna_core::data::types::{
+use antenna_core::model::{
+    compute_g_over_t, AntennaConfigurationBuilder, FeedParametersBuilder, IntegrationParams,
+    MeshParametersBuilder, ReflectorGeometryBuilder, PHYSICS_MODEL_VERSION,
+};
+use antenna_core::types::{
     AntennaCalibration, AntennaCalibrationBuilder, BSplineModel4D, CalibrationCoverage,
     CalibrationMetadataBuilder, FeedParameters as DataFeedParameters, MeasurementDensity,
     MeshParameters as DataMeshParameters, ParameterSource, PhysicalAntennaConfigBuilder,
     ReflectorGeometry as DataReflectorGeometry, ValidityRangesBuilder, BORESIGHT_COVERAGE_CONE_DEG,
     CALIBRATION_SCHEMA_VERSION,
-};
-use antenna_core::model::{
-    compute_g_over_t, AntennaConfigurationBuilder, FeedParametersBuilder, IntegrationParams,
-    MeshParametersBuilder, ReflectorGeometryBuilder, PHYSICS_MODEL_VERSION,
 };
 
 /// Boresight measurement point (frequency sweep at azimuth=0, elevation=0)

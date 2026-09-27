@@ -33,12 +33,12 @@
 //! ```
 
 use crate::parser::{closed_extent, MeasurementPoint};
-use antenna_core::data::types::AngularResolution;
 use antenna_core::model::phase::wavelength_from_frequency;
 use antenna_core::model::{
     BasisStencilOutcome, ClampedAxis, CorrectionDomain, CorrectionEvaluation,
     CorrectionSurfaceLayout, FittedCorrectionSurface,
 };
+use antenna_core::types::AngularResolution;
 use ndarray::{Array1, Array2};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -91,7 +91,7 @@ pub enum CorrectionSurfaceError {
     /// The core layout refused the placed axes. Carries the typed core error, which names
     /// the axis and the invariant it broke (GitHub issue #95).
     #[error("Invalid correction-surface layout: {0}")]
-    InvalidLayout(#[from] antenna_core::data::types::ValidationError),
+    InvalidLayout(#[from] antenna_core::types::ValidationError),
 
     #[error("Singular matrix in least squares fitting: {reason}")]
     SingularMatrix { reason: String },
@@ -2376,7 +2376,7 @@ mod tests {
     // D21 — angular resolution of the fitted surface against the pattern scale
     // ========================================================================
 
-    use antenna_core::data::types::MIN_KNOTS_PER_LOBE_PERIOD;
+    use antenna_core::types::MIN_KNOTS_PER_LOBE_PERIOD;
 
     /// Grid over an explicit cone span, so a test can vary coverage independently of density.
     fn grid_over_cone_span(

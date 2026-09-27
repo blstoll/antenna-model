@@ -52,7 +52,7 @@ tracing = "0.1.44"
 utoipa = { version = "=5.5.0", features = ["macros"], optional = true }
 
 [dev-dependencies]
-# Test-only: the warnings.rs and data/types.rs serde round-trips (roadmap D27
+# Test-only: the warnings.rs and types/ serde round-trips (roadmap D27
 # finding 5). See the note in [dependencies] before promoting it back.
 serde_json = "1.0.150"
 tempfile = "3.27.0"

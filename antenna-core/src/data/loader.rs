@@ -1,70 +1,35 @@
-//! Calibration artifact loader
+//! Reading and writing ANTC-framed calibration artifacts.
 //!
-//! This module provides functionality for loading and validating calibration artifacts
-//! from binary files.
+//! An artifact file is `[magic 4][version u32 LE][crc32 u32 LE][len u64 LE][payload]`,
+//! where the payload is a postcard-encoded [`AntennaCalibration`]. Write with
+//! [`encode_calibration_artifact`]; read with [`load_calibration_artifact`].
 //!
 //! # The two version axes
 //!
-//! A `.bin` calibration artifact carries **two** independent version stamps. They are easy
-//! to confuse, so state plainly what each one guards (a third axis,
-//! [`crate::data::types::CalibrationMetadata::physics_model_version`], is about physics
-//! staleness rather than decoding — see `docs/calibration-workflow-guide.md` §10.5):
-//!
 //! | Axis | Where | Type | Guards |
 //! |---|---|---|---|
-//! | **Container** ([`ANTC_ARTIFACT_VERSION`]) | ANTC file header, *outside* the payload | `u32` | How file bytes become a payload byte string: the `[magic][version][crc32][len]` framing and which codec decodes the payload. |
-//! | **Schema** ([`crate::data::types::CALIBRATION_SCHEMA_VERSION`]) | `metadata.format_version`, *inside* the payload | `String` `"MAJOR.MINOR"` | What the decoded [`AntennaCalibration`] means: which fields exist, in what order, meaning what. |
+//! | **Container** ([`ANTC_ARTIFACT_VERSION`]) | ANTC header, *outside* the payload | `u32` | How file bytes become a payload: framing and codec. |
+//! | **Schema** ([`CALIBRATION_SCHEMA_VERSION`]) | `metadata.format_version`, *inside* the payload | `"MAJOR.MINOR"` | What the decoded [`AntennaCalibration`] means: which fields exist, in what order, meaning what. |
 //!
-//! **Why both are needed, and why neither subsumes the other.** The container stamp is
-//! readable *before* decoding, so it is the only thing that can reject a file this build
-//! cannot parse at all — a pre-2026-07-18 bincode payload, say. It cannot see inside the
-//! payload, so it says nothing about field meanings. The schema stamp is the reverse: it
-//! is only readable *after* a successful decode, so it cannot protect the decode itself,
-//! but it catches the class the container stamp structurally cannot — a payload that
-//! decodes cleanly and means something different. That class is real here because postcard
-//! is positional and non-self-describing: swapping two `f64` fields, or redefining what an
-//! existing field measures, produces bytes that decode without complaint into wrong
-//! numbers.
+//! Neither subsumes the other. The container stamp is readable *before* decoding, so it
+//! is the only guard against a file this build cannot parse. The schema stamp is readable
+//! only *after* decoding, and it is the only guard against a payload that decodes cleanly
+//! but means something else — real here because postcard is positional.
+//! ([`crate::types::CalibrationMetadata::physics_model_version`] is a third, orthogonal
+//! axis about physics staleness.)
 //!
-//! **Bump policy.** Any change to the postcard byte layout (adding, removing, reordering,
-//! or retyping a field reachable from [`AntennaCalibration`]) bumps **both**: the schema
-//! MAJOR, because the meaning changed, and the container version, because existing files
-//! can no longer be decoded. A change confined to *documented meaning* with the layout
-//! untouched bumps the schema MINOR only. A change to framing or codec alone — the
-//! bincode → postcard migration, which is why the container version is 2 — bumps the
-//! container version only.
+//! **Bump policy.** A postcard layout change bumps both. A meaning-only change bumps the
+//! schema (MAJOR if an existing field now means something different, MINOR if meaning is
+//! only documented or validation tightened). A framing or codec change bumps the container
+//! only. History: `docs/calibration-workflow-guide.md` §10.5.1.
 //!
-//! **Enforcement.** Container mismatch and schema-MAJOR mismatch are hard errors; a
-//! differing schema MINOR warns and loads. Both producers in `calibrate` write the ANTC
-//! header via one shared writer, so every artifact this repo produces carries a container
-//! stamp.
-//!
-//! **ANTC framing is required; there is no headerless fallback** (roadmap D27 finding 9,
-//! removed 2026-08-14). Until D2 (2026-07-30) the boresight producer wrote a bare postcard
-//! payload, and this loader accepted one by skipping straight to the decode — which meant
-//! skipping *both* integrity checks, the container version gate and the CRC32. It was kept
-//! afterwards to stay compatible with artifacts written before D2. That compatibility turned
-//! out to be empty: the schema gate below runs on every artifact regardless of framing, and
-//! [`crate::data::types::CALIBRATION_SCHEMA_VERSION`] has since moved 2.0 → 3.0 → 4.0 → 5.1,
-//! so every artifact the fallback existed for is refused on the schema axis anyway. It could
-//! therefore only ever succeed on a bare postcard encoding at the *current* schema.
-//!
-//! Two such files did exist and were **not** test helpers, which is worth recording because
-//! it is the part the roadmap filing got wrong:
-//! `antenna-model/tests/fixtures/calibration_data/test_uncalibrated_{x,s}band_boresight.bin`
-//! are committed fixtures that had been carried across every schema bump by *restamping*
-//! (decode, set `format_version`, re-encode bare) rather than by re-running `calibrate` —
-//! which is why they stayed headerless long after D2 made framing universal, and why the
-//! regeneration commands in `antenna-model/tests/README.md` would not have reproduced them.
-//! They were reframed in place when the fallback was removed: a pure 20-byte prepend, payload
-//! bytes untouched, so no fixture value moved.
-//!
-//! Requiring the header trades nothing away and makes a truncated or corrupted file fail as a
-//! rejection instead of as an arbitrary decode.
+//! **Enforcement.** A missing ANTC header, container mismatch, CRC mismatch, or foreign
+//! schema MAJOR is a hard error; a differing schema MINOR warns and loads. There is no
+//! headerless fallback (D27).
 
-use crate::data::types::{AntennaCalibration, CALIBRATION_SCHEMA_VERSION};
 use crate::error::DataError;
 use crate::model::PHYSICS_MODEL_VERSION;
+use crate::types::{AntennaCalibration, CALIBRATION_SCHEMA_VERSION};
 use std::path::Path;
 use tracing::{debug, info, warn};
 
@@ -73,31 +38,10 @@ pub const ANTC_MAGIC: &[u8; 4] = b"ANTC";
 
 /// The ANTC **container** version this build writes and the only one it can decode.
 ///
-/// Covers the on-disk framing (`[magic 4][version u32 LE][crc32 u32 LE][len u64 LE]`
-/// followed by the payload) and the codec that decodes the payload — not the payload's
-/// schema, which is [`CALIBRATION_SCHEMA_VERSION`]. See the module docs for the split.
-///
-/// Bumped 1 → 2 on the bincode → postcard migration (2026-07-18): the payload
-/// encoding changed, so any pre-migration ANTC file is rejected loudly rather than
-/// risking a garbled decode.
-///
-/// Bumped 2 → 3 by roadmap **D23** (2026-08-03), which added
-/// `PhysicalAntennaConfig.feed.asymmetry_factor`. That is a payload *layout* change, not a
-/// codec change, so strictly the schema axis is what changed meaning — but a version-2
-/// payload is one `f64` short of what this build decodes, and postcard reads positionally,
-/// so the decode itself would consume the following field's bytes and either fail
-/// arbitrarily deep or succeed into garbage. The container axis is the only stamp readable
-/// *before* that happens, which is exactly the "existing files can no longer be decoded"
-/// case the module docs' bump policy assigns to it.
-///
-/// Bumped 3 → 4 by roadmap **D21** (2026-08-04), which added
-/// `CalibrationMetadata.angular_resolution`. Same mechanism as 2 → 3 one field earlier in
-/// the payload: an `Option` costs at least its one-byte discriminant, so a version-3 payload
-/// is short by that byte and every field after it decodes from the wrong offset.
-///
-/// Writers use this constant through
-/// `calibrate::artifact_export::write_calibration_artifact`, so the reader and both
-/// producers cannot disagree about the framing.
+/// Covers the framing and the payload codec, not the payload's schema
+/// ([`CALIBRATION_SCHEMA_VERSION`]). Bump it whenever existing files can no longer be
+/// decoded — a codec change or any payload layout change — so they are rejected before a
+/// positional decode can misread them. See the module docs for the bump policy.
 pub const ANTC_ARTIFACT_VERSION: u32 = 4;
 
 /// Byte length of an ANTC header: 4 (magic) + 4 (version) + 4 (crc) + 8 (len) = 20.
@@ -105,21 +49,13 @@ pub const ANTC_HEADER_LEN: usize = 20;
 
 /// Encode a calibration into ANTC container bytes: `[magic][version][crc32][len][payload]`.
 ///
-/// This is the counterpart of [`load_calibration_artifact`] and lives beside it so the
-/// framing has **one** definition rather than one per writer. Writers should reach for this
-/// instead of laying out the header themselves —
-/// `calibrate::artifact_export::write_calibration_artifact` (the tool's only artifact writer,
-/// roadmap D2) is a thin wrapper over it, and test helpers that need a loadable artifact use
-/// it too.
+/// The one definition of the framing: every writer, including
+/// `calibrate::artifact_export::write_calibration_artifact` and test helpers, goes through
+/// it. Do not lay the header out by hand — hand-rolled copies drift from
+/// [`ANTC_ARTIFACT_VERSION`] (D23, D27).
 ///
-/// That indirection is not ceremony: hand-rolled copies of this layout have been a recurring
-/// defect. D23 found a fourth one in a test carrying a hardcoded container version, which
-/// would have sailed straight past its own version bump, and D27 found a fifth writing no
-/// header at all. A copy cannot drift from [`ANTC_ARTIFACT_VERSION`] if there is no copy.
-///
-/// Note this stamps the **container** axis only. The **schema** axis
-/// (`metadata.format_version`) rides inside the payload and comes from whichever builder
-/// produced `calibration`; see [`crate::data::types::CALIBRATION_SCHEMA_VERSION`].
+/// Stamps the container axis only; the schema stamp is whatever the calibration's
+/// `metadata.format_version` already holds.
 pub fn encode_calibration_artifact(
     calibration: &AntennaCalibration,
 ) -> Result<Vec<u8>, postcard::Error> {
@@ -137,16 +73,11 @@ pub fn encode_calibration_artifact(
     Ok(bytes)
 }
 
-/// Load a calibration artifact from a binary file
+/// Load, integrity-check, version-check and validate a calibration artifact.
 ///
-/// Deserializes and validates a calibration artifact from a .bin file.
-///
-/// # Arguments
-/// * `path` - Path to the calibration binary file
-///
-/// # Returns
-/// * `Ok(AntennaCalibration)` - Successfully loaded and validated calibration
-/// * `Err(DataError)` - Failed to load or validate
+/// Checks run in order: ANTC framing, container version, CRC32, postcard decode, schema
+/// version, then [`AntennaCalibration::validate`]. Any failure is a [`DataError`] naming
+/// the path. A physics-model version mismatch only warns.
 ///
 /// # Example
 /// ```no_run
@@ -167,9 +98,7 @@ pub fn load_calibration_artifact<P: AsRef<Path>>(path: P) -> Result<AntennaCalib
         reason: format!("Failed to read file: {}", e),
     })?;
 
-    // ANTC framing is required. There is deliberately no headerless fallback (roadmap D27
-    // finding 9); the module docs record why removing it changed nothing that was actually
-    // loadable.
+    // ANTC framing is required: a bare payload has no container stamp or CRC to check.
     if bytes.len() < ANTC_HEADER_LEN || &bytes[0..4] != ANTC_MAGIC {
         return Err(DataError::LoadError {
             path: path.display().to_string(),
@@ -376,8 +305,8 @@ fn check_schema_version(artifact: &str) -> Result<(), String> {
 
 /// Warning to emit when an artifact was fitted against a different physics-model
 /// version than this service computes with. Correction surfaces are fitted to
-/// `measured − physics` residuals, so a mismatch can silently degrade accuracy;
-/// this is a warning, not an error (roadmap P1b policy).
+/// `measured − physics` residuals, so a mismatch can silently degrade accuracy; it
+/// warns rather than errors (P1b).
 fn physics_model_version_mismatch(artifact: u32, current: u32) -> Option<String> {
     (artifact != current).then(|| {
         format!(
@@ -389,16 +318,10 @@ fn physics_model_version_mismatch(artifact: u32, current: u32) -> Option<String>
     })
 }
 
-/// Validate a calibration artifact's internal consistency
-///
-/// Performs deep validation beyond the basic checks in `AntennaCalibration::validate()`.
-///
-/// # Arguments
-/// * `calibration` - The calibration to validate
-///
-/// # Returns
-/// * `Ok(())` - Calibration is valid
-/// * `Err(DataError)` - Validation failed
+/// Runs [`AntennaCalibration::validate`], then warns on implausible values: a frequency
+/// range outside 100–50 000 MHz, over a million correction coefficients, RMSE above 1 dB,
+/// or R² below 0.95. (Its elevation and mesh error checks repeat ones `validate` already
+/// made.)
 pub fn validate_calibration(calibration: &AntennaCalibration) -> Result<(), DataError> {
     // Basic validation (already done in load, but can be called separately)
     calibration
@@ -476,7 +399,7 @@ pub fn validate_calibration(calibration: &AntennaCalibration) -> Result<(), Data
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::types::{
+    use crate::types::{
         BSplineModel4D, CalibrationCoverage, CalibrationMetadata, FeedParameters,
         PhysicalAntennaConfig, ReflectorGeometry, ValidityRanges,
     };
@@ -504,11 +427,7 @@ mod tests {
     }
 
     /// Write a calibration the way a real producer does: postcard payload inside ANTC framing.
-    ///
-    /// Tests that are not *about* framing must use this rather than a bare
-    /// `postcard::to_allocvec`. Several did until 2026-08-14, which is how the headerless
-    /// fallback ended up load-bearing for the test suite while no producer wrote one
-    /// (roadmap D27 finding 9).
+    /// Tests not *about* framing must use this rather than a bare `postcard::to_allocvec`.
     fn write_framed(calibration: &AntennaCalibration) -> NamedTempFile {
         write_bytes(&encode_calibration_artifact(calibration).unwrap())
     }
@@ -605,12 +524,8 @@ mod tests {
         }
     }
 
-    /// The decode-failure path, which `test_load_calibration_artifact_invalid_data` used to
-    /// cover before ANTC framing became mandatory: a file that *is* framed, whose header
-    /// is self-consistent and whose CRC matches, but whose payload is not a decodable
-    /// `AntennaCalibration`. Truncating a real payload is used rather than random bytes so
-    /// the failure is deterministic — postcard reads positionally and a short buffer always
-    /// runs out.
+    /// A well-framed, CRC-clean file whose payload does not decode is refused. A truncated
+    /// real payload, not random bytes, keeps the failure deterministic.
     #[test]
     fn framed_artifact_with_undecodable_payload_is_refused() {
         let payload = postcard::to_allocvec(&create_test_calibration()).unwrap();
@@ -677,8 +592,7 @@ mod tests {
             .unwrap()
     }
 
-    /// Issue #97: a correction surface without a coverage record is refused at load with
-    /// an actionable reason — not treated as covered everywhere, not warned-and-loaded.
+    /// Guards against a correction surface without coverage loading as covered everywhere (#97).
     #[test]
     fn a_correction_surface_without_coverage_is_rejected_at_load() {
         let mut calibration = create_test_calibration();
@@ -800,12 +714,8 @@ mod tests {
         let calibration = create_test_calibration();
 
         let payload = postcard::to_allocvec(&calibration).unwrap();
-        // Derived, never a literal. This test was written against a hardcoded `3` when the
-        // supported version was 2; D23's 2 → 3 bump (2026-08-03) turned it into an
-        // assertion that this build rejects *its own* artifacts, and it failed loudly —
-        // which is the lucky case. A test asserting acceptance of a literal would have gone
-        // green while testing nothing, exactly as the workflow guide records happening to
-        // three loader tests during the C13 bump.
+        // Derived, never a literal: a literal version stops testing "unsupported" when the
+        // supported version moves onto it.
         let unsupported = ANTC_ARTIFACT_VERSION + 1;
         let bytes = make_antc_bytes(&payload, unsupported, None);
 
@@ -830,9 +740,8 @@ mod tests {
         }
     }
 
-    /// The loader derives the major/minor it supports from `CALIBRATION_SCHEMA_VERSION`
-    /// rather than restating them, so an unparseable constant would turn every load into
-    /// an "internal error". Pin that it parses.
+    /// Guards against an unparseable `CALIBRATION_SCHEMA_VERSION` turning every load into
+    /// an internal error.
     #[test]
     fn supported_schema_version_constant_is_parseable() {
         let parsed = parse_schema_version(CALIBRATION_SCHEMA_VERSION);
@@ -858,12 +767,8 @@ mod tests {
 
     #[test]
     fn schema_major_mismatch_is_an_error() {
-        // One major below and one above: neither can be interpreted by this build's field
-        // layout. **Derived from the constant, not written out.** These were the literals
-        // "1.0" and "3.0", which stopped testing what they claim the moment roadmap C13 moved
-        // the schema to 3.0 — "3.0" became this build's own version and the test failed. A
-        // version test that has to be edited whenever the version moves is a version test that
-        // will eventually be edited wrongly.
+        // One major below and one above. Derived from the constant, not written out, so the
+        // test keeps meaning "foreign major" when the schema version moves.
         let (major, _) = parse_schema_version(CALIBRATION_SCHEMA_VERSION)
             .expect("this build's schema version parses");
         let below = format!("{}.0", major - 1);
@@ -899,10 +804,8 @@ mod tests {
         );
     }
 
-    /// The wrong-version fixture required by roadmap unit D2, driven through the real
-    /// loading path: a well-framed, CRC-clean, decodable artifact whose *schema* stamp
-    /// this build cannot interpret must be rejected — the container check cannot catch
-    /// this class, because the container is perfectly valid.
+    /// Guards against a well-framed, decodable artifact with a foreign schema stamp loading
+    /// (D2): the container check cannot catch it.
     #[test]
     fn test_load_rejects_foreign_schema_version() {
         let mut calibration = create_test_calibration();
@@ -927,12 +830,8 @@ mod tests {
         }
     }
 
-    /// A bare postcard payload is refused for its *framing*, before any of its contents are
-    /// read (roadmap D27 finding 9). This is the negative control for removing the legacy
-    /// headerless fallback, and it deliberately uses a calibration that is valid in every
-    /// other respect — current schema, current physics stamp, passes `validate()` — so the
-    /// only thing it can be rejected for is the missing container header. If someone
-    /// reinstates the fallback, this is the test that fails.
+    /// Guards against reinstating the headerless fallback (D27): an otherwise valid bare
+    /// postcard payload is refused for its framing alone.
     #[test]
     fn headerless_artifact_is_refused_even_when_otherwise_valid() {
         let calibration = create_test_calibration();

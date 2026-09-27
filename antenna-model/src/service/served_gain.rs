@@ -58,7 +58,6 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use antenna_core::data::types::{AntennaCalibration, CalibrationCoverage, CalibrationStatus};
 use antenna_core::error::{AntennaModelError, ComputationError, Result};
 use antenna_core::model::{
     analyze_edge_cases, compute_gain_db, squint_corrected_direction, AntennaConfiguration,
@@ -66,6 +65,7 @@ use antenna_core::model::{
     FeedPosition, IntegrationParams, MeshParameters as ModelMeshParams,
     ReflectorGeometry as ModelReflector,
 };
+use antenna_core::types::{AntennaCalibration, CalibrationCoverage, CalibrationStatus};
 use antenna_core::warnings::{ApiWarning, WarningCode};
 use tracing::error;
 
@@ -305,9 +305,7 @@ pub(crate) struct PreparedServedGain {
     diameter_m: f64,
 }
 
-fn invalid_correction_surface(
-    error: antenna_core::data::types::ValidationError,
-) -> AntennaModelError {
+fn invalid_correction_surface(error: antenna_core::types::ValidationError) -> AntennaModelError {
     ComputationError::InvalidModelState(format!("invalid correction surface in artifact: {error}"))
         .into()
 }
@@ -1042,7 +1040,7 @@ const OFF_AXIS_FIRST_NULL_MULTIPLE: f64 = 3.0;
 /// Carries [`WarningCode::OffAxisUnvalidated`] (typed by C8 stage 3,
 /// 2026-07-27).
 fn off_axis_unvalidated_warning(
-    calibration: &antenna_core::data::types::AntennaCalibration,
+    calibration: &antenna_core::types::AntennaCalibration,
     off_boresight_deg: f64,
     frequency_mhz: f64,
 ) -> Option<ApiWarning> {
@@ -1118,7 +1116,7 @@ fn off_axis_unvalidated_warning(
 /// a client reads from `calibration_status`, not a different reason to distrust
 /// the number.
 fn rear_hemisphere_warning(
-    calibration: &antenna_core::data::types::AntennaCalibration,
+    calibration: &antenna_core::types::AntennaCalibration,
     off_boresight_deg: f64,
     frequency_mhz: f64,
 ) -> Option<ApiWarning> {
@@ -1255,13 +1253,11 @@ mod tests {
     /// coefficient count actually matches its knot vectors. (`dummy_correction_surface`
     /// is deliberately not reused here: it exists to make a surface *present*, and its
     /// all-zero coefficients hide the shape mismatch.)
-    fn constant_correction_surface(
-        correction_db: f64,
-    ) -> antenna_core::data::types::BSplineModel4D {
+    fn constant_correction_surface(correction_db: f64) -> antenna_core::types::BSplineModel4D {
         let order = 3usize;
         let layers = order + 1;
         let n_freq = 4;
-        antenna_core::data::types::BSplineModel4D {
+        antenna_core::types::BSplineModel4D {
             coefficients: vec![correction_db; layers * layers * n_freq * layers],
             shape: [layers, layers, n_freq, layers],
             knots_azimuth: vec![0.0, 0.0, 0.0, 180.0, 360.0, 360.0, 360.0],
@@ -1581,7 +1577,7 @@ mod tests {
     fn boresight_cone_coverage_accepts_a_pole_query_at_any_azimuth() {
         let coverage = CalibrationCoverage::builder()
             .azimuth_range(0.0, 360.0)
-            .elevation_range(0.0, antenna_core::data::types::BORESIGHT_COVERAGE_CONE_DEG)
+            .elevation_range(0.0, antenna_core::types::BORESIGHT_COVERAGE_CONE_DEG)
             .frequency_range(3700.0, 6425.0)
             .num_measurements(6)
             .has_correction_surface(true)
@@ -2200,7 +2196,7 @@ mod tests {
     /// matches [`constant_correction_surface`].
     fn narrow_elevation_correction_surface(
         correction_db: f64,
-    ) -> antenna_core::data::types::BSplineModel4D {
+    ) -> antenna_core::types::BSplineModel4D {
         let mut surface = constant_correction_surface(correction_db);
         surface.knots_elevation = vec![0.0, 0.0, 0.0, 1.0, 2.0, 2.0, 2.0];
         surface

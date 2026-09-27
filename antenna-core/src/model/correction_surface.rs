@@ -41,9 +41,7 @@
 //! decode it must satisfy rules 1–4 and carry identical slabs (issue #92). Issue #98 retires
 //! it.
 
-use crate::data::types::{
-    BSplineModel4D, CalibrationCoverage, ValidationError as DataValidationError,
-};
+use crate::types::{BSplineModel4D, CalibrationCoverage, ValidationError as DataValidationError};
 
 /// A producer's description of one clamped B-spline axis: its bounds and interior knots.
 ///

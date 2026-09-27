@@ -1,11 +1,11 @@
 //! Shared test-only calibration fixtures for the service layer.
 
-use crate::data::types::{
+use crate::model::FittedCorrectionSurface;
+use antenna_core::types::{
     AntennaCalibration, BSplineModel4D, CalibrationCoverage, CalibrationMetadata,
     CalibrationStatus, FeedParameters, MeshParameters, PhysicalAntennaConfig, ReflectorGeometry,
     ValidityRanges,
 };
-use crate::model::FittedCorrectionSurface;
 /// The canonical service-layer test artifact: a 10 m / f/D 0.5 dish with a mesh, an
 /// on-axis feed, and validity ranges wide enough that nothing extrapolates by accident.
 ///
@@ -75,8 +75,8 @@ pub(crate) fn create_test_calibration(status: CalibrationStatus) -> AntennaCalib
 /// end-to-end query does not extrapolate. Only its PRESENCE matters for the
 /// P11 predicate, but making it evaluable lets it also be used in the
 /// end-to-end `compute_gain` tests.
-pub(crate) fn dummy_correction_surface() -> crate::data::types::BSplineModel4D {
-    crate::data::types::BSplineModel4D {
+pub(crate) fn dummy_correction_surface() -> antenna_core::types::BSplineModel4D {
+    antenna_core::types::BSplineModel4D {
         coefficients: vec![0.0; 2 * 2 * 2],
         shape: [2, 2, 2, 1],
         knots_azimuth: vec![0.0, 0.0, 360.0, 360.0],
