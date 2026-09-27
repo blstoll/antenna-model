@@ -2,24 +2,17 @@
 
 use crate::model::FittedCorrectionSurface;
 use antenna_core::types::{
-    AntennaCalibration, BSplineModel4D, CalibrationCoverage, CalibrationMetadata,
-    CalibrationStatus, FeedParameters, MeshParameters, PhysicalAntennaConfig, ReflectorGeometry,
-    ValidityRanges,
+    AntennaCalibration, AntennaCalibrationBuilder, BSplineModel4D, CalibrationCoverage,
+    CalibrationMetadata, CalibrationStatus, FeedParameters, MeshParameters, PhysicalAntennaConfig,
+    ReflectorGeometry, ValidityRanges,
 };
-/// The canonical service-layer test artifact: a 10 m / f/D 0.5 dish with a mesh, an
+/// The one builder for antenna-model test artifacts: a 10 m / f/D 0.5 dish with a mesh, an
 /// on-axis feed, and validity ranges wide enough that nothing extrapolates by accident.
-///
-/// Shared by `service::evaluator` (end-to-end `/gain` behaviour) and
-/// `service::served_gain` (the gain law itself) since issue #61 split the two — before
-/// that both lived in one `mod tests` and this was private to it.
-///
-/// A `PartiallyCalibrated` status also installs its coverage on the artifact, so the
-/// status and the coverage record cannot disagree in a fixture.
-pub(crate) fn create_test_calibration(status: CalibrationStatus) -> AntennaCalibration {
+/// Override ids, status or physics before `build()`.
+pub(crate) fn calibration_builder() -> AntennaCalibrationBuilder {
     let metadata = CalibrationMetadata::builder()
         .antenna_name("Test Antenna")
         .calibration_date("2025-01-01T00:00:00Z")
-        .format_version("2.0")
         .data_source("test")
         .rmse_db(0.5)
         .r_squared(0.99)
@@ -27,7 +20,7 @@ pub(crate) fn create_test_calibration(status: CalibrationStatus) -> AntennaCalib
         .build()
         .unwrap();
 
-    let mut builder = AntennaCalibration::builder()
+    AntennaCalibration::builder()
         .antenna_id("test_antenna")
         .feed_id("test_feed")
         .metadata(metadata)
@@ -39,7 +32,7 @@ pub(crate) fn create_test_calibration(status: CalibrationStatus) -> AntennaCalib
                 surface_rms_mm: 0.5,
             },
             feed: FeedParameters {
-                // Feed at focal point - zero offset from optical axis
+                // Focus-relative: an on-axis feed is the origin (C13).
                 position: (0.0, 0.0, 0.0),
                 q_factor: 8.0,
                 phase_center_offset_m: 0.0,
@@ -56,16 +49,19 @@ pub(crate) fn create_test_calibration(status: CalibrationStatus) -> AntennaCalib
             elevation_min_max: (0.0, 90.0),
             frequency_min_max: (1000.0, 10000.0),
             temperature_const: 290.0,
-        });
+        })
+}
 
-    builder = builder.calibration_status(status.clone());
-
-    // Add coverage for partially calibrated
-    if let CalibrationStatus::PartiallyCalibrated { ref coverage, .. } = status {
-        builder = builder.calibration_coverage(coverage.clone());
-    }
-
-    builder.build().unwrap()
+/// [`calibration_builder`]'s artifact with `status`. A `PartiallyCalibrated` status also
+/// installs its coverage, so the two records cannot disagree.
+pub(crate) fn create_test_calibration(status: CalibrationStatus) -> AntennaCalibration {
+    let builder = match &status {
+        CalibrationStatus::PartiallyCalibrated { coverage, .. } => {
+            calibration_builder().calibration_coverage(coverage.clone())
+        }
+        _ => calibration_builder(),
+    };
+    builder.calibration_status(status).build().unwrap()
 }
 
 /// A valid, evaluable correction surface for tests that need to represent

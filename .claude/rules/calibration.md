@@ -266,8 +266,9 @@ The artifact's validity/coverage elevation ranges are polar-angle ranges (see D2
 An `AntennaCalibration` comes only from `AntennaCalibrationBuilder::build` or the loader, and
 both run the one validation `antenna_core::artifact` owns — so consumers never re-check, and
 there is deliberately **no public validate function**. The service's repository inserts
-without validating. Tests that need a valid core artifact use `antenna_core::types::fixtures`;
-tests may still mutate one afterwards to prove a rejection. See
+without validating. Tests that need a valid artifact start from one builder per crate —
+`antenna_core::types::fixtures` in core, `service::test_support::calibration_builder` in
+`antenna-model` — and may still mutate one afterwards to prove a rejection. See
 `docs/adr/0001-artifacts-are-validated-at-construction.md`.
 
 ## Coverage and support (issue #97)

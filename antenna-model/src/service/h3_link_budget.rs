@@ -431,60 +431,17 @@ fn compute_cell_result(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::service::test_support::install_correction_surface;
+    use crate::service::test_support::{calibration_builder, install_correction_surface};
     use antenna_core::types::{
-        AntennaCalibration, BSplineModel4D, CalibrationCoverage, CalibrationMetadata,
-        CalibrationStatus, FeedParameters, MeshParameters, PhysicalAntennaConfig,
-        ReflectorGeometry, ValidityRanges,
+        AntennaCalibration, BSplineModel4D, CalibrationCoverage, CalibrationStatus,
     };
 
     use crate::api::schemas::GainRequest;
 
-    /// Build a minimal `AntennaCalibration` suitable for H3 link-budget tests.
-    ///
-    /// The geometry matches the evaluator.rs `create_test_calibration`:
-    /// 10 m dish, f/D=0.5, no design feed offset, mesh present.
     fn make_h3_test_calibration() -> AntennaCalibration {
-        let metadata = CalibrationMetadata::builder()
-            .antenna_name("H3 Test Antenna")
-            .calibration_date("2025-01-01T00:00:00Z")
-            .format_version("2.0")
-            .data_source("test")
-            .rmse_db(0.5)
-            .r_squared(0.99)
-            .num_measurements(1000)
-            .build()
-            .unwrap();
-
-        AntennaCalibration::builder()
+        calibration_builder()
             .antenna_id("h3_test_antenna")
             .feed_id("h3_test_feed")
-            .metadata(metadata)
-            .physical_config(PhysicalAntennaConfig {
-                reflector: ReflectorGeometry {
-                    diameter_m: 10.0,
-                    focal_length_m: 5.0,
-                    f_over_d_ratio: 0.5,
-                    surface_rms_mm: 0.5,
-                },
-                feed: FeedParameters {
-                    position: (0.0, 0.0, 0.0),
-                    q_factor: 8.0,
-                    phase_center_offset_m: 0.0,
-                    axial_defocus_m: 0.0,
-                    asymmetry_factor: 1.0,
-                },
-                mesh: Some(MeshParameters {
-                    mesh_spacing_mm: 5.0,
-                    wire_diameter_mm: 0.5,
-                }),
-            })
-            .validity_ranges(ValidityRanges {
-                azimuth_min_max: (0.0, 360.0),
-                elevation_min_max: (0.0, 90.0),
-                frequency_min_max: (1000.0, 10000.0),
-                temperature_const: 290.0,
-            })
             .calibration_status(CalibrationStatus::FullyCalibrated {
                 accuracy_estimate_db: 1.0,
             })

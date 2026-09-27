@@ -527,57 +527,14 @@ fn build_validity_ranges(feed_spec: &FeedSpecConfig) -> ValidityRanges {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::service::test_support::install_correction_surface;
-    use antenna_core::types::{CalibrationMetadata, FeedParameters, ReflectorGeometry};
+    use crate::service::test_support::{calibration_builder, install_correction_surface};
     use std::io::Write;
     use tempfile::{NamedTempFile, TempDir};
 
     fn create_test_calibration(antenna_id: &str, feed_id: &str) -> AntennaCalibration {
-        let metadata = CalibrationMetadata::builder()
-            .antenna_name(format!("{} {}", antenna_id, feed_id))
-            .calibration_date("2025-01-15T00:00:00Z")
-            .data_source("test_data.csv")
-            .rmse_db(0.5)
-            .r_squared(0.98)
-            .num_measurements(1000)
-            .build()
-            .unwrap();
-
-        let reflector = ReflectorGeometry::builder()
-            .diameter_m(34.0)
-            .focal_length_m(13.6)
-            .f_over_d_ratio(0.4)
-            .surface_rms_mm(0.5)
-            .build()
-            .unwrap();
-
-        let feed = FeedParameters::builder()
-            .position(0.0, 0.0, 0.1)
-            .q_factor(8.0)
-            .phase_center_offset_m(0.0)
-            .build()
-            .unwrap();
-
-        let physical_config = PhysicalAntennaConfig::builder()
-            .reflector(reflector)
-            .feed(feed)
-            .build()
-            .unwrap();
-
-        let ranges = ValidityRanges::builder()
-            .azimuth_range(0.0, 360.0)
-            .elevation_range(10.0, 80.0)
-            .frequency_range(8000.0, 8500.0)
-            .temperature(290.0)
-            .build()
-            .unwrap();
-
-        AntennaCalibration::builder()
+        calibration_builder()
             .antenna_id(antenna_id)
             .feed_id(feed_id)
-            .metadata(metadata)
-            .physical_config(physical_config)
-            .validity_ranges(ranges)
             .build()
             .unwrap()
     }
@@ -664,7 +621,7 @@ mod tests {
         repo.add_calibration(cal);
 
         let config = repo.get_antenna_config("antenna_1", "x_band").unwrap();
-        assert_eq!(config.reflector.diameter_m, 34.0);
+        assert_eq!(config.reflector.diameter_m, 10.0);
     }
 
     #[test]
@@ -718,7 +675,7 @@ mod tests {
         repo.add_calibration(cal);
 
         let ranges = repo.get_validity_ranges("antenna_1", "x_band").unwrap();
-        assert_eq!(ranges.frequency_min_max, (8000.0, 8500.0));
+        assert_eq!(ranges.frequency_min_max, (1000.0, 10000.0));
     }
 
     #[test]

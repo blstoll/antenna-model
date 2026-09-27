@@ -188,7 +188,7 @@ pub fn load_calibration_artifact<P: AsRef<Path>>(path: P) -> Result<AntennaCalib
         }
     })?;
 
-    crate::artifact::validate_decoded(&calibration).map_err(|e| DataError::ValidationError {
+    crate::artifact::validate(&calibration).map_err(|e| DataError::ValidationError {
         path: path.display().to_string(),
         reason: e.to_string(),
     })?;

@@ -57,8 +57,11 @@ All four construction points run one validation, owned privately by `antenna_cor
 
 - An invalid artifact cannot reach the service through any production path; the repository's
   prepared-correction error arm is reachable only by a hand-mutated value.
-- Tests may still build or mutate artifacts directly. Core tests that need a valid artifact use
-  the one builder-based fixture, `antenna_core::types::fixtures`.
+- Tests may still build or mutate artifacts directly. Tests that need a valid artifact start
+  from one builder per crate: `antenna_core::types::fixtures` in core and
+  `service::test_support::calibration_builder` in `antenna-model`'s unit tests. An
+  integration-test crate cannot reach either without exposing fixtures in the public API, so
+  `antenna-model/tests/feed_steering_test.rs` keeps its own builder-based helper.
 - Rejection tests assert on the builder's or the loader's error, since there is no validate
   function to call.
 - A future construction point (e.g. an S3 or HTTP loader, #106) must go through the builder or

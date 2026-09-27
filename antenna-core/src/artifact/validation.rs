@@ -1,6 +1,6 @@
 //! The artifact invariants. Private: reached only through the builder and the loader.
 
-use crate::model::geometry::{F_OVER_D_MAX, F_OVER_D_MIN};
+use crate::model::geometry::{is_valid_asymmetry_factor, F_OVER_D_MAX, F_OVER_D_MIN};
 use crate::model::CoveredCorrectionSurface;
 use crate::types::{
     AngularResolution, AntennaCalibration, CalibrationCoverage, FeedParameters, MeshParameters,
@@ -13,7 +13,7 @@ type Checked = Result<(), ValidationError>;
 const Q_FACTOR_MAX: f64 = 20.0;
 
 /// Checks every artifact invariant, failing on the first one broken.
-pub(super) fn validate(calibration: &AntennaCalibration) -> Checked {
+pub(crate) fn validate(calibration: &AntennaCalibration) -> Checked {
     non_empty("antenna_id", &calibration.antenna_id)?;
     non_empty("feed_id", &calibration.feed_id)?;
     physical_config(&calibration.physical_config)?;
@@ -45,6 +45,14 @@ fn invalid_parameter(parameter: &str, value: f64, reason: impl Into<String>) -> 
         parameter: parameter.to_string(),
         value,
         reason: reason.into(),
+    }
+}
+
+fn invalid_resolution(field: &str, value: f64, reason: &str) -> ValidationError {
+    ValidationError::InvalidAngularResolution {
+        field: field.to_string(),
+        value,
+        reason: reason.to_string(),
     }
 }
 
@@ -105,9 +113,7 @@ fn feed(feed: &FeedParameters) -> Checked {
             format!("must be between 0 and {Q_FACTOR_MAX}"),
         ));
     }
-    // Mirrors `model::geometry::FeedParameters::validate`, but fails at construction
-    // instead of when a request first reaches the integrator.
-    if !(feed.asymmetry_factor.is_finite() && feed.asymmetry_factor > 0.0) {
+    if !is_valid_asymmetry_factor(feed.asymmetry_factor) {
         return Err(invalid_parameter(
             "asymmetry_factor",
             feed.asymmetry_factor,
@@ -143,8 +149,9 @@ fn mesh(mesh: &MeshParameters) -> Checked {
     Ok(())
 }
 
-fn ordered(dimension: &str, (min, max): (f64, f64)) -> Checked {
-    if min > max {
+/// An [`ValidationError::InvalidRange`] naming `range` when `invalid`, else `Ok`.
+fn reject_range_if(invalid: bool, dimension: &str, (min, max): (f64, f64)) -> Checked {
+    if invalid {
         return Err(ValidationError::InvalidRange {
             dimension: dimension.to_string(),
             min,
@@ -154,6 +161,10 @@ fn ordered(dimension: &str, (min, max): (f64, f64)) -> Checked {
     Ok(())
 }
 
+fn ordered(dimension: &str, range: (f64, f64)) -> Checked {
+    reject_range_if(range.0 > range.1, dimension, range)
+}
+
 /// Every range ordered; elevation (a polar angle off boresight) within `[0, 90]`;
 /// temperature positive.
 fn validity_ranges(ranges: &ValidityRanges) -> Checked {
@@ -161,13 +172,11 @@ fn validity_ranges(ranges: &ValidityRanges) -> Checked {
     ordered("elevation", ranges.elevation_min_max)?;
     ordered("frequency", ranges.frequency_min_max)?;
     let (elevation_min, elevation_max) = ranges.elevation_min_max;
-    if elevation_min < 0.0 || elevation_max > 90.0 {
-        return Err(ValidationError::InvalidRange {
-            dimension: "elevation".to_string(),
-            min: elevation_min,
-            max: elevation_max,
-        });
-    }
+    reject_range_if(
+        elevation_min < 0.0 || elevation_max > 90.0,
+        "elevation",
+        ranges.elevation_min_max,
+    )?;
     if ranges.temperature_const <= 0.0 {
         return Err(ValidationError::InvalidTemperature(
             ranges.temperature_const,
@@ -186,13 +195,7 @@ fn coverage_ranges(coverage: &CalibrationCoverage) -> Checked {
 /// possibly `INFINITY`. Refuses a recorded assessment that cannot be interpreted rather
 /// than reporting on it (D26 finding 5).
 fn angular_resolution(resolution: &AngularResolution) -> Checked {
-    let invalid = |field: &str, value: f64, reason: &str| {
-        Err(ValidationError::InvalidAngularResolution {
-            field: field.to_string(),
-            value,
-            reason: reason.to_string(),
-        })
-    };
+    let invalid = |field, value, reason| Err(invalid_resolution(field, value, reason));
     for (field, spacing) in [
         ("cone_knot_spacing_deg", resolution.cone_knot_spacing_deg),
         ("clock_knot_spacing_deg", resolution.clock_knot_spacing_deg),

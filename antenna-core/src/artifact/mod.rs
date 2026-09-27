@@ -9,6 +9,9 @@
 
 mod validation;
 
+// Crate-visible only for the loader, until #106 moves it into this module.
+pub(crate) use validation::validate;
+
 use crate::types::{AntennaCalibration, AntennaCalibrationBuilder, ValidationError};
 
 impl AntennaCalibrationBuilder {
@@ -21,9 +24,4 @@ impl AntennaCalibrationBuilder {
         validation::validate(&calibration)?;
         Ok(calibration)
     }
-}
-
-/// Validates a decoded artifact. Crate-visible only for the loader.
-pub(crate) fn validate_decoded(calibration: &AntennaCalibration) -> Result<(), ValidationError> {
-    validation::validate(calibration)
 }
