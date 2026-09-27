@@ -771,28 +771,30 @@ async fn run_calibration(args: Args) -> Result<()> {
         None => info!("validation in-support correction RMSE: n/a (no point had fitted support)"),
     }
     info!(
-        out_of_support_points = validation_report.out_of_support_points,
-        out_of_support_proportion = validation_report.out_of_support_proportion,
+        out_of_support_points = ?validation_report.out_of_support_points,
+        out_of_support_proportion = ?validation_report.out_of_support_proportion,
         "validation correction-surface support"
     );
     info!(
-        "    Main lobe max error: {:.4} dB",
-        validation_report.main_lobe_max_error
+        main_lobe_max_error_db = validation_report.main_lobe_max_error,
+        "validation main-lobe maximum error"
     );
     info!(
-        "    First sidelobe max error: {:.4} dB",
-        validation_report.first_sidelobe_max_error
+        first_sidelobe_max_error_db = validation_report.first_sidelobe_max_error,
+        "validation first-sidelobe maximum error"
     );
     info!(
-        "    Outliers: {} ({:.1}%)",
-        validation_report.outliers.len(),
-        validation_report.outliers.len() as f64 / measurements.points.len() as f64 * 100.0
+        outlier_points = validation_report.outliers.len(),
+        outlier_proportion =
+            validation_report.outliers.len() as f64 / measurements.points.len() as f64,
+        "validation high-error served predictions"
     );
 
     if !validation_report.main_lobe_meets_target {
         warn!(
-            "  ⚠ Main lobe accuracy target not met ({:.4} dB > {:.4} dB)",
-            validation_report.main_lobe_max_error, validation_config.main_lobe_target_db
+            main_lobe_max_error_db = validation_report.main_lobe_max_error,
+            target_db = validation_config.main_lobe_target_db,
+            "main-lobe accuracy target not met"
         );
     } else {
         info!("  ✓ Main lobe meets accuracy target");
@@ -800,8 +802,9 @@ async fn run_calibration(args: Args) -> Result<()> {
 
     if !validation_report.first_sidelobe_meets_target {
         warn!(
-            "  ⚠ First sidelobe accuracy target not met ({:.4} dB > {:.4} dB)",
-            validation_report.first_sidelobe_max_error, validation_config.first_sidelobe_target_db
+            first_sidelobe_max_error_db = validation_report.first_sidelobe_max_error,
+            target_db = validation_config.first_sidelobe_target_db,
+            "first-sidelobe accuracy target not met"
         );
     } else {
         info!("  ✓ First sidelobe meets accuracy target");
@@ -851,7 +854,7 @@ async fn run_calibration(args: Args) -> Result<()> {
         if cv.out_of_support_points() > 0 {
             warn!(
                 out_of_support_points = cv.out_of_support_points(),
-                out_of_support_proportion = cv.out_of_support_proportion(),
+                out_of_support_proportion = ?cv.out_of_support_proportion(),
                 "cross-validation served-behavior metrics include physics-only predictions outside fitted support"
             );
         }

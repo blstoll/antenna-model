@@ -167,6 +167,9 @@ This file is used by the Antenna Model Service for runtime predictions.
 
 ### Validation Report JSON (optional)
 
+Illustrative excerpt (valid JSON, but it omits other required report fields such as regional
+point counts, error maxima, and `meets_accuracy_requirements`):
+
 ```json
 {
   "num_points": 500,
@@ -180,24 +183,39 @@ This file is used by the Antenna Model Service for runtime predictions.
   "main_lobe_meets_target": true,
   "first_sidelobe_max_error": 0.92,
   "first_sidelobe_meets_target": true,
-  "outliers": [...],
+  "outliers": [],
   "cross_validation": {
+    "num_folds": 2,
     "scored_folds": [{
       "fold": 1,
-      "validation_points": 100,
+      "validation_points": 250,
       "served_behavior_rmse": 0.47,
       "in_support_correction_rmse": 0.44,
       "out_of_support_points": 2,
-      "out_of_support_proportion": 0.02
+      "out_of_support_proportion": 0.008
+    }, {
+      "fold": 2,
+      "validation_points": 250,
+      "served_behavior_rmse": 0.51,
+      "in_support_correction_rmse": 0.46,
+      "out_of_support_points": 3,
+      "out_of_support_proportion": 0.012
     }],
-    "mean_rmse": 0.47,
-    "std_rmse": 0.03,
+    "fold_rmse_values": [0.47, 0.51],
+    "failed_folds": [],
     "out_of_support_points": 5,
     "out_of_support_proportion": 0.01,
-    "failed_folds": []
+    "mean_rmse": 0.49,
+    "std_rmse": 0.02,
+    "min_rmse": 0.47,
+    "max_rmse": 0.51
   }
 }
 ```
+
+When no cross-validation fold can be scored, RMSE aggregates and
+`out_of_support_proportion` are `null`: there is no scored denominator. Reports written before
+issue #96 remain readable; their unavailable per-fold support metrics are not invented.
 
 ### Metadata JSON (optional)
 

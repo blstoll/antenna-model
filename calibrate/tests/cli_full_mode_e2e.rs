@@ -652,6 +652,44 @@ fn assert_injected_bias_recovery(scenario: &UntunedScenario) {
     );
 }
 
+fn logged_number(output: &str, message: &str, field: &str) -> f64 {
+    let mut in_ansi_escape = false;
+    let plain = output
+        .chars()
+        .filter(|character| {
+            if *character == '\u{1b}' {
+                in_ansi_escape = true;
+                false
+            } else if in_ansi_escape {
+                if *character == 'm' {
+                    in_ansi_escape = false;
+                }
+                false
+            } else {
+                true
+            }
+        })
+        .collect::<String>();
+    let line = plain
+        .lines()
+        .find(|line| line.contains(message))
+        .unwrap_or_else(|| panic!("CLI output omitted {message:?}:\n{output}"));
+    let value = line
+        .split_once(&format!("{field}="))
+        .map(|(_, value)| value)
+        .unwrap_or_else(|| panic!("{message:?} omitted numeric field {field:?}: {line}"));
+    let number = value
+        .trim_start_matches("Some(")
+        .chars()
+        .take_while(|character| {
+            character.is_ascii_digit() || matches!(character, '.' | '-' | '+' | 'e' | 'E')
+        })
+        .collect::<String>();
+    number
+        .parse()
+        .unwrap_or_else(|error| panic!("{field:?} was not numeric in {line:?}: {error}"))
+}
+
 /// D10's standing CLI pin. K=3 is the non-default validated scenario; multiple requested
 /// counts are covered cheaply at the parsed-arguments production boundary in `main.rs`.
 #[test]
@@ -690,16 +728,68 @@ fn cli_cv_three_folds_reports_finite_scores() {
     }
 
     let output = run.output();
-    for text in [
+    let expected_served = report["served_behavior_rmse"]
+        .as_f64()
+        .expect("served_behavior_rmse");
+    let expected_in_support = report["in_support_correction_rmse"]
+        .as_f64()
+        .expect("in_support_correction_rmse");
+    let logged_served = logged_number(
+        &output,
+        "validation served-behavior RMSE",
+        "served_behavior_rmse_db",
+    );
+    let logged_in_support = logged_number(
+        &output,
         "validation in-support correction RMSE",
+        "in_support_correction_rmse_db",
+    );
+    let logged_support_count = logged_number(
+        &output,
         "validation correction-surface support",
-        "cross-validation fold metrics",
-    ] {
-        assert!(
-            output.contains(text),
-            "CLI text output omitted {text:?}:\n{output}"
-        );
-    }
+        "out_of_support_points",
+    );
+    let logged_support_proportion = logged_number(
+        &output,
+        "validation correction-surface support",
+        "out_of_support_proportion",
+    );
+    assert!((logged_served - expected_served).abs() < 1e-12);
+    assert!((logged_in_support - expected_in_support).abs() < 1e-12);
+    assert_eq!(
+        logged_support_count,
+        report["out_of_support_points"]
+            .as_u64()
+            .expect("support count") as f64
+    );
+    assert_eq!(
+        logged_support_proportion,
+        report["out_of_support_proportion"]
+            .as_f64()
+            .expect("support proportion")
+    );
+
+    let first_fold = &folds[0];
+    assert_eq!(
+        logged_number(
+            &output,
+            "cross-validation fold metrics",
+            "served_behavior_rmse_db",
+        ),
+        first_fold["served_behavior_rmse"]
+            .as_f64()
+            .expect("fold served RMSE")
+    );
+    assert_eq!(
+        logged_number(
+            &output,
+            "cross-validation fold metrics",
+            "in_support_correction_rmse_db",
+        ),
+        first_fold["in_support_correction_rmse"]
+            .as_f64()
+            .expect("fold in-support RMSE")
+    );
 }
 
 /// Without `--validate`, step 6 must not cross-validate — but the numerical quality report

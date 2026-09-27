@@ -146,15 +146,24 @@ pub struct ValidationReport {
     /// Served-behavior RMSE over every validation point.
     ///
     /// Outside fitted support, this includes the physics-only prediction.
+    #[serde(alias = "corrected_rmse")]
     pub served_behavior_rmse: f64,
     /// Correction RMSE over only points where the fitted surface returned `Applied`.
     ///
-    /// `None` means no validation point was inside fitted support.
+    /// `None` means no validation point was inside fitted support, or — when
+    /// `out_of_support_points` is also `None` — a pre-#96 report that did not record support.
+    #[serde(default)]
     pub in_support_correction_rmse: Option<f64>,
     /// Validation points served physics-only because they lay outside fitted support.
-    pub out_of_support_points: usize,
+    ///
+    /// `None` only for a report written before #96, which did not record support.
+    #[serde(default)]
+    pub out_of_support_points: Option<usize>,
     /// Proportion of validation points outside fitted support, in `[0, 1]`.
-    pub out_of_support_proportion: f64,
+    ///
+    /// `None` exactly when `out_of_support_points` is.
+    #[serde(default)]
+    pub out_of_support_proportion: Option<f64>,
     /// Served-behavior maximum error, with physics-only fallback outside fitted support.
     pub corrected_max_error: f64,
     /// Served-behavior coefficient of determination, with physics-only fallback outside support.
@@ -232,9 +241,7 @@ pub struct AngularRegionStats {
     pub mean_error_db: f64,
 }
 
-pub use crate::correction_surface::{
-    CrossValidationFoldResult, CrossValidationResults, FoldFailure,
-};
+use crate::correction_surface::CrossValidationResults;
 
 // ============================================================================
 // Main Validation Function
@@ -438,8 +445,8 @@ pub fn validate_calibration(
         model_only_r_squared,
         served_behavior_rmse,
         in_support_correction_rmse: support_metrics.in_support_correction_rmse,
-        out_of_support_points: support_metrics.out_of_support_points,
-        out_of_support_proportion: support_metrics.out_of_support_proportion,
+        out_of_support_points: Some(support_metrics.out_of_support_points),
+        out_of_support_proportion: Some(support_metrics.out_of_support_proportion),
         corrected_max_error: served_behavior_max_error,
         corrected_r_squared: served_behavior_r_squared,
         rmse_improvement_percent,
@@ -780,15 +787,27 @@ impl ValidationReport {
             "Served-behavior RMSE: {:.3} dB\n",
             self.served_behavior_rmse
         ));
-        match self.in_support_correction_rmse {
-            Some(rmse) => s.push_str(&format!("In-support correction RMSE: {rmse:.3} dB\n")),
-            None => s.push_str("In-support correction RMSE: n/a (no point had fitted support)\n"),
-        }
-        s.push_str(&format!(
-            "Out of support: {} points ({:.1}%)\n",
+        match (
             self.out_of_support_points,
-            100.0 * self.out_of_support_proportion
-        ));
+            self.out_of_support_proportion,
+            self.in_support_correction_rmse,
+        ) {
+            (Some(points), Some(proportion), in_support) => {
+                s.push_str(&match in_support {
+                    Some(rmse) => format!("In-support correction RMSE: {rmse:.3} dB\n"),
+                    None => "In-support correction RMSE: n/a (no point had fitted support)\n"
+                        .to_string(),
+                });
+                s.push_str(&format!(
+                    "Out of support: {points} points ({:.1}%)\n",
+                    100.0 * proportion
+                ));
+            }
+            _ => {
+                s.push_str("In-support correction RMSE: n/a (unavailable in legacy report)\n");
+                s.push_str("Out of support: n/a (unavailable in legacy report)\n");
+            }
+        }
         s.push_str(&format!(
             "Served-behavior max error: {:.3} dB\n",
             self.corrected_max_error
@@ -885,20 +904,32 @@ impl ValidationReport {
             // `fold_rmse_values` is dense and skips folds that could not be scored, so with
             // folds 1 and 2 failing, printing positionally would report fold 3's RMSE as
             // "fold 1".
-            for fold in cv.scored_folds() {
-                let in_support = fold
-                    .in_support_correction_rmse()
-                    .map(|rmse| format!("{rmse:.3} dB"))
-                    .unwrap_or_else(|| "n/a".to_string());
-                s.push_str(&format!(
-                    "Fold #{}: served {:.3} dB; in-support {}; out of support {} / {} ({:.1}%)\n",
-                    fold.fold(),
-                    fold.served_behavior_rmse(),
-                    in_support,
-                    fold.out_of_support_points(),
-                    fold.validation_points(),
-                    100.0 * fold.out_of_support_proportion()
-                ));
+            if cv.has_per_fold_support() {
+                for fold in cv.scored_folds() {
+                    let in_support = fold
+                        .in_support_correction_rmse()
+                        .map(|rmse| format!("{rmse:.3} dB"))
+                        .unwrap_or_else(|| "n/a".to_string());
+                    s.push_str(&format!(
+                        "Fold #{}: served {:.3} dB; in-support {}; out of support {} / {} ({:.1}%)\n",
+                        fold.fold(),
+                        fold.served_behavior_rmse(),
+                        in_support,
+                        fold.out_of_support_points(),
+                        fold.validation_points(),
+                        100.0 * fold.out_of_support_proportion()
+                    ));
+                }
+            } else {
+                for (fold, rmse) in cv
+                    .scored_fold_numbers()
+                    .into_iter()
+                    .zip(cv.fold_rmse_values())
+                {
+                    s.push_str(&format!(
+                        "Fold #{fold}: served {rmse:.3} dB; support diagnostics unavailable (legacy report)\n"
+                    ));
+                }
             }
 
             if !cv.is_complete() {
@@ -938,7 +969,9 @@ impl ValidationReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::correction_surface::CorrectionSurfaceParams;
+    use crate::correction_surface::{
+        CorrectionSurfaceParams, CrossValidationFoldResult, FoldFailure,
+    };
     use antenna_core::model::{CorrectionSurfaceLayout, FittedCorrectionSurface};
 
     #[test]
@@ -1031,12 +1064,27 @@ mod tests {
         let expected_served_rmse = 3.0 / 2.0_f64.sqrt();
         assert!((report.served_behavior_rmse - expected_served_rmse).abs() < 1e-12);
         assert_eq!(report.in_support_correction_rmse, Some(0.0));
-        assert_eq!(report.out_of_support_points, 1);
-        assert_eq!(report.out_of_support_proportion, 0.5);
-        assert_ne!(
-            report.in_support_correction_rmse,
+        assert_eq!(report.out_of_support_points, Some(1));
+        assert_eq!(report.out_of_support_proportion, Some(0.5));
+        let incorrectly_applied = support_aware_metrics(measurements.iter().zip(&evaluated).map(
+            |(measurement, prediction)| {
+                let disposition = match prediction.correction {
+                    CorrectionEvaluation::Applied(correction_db) => {
+                        CorrectionEvaluation::Applied(correction_db)
+                    }
+                    CorrectionEvaluation::OutsideSupport => CorrectionEvaluation::Applied(0.0),
+                };
+                (measurement.g_over_t_db - prediction.served_db, disposition)
+            },
+        ));
+        assert_eq!(
+            incorrectly_applied.in_support_correction_rmse,
             Some(expected_served_rmse),
-            "negative control: treating OutsideSupport as Applied(0.0) would put its 3 dB error in the in-support denominator"
+            "the negative control must actually run the Applied(0.0) misclassification"
+        );
+        assert_ne!(
+            report.in_support_correction_rmse, incorrectly_applied.in_support_correction_rmse,
+            "treating OutsideSupport as Applied(0.0) must change the report"
         );
         assert_eq!(report.corrected_max_error, 3.0);
         assert_eq!(report.outliers.len(), 1);
@@ -1082,8 +1130,8 @@ mod tests {
 
         assert_eq!(report.served_behavior_rmse, 3.0);
         assert_eq!(report.in_support_correction_rmse, None);
-        assert_eq!(report.out_of_support_points, 1);
-        assert_eq!(report.out_of_support_proportion, 1.0);
+        assert_eq!(report.out_of_support_points, Some(1));
+        assert_eq!(report.out_of_support_proportion, Some(1.0));
     }
 
     // ========================================================================
@@ -1373,8 +1421,8 @@ mod tests {
             model_only_r_squared: 0.0,
             served_behavior_rmse: 0.0,
             in_support_correction_rmse: None,
-            out_of_support_points: 0,
-            out_of_support_proportion: 0.0,
+            out_of_support_points: Some(0),
+            out_of_support_proportion: Some(0.0),
             corrected_max_error: 0.0,
             corrected_r_squared: 0.0,
             rmse_improvement_percent: 0.0,
