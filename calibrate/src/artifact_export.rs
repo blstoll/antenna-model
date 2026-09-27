@@ -133,15 +133,15 @@ pub struct ExportPhysicalParams {
 /// * `physical` - Tuned/nominal physical parameters.
 /// * `surface` - The fitted 3D correction surface.
 /// * `measurements` - All measurement points (for the count and temperature extent).
+/// * `rmse_db` / `r_squared` - Combined-model quality metrics (from validation).
+/// * `physics_only_rmse_db` - Physics-only RMSE before correction.
+/// * `parameters_tuned` - Whether physical parameters were tuned.
 ///
 /// # Coverage and support are one measured domain
 ///
 /// Validity ranges and calibration coverage are written from `surface`'s measured domain —
 /// the value the fit clamped its knot bounds to — so full-mode coverage equals the
 /// surface's fitted support by construction (issue #97).
-/// * `rmse_db` / `r_squared` - Combined-model quality metrics (from validation).
-/// * `physics_only_rmse_db` - Physics-only RMSE before correction.
-/// * `parameters_tuned` - Whether physical parameters were tuned.
 ///
 /// # The angular-resolution assessment is derived here, not passed in
 ///

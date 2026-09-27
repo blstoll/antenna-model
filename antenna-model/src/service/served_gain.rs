@@ -281,8 +281,8 @@ impl ServedGain {
 /// value's `Sync` story a runtime property instead of a structural one.
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedServedGain {
-    /// The projected artifact. Held whole because coverage, status advisories and the
-    /// antenna id are read from it per direction.
+    /// The projected artifact. Held whole because the status advisories and the antenna id
+    /// are read from it per direction; coverage is read from `correction` and `coverage`.
     calibration: AntennaCalibration,
     /// Executable three-axis correction paired with its gating coverage, prepared and
     /// validated once, never per direction (issue #97).
@@ -351,7 +351,11 @@ impl PreparedServedGain {
         let correction = correction_surface.map_err(invalid_correction_surface)?;
         let coverage = calibration
             .coverage()
-            .map_err(invalid_correction_surface)?
+            .map_err(|error| {
+                AntennaModelError::from(ComputationError::InvalidModelState(format!(
+                    "invalid calibration coverage in artifact: {error}"
+                )))
+            })?
             .cloned();
         let focal_length_m = calibration.physical_config.reflector.focal_length_m;
         let diameter_m = calibration.physical_config.reflector.diameter_m;

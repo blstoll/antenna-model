@@ -2201,7 +2201,6 @@ mod tests {
         (fd, cd, kd)
     }
 
-    /// The knot vector the core layout builds for one placed axis.
     /// An axis's own data extent — the bounds the fitter's measured domain gives it.
     fn extent(data: &[f64]) -> (f64, f64) {
         data.iter()
@@ -2210,6 +2209,7 @@ mod tests {
             })
     }
 
+    /// The knot vector the core layout builds for one placed axis.
     fn delivered_knots(axis: ClampedAxis, order: usize) -> Vec<f64> {
         let unit = || ClampedAxis::new(0.0, 1.0, vec![]);
         correction_layout(axis, unit(), unit(), order)

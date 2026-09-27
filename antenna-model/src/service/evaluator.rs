@@ -418,11 +418,15 @@ mod tests {
                         Duration::from_secs(300),
                     )
                     .unwrap();
-                    assert_ne!(
-                        evaluation.correction,
-                        CorrectionDisposition::OutsideSupport,
-                        "a valid loaded artifact reached the defensive arm at \
-                         {emitter:?} / {frequency_mhz} MHz"
+                    assert!(
+                        matches!(
+                            evaluation.correction,
+                            CorrectionDisposition::Unavailable
+                                | CorrectionDisposition::OutsideCoverage
+                                | CorrectionDisposition::Applied
+                        ),
+                        "a valid loaded artifact served {:?} at {emitter:?} / {frequency_mhz} MHz",
+                        evaluation.correction
                     );
                     seen.insert(format!("{:?}", evaluation.correction));
                 }
