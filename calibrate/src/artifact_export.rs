@@ -29,7 +29,7 @@ use antenna_core::data::types::{
 use antenna_core::model::PHYSICS_MODEL_VERSION;
 
 use crate::correction_surface::{assess_angular_resolution, CorrectionSurface};
-use crate::parser::MeasurementPoint;
+use crate::parser::{closed_extent, MeasurementPoint};
 use std::path::Path;
 
 /// Errors that can occur while exporting a full-calibration artifact.
@@ -85,12 +85,7 @@ fn temperature_extent(measurements: &[MeasurementPoint]) -> Result<(f64, f64)> {
             "no measurements provided for extent computation".to_string(),
         ));
     }
-    Ok(measurements
-        .iter()
-        .map(|p| p.temperature_k)
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), t| {
-            (lo.min(t), hi.max(t))
-        }))
+    Ok(closed_extent(measurements.iter().map(|p| p.temperature_k)))
 }
 
 /// Physical parameters needed to assemble the exported artifact.

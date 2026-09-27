@@ -727,19 +727,22 @@ impl PreparedServedGain {
     ) -> Result<ServedGain> {
         let mut warnings = physics.warnings;
 
+        // Asked once per direction: it decides both the no-surface disposition and the
+        // spatial out-of-coverage advisory.
+        let outside_measured_region = outside_partial_calibration_region(
+            &self.calibration,
+            self.coverage.as_ref(),
+            corrected.e_clock_deg,
+            corrected.e_cone_deg,
+        );
+
         // Correction surface, gated on the FULL coverage question (direction and
         // frequency) against the coverage it was prepared with. Interpolated at the
         // squint-corrected direction. For a valid artifact the law is
         //   no surface → Unavailable, outside coverage → OutsideCoverage, else → Applied
         // (issue #97); the OutsideSupport arm is defensive only.
         let (correction_db, disposition) = match &self.correction {
-            None if outside_partial_calibration_region(
-                &self.calibration,
-                self.coverage.as_ref(),
-                corrected.e_clock_deg,
-                corrected.e_cone_deg,
-            ) =>
-            {
+            None if outside_measured_region => {
                 (0.0, CorrectionDisposition::UnavailableOutsideCoverage)
             }
             None => (0.0, CorrectionDisposition::Unavailable),
@@ -793,9 +796,7 @@ impl PreparedServedGain {
         //   → off-axis validity → rear-hemisphere validity
         warnings.extend(generate_calibration_warnings(
             &self.calibration,
-            self.coverage.as_ref(),
-            corrected.e_clock_deg,
-            corrected.e_cone_deg,
+            outside_measured_region,
             disposition,
         ));
 
@@ -920,12 +921,12 @@ fn outside_partial_calibration_region(
 
 /// Generate warnings based on calibration status and query parameters.
 ///
-/// Returns a vector of warning messages to be included in the response.
+/// `outside_measured_region` is [`outside_partial_calibration_region`] for this direction,
+/// evaluated once by the caller. Returns a vector of warning messages to be included in the
+/// response.
 fn generate_calibration_warnings(
     calibration: &AntennaCalibration,
-    coverage: Option<&CalibrationCoverage>,
-    azimuth_deg: f64,
-    elevation_deg: f64,
+    outside_measured_region: bool,
     correction: CorrectionDisposition,
 ) -> Vec<ApiWarning> {
     let mut warnings = Vec::new();
@@ -957,8 +958,7 @@ fn generate_calibration_warnings(
             // only: this advisory reports direction, not band, so an in-grid query
             // at an uncalibrated frequency gets `correction_not_applied` below
             // without also claiming to be outside the calibrated region.
-            if outside_partial_calibration_region(calibration, coverage, azimuth_deg, elevation_deg)
-            {
+            if outside_measured_region {
                 warnings.push(WarningCode::OutOfCoverage.with(
                     "Query is outside calibrated region - using physics model extrapolation",
                 ));
@@ -1673,9 +1673,12 @@ mod tests {
 
         let warnings = generate_calibration_warnings(
             &calibration,
-            calibration.calibration_coverage.as_ref(),
-            180.0,
-            45.0,
+            outside_partial_calibration_region(
+                &calibration,
+                calibration.calibration_coverage.as_ref(),
+                180.0,
+                45.0,
+            ),
             CorrectionDisposition::Unavailable,
         );
 
@@ -1705,9 +1708,12 @@ mod tests {
 
         let warnings = generate_calibration_warnings(
             &calibration,
-            calibration.calibration_coverage.as_ref(),
-            180.0,
-            45.0,
+            outside_partial_calibration_region(
+                &calibration,
+                calibration.calibration_coverage.as_ref(),
+                180.0,
+                45.0,
+            ),
             CorrectionDisposition::Applied,
         );
 
@@ -1737,9 +1743,12 @@ mod tests {
 
         let warnings = generate_calibration_warnings(
             &calibration,
-            calibration.calibration_coverage.as_ref(),
-            180.0,
-            45.0,
+            outside_partial_calibration_region(
+                &calibration,
+                calibration.calibration_coverage.as_ref(),
+                180.0,
+                45.0,
+            ),
             CorrectionDisposition::OutsideCoverage,
         );
 
@@ -1761,9 +1770,12 @@ mod tests {
 
         let warnings = generate_calibration_warnings(
             &calibration,
-            calibration.calibration_coverage.as_ref(),
-            180.0,
-            45.0,
+            outside_partial_calibration_region(
+                &calibration,
+                calibration.calibration_coverage.as_ref(),
+                180.0,
+                45.0,
+            ),
             CorrectionDisposition::Applied,
         );
 
@@ -1781,9 +1793,12 @@ mod tests {
 
         let warnings = generate_calibration_warnings(
             &calibration,
-            calibration.calibration_coverage.as_ref(),
-            180.0,
-            45.0,
+            outside_partial_calibration_region(
+                &calibration,
+                calibration.calibration_coverage.as_ref(),
+                180.0,
+                45.0,
+            ),
             CorrectionDisposition::OutsideCoverage,
         );
 
@@ -1821,9 +1836,12 @@ mod tests {
 
         let warnings = generate_calibration_warnings(
             &calibration,
-            calibration.calibration_coverage.as_ref(),
-            45.0,
-            15.0,
+            outside_partial_calibration_region(
+                &calibration,
+                calibration.calibration_coverage.as_ref(),
+                45.0,
+                15.0,
+            ),
             CorrectionDisposition::OutsideCoverage,
         );
 

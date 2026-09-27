@@ -314,12 +314,7 @@ impl MeasurementData {
             .iter()
             .filter(|p| p.has_atypical_g_over_t())
             .count();
-        let g_over_t_range = self
-            .points
-            .iter()
-            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| {
-                (lo.min(p.g_over_t_db), hi.max(p.g_over_t_db))
-            });
+        let g_over_t_range = closed_extent(self.points.iter().map(|p| p.g_over_t_db));
 
         DataQualityReport {
             total_points: self.points.len(),
@@ -644,6 +639,16 @@ pub fn create_sample_csv<P: AsRef<Path>>(path: P, num_points: usize) -> Result<(
     }
 
     Ok(())
+}
+
+/// The `(min, max)` of `values`. An empty input yields `(INFINITY, NEG_INFINITY)`, an
+/// inverted interval, so callers that can see one must refuse it first.
+pub(crate) fn closed_extent(values: impl IntoIterator<Item = f64>) -> (f64, f64) {
+    values
+        .into_iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
+            (lo.min(v), hi.max(v))
+        })
 }
 
 #[cfg(test)]

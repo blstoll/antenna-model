@@ -32,7 +32,7 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-use crate::parser::MeasurementPoint;
+use crate::parser::{closed_extent, MeasurementPoint};
 use antenna_core::data::types::AngularResolution;
 use antenna_core::model::phase::wavelength_from_frequency;
 use antenna_core::model::{
@@ -1157,14 +1157,7 @@ pub fn fit_correction_surface(
 /// `validate_fitting_inputs` has already refused an empty or non-finite input, so every
 /// fold below starts from a real value.
 fn measured_domain(residuals: &[ResidualPoint]) -> CorrectionDomain {
-    let extent = |value: fn(&ResidualPoint) -> f64| {
-        residuals
-            .iter()
-            .map(value)
-            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
-                (lo.min(v), hi.max(v))
-            })
-    };
+    let extent = |value: fn(&ResidualPoint) -> f64| closed_extent(residuals.iter().map(value));
     CorrectionDomain {
         e_clock_deg: extent(|r| r.e_clock_deg),
         e_cone_deg: extent(|r| r.e_cone_deg),
@@ -2203,10 +2196,7 @@ mod tests {
 
     /// An axis's own data extent — the bounds the fitter's measured domain gives it.
     fn extent(data: &[f64]) -> (f64, f64) {
-        data.iter()
-            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &v| {
-                (lo.min(v), hi.max(v))
-            })
+        closed_extent(data.iter().copied())
     }
 
     /// The knot vector the core layout builds for one placed axis.
