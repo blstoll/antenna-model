@@ -836,7 +836,7 @@ fn assert_the_scripts_validated_run_produces_an_artifact(scenario: &RealDataScen
     );
 
     let report = &run.report;
-    let folds = report["cross_validation"]["fold_rmse_values"]
+    let folds = report["cross_validation"]["scored_folds"]
         .as_array()
         .unwrap_or_else(|| panic!("--validate must produce cross-validation; report:\n{report:#}"));
     assert_eq!(folds.len(), 5, "clap's --cv-folds default is 5");
@@ -844,18 +844,24 @@ fn assert_the_scripts_validated_run_produces_an_artifact(scenario: &RealDataScen
     let values: Vec<f64> = folds
         .iter()
         .enumerate()
-        .map(|(index, value)| {
-            let score = value
+        .map(|(index, fold)| {
+            let served = fold["served_behavior_rmse"]
                 .as_f64()
-                .unwrap_or_else(|| panic!("fold {index} RMSE is not numeric: {value}"));
-            assert!(
-                score.is_finite(),
-                "fold {index} RMSE is not finite: {score}"
-            );
-            score
+                .unwrap_or_else(|| panic!("fold {index} served RMSE is not numeric: {fold}"));
+            let in_support = fold["in_support_correction_rmse"]
+                .as_f64()
+                .unwrap_or_else(|| {
+                    panic!("real-data fold {index} unexpectedly lacks support: {fold}")
+                });
+            assert!(served.is_finite() && in_support.is_finite());
+            assert_eq!(fold["out_of_support_points"], 0);
+            assert_eq!(fold["out_of_support_proportion"], 0.0);
+            served
         })
         .collect();
-    let corrected = report["corrected_rmse"].as_f64().expect("corrected_rmse");
+    let corrected = report["served_behavior_rmse"]
+        .as_f64()
+        .expect("served_behavior_rmse");
     let worst = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let best = values.iter().cloned().fold(f64::INFINITY, f64::min);
     println!("fold RMSEs {values:?}, in-sample corrected {corrected:.4} dB");
@@ -877,7 +883,7 @@ fn assert_the_scripts_validated_run_produces_an_artifact(scenario: &RealDataScen
          {worst:.4} dB, best {best:.4} dB, in-sample {corrected:.4} dB). Strided folds \
          measured 0.0286 / 0.0312 / 0.0305 / 0.0602 / 0.0458 dB on 2026-08-03; the blocked \
          assignment D22 replaced gave 10.07 / 0.56 / 0.12 / 0.64 / 10.86. Check \
-         validator::perform_cross_validation's fold assignment first."
+         correction_surface::cross_validate's fold assignment first."
     );
 
     // The whole point of striding is that no fold is *special*. Under the blocked assignment
@@ -992,9 +998,9 @@ fn assert_calibrate_and_the_generator_evaluate_the_same_model(scenario: &RealDat
 }
 
 fn assert_the_correction_surface_fits_the_fill(scenario: &RealDataScenario) {
-    let corrected = scenario.unvalidated.report["corrected_rmse"]
+    let corrected = scenario.unvalidated.report["served_behavior_rmse"]
         .as_f64()
-        .expect("corrected_rmse in the calibration report");
+        .expect("served_behavior_rmse in the calibration report");
     let model_only = scenario.unvalidated.report["model_only_rmse"]
         .as_f64()
         .expect("model_only_rmse");

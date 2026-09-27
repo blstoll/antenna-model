@@ -167,25 +167,55 @@ This file is used by the Antenna Model Service for runtime predictions.
 
 ### Validation Report JSON (optional)
 
+Illustrative excerpt (valid JSON, but it omits other required report fields such as regional
+point counts, error maxima, and `meets_accuracy_requirements`):
+
 ```json
 {
   "num_points": 500,
   "model_only_rmse": 2.34,
-  "corrected_rmse": 0.45,
+  "served_behavior_rmse": 0.45,
+  "in_support_correction_rmse": 0.41,
+  "out_of_support_points": 5,
+  "out_of_support_proportion": 0.01,
   "rmse_improvement_percent": 80.8,
   "main_lobe_max_error": 0.78,
   "main_lobe_meets_target": true,
   "first_sidelobe_max_error": 0.92,
   "first_sidelobe_meets_target": true,
-  "outliers": [...],
+  "outliers": [],
   "cross_validation": {
-    "mean_rmse": 0.47,
-    "std_rmse": 0.03,
-    "min_rmse": 0.43,
+    "num_folds": 2,
+    "scored_folds": [{
+      "fold": 1,
+      "validation_points": 250,
+      "served_behavior_rmse": 0.47,
+      "in_support_correction_rmse": 0.44,
+      "out_of_support_points": 2,
+      "out_of_support_proportion": 0.008
+    }, {
+      "fold": 2,
+      "validation_points": 250,
+      "served_behavior_rmse": 0.51,
+      "in_support_correction_rmse": 0.46,
+      "out_of_support_points": 3,
+      "out_of_support_proportion": 0.012
+    }],
+    "fold_rmse_values": [0.47, 0.51],
+    "failed_folds": [],
+    "out_of_support_points": 5,
+    "out_of_support_proportion": 0.01,
+    "mean_rmse": 0.49,
+    "std_rmse": 0.02,
+    "min_rmse": 0.47,
     "max_rmse": 0.51
   }
 }
 ```
+
+When no cross-validation fold can be scored, RMSE aggregates and
+`out_of_support_proportion` are `null`: there is no scored denominator. Reports written before
+issue #96 remain readable; their unavailable per-fold support metrics are not invented.
 
 ### Metadata JSON (optional)
 
@@ -264,12 +294,16 @@ done
 
 ## Calibration Quality Metrics
 
-### Accuracy Targets
+### Accuracy Requirements
+
+Artifact acceptance uses only these served-prediction maximum-error requirements:
 
 - **Main Lobe**: ≤1.0 dB maximum error
 - **First Sidelobe**: ≤1.0 dB maximum error
-- **Overall RMSE**: ≤0.5 dB (after correction)
-- **R² (goodness of fit)**: ≥0.90
+
+`served_behavior_rmse`, `in_support_correction_rmse`, and R² are diagnostics, not acceptance
+gates. The served metric includes physics-only fallback outside fitted support; the in-support
+metric excludes those points. Always read the accompanying out-of-support count and proportion.
 
 ### Interpreting Results
 
@@ -277,7 +311,9 @@ done
 ```
 ✓ Main lobe meets accuracy target
 ✓ First sidelobe meets accuracy target
-Corrected RMSE: 0.35 dB
+Served-behavior RMSE: 0.35 dB
+In-support correction RMSE: 0.31 dB
+Out of support: 3 points (0.6%)
 Improvement: 85.2%
 ```
 

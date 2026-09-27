@@ -270,7 +270,10 @@ mod tests {
             model_only_rmse: 1.0,
             model_only_max_error: 2.0,
             model_only_r_squared: 0.8,
-            corrected_rmse: 0.5,
+            served_behavior_rmse: 0.5,
+            in_support_correction_rmse: Some(0.4),
+            out_of_support_points: Some(1),
+            out_of_support_proportion: Some(0.1),
             corrected_max_error: 1.0,
             corrected_r_squared: 0.95,
             rmse_improvement_percent: 50.0,
@@ -315,10 +318,36 @@ mod tests {
         export_validation_json(&test_validation_report(), &path).expect("export report");
 
         let text = std::fs::read_to_string(&path).expect("read report");
+        let json: serde_json::Value = serde_json::from_str(&text).expect("parse JSON");
+        assert!(json.get("corrected_rmse").is_none());
+        assert!(json["served_behavior_rmse"].is_number());
+
         let parsed: ValidationReport = serde_json::from_str(&text).expect("parse report");
         assert_eq!(parsed.num_points, 10);
-        assert!((parsed.corrected_rmse - 0.5).abs() < 1e-12);
+        assert!((parsed.served_behavior_rmse - 0.5).abs() < 1e-12);
+        assert_eq!(parsed.in_support_correction_rmse, Some(0.4));
+        assert_eq!(parsed.out_of_support_points, Some(1));
+        assert_eq!(parsed.out_of_support_proportion, Some(0.1));
         assert!(parsed.meets_accuracy_requirements);
+    }
+
+    #[test]
+    fn a_report_with_no_in_support_points_serializes_null_not_zero() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("report_no_support.json");
+        let mut report = test_validation_report();
+        report.in_support_correction_rmse = None;
+        report.out_of_support_points = Some(report.num_points);
+        report.out_of_support_proportion = Some(1.0);
+
+        export_validation_json(&report, &path).expect("export report");
+        let text = std::fs::read_to_string(&path).expect("read report");
+        let json: serde_json::Value = serde_json::from_str(&text).expect("parse JSON");
+        assert!(json["in_support_correction_rmse"].is_null());
+        assert_eq!(json["out_of_support_points"], report.num_points);
+
+        let parsed: ValidationReport = serde_json::from_str(&text).expect("round-trip report");
+        assert_eq!(parsed.in_support_correction_rmse, None);
     }
 
     /// A report whose cross-validation scored **nothing** must still round-trip.
@@ -331,46 +360,128 @@ mod tests {
     /// function writes would not have parsed. `Option<f64>` is why it does.
     #[test]
     fn a_report_with_no_scored_cross_validation_folds_round_trips() {
-        use crate::validator::{CrossValidationResults, FoldFailure};
+        use crate::correction_surface::{CrossValidationResults, FoldFailure};
 
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("report_no_folds.json");
 
         let mut report = test_validation_report();
-        report.cross_validation = Some(CrossValidationResults {
-            num_folds: 2,
-            fold_rmse_values: vec![],
-            failed_folds: vec![
-                FoldFailure {
-                    fold: 1,
-                    training_points: 5,
-                    reason: "fold 1/2 could not refit".to_string(),
-                },
-                FoldFailure {
-                    fold: 2,
-                    training_points: 5,
-                    reason: "fold 2/2 could not refit".to_string(),
-                },
-            ],
-            unsupported_validation_points: 0,
-            mean_rmse: None,
-            std_rmse: None,
-            min_rmse: None,
-            max_rmse: None,
-        });
+        report.cross_validation = Some(
+            CrossValidationResults::from_fold_results(
+                vec![],
+                vec![
+                    FoldFailure {
+                        fold: 1,
+                        training_points: 5,
+                        reason: "fold 1/2 could not refit".to_string(),
+                    },
+                    FoldFailure {
+                        fold: 2,
+                        training_points: 5,
+                        reason: "fold 2/2 could not refit".to_string(),
+                    },
+                ],
+            )
+            .expect("complete fold outcomes"),
+        );
 
         export_validation_json(&report, &path).expect("export report");
         let text = std::fs::read_to_string(&path).expect("read report");
+        let json: serde_json::Value = serde_json::from_str(&text).expect("parse JSON");
+        assert!(
+            json["cross_validation"]["out_of_support_proportion"].is_null(),
+            "zero scored points have no support proportion; got {json:#}"
+        );
         let parsed: ValidationReport = serde_json::from_str(&text)
             .expect("a report with an unscored cross-validation must parse back");
 
         let cv = parsed.cross_validation.expect("cross-validation present");
         assert!(
-            cv.mean_rmse.is_none(),
+            cv.mean_rmse().is_none(),
             "no fold scored, so there is no mean"
         );
-        assert_eq!(cv.failed_folds.len(), 2);
+        assert_eq!(cv.failed_folds().len(), 2);
         assert!(!cv.is_complete());
+    }
+
+    #[test]
+    fn legacy_report_without_cross_validation_does_not_invent_support() {
+        let mut legacy = serde_json::to_value(test_validation_report()).expect("serialize fixture");
+        let report = legacy.as_object_mut().expect("validation report object");
+        let served_rmse = report.remove("served_behavior_rmse").expect("served RMSE");
+        report.insert("corrected_rmse".to_string(), served_rmse);
+        report.remove("in_support_correction_rmse");
+        report.remove("out_of_support_points");
+        report.remove("out_of_support_proportion");
+
+        let parsed: ValidationReport = serde_json::from_value(legacy).expect("legacy report");
+        let summary = parsed.format_summary();
+        assert!(
+            summary.contains("Out of support: n/a (unavailable in legacy report)"),
+            "a pre-#96 report without CV has no in-sample support diagnostics: {summary}"
+        );
+    }
+
+    #[test]
+    fn a_pre_issue_96_validation_report_still_parses() {
+        let mut legacy = serde_json::to_value(test_validation_report()).expect("serialize fixture");
+        let report = legacy.as_object_mut().expect("validation report object");
+        let served_rmse = report
+            .remove("served_behavior_rmse")
+            .expect("served RMSE field");
+        report.insert("corrected_rmse".to_string(), served_rmse);
+        report.remove("in_support_correction_rmse");
+        report.remove("out_of_support_points");
+        report.remove("out_of_support_proportion");
+        report.insert(
+            "cross_validation".to_string(),
+            serde_json::json!({
+                "num_folds": 2,
+                "fold_rmse_values": [0.25],
+                "failed_folds": [{
+                    "fold": 2,
+                    "training_points": 5,
+                    "reason": "fold 2/2 could not refit"
+                }],
+                "unsupported_validation_points": 3,
+                "mean_rmse": 999.0,
+                "std_rmse": 0.0,
+                "min_rmse": 0.25,
+                "max_rmse": 0.25
+            }),
+        );
+
+        let parsed: ValidationReport = serde_json::from_value(legacy)
+            .expect("reports written before issue #96 must remain readable");
+
+        assert_eq!(parsed.served_behavior_rmse, 0.5);
+        let cv = parsed
+            .cross_validation
+            .as_ref()
+            .expect("legacy cross-validation");
+        assert_eq!(cv.fold_rmse_values(), vec![0.25]);
+        assert_eq!(
+            cv.mean_rmse(),
+            Some(0.25),
+            "a legacy aggregate must reflect fold values"
+        );
+        assert_eq!(cv.out_of_support_points(), 3);
+        let summary = parsed.format_summary();
+        assert!(summary.contains("Fold #1: served 0.250 dB"), "{summary}");
+        assert!(
+            summary.contains("Out of support: n/a (unavailable in legacy report)"),
+            "the old report has no in-sample support count: {summary}"
+        );
+        let rewritten = serde_json::to_value(&parsed).expect("rewrite legacy report");
+        let reparsed: ValidationReport = serde_json::from_value(rewritten)
+            .expect("a readable legacy report must remain readable after rewriting");
+        assert_eq!(
+            reparsed
+                .cross_validation
+                .expect("rewritten CV")
+                .fold_rmse_values(),
+            vec![0.25]
+        );
     }
 
     /// The `sin θ → 0` resolution, whose clock lobe period is a deliberate `INFINITY`.

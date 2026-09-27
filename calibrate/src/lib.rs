@@ -40,7 +40,8 @@ pub use antenna_config::{
 
 pub use correction_surface::{
     assess_angular_resolution, compute_residuals, fit_correction_surface, CorrectionSurface,
-    CorrectionSurfaceError, CorrectionSurfaceParams, FitStatistics, ResidualPoint,
+    CorrectionSurfaceError, CorrectionSurfaceParams, CrossValidationFoldResult,
+    CrossValidationResults, FitStatistics, FoldFailure, ResidualPoint,
 };
 
 pub use parameter_tuner::{tune_parameters, TuningMode, TuningResult};
@@ -51,8 +52,8 @@ pub use parser::{
 };
 
 pub use validator::{
-    validate_calibration, AngularRegionStats, CrossValidationResults, FrequencyBandStats,
-    OutlierPoint, ValidationConfig, ValidationError, ValidationReport,
+    validate_calibration, AngularRegionStats, FrequencyBandStats, OutlierPoint, ValidationConfig,
+    ValidationError, ValidationReport,
 };
 
 pub use sidecar::{

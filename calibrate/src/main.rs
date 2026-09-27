@@ -187,22 +187,11 @@ fn surface_fitting_params(validate: bool, cv_folds: usize) -> CorrectionSurfaceP
 
 /// Validation settings for full-mode step 6.
 ///
-/// `correction_params` **must** be the params the surface being validated was fitted with.
-/// Passing `CorrectionSurfaceParams::default()` here (the pre-D10 behavior) made every
-/// cross-validation fold refit a markedly more flexible surface — roughly double the knots
-/// at 1000× weaker regularization — so the reported CV RMSE described a model family more
-/// prone to overfit than the artifact being blessed.
-///
-/// `num_folds = 0` disables cross-validation only; every other check in step 6 (RMSE,
-/// main-lobe and first-sidelobe statistics, outliers, band analysis) runs regardless.
-/// Gating it on `--validate` matches the flag's documented meaning ("Run cross-validation
-/// after fitting") and step 5, which already honors it — before this, `--cv-folds`' clap
-/// default of 5 meant every full-mode run cross-validated whether asked to or not.
-fn validation_config(
-    validate: bool,
-    cv_folds: usize,
-    surface_params: &CorrectionSurfaceParams,
-) -> ValidationConfig {
+/// Cross-validation fitting policy belongs only to `surface_fitting_params`; step 6 consumes
+/// the result retained by the fitted surface (#96). `num_folds` selects whether that stored
+/// result appears in the report and checks that it matches the requested CLI count. A zero
+/// value disables cross-validation reporting only; every in-sample quality check still runs.
+fn validation_config(validate: bool, cv_folds: usize) -> ValidationConfig {
     ValidationConfig {
         num_folds: if validate { cv_folds } else { 0 },
         main_lobe_beamwidths: 1.0,
@@ -211,7 +200,6 @@ fn validation_config(
         main_lobe_target_db: 1.0,
         first_sidelobe_target_db: 1.0,
         outlier_threshold_db: 3.0,
-        correction_params: surface_params.clone(),
     }
 }
 
@@ -227,7 +215,7 @@ struct FullModeValidationOptions {
 
 fn full_mode_validation_options(args: &Args) -> FullModeValidationOptions {
     let surface_params = surface_fitting_params(args.validate, args.cv_folds);
-    let validation_config = validation_config(args.validate, args.cv_folds, &surface_params);
+    let validation_config = validation_config(args.validate, args.cv_folds);
 
     FullModeValidationOptions {
         surface_params,
@@ -772,27 +760,41 @@ async fn run_calibration(args: Args) -> Result<()> {
 
     info!("  ✓ Validation complete");
     info!(
-        served_behavior_rmse_db = validation_report.corrected_rmse,
+        served_behavior_rmse_db = validation_report.served_behavior_rmse,
         "validation served-behavior RMSE"
     );
+    match validation_report.in_support_correction_rmse {
+        Some(rmse) => info!(
+            in_support_correction_rmse_db = rmse,
+            "validation in-support correction RMSE"
+        ),
+        None => info!("validation in-support correction RMSE: n/a (no point had fitted support)"),
+    }
     info!(
-        "    Main lobe max error: {:.4} dB",
-        validation_report.main_lobe_max_error
+        out_of_support_points = ?validation_report.out_of_support_points,
+        out_of_support_proportion = ?validation_report.out_of_support_proportion,
+        "validation correction-surface support"
     );
     info!(
-        "    First sidelobe max error: {:.4} dB",
-        validation_report.first_sidelobe_max_error
+        main_lobe_max_error_db = validation_report.main_lobe_max_error,
+        "validation main-lobe maximum error"
     );
     info!(
-        "    Outliers: {} ({:.1}%)",
-        validation_report.outliers.len(),
-        validation_report.outliers.len() as f64 / measurements.points.len() as f64 * 100.0
+        first_sidelobe_max_error_db = validation_report.first_sidelobe_max_error,
+        "validation first-sidelobe maximum error"
+    );
+    info!(
+        outlier_points = validation_report.outliers.len(),
+        outlier_proportion =
+            validation_report.outliers.len() as f64 / measurements.points.len() as f64,
+        "validation high-error served predictions"
     );
 
     if !validation_report.main_lobe_meets_target {
         warn!(
-            "  ⚠ Main lobe accuracy target not met ({:.4} dB > {:.4} dB)",
-            validation_report.main_lobe_max_error, validation_config.main_lobe_target_db
+            main_lobe_max_error_db = validation_report.main_lobe_max_error,
+            target_db = validation_config.main_lobe_target_db,
+            "main-lobe accuracy target not met"
         );
     } else {
         info!("  ✓ Main lobe meets accuracy target");
@@ -800,8 +802,9 @@ async fn run_calibration(args: Args) -> Result<()> {
 
     if !validation_report.first_sidelobe_meets_target {
         warn!(
-            "  ⚠ First sidelobe accuracy target not met ({:.4} dB > {:.4} dB)",
-            validation_report.first_sidelobe_max_error, validation_config.first_sidelobe_target_db
+            first_sidelobe_max_error_db = validation_report.first_sidelobe_max_error,
+            target_db = validation_config.first_sidelobe_target_db,
+            "first-sidelobe accuracy target not met"
         );
     } else {
         info!("  ✓ First sidelobe meets accuracy target");
@@ -812,7 +815,7 @@ async fn run_calibration(args: Args) -> Result<()> {
     // fold scored has no mean to print — and must say so rather than print a sentinel.
     if let Some(cv) = &validation_report.cross_validation {
         info!("  Cross-validation results:");
-        match (cv.mean_rmse, cv.std_rmse) {
+        match (cv.mean_rmse(), cv.std_rmse()) {
             (Some(mean), Some(std)) => info!(
                 mean_rmse_db = mean,
                 std_rmse_db = std,
@@ -820,27 +823,38 @@ async fn run_calibration(args: Args) -> Result<()> {
             ),
             _ => info!("    Served-behavior mean RMSE: n/a — no fold could be refitted"),
         }
-        if let (Some(min), Some(max)) = (cv.min_rmse, cv.max_rmse) {
+        if let (Some(min), Some(max)) = (cv.min_rmse(), cv.max_rmse()) {
             info!(
                 min_rmse_db = min,
                 max_rmse_db = max,
                 "cross-validation served-behavior RMSE range"
             );
         }
-        if !cv.failed_folds.is_empty() {
+        for fold in cv.scored_folds() {
+            info!(
+                fold = fold.fold(),
+                served_behavior_rmse_db = fold.served_behavior_rmse(),
+                in_support_correction_rmse_db = ?fold.in_support_correction_rmse(),
+                out_of_support_points = fold.out_of_support_points(),
+                out_of_support_proportion = fold.out_of_support_proportion(),
+                "cross-validation fold metrics"
+            );
+        }
+        if !cv.failed_folds().is_empty() {
             warn!(
-                failed_folds = cv.failed_folds.len(),
-                requested_folds = cv.num_folds,
-                scored_folds = cv.fold_rmse_values.len(),
+                failed_folds = cv.failed_folds().len(),
+                requested_folds = cv.num_folds(),
+                scored_folds = cv.scored_folds().len(),
                 "cross-validation folds could not refit; aggregates cover only scored folds, and the successful full-data fit is still written"
             );
-            for failure in &cv.failed_folds {
+            for failure in cv.failed_folds() {
                 warn!(fold = failure.fold, reason = %failure.reason, "cross-validation fold failed");
             }
         }
-        if cv.unsupported_validation_points > 0 {
+        if cv.out_of_support_points() > 0 {
             warn!(
-                unsupported_validation_points = cv.unsupported_validation_points,
+                out_of_support_points = cv.out_of_support_points(),
+                out_of_support_proportion = ?cv.out_of_support_proportion(),
                 "cross-validation served-behavior metrics include physics-only predictions outside fitted support"
             );
         }
@@ -880,7 +894,7 @@ async fn run_calibration(args: Args) -> Result<()> {
         &export_physical,
         &correction_surface,
         &measurements.points,
-        validation_report.corrected_rmse,
+        validation_report.served_behavior_rmse,
         correction_surface.fit_stats.r_squared,
         model_only_rmse,
         args.tune_parameters,
@@ -927,7 +941,7 @@ async fn run_calibration(args: Args) -> Result<()> {
     );
     info!("  Model-only RMSE: {:.4} dB", model_only_rmse);
     info!(
-        served_behavior_rmse_db = validation_report.corrected_rmse,
+        served_behavior_rmse_db = validation_report.served_behavior_rmse,
         "calibration served-behavior RMSE"
     );
     info!(
@@ -1056,62 +1070,18 @@ mod tests {
         assert_eq!(tuning_options(&args).max_iterations, 37);
     }
 
-    /// D10 defect (a): the validation config must carry the params the artifact was
-    /// actually fitted with. Before the fix this was `CorrectionSurfaceParams::default()`,
-    /// so every fold refit fitted 8/8/12 knots at 1e-6 regularization while the shipped
-    /// surface was 4/6/8 at 1e-3.
-    #[test]
-    fn validation_config_scores_the_surface_that_ships() {
-        let surface_params = surface_fitting_params(true, 5);
-        let config = validation_config(true, 5, &surface_params);
-
-        assert_eq!(
-            config.correction_params.num_knots_frequency,
-            surface_params.num_knots_frequency
-        );
-        assert_eq!(
-            config.correction_params.num_knots_econe,
-            surface_params.num_knots_econe
-        );
-        assert_eq!(
-            config.correction_params.num_knots_eclock,
-            surface_params.num_knots_eclock
-        );
-        assert_eq!(
-            config.correction_params.regularization,
-            surface_params.regularization
-        );
-        assert_eq!(
-            config.correction_params.spline_order,
-            surface_params.spline_order
-        );
-
-        // Guard the specific regression: these are the default's values, not ours.
-        let default = CorrectionSurfaceParams::default();
-        assert_ne!(
-            config.correction_params.num_knots_frequency, default.num_knots_frequency,
-            "fixture no longer distinguishes the artifact params from the default"
-        );
-        assert_ne!(
-            config.correction_params.regularization, default.regularization,
-            "fixture no longer distinguishes the artifact params from the default"
-        );
-    }
-
     /// `--validate` is documented as "Run cross-validation after fitting". Step 5 honors
     /// it; step 6 did not, so every full-mode run cross-validated whether asked or not.
     #[test]
     fn cross_validation_is_gated_on_the_validate_flag() {
-        let params = surface_fitting_params(false, 5);
         assert_eq!(
-            validation_config(false, 5, &params).num_folds,
+            validation_config(false, 5).num_folds,
             0,
             "without --validate, step 6 must not cross-validate"
         );
 
-        let params = surface_fitting_params(true, 5);
         assert_eq!(
-            validation_config(true, 5, &params).num_folds,
+            validation_config(true, 5).num_folds,
             5,
             "with --validate, --cv-folds still sets the fold count"
         );
@@ -1120,9 +1090,8 @@ mod tests {
     /// Gating CV must not disable the rest of step 6.
     #[test]
     fn gating_cross_validation_leaves_the_other_validation_settings_intact() {
-        let params = surface_fitting_params(false, 5);
-        let ungated = validation_config(false, 5, &params);
-        let gated = validation_config(true, 5, &params);
+        let ungated = validation_config(false, 5);
+        let gated = validation_config(true, 5);
 
         assert_eq!(ungated.main_lobe_target_db, gated.main_lobe_target_db);
         assert_eq!(

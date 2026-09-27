@@ -184,13 +184,10 @@ pub struct CorrectionSurfaceParams {
 impl CorrectionSurfaceParams {
     /// Return a copy of these parameters with cross-validation disabled.
     ///
-    /// Used for every *inner* fit performed on behalf of an outer cross-validation —
-    /// both the fold refits in [`crate::validator::validate_calibration`] and the fold
-    /// fits inside [`cross_validate`] itself. Cross-validating a fold of a
-    /// cross-validation is never wanted: it does not describe the surface being scored,
-    /// and because each level re-enters `fit_correction_surface` with the same folds it
-    /// recurses until the shrinking training set trips the
-    /// `(spline_order + 1)³` minimum and the whole run fails.
+    /// Used for every inner fold fit in [`cross_validate`]. Cross-validating a fold of a
+    /// cross-validation is never wanted: it does not describe the surface being scored and
+    /// recursively refits successively smaller training sets. The validator owns no refit
+    /// path after issue #96; it consumes the outer fit's retained result.
     ///
     /// Every other field — knot counts, regularization, spline order, knot spacing — is
     /// preserved, so the refit fits the *same model family* as the surface being scored.
@@ -274,8 +271,11 @@ pub struct CorrectionSurface {
     /// E-clock-fastest order.
     fitted: FittedCorrectionSurface,
 
-    /// Fitting statistics
+    /// Fitting statistics.
     pub fit_stats: FitStatistics,
+
+    /// The one cross-validation run performed while fitting, if requested.
+    cross_validation: Option<CrossValidationResults>,
 }
 
 /// Statistics about the fitted correction surface
@@ -298,6 +298,459 @@ pub struct FitStatistics {
 
     /// Improvement over uncorrected model (% reduction in RMSE)
     pub improvement_percent: f64,
+}
+
+/// A cross-validation fold that could not be scored.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FoldFailure {
+    /// 1-based fold number.
+    pub fold: usize,
+    /// Size of the fold's training split.
+    pub training_points: usize,
+    /// Why the fold could not be scored completely.
+    pub reason: String,
+}
+
+/// The support-aware diagnostics shared by in-sample and fold scoring (#96).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SupportAwareMetrics {
+    pub served_behavior_rmse: f64,
+    pub in_support_correction_rmse: Option<f64>,
+    pub out_of_support_points: usize,
+    pub out_of_support_proportion: f64,
+}
+
+/// Metrics for one successfully refitted and scored fold.
+///
+/// The out-of-support proportion is derived from its counts so serialized input cannot make
+/// the displayed proportion contradict the numerator and denominator.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(try_from = "CrossValidationFoldResultInput")]
+pub struct CrossValidationFoldResult {
+    fold: usize,
+    validation_points: usize,
+    served_behavior_rmse: f64,
+    in_support_correction_rmse: Option<f64>,
+    out_of_support_points: usize,
+}
+
+#[derive(Deserialize)]
+struct CrossValidationFoldResultInput {
+    fold: usize,
+    validation_points: usize,
+    served_behavior_rmse: f64,
+    in_support_correction_rmse: Option<f64>,
+    out_of_support_points: usize,
+}
+
+#[derive(Serialize)]
+struct CrossValidationFoldResultOutput {
+    fold: usize,
+    validation_points: usize,
+    served_behavior_rmse: f64,
+    in_support_correction_rmse: Option<f64>,
+    out_of_support_points: usize,
+    out_of_support_proportion: f64,
+}
+
+impl TryFrom<CrossValidationFoldResultInput> for CrossValidationFoldResult {
+    type Error = CorrectionSurfaceError;
+
+    fn try_from(input: CrossValidationFoldResultInput) -> Result<Self> {
+        Self::new(
+            input.fold,
+            input.validation_points,
+            input.served_behavior_rmse,
+            input.in_support_correction_rmse,
+            input.out_of_support_points,
+        )
+    }
+}
+
+impl Serialize for CrossValidationFoldResult {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        CrossValidationFoldResultOutput {
+            fold: self.fold,
+            validation_points: self.validation_points,
+            served_behavior_rmse: self.served_behavior_rmse,
+            in_support_correction_rmse: self.in_support_correction_rmse,
+            out_of_support_points: self.out_of_support_points,
+            out_of_support_proportion: self.out_of_support_proportion(),
+        }
+        .serialize(serializer)
+    }
+}
+
+fn valid_fold_metrics(
+    fold: usize,
+    validation_points: usize,
+    served_behavior_rmse: f64,
+    in_support_correction_rmse: Option<f64>,
+    out_of_support_points: usize,
+) -> bool {
+    let counts_are_valid =
+        fold > 0 && validation_points > 0 && out_of_support_points <= validation_points;
+    let served_rmse_is_valid = served_behavior_rmse.is_finite() && served_behavior_rmse >= 0.0;
+    let in_support_points = validation_points.saturating_sub(out_of_support_points);
+    let in_support_rmse_is_valid = match (in_support_points, in_support_correction_rmse) {
+        (0, None) => true,
+        (1.., Some(rmse)) => rmse.is_finite() && rmse >= 0.0,
+        _ => false,
+    };
+
+    counts_are_valid && served_rmse_is_valid && in_support_rmse_is_valid
+}
+
+impl CrossValidationFoldResult {
+    pub(crate) fn new(
+        fold: usize,
+        validation_points: usize,
+        served_behavior_rmse: f64,
+        in_support_correction_rmse: Option<f64>,
+        out_of_support_points: usize,
+    ) -> Result<Self> {
+        valid_fold_metrics(
+            fold,
+            validation_points,
+            served_behavior_rmse,
+            in_support_correction_rmse,
+            out_of_support_points,
+        )
+        .then_some(Self {
+                fold,
+                validation_points,
+                served_behavior_rmse,
+                in_support_correction_rmse,
+                out_of_support_points,
+            })
+            .ok_or_else(|| CorrectionSurfaceError::CrossValidationError {
+                reason: "a scored fold needs positive fold and validation counts, finite nonnegative RMSEs, and an in-support RMSE exactly when supported points exist".to_string(),
+            })
+    }
+
+    pub fn fold(&self) -> usize {
+        self.fold
+    }
+
+    pub fn validation_points(&self) -> usize {
+        self.validation_points
+    }
+
+    pub fn served_behavior_rmse(&self) -> f64 {
+        self.served_behavior_rmse
+    }
+
+    pub fn in_support_correction_rmse(&self) -> Option<f64> {
+        self.in_support_correction_rmse
+    }
+
+    pub fn out_of_support_points(&self) -> usize {
+        self.out_of_support_points
+    }
+
+    pub fn out_of_support_proportion(&self) -> f64 {
+        self.out_of_support_points as f64 / self.validation_points as f64
+    }
+}
+
+/// Results from the single k-fold cross-validation run owned by this module.
+///
+/// New reports retain primary fold outcomes and derive every aggregate. The legacy variant is
+/// read-only compatibility for reports written before issue #96, whose per-fold support data
+/// cannot be reconstructed honestly.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(try_from = "CrossValidationResultsInput")]
+pub struct CrossValidationResults {
+    data: CrossValidationData,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum CrossValidationData {
+    Scored {
+        scored_folds: Vec<CrossValidationFoldResult>,
+        failed_folds: Vec<FoldFailure>,
+    },
+    Legacy {
+        num_folds: usize,
+        fold_rmse_values: Vec<f64>,
+        failed_folds: Vec<FoldFailure>,
+        unsupported_validation_points: usize,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct RmseSummary {
+    mean: Option<f64>,
+    std: Option<f64>,
+    min: Option<f64>,
+    max: Option<f64>,
+}
+
+#[derive(Deserialize)]
+struct CrossValidationResultsInput {
+    num_folds: usize,
+    scored_folds: Option<Vec<CrossValidationFoldResult>>,
+    #[serde(default)]
+    fold_rmse_values: Vec<f64>,
+    #[serde(default)]
+    failed_folds: Vec<FoldFailure>,
+    #[serde(default, alias = "unsupported_validation_points")]
+    out_of_support_points: usize,
+}
+
+#[derive(Serialize)]
+struct CrossValidationResultsOutput<'a> {
+    num_folds: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scored_folds: Option<&'a [CrossValidationFoldResult]>,
+    fold_rmse_values: Vec<f64>,
+    failed_folds: &'a [FoldFailure],
+    out_of_support_points: usize,
+    out_of_support_proportion: Option<f64>,
+    mean_rmse: Option<f64>,
+    std_rmse: Option<f64>,
+    min_rmse: Option<f64>,
+    max_rmse: Option<f64>,
+}
+
+impl TryFrom<CrossValidationResultsInput> for CrossValidationResults {
+    type Error = CorrectionSurfaceError;
+
+    fn try_from(input: CrossValidationResultsInput) -> Result<Self> {
+        match input.scored_folds {
+            Some(scored_folds) => {
+                let result = Self::from_fold_results(scored_folds, input.failed_folds)?;
+                (result.num_folds() == input.num_folds)
+                    .then_some(result)
+                    .ok_or_else(|| CorrectionSurfaceError::CrossValidationError {
+                        reason:
+                            "cross-validation fold outcomes must match the requested fold count"
+                                .to_string(),
+                    })
+            }
+            None => Self::from_legacy(input),
+        }
+    }
+}
+
+impl Serialize for CrossValidationResults {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let summary = self.rmse_summary();
+        CrossValidationResultsOutput {
+            num_folds: self.num_folds(),
+            scored_folds: match &self.data {
+                CrossValidationData::Scored { scored_folds, .. } => Some(scored_folds),
+                CrossValidationData::Legacy { .. } => None,
+            },
+            fold_rmse_values: self.fold_rmse_values(),
+            failed_folds: self.failed_folds(),
+            out_of_support_points: self.out_of_support_points(),
+            out_of_support_proportion: self.out_of_support_proportion(),
+            mean_rmse: summary.mean,
+            std_rmse: summary.std,
+            min_rmse: summary.min,
+            max_rmse: summary.max,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl CrossValidationResults {
+    pub(crate) fn from_fold_results(
+        scored_folds: Vec<CrossValidationFoldResult>,
+        failed_folds: Vec<FoldFailure>,
+    ) -> Result<Self> {
+        fold_numbers_are_complete(&scored_folds, &failed_folds)
+            .then_some(Self {
+                data: CrossValidationData::Scored {
+                    scored_folds,
+                    failed_folds,
+                },
+            })
+            .ok_or_else(|| CorrectionSurfaceError::CrossValidationError {
+                reason: "fold outcomes must cover each requested fold exactly once".to_string(),
+            })
+    }
+
+    fn from_legacy(input: CrossValidationResultsInput) -> Result<Self> {
+        let scored_fold_count = input.fold_rmse_values.len();
+        let fold_count_matches = scored_fold_count + input.failed_folds.len() == input.num_folds;
+        let failed_numbers_are_valid =
+            legacy_scored_fold_numbers(input.num_folds, &input.failed_folds).len()
+                == scored_fold_count;
+        let rmse_values_are_valid = input
+            .fold_rmse_values
+            .iter()
+            .all(|rmse| rmse.is_finite() && *rmse >= 0.0);
+
+        (fold_count_matches && failed_numbers_are_valid && rmse_values_are_valid)
+            .then_some(Self {
+                data: CrossValidationData::Legacy {
+                    num_folds: input.num_folds,
+                    fold_rmse_values: input.fold_rmse_values,
+                    failed_folds: input.failed_folds,
+                    unsupported_validation_points: input.out_of_support_points,
+                },
+            })
+            .ok_or_else(|| CorrectionSurfaceError::CrossValidationError {
+                reason: "legacy cross-validation folds must match the requested count and contain finite nonnegative RMSEs".to_string(),
+            })
+    }
+
+    pub fn num_folds(&self) -> usize {
+        match &self.data {
+            CrossValidationData::Scored {
+                scored_folds,
+                failed_folds,
+            } => scored_folds.len() + failed_folds.len(),
+            CrossValidationData::Legacy { num_folds, .. } => *num_folds,
+        }
+    }
+
+    /// Whether scored folds carry the support-aware diagnostics introduced in issue #96.
+    pub fn has_per_fold_support(&self) -> bool {
+        matches!(self.data, CrossValidationData::Scored { .. })
+    }
+
+    pub fn scored_folds(&self) -> &[CrossValidationFoldResult] {
+        match &self.data {
+            CrossValidationData::Scored { scored_folds, .. } => scored_folds,
+            CrossValidationData::Legacy { .. } => &[],
+        }
+    }
+
+    pub fn fold_rmse_values(&self) -> Vec<f64> {
+        match &self.data {
+            CrossValidationData::Scored { scored_folds, .. } => scored_folds
+                .iter()
+                .map(CrossValidationFoldResult::served_behavior_rmse)
+                .collect(),
+            CrossValidationData::Legacy {
+                fold_rmse_values, ..
+            } => fold_rmse_values.clone(),
+        }
+    }
+
+    pub fn failed_folds(&self) -> &[FoldFailure] {
+        match &self.data {
+            CrossValidationData::Scored { failed_folds, .. }
+            | CrossValidationData::Legacy { failed_folds, .. } => failed_folds,
+        }
+    }
+
+    pub fn out_of_support_points(&self) -> usize {
+        match &self.data {
+            CrossValidationData::Scored { scored_folds, .. } => scored_folds
+                .iter()
+                .map(CrossValidationFoldResult::out_of_support_points)
+                .sum(),
+            CrossValidationData::Legacy {
+                unsupported_validation_points,
+                ..
+            } => *unsupported_validation_points,
+        }
+    }
+
+    pub fn out_of_support_proportion(&self) -> Option<f64> {
+        let validation_points = self
+            .scored_folds()
+            .iter()
+            .map(CrossValidationFoldResult::validation_points)
+            .sum::<usize>();
+        (validation_points > 0)
+            .then(|| self.out_of_support_points() as f64 / validation_points as f64)
+    }
+
+    pub fn mean_rmse(&self) -> Option<f64> {
+        self.rmse_summary().mean
+    }
+
+    pub fn std_rmse(&self) -> Option<f64> {
+        self.rmse_summary().std
+    }
+
+    pub fn min_rmse(&self) -> Option<f64> {
+        self.rmse_summary().min
+    }
+
+    pub fn max_rmse(&self) -> Option<f64> {
+        self.rmse_summary().max
+    }
+
+    pub fn is_complete(&self) -> bool {
+        self.failed_folds().is_empty() && self.out_of_support_points() == 0
+    }
+
+    pub fn scored_fold_numbers(&self) -> Vec<usize> {
+        match &self.data {
+            CrossValidationData::Scored { scored_folds, .. } => scored_folds
+                .iter()
+                .map(CrossValidationFoldResult::fold)
+                .collect(),
+            CrossValidationData::Legacy {
+                num_folds,
+                failed_folds,
+                ..
+            } => legacy_scored_fold_numbers(*num_folds, failed_folds),
+        }
+    }
+
+    fn rmse_summary(&self) -> RmseSummary {
+        summarize_rmse(&self.fold_rmse_values())
+    }
+
+    fn complete_point_weighted_served_rmse(&self) -> Option<f64> {
+        match &self.data {
+            CrossValidationData::Scored {
+                scored_folds,
+                failed_folds,
+            } if failed_folds.is_empty() => {
+                let validation_points = scored_folds
+                    .iter()
+                    .map(CrossValidationFoldResult::validation_points)
+                    .sum::<usize>();
+                (validation_points > 0).then(|| {
+                    let squared_error = scored_folds
+                        .iter()
+                        .map(|fold| {
+                            fold.served_behavior_rmse().powi(2) * fold.validation_points() as f64
+                        })
+                        .sum::<f64>();
+                    (squared_error / validation_points as f64).sqrt()
+                })
+            }
+            CrossValidationData::Scored { .. } | CrossValidationData::Legacy { .. } => None,
+        }
+    }
+}
+
+fn fold_numbers_are_complete(
+    scored_folds: &[CrossValidationFoldResult],
+    failed_folds: &[FoldFailure],
+) -> bool {
+    let mut fold_numbers = scored_folds
+        .iter()
+        .map(CrossValidationFoldResult::fold)
+        .chain(failed_folds.iter().map(|fold| fold.fold))
+        .collect::<Vec<_>>();
+    fold_numbers.sort_unstable();
+    fold_numbers == (1..=fold_numbers.len()).collect::<Vec<_>>()
+}
+
+fn legacy_scored_fold_numbers(num_folds: usize, failed_folds: &[FoldFailure]) -> Vec<usize> {
+    let failed = failed_folds
+        .iter()
+        .map(|failure| failure.fold)
+        .collect::<std::collections::BTreeSet<_>>();
+    (1..=num_folds)
+        .filter(|fold| !failed.contains(fold))
+        .collect()
 }
 
 // ============================================================================
@@ -554,8 +1007,8 @@ pub fn fit_correction_surface(
     params: &CorrectionSurfaceParams,
 ) -> Result<CorrectionSurface> {
     info!(
-        "Starting correction surface fitting with {} data points",
-        measurements.len()
+        data_points = measurements.len(),
+        "starting correction surface fitting"
     );
 
     // Validate inputs
@@ -566,7 +1019,7 @@ pub fn fit_correction_surface(
 
     // Compute initial RMSE (before correction)
     let initial_rmse = compute_rmse(&residuals.iter().map(|r| r.residual_db).collect::<Vec<_>>());
-    info!("Initial RMSE (model only): {:.3} dB", initial_rmse);
+    info!(model_only_rmse_db = initial_rmse, "initial model-only RMSE");
 
     // Place each axis's interior knots (fitting policy, this crate's), then let the core
     // layout build the knot vectors and shape from them (geometry, core's — issue #95).
@@ -639,42 +1092,42 @@ pub fn fit_correction_surface(
     })?;
 
     let fit_stats = compute_fit_statistics(&fitted, &residuals, initial_rmse)?;
-    let surface = CorrectionSurface::new(fitted, fit_stats);
 
     info!(
-        "Correction surface fitted successfully. RMSE: {:.3} dB, R²: {:.3}, Improvement: {:.1}%",
-        surface.fit_stats.rmse_db,
-        surface.fit_stats.r_squared,
-        surface.fit_stats.improvement_percent
+        rmse_db = fit_stats.rmse_db,
+        r_squared = fit_stats.r_squared,
+        improvement_percent = fit_stats.improvement_percent,
+        "correction surface fitted successfully"
     );
 
-    // Cross-validation if requested
-    if params.cross_validation_folds > 1 {
+    let cross_validation = if params.cross_validation_folds > 1 {
         info!(
-            "Running {}-fold cross-validation...",
-            params.cross_validation_folds
+            folds = params.cross_validation_folds,
+            "running cross-validation"
         );
-        // `None` when no fold could be refitted — reported as an absent figure, never as a
-        // failed run (roadmap D22; see `cross_validate`'s docs for why this is the copy that
-        // matters).
-        let cv_rmse = cross_validate(&residuals, params)?;
-        match cv_rmse {
-            Some(rmse) => info!("Cross-validation RMSE: {:.3} dB", rmse),
-            None => info!("Cross-validation RMSE: not available (no fold could be refitted)"),
-        }
-
-        let surface = CorrectionSurface {
-            fit_stats: FitStatistics {
-                cross_validation_rmse: cv_rmse,
-                ..surface.fit_stats
-            },
-            ..surface
-        };
-
-        Ok(surface)
+        Some(cross_validate(&residuals, params)?)
     } else {
-        Ok(surface)
+        None
+    };
+    let cross_validation_rmse = cross_validation
+        .as_ref()
+        .and_then(CrossValidationResults::complete_point_weighted_served_rmse);
+    match cross_validation_rmse {
+        Some(rmse) => info!(served_behavior_rmse_db = rmse, "cross-validation complete"),
+        None if cross_validation.is_some() => {
+            info!("Cross-validation RMSE: not available (not every fold could be refitted)")
+        }
+        None => {}
     }
+
+    Ok(CorrectionSurface {
+        fitted,
+        fit_stats: FitStatistics {
+            cross_validation_rmse,
+            ..fit_stats
+        },
+        cross_validation,
+    })
 }
 
 // ============================================================================
@@ -975,9 +1428,9 @@ fn fit_bspline_coefficients(
     let n_coeff = layout.coefficient_count();
 
     info!(
-        "Accumulating normal equations: {} data points, {} coefficients",
-        residuals.len(),
-        n_coeff
+        data_points = residuals.len(),
+        coefficients = n_coeff,
+        "accumulating normal equations"
     );
 
     let (mut normal_matrix, btr) = accumulate_normal_equations(residuals, layout, regularization)?;
@@ -1003,7 +1456,16 @@ fn fit_bspline_coefficients(
 impl CorrectionSurface {
     /// Pair a solved core surface with the statistics measured against it.
     pub fn new(fitted: FittedCorrectionSurface, fit_stats: FitStatistics) -> Self {
-        Self { fitted, fit_stats }
+        Self {
+            fitted,
+            fit_stats,
+            cross_validation: None,
+        }
+    }
+
+    /// The one cross-validation run performed while fitting, if requested.
+    pub fn cross_validation(&self) -> Option<&CrossValidationResults> {
+        self.cross_validation.as_ref()
     }
 
     /// The solved core surface — the single mathematical model this type carries.
@@ -1178,11 +1640,10 @@ fn compute_r_squared(original: &[f64], corrected: &[f64]) -> f64 {
 
 /// Is point `index` held out by fold `fold` of `num_folds`?
 ///
-/// **The single definition of fold assignment for this crate** — both cross-validation
-/// implementations call it (`cross_validate` below, and `validator::perform_cross_validation`),
-/// so they cannot report two numbers computed by two different partitions of the same data.
-/// That is not hypothetical: until roadmap **D22** they *did*, and only the validator's copy
-/// was ever examined.
+/// **The single definition of fold assignment for this crate**, used by the sole
+/// cross-validation implementation below. Before GitHub issue **#96**, a second validator-side
+/// loop could report a different answer from the fit-side run; the fitted surface now retains
+/// this implementation's result for validation reporting.
 ///
 /// **Strided**: point `i` is held out by fold `i % num_folds`. Folds used to be contiguous
 /// slices, `[k·n/K, (k+1)·n/K)`. Measurement files are grid-ordered — frequency-major for both
@@ -1206,150 +1667,238 @@ pub(crate) fn is_held_out(index: usize, fold: usize, num_folds: usize) -> bool {
     index % num_folds == fold
 }
 
-/// Perform k-fold cross-validation.
+#[cfg(test)]
+thread_local! {
+    static CROSS_VALIDATION_INVOCATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Perform the crate's one k-fold cross-validation run (#96).
 ///
-/// Returns `None` when any fold could not be refitted, rather than failing the caller: a fold
-/// refits on `(1 − 1/folds)` of the data, and since roadmap **D20** an underdetermined fit is a hard
-/// error, so a dataset can clear the coefficient count on the full set and miss it on a split.
-/// Propagating that killed the whole run — and because `--validate` sets
-/// `cross_validation_folds`, it killed it *here*, inside the fit, before
-/// `validator::validate_calibration` or the artifact writer was ever reached. `--validate`
-/// could therefore **remove an artifact that the same command without it produces**, which is
-/// exactly what roadmap D22 decided it must not do. Fixing that only in the validator left
-/// this copy as the reachable one; both are non-fatal now.
+/// Every requested fold is represented as either a scored fold or a [`FoldFailure`]. A fold
+/// refits on `(1 − 1/folds)` of the data, so since roadmap **D20** an underdetermined fit can
+/// fail even when the full-data fit succeeds. Roadmap **D22** made those failures reportable
+/// rather than fatal: `--validate` must not withhold an artifact whose own fit succeeded.
+/// The returned support-aware result is retained by [`CorrectionSurface`] and consumed by
+/// both fit statistics and [`crate::validator::ValidationReport`] without recomputation.
 fn cross_validate(
     residuals: &[ResidualPoint],
     params: &CorrectionSurfaceParams,
-) -> Result<Option<f64>> {
-    let k = params.cross_validation_folds;
-    if k < 2 {
+) -> Result<CrossValidationResults> {
+    #[cfg(test)]
+    CROSS_VALIDATION_INVOCATIONS.with(|count| count.set(count.get() + 1));
+
+    let num_folds = params.cross_validation_folds;
+    if num_folds < 2 || num_folds > residuals.len() {
         return Err(CorrectionSurfaceError::CrossValidationError {
-            reason: "Need at least 2 folds for cross-validation".to_string(),
+            reason: format!(
+                "fold count must be between 2 and the {} residual points, got {num_folds}",
+                residuals.len()
+            ),
         });
     }
 
-    let mut cv_errors = Vec::new();
-    let mut scored_folds = 0usize;
-    let mut failed_folds = 0usize;
-    let mut unsupported_points = 0usize;
+    let refit_params = params.without_nested_cross_validation();
+    let (scored_folds, failed_folds) = (0..num_folds)
+        .map(|fold| score_fold(residuals, fold, num_folds, &refit_params))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .fold(
+            (Vec::new(), Vec::new()),
+            |(mut scored, mut failed), outcome| {
+                match outcome {
+                    FoldOutcome::Scored(result) => scored.push(result),
+                    FoldOutcome::Failed(failure) => failed.push(failure),
+                }
+                (scored, failed)
+            },
+        );
 
-    for fold in 0..k {
-        // Split into training and validation sets, through the shared assignment above.
-        let mut training = Vec::new();
-        let mut validation = Vec::new();
+    let result = CrossValidationResults::from_fold_results(scored_folds, failed_folds)?;
+    let scored = result.scored_folds().len();
+    let out_of_support_points = result.out_of_support_points();
 
-        for (i, res) in residuals.iter().enumerate() {
-            if is_held_out(i, fold, k) {
-                validation.push(res.clone());
-            } else {
-                training.push(res.clone());
-            }
-        }
+    if scored == 0 {
+        warn!(
+            folds = num_folds,
+            "cross-validation could not score any fold; the successful full-data fit is reported without a cross-validation figure"
+        );
+    } else if !result.failed_folds().is_empty() || out_of_support_points > 0 {
+        warn!(
+            scored_folds = scored,
+            num_folds,
+            failed_folds = result.failed_folds().len(),
+            out_of_support_points,
+            out_of_support_proportion = ?result.out_of_support_proportion(),
+            "cross-validation support incomplete; served-behavior RMSE uses physics-only predictions outside support"
+        );
+    }
 
-        // Fit on training data
-        // Note: We need to reconstruct measurements and predictions from residuals
-        // For simplicity, we'll use the residuals directly and fit to zero-mean
-        let training_measurements: Vec<MeasurementPoint> = training
-            .iter()
-            .map(|r| MeasurementPoint {
-                e_clock_deg: r.e_clock_deg,
-                e_cone_deg: r.e_cone_deg,
-                frequency_mhz: r.frequency_mhz,
-                g_over_t_db: r.residual_db,
-                temperature_k: 290.0, // Dummy value
-            })
-            .collect();
+    Ok(result)
+}
 
-        let training_predictions = vec![0.0; training.len()]; // Zero mean for residuals
+/// One cross-validation fold's outcome: scored, or a reportable refit failure (roadmap D22).
+enum FoldOutcome {
+    Scored(CrossValidationFoldResult),
+    Failed(FoldFailure),
+}
 
-        // Fit surface on training fold. The fold fit must not cross-validate in turn —
-        // `fit_correction_surface` would re-enter this function with the same fold count
-        // and recurse until the training set falls below the fitting minimum.
-        let surface = match fit_correction_surface(
-            &training_measurements,
-            &training_predictions,
-            &params.without_nested_cross_validation(),
-        ) {
+/// Refit on every point outside zero-based `fold` and score the held-out points.
+fn score_fold(
+    residuals: &[ResidualPoint],
+    fold: usize,
+    num_folds: usize,
+    refit_params: &CorrectionSurfaceParams,
+) -> Result<FoldOutcome> {
+    let (validation, training): (Vec<_>, Vec<_>) = residuals
+        .iter()
+        .enumerate()
+        .partition(|(index, _)| is_held_out(*index, fold, num_folds));
+    let training_measurements: Vec<MeasurementPoint> = training
+        .iter()
+        .map(|(_, residual)| MeasurementPoint {
+            e_clock_deg: residual.e_clock_deg,
+            e_cone_deg: residual.e_cone_deg,
+            frequency_mhz: residual.frequency_mhz,
+            g_over_t_db: residual.residual_db,
+            temperature_k: 290.0,
+        })
+        .collect();
+    let training_predictions = vec![0.0; training.len()];
+
+    let surface =
+        match fit_correction_surface(&training_measurements, &training_predictions, refit_params) {
             Ok(surface) => surface,
-            Err(e) => {
-                failed_folds += 1;
-                warn!(
-                    "cross-validation fold {}/{k} could not refit on its training split of {} \
-                     points (the full set has {}, and its own fit succeeded — cross-validation \
-                     trains on {:.0}% of it): {e}",
+            Err(error) => {
+                let reason = format!(
+                    "fold {}/{} could not refit on its training split of {} points (the full \
+                     set has {}, and its own fit succeeded — cross-validation trains on \
+                     {:.0}% of it): {error}",
                     fold + 1,
+                    num_folds,
                     training.len(),
                     residuals.len(),
-                    100.0 * (1.0 - 1.0 / k as f64),
+                    100.0 * (1.0 - 1.0 / num_folds as f64),
                 );
-                continue;
+                warn!(
+                    fold = fold + 1,
+                    folds = num_folds,
+                    training_points = training.len(),
+                    full_set_points = residuals.len(),
+                    error = %error,
+                    "cross-validation fold could not refit"
+                );
+                return Ok(FoldOutcome::Failed(FoldFailure {
+                    fold: fold + 1,
+                    training_points: training.len(),
+                    reason,
+                }));
             }
         };
 
-        // Evaluate through the same core support law used by serving. Outside support
-        // contributes the physics-only error and remains typed; it is never represented as
-        // a successfully applied 0 dB correction.
-        let fitted = surface.fitted();
-        let evaluated: Vec<EvaluatedResidual> = validation
-            .iter()
-            .map(|residual| {
-                evaluated_residual(
-                    residual.residual_db,
-                    fitted.evaluate(
-                        residual.e_clock_deg,
-                        residual.e_cone_deg,
-                        residual.frequency_mhz,
-                    ),
-                )
-            })
-            .collect();
-        let fold_unsupported = evaluated
-            .iter()
-            .filter(|residual| matches!(residual.correction, CorrectionEvaluation::OutsideSupport))
-            .count();
-        unsupported_points += fold_unsupported;
-        if fold_unsupported > 0 {
-            warn!(
-                fold = fold + 1,
-                folds = k,
-                unsupported_points = fold_unsupported,
-                validation_points = validation.len(),
-                "cross-validation points outside fitted support use physics-only errors"
-            );
-        }
-        cv_errors.extend(evaluated.iter().map(|residual| residual.error_db));
-        scored_folds += 1;
+    let evaluated: Vec<EvaluatedResidual> = validation
+        .iter()
+        .map(|(_, residual)| {
+            evaluated_residual(
+                residual.residual_db,
+                surface.fitted().evaluate(
+                    residual.e_clock_deg,
+                    residual.e_cone_deg,
+                    residual.frequency_mhz,
+                ),
+            )
+        })
+        .collect();
+    let result = cross_validation_fold_result(fold + 1, &evaluated)?;
+    if result.out_of_support_points() > 0 {
+        warn!(
+            fold = result.fold(),
+            folds = num_folds,
+            out_of_support_points = result.out_of_support_points(),
+            out_of_support_proportion = ?result.out_of_support_proportion(),
+            "cross-validation points outside fitted support use physics-only errors"
+        );
     }
+    Ok(FoldOutcome::Scored(result))
+}
 
-    let cross_validation_rmse = match (scored_folds, failed_folds) {
-        (0, _) => {
-            warn!(
-                folds = k,
-                "cross-validation could not score any fold; the successful full-data fit is reported without a cross-validation figure"
-            );
-            None
-        }
-        (_, failed) if failed > 0 => {
-            warn!(
-                failed_folds = failed,
-                scored_folds,
-                folds = k,
-                "cross-validation is incomplete because some folds could not be refitted; the surface is reported without a cross-validation figure"
-            );
-            None
-        }
-        _ => {
-            if unsupported_points > 0 {
-                warn!(
-                    unsupported_points,
-                    "cross-validation RMSE includes physics-only served behavior outside fitted support"
-                );
+fn cross_validation_fold_result(
+    fold: usize,
+    evaluated: &[EvaluatedResidual],
+) -> Result<CrossValidationFoldResult> {
+    let metrics = support_aware_metrics(
+        evaluated
+            .iter()
+            .map(|value| (value.error_db, value.correction)),
+    );
+
+    CrossValidationFoldResult::new(
+        fold,
+        evaluated.len(),
+        metrics.served_behavior_rmse,
+        metrics.in_support_correction_rmse,
+        metrics.out_of_support_points,
+    )
+}
+
+fn summarize_rmse(values: &[f64]) -> RmseSummary {
+    match values {
+        [] => RmseSummary {
+            mean: None,
+            std: None,
+            min: None,
+            max: None,
+        },
+        values => {
+            let mean = values.iter().sum::<f64>() / values.len() as f64;
+            let variance = values
+                .iter()
+                .map(|value| (value - mean).powi(2))
+                .sum::<f64>()
+                / values.len() as f64;
+            RmseSummary {
+                mean: Some(mean),
+                std: Some(variance.sqrt()),
+                min: values.iter().copied().reduce(f64::min),
+                max: values.iter().copied().reduce(f64::max),
             }
-            Some(compute_rmse(&cv_errors))
         }
-    };
+    }
+}
 
-    Ok(cross_validation_rmse)
+/// Score served errors while retaining fitted-support provenance.
+pub(crate) fn support_aware_metrics(
+    errors: impl IntoIterator<Item = (f64, CorrectionEvaluation)>,
+) -> SupportAwareMetrics {
+    let (served_squared_error, in_support_squared_error, total_points, in_support_points) =
+        errors.into_iter().fold(
+            (0.0, 0.0, 0usize, 0usize),
+            |(served_sum, support_sum, total, supported), (error_db, correction)| {
+                let squared_error = error_db.powi(2);
+                match correction {
+                    CorrectionEvaluation::Applied(_) => (
+                        served_sum + squared_error,
+                        support_sum + squared_error,
+                        total + 1,
+                        supported + 1,
+                    ),
+                    CorrectionEvaluation::OutsideSupport => (
+                        served_sum + squared_error,
+                        support_sum,
+                        total + 1,
+                        supported,
+                    ),
+                }
+            },
+        );
+    let out_of_support_points = total_points - in_support_points;
+
+    SupportAwareMetrics {
+        served_behavior_rmse: (served_squared_error / total_points as f64).sqrt(),
+        in_support_correction_rmse: (in_support_points > 0)
+            .then(|| (in_support_squared_error / in_support_points as f64).sqrt()),
+        out_of_support_points,
+        out_of_support_proportion: out_of_support_points as f64 / total_points as f64,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1470,6 +2019,58 @@ fn std_residual(residuals: &[ResidualPoint]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn serialized_cross_validation_projections_cannot_override_fold_outcomes() {
+        let result = CrossValidationResults::from_fold_results(
+            vec![CrossValidationFoldResult::new(1, 2, 0.5, Some(0.25), 1).expect("valid fold")],
+            vec![FoldFailure {
+                fold: 2,
+                training_points: 2,
+                reason: "fold 2/2 could not refit".to_string(),
+            }],
+        )
+        .expect("complete fold outcomes");
+        let mut wire = serde_json::to_value(&result).expect("serialize result");
+        wire["fold_rmse_values"] = serde_json::json!([999.0]);
+        wire["mean_rmse"] = serde_json::json!(999.0);
+        wire["out_of_support_points"] = serde_json::json!(0);
+        wire["scored_folds"][0]["out_of_support_proportion"] = serde_json::json!(0.0);
+
+        let parsed: CrossValidationResults =
+            serde_json::from_value(wire).expect("primary fold outcomes remain valid");
+
+        assert_eq!(parsed.fold_rmse_values(), vec![0.5]);
+        assert_eq!(parsed.mean_rmse(), Some(0.5));
+        assert_eq!(parsed.out_of_support_points(), 1);
+        assert_eq!(parsed.out_of_support_proportion(), Some(0.5));
+
+        let mut invalid = serde_json::to_value(&parsed).expect("serialize parsed result");
+        invalid["scored_folds"][0]["out_of_support_points"] = serde_json::json!(2);
+        assert!(
+            serde_json::from_value::<CrossValidationResults>(invalid).is_err(),
+            "Some(in-support RMSE) must be rejected when every point is outside support"
+        );
+    }
+
+    #[test]
+    fn legacy_fold_values_cannot_supply_point_weighted_fit_statistics() {
+        let legacy: CrossValidationResults = serde_json::from_value(serde_json::json!({
+            "num_folds": 2,
+            "fold_rmse_values": [0.25, 0.75],
+            "failed_folds": [],
+            "unsupported_validation_points": 0,
+            "mean_rmse": 0.5
+        }))
+        .expect("legacy report parses");
+
+        assert_eq!(legacy.mean_rmse(), Some(0.5));
+        assert_eq!(
+            legacy.complete_point_weighted_served_rmse(),
+            None,
+            "old reports contain no fold sizes and cannot supply a point-weighted fit statistic"
+        );
+    }
 
     #[test]
     fn test_generate_uniform_knots() {
@@ -2351,6 +2952,8 @@ mod tests {
     /// test would stop testing anything.
     #[test]
     fn cross_validation_does_not_recurse_into_itself() {
+        CROSS_VALIDATION_INVOCATIONS.with(|count| count.set(0));
+
         let mut measurements = Vec::new();
         let mut predictions = Vec::new();
         for fi in 0..2 {
@@ -2393,6 +2996,13 @@ mod tests {
             surface.fit_stats.cross_validation_rmse.is_some(),
             "the requested cross-validation should still have run"
         );
+        CROSS_VALIDATION_INVOCATIONS.with(|count| {
+            assert_eq!(
+                count.get(),
+                1,
+                "only the outer fit may cross-validate; fold fits must disable nested CV"
+            );
+        });
     }
 
     /// **Roadmap D22, the reachable half.** A fold that cannot refit must not fail the fit.
