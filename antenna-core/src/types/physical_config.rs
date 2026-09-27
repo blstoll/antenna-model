@@ -143,9 +143,10 @@ pub struct FeedParameters {
     /// broaden the E-plane. Modulates the effective q-factor by `cos 2φ'`, and a
     /// non-unity value selects the azimuthal-mode integrator branch.
     ///
-    /// Producers must write the antenna class's design value. A symmetric default here
-    /// serves a different illumination than the correction surface was fitted against —
-    /// up to 1.20 dB off-axis while invisible at boresight. See D23.
+    /// Producers must write the antenna class's design value rather than accept
+    /// [`FeedParametersBuilder`]'s symmetric default: a mismatch serves a different
+    /// illumination than the correction surface was fitted against — up to 1.20 dB
+    /// off-axis while invisible at boresight. See D23.
     pub asymmetry_factor: f64,
 }
 

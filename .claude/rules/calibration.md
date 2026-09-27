@@ -3,6 +3,7 @@ description: Calibration pipeline, artifact schema/container version axes, and w
 paths:
   - "calibrate/**"
   - "antenna-core/src/data/**"
+  - "antenna-core/src/types/**"
   - "calibration_data/**"
   - "scripts/generate-cr159703-artifact.sh"
 ---

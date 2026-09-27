@@ -48,7 +48,8 @@ antenna-model/
 │       ├── model/          # bessel, coordinates, coordinates_3d, correction_surface,
 │       │                   #   edge_cases, fft, geometry, illumination, integration, mesh,
 │       │                   #   pattern, phase, ray_trace
-│       ├── data/           # Artifact layer: types.rs + loader.rs (ANTC container)
+│       ├── types/          # Calibration-artifact types, one file per type
+│       ├── data/           # ANTC artifact loader
 │       ├── error.rs        # Shared error vocabulary
 │       └── warnings.rs     # Shared WarningCode / ApiWarning vocabulary
 │

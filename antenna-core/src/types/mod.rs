@@ -2,7 +2,8 @@
 //! antenna-feed combination.
 //!
 //! [`AntennaCalibration`] is the root; every other type here is reachable from it.
-//! Construct values with each type's `builder()` and check them with `validate()`.
+//! Structs are constructed with their `builder()`, whose `build()` fails naming the first
+//! required field left unset and does not validate; check a value with `validate()`.
 //!
 //! # Wire format: postcard is positional
 //!

@@ -89,7 +89,9 @@ the dep-graph script.
 
 Work may originate from either **roadmap units** with IDs (`D21`, `P13`, `C15`, `F6`, `S3`)
 defined in `docs/roadmap-2026-07-work-units.md` or tickets in this repository's issue tracker.
-Commit subjects, PR bodies, and docs cite the source that governs a change (for example `D21` or `#60`). Rustdoc states what an item is and how to use it. Code comments explain what the code can't — pitfalls, non-obvious constraints.
+Commit subjects, PR bodies, and docs cite the source that governs a change (for example `D21`
+or `#60`). Rustdoc states what an item is and how to use it. Code comments explain what the
+code can't — pitfalls, non-obvious constraints.
 
 Never commit to `main` — branch first. For implementing a roadmap unit and
 opening its PR, use the `roadmap-unit` skill.

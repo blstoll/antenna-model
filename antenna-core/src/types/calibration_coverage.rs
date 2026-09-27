@@ -124,7 +124,7 @@ impl CalibrationCoverage {
     /// whose elevation range includes 0 but whose azimuth range is constrained can
     /// reject an exact-boresight query. Boresight artifacts avoid this by declaring
     /// azimuth `(0, 360)`. The general fix — skip the azimuth clause below a pole
-    /// threshold — is filed under D13; apply it here and in
+    /// threshold — is recorded, unapplied, in the D13 entry; apply it here and in
     /// [`Self::contains_direction`] together.
     pub fn contains_direction_at_frequency(
         &self,

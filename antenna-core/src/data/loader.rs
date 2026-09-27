@@ -318,10 +318,10 @@ fn physics_model_version_mismatch(artifact: u32, current: u32) -> Option<String>
     })
 }
 
-/// Runs [`AntennaCalibration::validate`], then additional plausibility checks: elevation
-/// range within `[0, 90]` and mesh wire thinner than its spacing are errors; an unusual
-/// frequency range, a very large correction surface, RMSE above 1 dB and R² below 0.95
-/// only warn.
+/// Runs [`AntennaCalibration::validate`], then warns on implausible values: a frequency
+/// range outside 100–50 000 MHz, over a million correction coefficients, RMSE above 1 dB,
+/// or R² below 0.95. (Its elevation and mesh error checks repeat ones `validate` already
+/// made.)
 pub fn validate_calibration(calibration: &AntennaCalibration) -> Result<(), DataError> {
     // Basic validation (already done in load, but can be called separately)
     calibration
