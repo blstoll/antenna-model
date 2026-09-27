@@ -62,12 +62,14 @@ use antenna_core::data::types::{AntennaCalibration, CalibrationCoverage, Calibra
 use antenna_core::error::{AntennaModelError, ComputationError, Result};
 use antenna_core::model::{
     analyze_edge_cases, compute_gain_db, squint_corrected_direction, AntennaConfiguration,
-    CorrectionEvaluation, FeedParameters as ModelFeedParams, FeedPosition, FittedCorrectionSurface,
-    IntegrationParams, MeshParameters as ModelMeshParams, ReflectorGeometry as ModelReflector,
+    CorrectionEvaluation, CoveredCorrectionSurface, FeedParameters as ModelFeedParams,
+    FeedPosition, IntegrationParams, MeshParameters as ModelMeshParams,
+    ReflectorGeometry as ModelReflector,
 };
 use antenna_core::warnings::{ApiWarning, WarningCode};
+use tracing::error;
 
-use crate::data::repository::PreparedCorrection;
+use crate::data::repository::{prepare_correction, PreparedCorrection};
 use crate::service::cache::{CachedGain, GainCache, GainCacheKey};
 
 /// A direction in the antenna frame, **before** beam-squint correction.
@@ -211,6 +213,11 @@ pub(crate) enum CorrectionDisposition {
     OutsideCoverage,
     /// Coverage admitted the query, but it lies outside the fitted spline support.
     /// Served gain is physics only; no correction value exists for this outcome.
+    ///
+    /// **Defensive, unreachable for a valid artifact** (issue #97): preparation pairs the
+    /// surface with coverage its support contains, so a query inside coverage is inside
+    /// support. Reaching this arm means that invariant was bypassed; it is logged as an
+    /// error and is not a client-facing capability.
     OutsideSupport,
 }
 
@@ -277,8 +284,12 @@ pub(crate) struct PreparedServedGain {
     /// The projected artifact. Held whole because coverage, status advisories and the
     /// antenna id are read from it per direction.
     calibration: AntennaCalibration,
-    /// Executable three-axis correction prepared and validated once, never per direction.
-    correction_surface: Option<Arc<FittedCorrectionSurface>>,
+    /// Executable three-axis correction paired with its gating coverage, prepared and
+    /// validated once, never per direction (issue #97).
+    correction: Option<Arc<CoveredCorrectionSurface>>,
+    /// The artifact's one coverage claim, for the partial-calibration advisories. Resolved
+    /// at preparation so status and top-level coverage cannot disagree here (issue #97).
+    coverage: Option<CalibrationCoverage>,
     /// Physical-optics model built from the artifact plus the request's feed geometry.
     antenna_config: AntennaConfiguration,
     /// Direction-independent edge-case advisories, computed once from `antenna_config`.
@@ -316,12 +327,7 @@ impl PreparedServedGain {
         frequencies: ServedFrequencies,
         time_budget: Duration,
     ) -> Result<Self> {
-        let correction_surface = calibration
-            .correction_surface
-            .as_ref()
-            .map(FittedCorrectionSurface::from_model4d)
-            .transpose()
-            .map(|surface| surface.map(Arc::new));
+        let correction_surface = prepare_correction(&calibration);
         Self::prepare_with_cached_correction(
             calibration,
             correction_surface,
@@ -342,7 +348,11 @@ impl PreparedServedGain {
         frequencies: ServedFrequencies,
         time_budget: Duration,
     ) -> Result<Self> {
-        let correction_surface = correction_surface.map_err(invalid_correction_surface)?;
+        let correction = correction_surface.map_err(invalid_correction_surface)?;
+        let coverage = calibration
+            .coverage()
+            .map_err(invalid_correction_surface)?
+            .cloned();
         let focal_length_m = calibration.physical_config.reflector.focal_length_m;
         let diameter_m = calibration.physical_config.reflector.diameter_m;
 
@@ -440,7 +450,8 @@ impl PreparedServedGain {
 
         Ok(Self {
             calibration,
-            correction_surface,
+            correction,
+            coverage,
             antenna_config,
             configuration_warnings,
             integration_params,
@@ -713,10 +724,14 @@ impl PreparedServedGain {
         let mut warnings = physics.warnings;
 
         // Correction surface, gated on the FULL coverage question (direction and
-        // frequency). Interpolated at the squint-corrected direction.
-        let (correction_db, disposition) = match &self.correction_surface {
+        // frequency) against the coverage it was prepared with. Interpolated at the
+        // squint-corrected direction. For a valid artifact the law is
+        //   no surface → Unavailable, outside coverage → OutsideCoverage, else → Applied
+        // (issue #97); the OutsideSupport arm is defensive only.
+        let (correction_db, disposition) = match &self.correction {
             None if outside_partial_calibration_region(
                 &self.calibration,
+                self.coverage.as_ref(),
                 corrected.e_clock_deg,
                 corrected.e_cone_deg,
             ) =>
@@ -724,9 +739,8 @@ impl PreparedServedGain {
                 (0.0, CorrectionDisposition::UnavailableOutsideCoverage)
             }
             None => (0.0, CorrectionDisposition::Unavailable),
-            Some(_)
-                if !is_in_coverage(
-                    &self.calibration.calibration_coverage,
+            Some(correction)
+                if !correction.coverage().contains_direction_at_frequency(
                     corrected.e_clock_deg,
                     corrected.e_cone_deg,
                     self.frequencies.operating_mhz,
@@ -734,7 +748,7 @@ impl PreparedServedGain {
             {
                 (0.0, CorrectionDisposition::OutsideCoverage)
             }
-            Some(surface) => match surface.evaluate(
+            Some(correction) => match correction.surface().evaluate(
                 corrected.e_clock_deg,
                 corrected.e_cone_deg,
                 self.frequencies.operating_mhz,
@@ -743,6 +757,15 @@ impl PreparedServedGain {
                     (correction_db, CorrectionDisposition::Applied)
                 }
                 CorrectionEvaluation::OutsideSupport => {
+                    error!(
+                        antenna_id = %self.calibration.antenna_id,
+                        feed_id = %self.calibration.feed_id,
+                        e_clock_deg = corrected.e_clock_deg,
+                        e_cone_deg = corrected.e_cone_deg,
+                        frequency_mhz = self.frequencies.operating_mhz,
+                        "invariant violated: query inside calibration coverage is outside \
+                         correction-surface support"
+                    );
                     (0.0, CorrectionDisposition::OutsideSupport)
                 }
             },
@@ -766,6 +789,7 @@ impl PreparedServedGain {
         //   → off-axis validity → rear-hemisphere validity
         warnings.extend(generate_calibration_warnings(
             &self.calibration,
+            self.coverage.as_ref(),
             corrected.e_clock_deg,
             corrected.e_cone_deg,
             disposition,
@@ -868,60 +892,34 @@ struct PhysicsOutcome {
     warnings: Vec<ApiWarning>,
 }
 
-/// Check if the query is within the calibrated coverage region.
+/// Whether a partially calibrated antenna was queried outside its measured spatial region.
 ///
-/// This is the served correction-application gate. It owns exactly one decision
-/// the calibration artifact cannot make for itself — what an *absent* coverage
-/// record means — and delegates the range test to
-/// [`CalibrationCoverage::contains_direction_at_frequency`], which is the sole
-/// authority for it (issue #60). The service previously carried its own copy of
-/// that expression; the two agreed only by inspection, and the pole limitation
-/// documented on the core predicate had to be fixed in two places.
+/// The **spatial-only** coverage question ([`CalibrationCoverage::contains_direction`]).
+/// Correction gating asks the full question — direction and frequency, through
+/// [`CalibrationCoverage::contains_direction_at_frequency`] on the coverage the surface was
+/// prepared with — and the two must stay distinct: a query on the measured grid at an
+/// uncalibrated frequency gets no correction but is not outside the calibrated *region*.
 ///
-/// When no coverage restriction is recorded (`None`) the correction surface is
-/// treated as valid everywhere it has data — the query is considered in-coverage.
-/// Actual correction application is still gated separately on
-/// `correction_surface.is_some()`, so returning `true` here for `None` is safe.
-///
-/// This is the **full** coverage question: azimuth, E-cone, and frequency. The
-/// partial-calibration advisory asks the narrower spatial-only question
-/// ([`CalibrationCoverage::contains_direction`]) and the two must stay distinct —
-/// a query on the measured grid at an uncalibrated frequency gets no correction
-/// but is not outside the calibrated *region*.
-///
-/// This remains private to the served-gain law; endpoints consume the resulting
-/// [`CorrectionDisposition`] rather than repeating this predicate.
+/// `coverage` is the artifact's one coverage claim ([`AntennaCalibration::coverage`]),
+/// never the status's serialized duplicate (issue #97).
 fn outside_partial_calibration_region(
-    calibration: &antenna_core::data::types::AntennaCalibration,
+    calibration: &AntennaCalibration,
+    coverage: Option<&CalibrationCoverage>,
     e_clock_deg: f64,
     e_cone_deg: f64,
 ) -> bool {
     matches!(
-        calibration.calibration_status.as_ref(),
-        Some(CalibrationStatus::PartiallyCalibrated { coverage, .. })
-            if !coverage.contains_direction(e_clock_deg, e_cone_deg)
-    )
-}
-
-fn is_in_coverage(
-    coverage: &Option<CalibrationCoverage>,
-    azimuth_deg: f64,
-    elevation_deg: f64,
-    frequency_mhz: f64,
-) -> bool {
-    match coverage {
-        Some(cov) => cov.contains_direction_at_frequency(azimuth_deg, elevation_deg, frequency_mhz),
-        // No coverage restriction recorded (fully calibrated artifact):
-        // the correction surface applies everywhere it has data.
-        None => true,
-    }
+        calibration.calibration_status,
+        Some(CalibrationStatus::PartiallyCalibrated { .. })
+    ) && coverage.is_some_and(|coverage| !coverage.contains_direction(e_clock_deg, e_cone_deg))
 }
 
 /// Generate warnings based on calibration status and query parameters.
 ///
 /// Returns a vector of warning messages to be included in the response.
 fn generate_calibration_warnings(
-    calibration: &antenna_core::data::types::AntennaCalibration,
+    calibration: &AntennaCalibration,
+    coverage: Option<&CalibrationCoverage>,
     azimuth_deg: f64,
     elevation_deg: f64,
     correction: CorrectionDisposition,
@@ -944,7 +942,7 @@ fn generate_calibration_warnings(
         }
         Some(CalibrationStatus::PartiallyCalibrated {
             accuracy_estimate_db,
-            coverage,
+            ..
         }) => {
             warnings.push(WarningCode::PartiallyCalibrated.with(format!(
                 "Antenna '{}' is partially calibrated. Accuracy estimate: ±{:.1} dB",
@@ -955,7 +953,8 @@ fn generate_calibration_warnings(
             // only: this advisory reports direction, not band, so an in-grid query
             // at an uncalibrated frequency gets `correction_not_applied` below
             // without also claiming to be outside the calibrated region.
-            if !coverage.contains_direction(azimuth_deg, elevation_deg) {
+            if outside_partial_calibration_region(calibration, coverage, azimuth_deg, elevation_deg)
+            {
                 warnings.push(WarningCode::OutOfCoverage.with(
                     "Query is outside calibrated region - using physics model extrapolation",
                 ));
@@ -1195,6 +1194,7 @@ fn ray_trace_stub_warning(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service::test_support::install_correction_surface;
     use crate::service::test_support::{create_test_calibration, dummy_correction_surface};
 
     /// The prepared value is shared across parallel grid workers (issue #63 onward), so
@@ -1351,12 +1351,12 @@ mod tests {
         let mut zero = create_test_calibration(CalibrationStatus::FullyCalibrated {
             accuracy_estimate_db: 1.0,
         });
-        zero.correction_surface = Some(constant_correction_surface(0.0));
+        install_correction_surface(&mut zero, constant_correction_surface(0.0));
 
         let mut shifted = create_test_calibration(CalibrationStatus::FullyCalibrated {
             accuracy_estimate_db: 1.0,
         });
-        shifted.correction_surface = Some(constant_correction_surface(2.5));
+        install_correction_surface(&mut shifted, constant_correction_surface(2.5));
 
         let zero_served = prepare_unsteered(zero)
             .evaluate_direct(direction, ReferenceGainRequest::Omit)
@@ -1392,7 +1392,7 @@ mod tests {
         let mut unrestricted = create_test_calibration(CalibrationStatus::FullyCalibrated {
             accuracy_estimate_db: 1.0,
         });
-        unrestricted.correction_surface = Some(constant_correction_surface(0.0));
+        install_correction_surface(&mut unrestricted, constant_correction_surface(0.0));
         let probe = PreparedServedGain::prepare(
             unrestricted,
             steering,
@@ -1442,7 +1442,7 @@ mod tests {
         let mut restricted = create_test_calibration(CalibrationStatus::FullyCalibrated {
             accuracy_estimate_db: 1.0,
         });
-        restricted.correction_surface = Some(constant_correction_surface(0.0));
+        install_correction_surface(&mut restricted, constant_correction_surface(0.0));
         restricted.calibration_coverage = Some(coverage);
 
         let served = PreparedServedGain::prepare(
@@ -1556,19 +1556,17 @@ mod tests {
     }
 
     #[test]
-    fn test_is_in_coverage_fully_covered() {
-        let coverage = Some(
-            CalibrationCoverage::builder()
-                .azimuth_range(0.0, 360.0)
-                .elevation_range(0.0, 90.0)
-                .frequency_range(8000.0, 9000.0)
-                .num_measurements(1000)
-                .has_correction_surface(true)
-                .build()
-                .unwrap(),
-        );
+    fn coverage_gate_fully_covered() {
+        let coverage = CalibrationCoverage::builder()
+            .azimuth_range(0.0, 360.0)
+            .elevation_range(0.0, 90.0)
+            .frequency_range(8000.0, 9000.0)
+            .num_measurements(1000)
+            .has_correction_surface(true)
+            .build()
+            .unwrap();
 
-        assert!(is_in_coverage(&coverage, 180.0, 45.0, 8400.0));
+        assert!(coverage.contains_direction_at_frequency(180.0, 45.0, 8400.0));
     }
 
     /// A boresight artifact's coverage must accept a boresight query whatever its
@@ -1577,47 +1575,43 @@ mod tests {
     /// correction while the encoding was `azimuth_range = (0, 0)`.
     #[test]
     fn boresight_cone_coverage_accepts_a_pole_query_at_any_azimuth() {
-        let coverage = Some(
-            CalibrationCoverage::builder()
-                .azimuth_range(0.0, 360.0)
-                .elevation_range(0.0, antenna_core::data::types::BORESIGHT_COVERAGE_CONE_DEG)
-                .frequency_range(3700.0, 6425.0)
-                .num_measurements(6)
-                .has_correction_surface(true)
-                .build()
-                .unwrap(),
-        );
+        let coverage = CalibrationCoverage::builder()
+            .azimuth_range(0.0, 360.0)
+            .elevation_range(0.0, antenna_core::data::types::BORESIGHT_COVERAGE_CONE_DEG)
+            .frequency_range(3700.0, 6425.0)
+            .num_measurements(6)
+            .has_correction_surface(true)
+            .build()
+            .unwrap();
 
         // 63.43° is the azimuth measured for a query aimed exactly at the boresight
         // point on a realistic ECEF geometry; 0.0 and 359.9 are equally valid there.
         for az in [0.0, 63.43, 180.0, 359.9] {
             assert!(
-                is_in_coverage(&coverage, az, 0.0, 4000.0),
+                coverage.contains_direction_at_frequency(az, 0.0, 4000.0),
                 "boresight coverage rejected a boresight query at azimuth {az}"
             );
         }
 
         // Outside the cone is genuinely off-axis, whatever the azimuth.
-        assert!(!is_in_coverage(&coverage, 63.43, 5.0, 4000.0));
+        assert!(!coverage.contains_direction_at_frequency(63.43, 5.0, 4000.0));
     }
 
     /// The encoding this replaced, kept as an explicit record of the defect: a
     /// zero-width azimuth range rejects the point it is meant to cover.
     #[test]
     fn legacy_degenerate_boresight_coverage_rejects_its_own_point() {
-        let legacy = Some(
-            CalibrationCoverage::builder()
-                .azimuth_range(0.0, 0.0)
-                .elevation_range(0.0, 0.0)
-                .frequency_range(3700.0, 6425.0)
-                .num_measurements(6)
-                .has_correction_surface(true)
-                .build()
-                .unwrap(),
-        );
+        let legacy = CalibrationCoverage::builder()
+            .azimuth_range(0.0, 0.0)
+            .elevation_range(0.0, 0.0)
+            .frequency_range(3700.0, 6425.0)
+            .num_measurements(6)
+            .has_correction_surface(true)
+            .build()
+            .unwrap();
 
         assert!(
-            !is_in_coverage(&legacy, 63.43, 0.0, 4000.0),
+            !legacy.contains_direction_at_frequency(63.43, 0.0, 4000.0),
             "if this now passes, the azimuth clause has been made pole-aware — good, \
              but update CalibrationCoverage::contains_direction_at_frequency's doc \
              comment and the roadmap item it points at"
@@ -1625,57 +1619,45 @@ mod tests {
     }
 
     #[test]
-    fn test_is_in_coverage_outside_azimuth() {
-        let coverage = Some(
-            CalibrationCoverage::builder()
-                .azimuth_range(0.0, 90.0)
-                .elevation_range(0.0, 90.0)
-                .frequency_range(8000.0, 9000.0)
-                .num_measurements(100)
-                .has_correction_surface(true)
-                .build()
-                .unwrap(),
-        );
+    fn coverage_gate_outside_azimuth() {
+        let coverage = CalibrationCoverage::builder()
+            .azimuth_range(0.0, 90.0)
+            .elevation_range(0.0, 90.0)
+            .frequency_range(8000.0, 9000.0)
+            .num_measurements(100)
+            .has_correction_surface(true)
+            .build()
+            .unwrap();
 
-        assert!(!is_in_coverage(&coverage, 180.0, 45.0, 8400.0));
+        assert!(!coverage.contains_direction_at_frequency(180.0, 45.0, 8400.0));
     }
 
     #[test]
-    fn test_is_in_coverage_outside_elevation() {
-        let coverage = Some(
-            CalibrationCoverage::builder()
-                .azimuth_range(0.0, 360.0)
-                .elevation_range(0.0, 30.0)
-                .frequency_range(8000.0, 9000.0)
-                .num_measurements(100)
-                .has_correction_surface(true)
-                .build()
-                .unwrap(),
-        );
+    fn coverage_gate_outside_elevation() {
+        let coverage = CalibrationCoverage::builder()
+            .azimuth_range(0.0, 360.0)
+            .elevation_range(0.0, 30.0)
+            .frequency_range(8000.0, 9000.0)
+            .num_measurements(100)
+            .has_correction_surface(true)
+            .build()
+            .unwrap();
 
-        assert!(!is_in_coverage(&coverage, 180.0, 45.0, 8400.0));
+        assert!(!coverage.contains_direction_at_frequency(180.0, 45.0, 8400.0));
     }
 
     #[test]
-    fn test_is_in_coverage_outside_frequency() {
-        let coverage = Some(
-            CalibrationCoverage::builder()
-                .azimuth_range(0.0, 360.0)
-                .elevation_range(0.0, 90.0)
-                .frequency_range(9000.0, 10000.0)
-                .num_measurements(100)
-                .has_correction_surface(true)
-                .build()
-                .unwrap(),
-        );
+    fn coverage_gate_outside_frequency() {
+        let coverage = CalibrationCoverage::builder()
+            .azimuth_range(0.0, 360.0)
+            .elevation_range(0.0, 90.0)
+            .frequency_range(9000.0, 10000.0)
+            .num_measurements(100)
+            .has_correction_surface(true)
+            .build()
+            .unwrap();
 
-        assert!(!is_in_coverage(&coverage, 180.0, 45.0, 8400.0));
-    }
-
-    #[test]
-    fn test_is_in_coverage_none_means_unrestricted() {
-        // No coverage restriction recorded (fully calibrated artifact) → always in coverage.
-        assert!(is_in_coverage(&None, 180.0, 45.0, 8400.0));
+        assert!(!coverage.contains_direction_at_frequency(180.0, 45.0, 8400.0));
     }
 
     #[test]
@@ -1687,6 +1669,7 @@ mod tests {
 
         let warnings = generate_calibration_warnings(
             &calibration,
+            calibration.calibration_coverage.as_ref(),
             180.0,
             45.0,
             CorrectionDisposition::Unavailable,
@@ -1718,6 +1701,7 @@ mod tests {
 
         let warnings = generate_calibration_warnings(
             &calibration,
+            calibration.calibration_coverage.as_ref(),
             180.0,
             45.0,
             CorrectionDisposition::Applied,
@@ -1745,18 +1729,11 @@ mod tests {
         });
 
         // Add a dummy correction surface to trigger the "not applied" warning
-        calibration.correction_surface = Some(antenna_core::data::types::BSplineModel4D {
-            coefficients: vec![0.0; 10],
-            shape: [2, 2, 2, 1],
-            knots_azimuth: vec![0.0, 360.0],
-            knots_elevation: vec![0.0, 90.0],
-            knots_frequency: vec![8000.0, 9000.0],
-            knots_temperature: vec![290.0],
-            spline_order: 3,
-        });
+        install_correction_surface(&mut calibration, dummy_correction_surface());
 
         let warnings = generate_calibration_warnings(
             &calibration,
+            calibration.calibration_coverage.as_ref(),
             180.0,
             45.0,
             CorrectionDisposition::OutsideCoverage,
@@ -1780,6 +1757,7 @@ mod tests {
 
         let warnings = generate_calibration_warnings(
             &calibration,
+            calibration.calibration_coverage.as_ref(),
             180.0,
             45.0,
             CorrectionDisposition::Applied,
@@ -1795,18 +1773,11 @@ mod tests {
         });
 
         // Add a dummy correction surface
-        calibration.correction_surface = Some(antenna_core::data::types::BSplineModel4D {
-            coefficients: vec![0.0; 10],
-            shape: [2, 2, 2, 1],
-            knots_azimuth: vec![0.0, 360.0],
-            knots_elevation: vec![0.0, 90.0],
-            knots_frequency: vec![8000.0, 9000.0],
-            knots_temperature: vec![290.0],
-            spline_order: 3,
-        });
+        install_correction_surface(&mut calibration, dummy_correction_surface());
 
         let warnings = generate_calibration_warnings(
             &calibration,
+            calibration.calibration_coverage.as_ref(),
             180.0,
             45.0,
             CorrectionDisposition::OutsideCoverage,
@@ -1839,18 +1810,14 @@ mod tests {
             accuracy_estimate_db: 1.5,
             coverage: coverage.clone(),
         });
-        calibration.correction_surface = Some(dummy_correction_surface());
+        install_correction_surface(&mut calibration, dummy_correction_surface());
 
         // 12 GHz is far outside the calibrated band; (45°, 15°) is inside the grid.
-        assert!(!is_in_coverage(
-            &calibration.calibration_coverage,
-            45.0,
-            15.0,
-            12_000.0
-        ));
+        assert!(!coverage.contains_direction_at_frequency(45.0, 15.0, 12_000.0));
 
         let warnings = generate_calibration_warnings(
             &calibration,
+            calibration.calibration_coverage.as_ref(),
             45.0,
             15.0,
             CorrectionDisposition::OutsideCoverage,
@@ -1864,71 +1831,6 @@ mod tests {
             ],
             "frequency alone must not raise the spatial out-of-coverage advisory"
         );
-    }
-
-    /// The served predicate is the calibration-coverage authority plus the
-    /// `None` (unrestricted) case — nothing else.
-    ///
-    /// This asserts *agreement*, not semantics: `CalibrationCoverage`'s own tests
-    /// own what the bounds mean. What this guards is a service-local copy of the
-    /// range test growing back, and such a copy is only visible **at the
-    /// boundary** — a clearly-inside and a clearly-outside probe agree even with
-    /// a copy that has `>` where the authority has `>=`. So the probes walk every
-    /// bound, derived from the coverage's own ranges rather than restated, and a
-    /// coarser in/out set would not be a cheaper version of this test.
-    #[test]
-    fn is_in_coverage_agrees_with_the_calibration_coverage_authority() {
-        let coverage = CalibrationCoverage::builder()
-            .azimuth_range(10.0, 350.0)
-            .elevation_range(5.0, 60.0)
-            .frequency_range(8000.0, 9000.0)
-            .num_measurements(500)
-            .has_correction_surface(true)
-            .build()
-            .unwrap();
-
-        /// One step outside a bound, in degrees and in MHz.
-        const STEP: f64 = 0.1;
-
-        let (az_lo, az_hi) = coverage.azimuth_range;
-        let (el_lo, el_hi) = coverage.elevation_range;
-        let (f_lo, f_hi) = coverage.frequency_range;
-        let (az_mid, el_mid, f_mid) = (
-            f64::midpoint(az_lo, az_hi),
-            f64::midpoint(el_lo, el_hi),
-            f64::midpoint(f_lo, f_hi),
-        );
-
-        let probes = [
-            // Plainly inside, then both extreme corners of the closed box.
-            (az_mid, el_mid, f_mid),
-            (az_lo, el_lo, f_lo),
-            (az_hi, el_hi, f_hi),
-            // One step outside each bound, one axis at a time.
-            (az_lo - STEP, el_mid, f_mid),
-            (az_hi + STEP, el_mid, f_mid),
-            (az_mid, el_lo - STEP, f_mid),
-            (az_mid, el_hi + STEP, f_mid),
-            (az_mid, el_mid, f_lo - STEP),
-            (az_mid, el_mid, f_hi + STEP),
-        ];
-
-        for (az, el, freq) in probes {
-            assert_eq!(
-                is_in_coverage(&Some(coverage.clone()), az, el, freq),
-                coverage.contains_direction_at_frequency(az, el, freq),
-                "served coverage diverged from CalibrationCoverage at ({az}, {el}, {freq})"
-            );
-        }
-
-        // The one decision the service owns rather than delegates: an absent
-        // coverage record is unrestricted, so every probe above is in coverage.
-        for (az, el, freq) in probes {
-            assert!(
-                is_in_coverage(&None, az, el, freq),
-                "absent coverage must be unrestricted at ({az}, {el}, {freq})"
-            );
-        }
     }
 
     // ------------------------------------------------------------------
@@ -2018,7 +1920,7 @@ mod tests {
         let mut fully = create_test_calibration(CalibrationStatus::FullyCalibrated {
             accuracy_estimate_db: 1.0,
         });
-        fully.correction_surface = Some(dummy_correction_surface());
+        install_correction_surface(&mut fully, dummy_correction_surface());
         assert!(off_axis_unvalidated_warning(&fully, 45.0, 8400.0).is_none());
 
         let coverage = CalibrationCoverage::builder()
@@ -2033,7 +1935,7 @@ mod tests {
             accuracy_estimate_db: 1.5,
             coverage,
         });
-        partial.correction_surface = Some(dummy_correction_surface());
+        install_correction_surface(&mut partial, dummy_correction_surface());
         assert!(off_axis_unvalidated_warning(&partial, 45.0, 8400.0).is_none());
 
         // Status None is treated as fully calibrated (backward compatibility);
@@ -2042,7 +1944,7 @@ mod tests {
             accuracy_estimate_db: 1.0,
         });
         unspecified.calibration_status = None;
-        unspecified.correction_surface = Some(dummy_correction_surface());
+        install_correction_surface(&mut unspecified, dummy_correction_surface());
         assert!(off_axis_unvalidated_warning(&unspecified, 45.0, 8400.0).is_none());
     }
 
@@ -2163,7 +2065,7 @@ mod tests {
             accuracy_estimate_db: 1.0,
         });
         // Corrected physics ⇒ a correction surface is present (P11 predicate gate).
-        fully.correction_surface = Some(dummy_correction_surface());
+        install_correction_surface(&mut fully, dummy_correction_surface());
         // The off-axis warning stays silent for a calibrated antenna even far off-axis...
         assert!(off_axis_unvalidated_warning(&fully, 120.0, 8400.0).is_none());
         // ...but the rear-hemisphere warning fires regardless of calibration status.
@@ -2227,7 +2129,7 @@ mod tests {
         let mut calibration = create_test_calibration(CalibrationStatus::FullyCalibrated {
             accuracy_estimate_db: 1.0,
         });
-        calibration.correction_surface = Some(dummy_correction_surface());
+        install_correction_surface(&mut calibration, dummy_correction_surface());
         assert!(!calibration.physics_is_uncorrected());
 
         let msg = rear_hemisphere_warning(&calibration, 120.0, 8400.0)
@@ -2422,7 +2324,7 @@ mod tests {
             accuracy_estimate_db: 1.5,
             coverage,
         });
-        calibration.correction_surface = Some(constant_correction_surface(2.0));
+        install_correction_surface(&mut calibration, constant_correction_surface(2.0));
 
         let prepared = prepare_unsteered(calibration);
         let served = assert_direct_cold_hot_agree(
@@ -2443,14 +2345,15 @@ mod tests {
         );
     }
 
-    /// A query outside fitted support serves physics only on every cache path. The
-    /// correction is never extrapolated numerically, and the warning names fitted support.
+    /// A query beyond a valid surface's fitted support is outside its coverage (issue #97),
+    /// so every cache path serves physics only with `OutsideCoverage` — never the defensive
+    /// `OutsideSupport` — and the correction is never extrapolated numerically.
     #[test]
-    fn cached_evaluation_matches_direct_outside_fitted_support() {
+    fn cached_evaluation_matches_direct_beyond_a_valid_surfaces_support() {
         let mut calibration = create_test_calibration(CalibrationStatus::FullyCalibrated {
             accuracy_estimate_db: 1.0,
         });
-        calibration.correction_surface = Some(narrow_elevation_correction_surface(2.0));
+        install_correction_surface(&mut calibration, narrow_elevation_correction_surface(2.0));
 
         let prepared = prepare_unsteered(calibration);
         let served = assert_direct_cold_hot_agree(
@@ -2458,19 +2361,93 @@ mod tests {
             PreSquintDirection::new(0.0, 5.0),
             ReferenceGainRequest::Omit,
         );
-        assert_eq!(
-            served.correction,
-            CorrectionDisposition::OutsideSupport,
-            "fixture must actually leave fitted support, or this pins nothing"
-        );
+        assert_eq!(served.correction, CorrectionDisposition::OutsideCoverage);
         let codes = warning_codes(&served);
         assert!(!codes.contains(&WarningCode::Extrapolated), "{codes:?}");
         let warning = served
             .warnings
             .iter()
             .find(|warning| warning.is(WarningCode::CorrectionNotApplied))
-            .expect("outside support must explain why correction was not applied");
-        assert!(warning.message.contains("fitted support"), "{warning:?}");
+            .expect("outside coverage must explain why correction was not applied");
+        assert!(warning.message.contains("coverage"), "{warning:?}");
+    }
+
+    /// Preparation is where the served path learns coverage, so it refuses every artifact
+    /// the load-time invariant refuses (issue #97): a surface with no coverage record, and
+    /// coverage the surface's support does not contain. Either would otherwise make the
+    /// defensive `OutsideSupport` arm reachable.
+    #[test]
+    fn preparation_refuses_a_surface_whose_coverage_is_absent_or_beyond_support() {
+        let error_of = |calibration: AntennaCalibration| {
+            PreparedServedGain::prepare(
+                calibration,
+                FeedSteering::new(0.0, 0.0, 5.0),
+                ServedFrequencies::new(TEST_FREQ_MHZ, None),
+                Duration::from_secs(300),
+            )
+            .expect_err("preparation must refuse the artifact")
+            .to_string()
+        };
+        let fully = || {
+            create_test_calibration(CalibrationStatus::FullyCalibrated {
+                accuracy_estimate_db: 1.0,
+            })
+        };
+
+        let mut absent = fully();
+        absent.correction_surface = Some(narrow_elevation_correction_surface(2.0));
+        assert!(
+            error_of(absent).contains("calibration_coverage is absent"),
+            "absent coverage must not be treated as covered everywhere"
+        );
+
+        let mut beyond = fully();
+        beyond.calibration_coverage = Some(
+            CalibrationCoverage::builder()
+                .azimuth_range(0.0, 360.0)
+                .elevation_range(0.0, 10.0)
+                .frequency_range(8_000.0, 9_000.0)
+                .num_measurements(100)
+                .has_correction_surface(true)
+                .build()
+                .unwrap(),
+        );
+        install_correction_surface(&mut beyond, narrow_elevation_correction_surface(2.0));
+        assert!(
+            error_of(beyond).contains("not contained by the correction_surface's fitted support"),
+            "coverage wider than support must be refused"
+        );
+
+        // Positive control: the same surface with coverage equal to its support prepares.
+        let mut contained = fully();
+        install_correction_surface(&mut contained, narrow_elevation_correction_surface(2.0));
+        prepare_unsteered(contained);
+    }
+
+    /// Disagreeing status and top-level coverage records are refused by preparation even
+    /// without a surface: the partial-calibration advisories read coverage too (#97).
+    #[test]
+    fn preparation_refuses_disagreeing_coverage_records() {
+        let status_coverage = CalibrationCoverage::boresight_cone((8_000.0, 9_000.0), 5, false);
+        let mut calibration = create_test_calibration(CalibrationStatus::PartiallyCalibrated {
+            accuracy_estimate_db: 1.5,
+            coverage: status_coverage,
+        });
+        calibration.calibration_coverage = Some(CalibrationCoverage::boresight_cone(
+            (8_000.0, 8_500.0),
+            5,
+            false,
+        ));
+
+        let error = PreparedServedGain::prepare(
+            calibration,
+            FeedSteering::new(0.0, 0.0, 5.0),
+            ServedFrequencies::new(TEST_FREQ_MHZ, None),
+            Duration::from_secs(300),
+        )
+        .expect_err("disagreeing coverage records must be refused")
+        .to_string();
+        assert!(error.contains("disagree"), "{error}");
     }
 
     /// A severe feed offset in the FORWARD hemisphere routes to the ray-tracing stub, so
@@ -2534,7 +2511,7 @@ mod tests {
         let mut calibration = create_test_calibration(CalibrationStatus::FullyCalibrated {
             accuracy_estimate_db: 1.0,
         });
-        calibration.correction_surface = Some(constant_correction_surface(0.0));
+        install_correction_surface(&mut calibration, constant_correction_surface(0.0));
 
         let prepared = prepare_with_steering(calibration, severe_offset_steering());
         assert!(
@@ -2596,7 +2573,10 @@ mod tests {
             let mut calibration = create_test_calibration(CalibrationStatus::FullyCalibrated {
                 accuracy_estimate_db: 1.0,
             });
-            calibration.correction_surface = Some(constant_correction_surface(correction_db));
+            install_correction_surface(
+                &mut calibration,
+                constant_correction_surface(correction_db),
+            );
             prepare_unsteered(calibration)
         };
 
@@ -2724,7 +2704,7 @@ mod tests {
         let mut calibration = create_test_calibration(CalibrationStatus::FullyCalibrated {
             accuracy_estimate_db: 1.0,
         });
-        calibration.correction_surface = Some(constant_correction_surface(0.0));
+        install_correction_surface(&mut calibration, constant_correction_surface(0.0));
         let prepared = PreparedServedGain::prepare(
             calibration,
             // A laterally displaced feed plus a pointing/operating frequency offset is

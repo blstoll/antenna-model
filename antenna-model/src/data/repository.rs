@@ -10,19 +10,31 @@ use crate::data::types::{
     CALIBRATION_SCHEMA_VERSION,
 };
 use crate::error::DataError;
-use crate::model::FittedCorrectionSurface;
+use crate::model::CoveredCorrectionSurface;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
+/// The executable correction surface paired with its gating coverage, validated once at
+/// insertion (issues #92, #97). An error here is cached and surfaced per request.
 pub(crate) type PreparedCorrection =
-    std::result::Result<Option<Arc<FittedCorrectionSurface>>, ValidationError>;
+    std::result::Result<Option<Arc<CoveredCorrectionSurface>>, ValidationError>;
+
+/// Prepare an artifact's correction for serving: the surface, paired with coverage that
+/// its fitted support contains. The single constructor both the repository cache and
+/// direct preparation use.
+pub(crate) fn prepare_correction(calibration: &AntennaCalibration) -> PreparedCorrection {
+    calibration
+        .covered_correction_surface()
+        .map(|covered| covered.map(Arc::new))
+}
 
 #[derive(Debug, Clone)]
 struct CalibrationEntry {
     calibration: AntennaCalibration,
-    /// The schema-5 wire surface validated and flattened exactly once when inserted.
+    /// The schema-5 wire surface validated, flattened, and paired with its coverage exactly
+    /// once when inserted.
     correction_surface: PreparedCorrection,
 }
 
@@ -336,12 +348,7 @@ impl CalibrationRepository {
     pub fn add_calibration(&mut self, calibration: AntennaCalibration) {
         let antenna_id = calibration.antenna_id.clone();
         let feed_id = calibration.feed_id.clone();
-        let correction_surface = calibration
-            .correction_surface
-            .as_ref()
-            .map(FittedCorrectionSurface::from_model4d)
-            .transpose()
-            .map(|surface| surface.map(Arc::new));
+        let correction_surface = prepare_correction(&calibration);
         let entry = CalibrationEntry {
             calibration,
             correction_surface,
@@ -526,6 +533,7 @@ fn build_validity_ranges(feed_spec: &FeedSpecConfig) -> ValidityRanges {
 mod tests {
     use super::*;
     use crate::data::types::{CalibrationMetadata, FeedParameters, ReflectorGeometry};
+    use crate::service::test_support::install_correction_surface;
     use std::io::Write;
     use tempfile::{NamedTempFile, TempDir};
 
@@ -684,15 +692,18 @@ mod tests {
     fn prepared_correction_surface_is_shared_across_point_lookups() {
         let mut repo = CalibrationRepository::new();
         let mut calibration = create_test_calibration("antenna_1", "x_band");
-        calibration.correction_surface = Some(BSplineModel4D {
-            coefficients: vec![1.0; 8],
-            shape: [2, 2, 2, 1],
-            knots_azimuth: vec![0.0, 0.0, 360.0, 360.0],
-            knots_elevation: vec![0.0, 0.0, 180.0, 180.0],
-            knots_frequency: vec![8_000.0, 8_000.0, 9_000.0, 9_000.0],
-            knots_temperature: vec![290.0, 290.0, 290.0],
-            spline_order: 2,
-        });
+        install_correction_surface(
+            &mut calibration,
+            BSplineModel4D {
+                coefficients: vec![1.0; 8],
+                shape: [2, 2, 2, 1],
+                knots_azimuth: vec![0.0, 0.0, 360.0, 360.0],
+                knots_elevation: vec![0.0, 0.0, 180.0, 180.0],
+                knots_frequency: vec![8_000.0, 8_000.0, 9_000.0, 9_000.0],
+                knots_temperature: vec![290.0, 290.0, 290.0],
+                spline_order: 2,
+            },
+        );
         repo.add_calibration(calibration);
 
         let prepared = || {

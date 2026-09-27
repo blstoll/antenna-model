@@ -19,7 +19,7 @@
 
 use antenna_core::data::loader::encode_calibration_artifact;
 use antenna_core::data::types::{
-    AngularResolution, AntennaCalibration, AntennaCalibrationBuilder, CalibrationCoverageBuilder,
+    AngularResolution, AntennaCalibration, AntennaCalibrationBuilder, CalibrationCoverage,
     CalibrationMetadataBuilder, CalibrationStatus, FeedParameters as DataFeedParameters,
     MeasurementDensity, MeshParameters as DataMeshParameters, ParameterSource,
     PhysicalAntennaConfigBuilder, ReflectorGeometry as DataReflectorGeometry,
@@ -73,49 +73,24 @@ pub enum ArtifactExportError {
 /// Result alias for this module.
 pub type Result<T> = std::result::Result<T, ArtifactExportError>;
 
-/// Extents of the measurement set used to populate validity ranges and coverage.
-#[derive(Debug, Clone, Copy)]
-struct MeasurementExtents {
-    e_clock_min_max: (f64, f64),
-    e_cone_min_max: (f64, f64),
-    frequency_min_max: (f64, f64),
-    temperature_mid: f64,
-    temperature_min_max: (f64, f64),
-}
-
-/// Compute measurement extents (E-clock/E-cone/frequency/temperature) from the points.
-fn measurement_extents(measurements: &[MeasurementPoint]) -> Result<MeasurementExtents> {
+/// The measured temperature extent `(min, max)`.
+///
+/// Temperature is the only extent export reads from `measurements`. The E-clock, E-cone
+/// and frequency extents come from the fitted surface's measured domain instead
+/// ([`CorrectionSurface::measured_domain`], issue #97): recomputing them here could state
+/// coverage the surface was never fitted over.
+fn temperature_extent(measurements: &[MeasurementPoint]) -> Result<(f64, f64)> {
     if measurements.is_empty() {
         return Err(ArtifactExportError::InvalidSurface(
             "no measurements provided for extent computation".to_string(),
         ));
     }
-
-    let mut e_clock = (f64::INFINITY, f64::NEG_INFINITY);
-    let mut e_cone = (f64::INFINITY, f64::NEG_INFINITY);
-    let mut freq = (f64::INFINITY, f64::NEG_INFINITY);
-    let mut temp = (f64::INFINITY, f64::NEG_INFINITY);
-
-    for p in measurements {
-        e_clock.0 = e_clock.0.min(p.e_clock_deg);
-        e_clock.1 = e_clock.1.max(p.e_clock_deg);
-        e_cone.0 = e_cone.0.min(p.e_cone_deg);
-        e_cone.1 = e_cone.1.max(p.e_cone_deg);
-        freq.0 = freq.0.min(p.frequency_mhz);
-        freq.1 = freq.1.max(p.frequency_mhz);
-        temp.0 = temp.0.min(p.temperature_k);
-        temp.1 = temp.1.max(p.temperature_k);
-    }
-
-    let temperature_mid = 0.5 * (temp.0 + temp.1);
-
-    Ok(MeasurementExtents {
-        e_clock_min_max: e_clock,
-        e_cone_min_max: e_cone,
-        frequency_min_max: freq,
-        temperature_mid,
-        temperature_min_max: temp,
-    })
+    Ok(measurements
+        .iter()
+        .map(|p| p.temperature_k)
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), t| {
+            (lo.min(t), hi.max(t))
+        }))
 }
 
 /// Physical parameters needed to assemble the exported artifact.
@@ -157,7 +132,13 @@ pub struct ExportPhysicalParams {
 /// * `data_source` - Source description (e.g. `file://...`).
 /// * `physical` - Tuned/nominal physical parameters.
 /// * `surface` - The fitted 3D correction surface.
-/// * `measurements` - All measurement points (for extents / coverage).
+/// * `measurements` - All measurement points (for the count and temperature extent).
+///
+/// # Coverage and support are one measured domain
+///
+/// Validity ranges and calibration coverage are written from `surface`'s measured domain —
+/// the value the fit clamped its knot bounds to — so full-mode coverage equals the
+/// surface's fitted support by construction (issue #97).
 /// * `rmse_db` / `r_squared` - Combined-model quality metrics (from validation).
 /// * `physics_only_rmse_db` - Physics-only RMSE before correction.
 /// * `parameters_tuned` - Whether physical parameters were tuned.
@@ -198,7 +179,8 @@ pub fn export_full_calibration(
     physics_only_rmse_db: f64,
     parameters_tuned: bool,
 ) -> Result<AntennaCalibration> {
-    let extents = measurement_extents(measurements)?;
+    let (t_meas_lo, t_meas_hi) = temperature_extent(measurements)?;
+    let domain = surface.measured_domain();
 
     // Derived from the diameter this function stamps, so the two cannot disagree.
     let angular_resolution: AngularResolution =
@@ -211,7 +193,6 @@ pub fn export_full_calibration(
 
     // Build the 4D correction surface over a flat temperature interval enclosing
     // the measured temperatures (with a 1 K pad to guarantee a nonzero interval).
-    let (t_meas_lo, t_meas_hi) = extents.temperature_min_max;
     let t_lo = t_meas_lo - 1.0;
     let t_hi = t_meas_hi + 1.0;
     let correction = surface.fitted().to_model4d(t_lo, t_hi)?;
@@ -247,7 +228,7 @@ pub fn export_full_calibration(
             reason: e,
         })?;
 
-    // Validity ranges from measurement extents.
+    // Validity ranges from the measured domain.
     //
     // The served elevation is a **polar angle from boresight** and is never negative
     // (`compute_emitter_direction_with_attitude`), so the E-cone axis reaching this point
@@ -265,7 +246,7 @@ pub fn export_full_calibration(
     // Failing loudly here rather than clamping is deliberate: a clamp cannot distinguish
     // "already in the right convention" from "silently truncated", which is exactly how this
     // went unseen. If it fires, the input never went through the normalization above.
-    let (cone_lo, cone_hi) = extents.e_cone_min_max;
+    let (cone_lo, cone_hi) = domain.e_cone_deg;
     if !(0.0..=90.0).contains(&cone_lo) || !(0.0..=90.0).contains(&cone_hi) || cone_lo > cone_hi {
         return Err(ArtifactExportError::BuildFailed {
             what: "validity ranges".to_string(),
@@ -279,28 +260,18 @@ pub fn export_full_calibration(
     // `azimuth_range`/`elevation_range` are the artifact's wire names for the E-clock and
     // E-cone extents, the same translation the core wire adapter makes for the knot vectors.
     let validity_ranges = ValidityRangesBuilder::default()
-        .azimuth_range(extents.e_clock_min_max.0, extents.e_clock_min_max.1)
+        .azimuth_range(domain.e_clock_deg.0, domain.e_clock_deg.1)
         .elevation_range(cone_lo, cone_hi)
-        .frequency_range(extents.frequency_min_max.0, extents.frequency_min_max.1)
-        .temperature(extents.temperature_mid)
+        .frequency_range(domain.frequency_mhz.0, domain.frequency_mhz.1)
+        .temperature(0.5 * (t_meas_lo + t_meas_hi))
         .build()
         .map_err(|e| ArtifactExportError::BuildFailed {
             what: "validity ranges".to_string(),
             reason: e,
         })?;
 
-    // Coverage from measurement extents.
-    let coverage = CalibrationCoverageBuilder::default()
-        .azimuth_range(extents.e_clock_min_max.0, extents.e_clock_min_max.1)
-        .elevation_range(cone_lo, cone_hi)
-        .frequency_range(extents.frequency_min_max.0, extents.frequency_min_max.1)
-        .num_measurements(measurements.len())
-        .has_correction_surface(true)
-        .build()
-        .map_err(|e| ArtifactExportError::BuildFailed {
-            what: "calibration coverage".to_string(),
-            reason: e,
-        })?;
+    // Coverage from the same measured domain as the surface's support (issue #97).
+    let coverage = CalibrationCoverage::from_domain(domain, measurements.len(), true);
 
     let calibration_status = CalibrationStatus::FullyCalibrated {
         accuracy_estimate_db: served_behavior_rmse_db,
@@ -610,5 +581,62 @@ mod tests {
         let cov = cal.calibration_coverage.expect("coverage present");
         assert!(cov.has_correction_surface);
         assert_eq!(cov.num_measurements, measurements.len());
+    }
+
+    /// Issue #97: full mode states surface bounds and coverage from ONE measured-domain
+    /// value — the one the fit placed its knot bounds from — so the exported coverage equals
+    /// the exported surface's support exactly. It is not re-derived from the `measurements`
+    /// argument: here those extend past the fitted data on every axis, and an independent
+    /// recomputation would write coverage the surface cannot evaluate over.
+    #[test]
+    fn full_mode_coverage_and_support_are_one_measured_domain() {
+        let (surface, _freq0) = make_test_surface();
+        let measured = surface.measured_domain();
+        assert_eq!(
+            measured,
+            surface.layout().support(),
+            "the fit places each axis's bounds at the measured domain's"
+        );
+
+        let wider: Vec<MeasurementPoint> = [
+            MeasurementPoint::new(measured.e_clock_deg.0, 0.0, 7_900.0, 0.0, 290.0),
+            MeasurementPoint::new(359.0, 12.0, 8_500.0, 0.0, 290.0),
+        ]
+        .into_iter()
+        .collect();
+        let physical = ExportPhysicalParams {
+            diameter_m: 3.7,
+            focal_length_m: 1.85,
+            f_over_d_ratio: 0.5,
+            surface_rms_mm: 1.2,
+            feed_position_m: (0.0, 0.0, 0.0),
+            q_factor: 8.0,
+            phase_center_offset_m: 0.0,
+            asymmetry_factor: 1.0,
+            mesh: None,
+        };
+
+        let cal = export_full_calibration(
+            "test_antenna",
+            "x_band",
+            "Test 3.7m",
+            "file://test.csv".to_string(),
+            &physical,
+            &surface,
+            &wider,
+            0.4,
+            0.99,
+            0.9,
+            true,
+        )
+        .expect("export should succeed");
+
+        cal.validate().expect("artifact must validate");
+        let covered = cal
+            .covered_correction_surface()
+            .expect("coverage is contained by support")
+            .expect("full mode writes a surface");
+        assert_eq!(covered.coverage().domain(), measured);
+        assert_eq!(covered.surface().layout().support(), measured);
     }
 }

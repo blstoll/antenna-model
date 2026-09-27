@@ -31,11 +31,11 @@ use tracing::{debug, info};
 use crate::design_specs_loader::{DesignSpecs, TuningBounds};
 use crate::frequency_correction;
 use antenna_core::data::types::{
-    AntennaCalibration, AntennaCalibrationBuilder, BSplineModel4D, CalibrationCoverageBuilder,
-    CalibrationMetadataBuilder, CalibrationStatus, FeedParameters as DataFeedParameters,
-    MeasurementDensity, MeshParameters as DataMeshParameters, ParameterSource,
-    PhysicalAntennaConfigBuilder, ReflectorGeometry as DataReflectorGeometry,
-    ValidityRangesBuilder, BORESIGHT_COVERAGE_CONE_DEG, CALIBRATION_SCHEMA_VERSION,
+    AntennaCalibration, AntennaCalibrationBuilder, BSplineModel4D, CalibrationCoverage,
+    CalibrationMetadataBuilder, FeedParameters as DataFeedParameters, MeasurementDensity,
+    MeshParameters as DataMeshParameters, ParameterSource, PhysicalAntennaConfigBuilder,
+    ReflectorGeometry as DataReflectorGeometry, ValidityRangesBuilder, BORESIGHT_COVERAGE_CONE_DEG,
+    CALIBRATION_SCHEMA_VERSION,
 };
 use antenna_core::model::{
     compute_g_over_t, AntennaConfigurationBuilder, FeedParametersBuilder, IntegrationParams,
@@ -780,22 +780,16 @@ pub fn build_calibration_artifact(
         .build()
         .map_err(|e| anyhow::anyhow!("Failed to build validity ranges: {}", e))?;
 
-    // Build calibration coverage (boresight only) — same cone encoding, and this is
-    // the one the evaluator actually gates the correction surface on.
-    let coverage = CalibrationCoverageBuilder::default()
-        .azimuth_range(0.0, 360.0)
-        .elevation_range(0.0, BORESIGHT_COVERAGE_CONE_DEG)
-        .frequency_range(freq_range.0, freq_range.1)
-        .num_measurements(measurements.points.len())
-        .has_correction_surface(calibration_result.frequency_correction.is_some())
-        .build()
-        .map_err(|e| anyhow::anyhow!("Failed to build coverage: {}", e))?;
-
-    // Build calibration status
-    let calibration_status = CalibrationStatus::PartiallyCalibrated {
-        accuracy_estimate_db: 1.5, // ±1.5 dB for boresight
-        coverage: coverage.clone(),
-    };
+    // Calibration coverage (boresight only) — same cone encoding, and this is the one the
+    // evaluator actually gates the correction surface on. It is deliberately narrower than
+    // the frequency correction's flat spatial support (`frequency_correction`'s axis
+    // constants): evaluable everywhere, measured only on axis. Coverage ⊆ support is the
+    // artifact invariant, checked at load (issue #97).
+    let coverage = CalibrationCoverage::boresight_cone(
+        freq_range,
+        measurements.points.len(),
+        calibration_result.frequency_correction.is_some(),
+    );
 
     // Build metadata
     let notes = format!(
@@ -832,8 +826,8 @@ pub fn build_calibration_artifact(
         .metadata(metadata)
         .physical_config(physical_config)
         .validity_ranges(validity_ranges)
-        .calibration_status(calibration_status)
-        .calibration_coverage(coverage);
+        // Status coverage and `calibration_coverage` are written from this one value.
+        .partially_calibrated(1.5, coverage); // ±1.5 dB for boresight
 
     // Attach frequency correction surface if available
     if let Some(ref correction) = calibration_result.frequency_correction {
@@ -1012,6 +1006,61 @@ frequency_mhz,g_over_t_db,temperature_k
         assert_eq!(
             artifact.physical_config.feed.asymmetry_factor, 1.1,
             "the artifact must carry the declared design asymmetry, not a symmetric default"
+        );
+    }
+
+    /// Issue #97: boresight coverage is the narrow on-axis cone, deliberately a *strict*
+    /// subset of the frequency correction's flat spatial support — the correction is
+    /// evaluable everywhere but measured only on boresight. The artifact must load, carry
+    /// one coverage value in both records, and state coverage the support contains.
+    #[test]
+    fn boresight_coverage_is_a_strict_subset_of_its_correction_support() {
+        let specs = create_test_design_specs();
+        let measurements = create_test_measurements();
+        let mut result = calibrate_boresight(&specs, "x_band", &measurements, Some(20))
+            .expect("boresight calibration");
+        // Force a correction regardless of how well the tuner fitted the synthetic data.
+        let frequencies: Vec<f64> = measurements
+            .points
+            .iter()
+            .map(|p| p.frequency_mhz)
+            .collect();
+        result.frequency_correction = Some(
+            crate::frequency_correction::fit_frequency_correction(
+                &frequencies,
+                &[0.3, -0.2, 0.1, 0.4],
+            )
+            .expect("frequency correction"),
+        );
+
+        let artifact = build_calibration_artifact(
+            &specs,
+            "x_band",
+            &measurements,
+            &result,
+            "test".to_string(),
+        )
+        .expect("build artifact");
+
+        artifact.validate().expect("boresight artifact must load");
+        let covered = artifact
+            .covered_correction_surface()
+            .expect("coverage is contained by support")
+            .expect("a correction surface was attached");
+        let coverage = covered.coverage().domain();
+        let support = covered.surface().layout().support();
+
+        assert!(covered.coverage().is_boresight_only());
+        assert_eq!(coverage.frequency_mhz, support.frequency_mhz);
+        assert_eq!(coverage.e_clock_deg, support.e_clock_deg);
+        assert!(
+            coverage.e_cone_deg.1 < support.e_cone_deg.1,
+            "coverage must be the narrow cone, not the flat support: {coverage:?} vs {support:?}"
+        );
+        assert_eq!(
+            artifact.coverage(),
+            Ok(Some(covered.coverage())),
+            "status and top-level coverage are one value"
         );
     }
 

@@ -1919,6 +1919,18 @@ repeated more than `order - 1` times. The last three were previously enforced on
 fitter. Every producer in `calibrate` already complied, so no artifact it wrote is newly
 rejected, and the stamp stays 5.1 by decision.
 
+**#97 (2026-09-26) made calibration coverage an artifact invariant, again with no schema
+bump.** Coverage (where measurements justify a correction) and fitted support (where the
+spline can be evaluated) are different claims, related by containment, not equality: an
+artifact with a correction surface must record `calibration_coverage`, and every coverage
+range must lie within the matching support range, bounds inclusive. A `PartiallyCalibrated`
+status's coverage must equal `calibration_coverage`. Each violation — absent coverage,
+coverage beyond support, disagreeing duplicates — is rejected at load with the field named;
+absent coverage is no longer read as "covered everywhere". Full mode writes coverage from the
+same measured domain the fit clamps its knot bounds to, so its extents are equal; boresight
+mode's on-axis cone is a strict subset of its flat frequency correction's support. Both
+producers already complied, so no artifact `calibrate` wrote is newly rejected.
+
 **5.0 (D21, 2026-08-04) is the first bump here that fixes no wrong number.** It added
 `CalibrationMetadata.angular_resolution` — what the fitted correction surface's knots can
 resolve against the antenna's own `λ/D` lobe period. Every 4.0 artifact means exactly what it

@@ -655,7 +655,7 @@ CI drift test, so a code cannot reach a client undocumented.
 |---|---|
 | `extrapolated` | Compatibility-reserved wire member. Correction-surface evaluation no longer produces this warning: outside fitted support has no numeric correction. |
 | `out_of_coverage` | The query falls outside the region a partially calibrated antenna was measured over; the physics model is being extrapolated into it. |
-| `correction_not_applied` | The antenna has a correction surface but it was not applied because the query fell outside recorded coverage or fitted support. The message names the actual reason; returned gain is raw physics. |
+| `correction_not_applied` | The antenna has a correction surface but it was not applied because the query fell outside its recorded calibration coverage; returned gain is raw physics. |
 | `uncalibrated` | The antenna is modelled from design specifications, not measurements. The message carries the absolute-gain and loss accuracy estimates. |
 | `partially_calibrated` | The antenna's calibration covers only part of its operating envelope. The message carries the accuracy estimate. |
 | `off_axis_unvalidated` | The query is more than ~3× the first-null angle (≈1.6·λ/D — beamwidth-relative, not a fixed angle) off boresight on an antenna served with uncorrected physics. See the note below. |
@@ -665,7 +665,7 @@ CI drift test, so a code cannot reach a client undocumented.
 | `severe_feed_offset` | Edge-case analysis found the feed displaced more than 0.5·f from the focus. Reports the *geometry*; `ray_trace_degraded` reports what the model did about it. |
 | `feed_offset_spillover_unmodeled` | The feed offset is in the 0.3·f–0.5·f band, where the exact coma phase still applies but spillover efficiency is not modelled. |
 | `spillover_significant` | Estimated feed spillover exceeds 10% of radiated power, enough to reduce aperture efficiency materially. |
-| `points_extrapolated` | `/api/v1/heatmap` grid summary: how many successful point dispositions used physics outside a partially calibrated antenna's measured region, outside correction coverage, or outside fitted support. The count comes from the served disposition, never from warning codes. |
+| `points_extrapolated` | `/api/v1/heatmap` grid summary: how many successful point dispositions used physics outside a partially calibrated antenna's measured region or outside correction coverage. The count comes from the served disposition, never from warning codes. |
 | `point_computation_failed` | At least one grid point (`/api/v1/heatmap`) or cell (`/api/v1/h3-heatmap`) could not be evaluated. Those are counted in `metadata.failed_points` and carry the failure sentinel rather than a gain. |
 
 **`off_axis_unvalidated` in detail.** Beyond the validated main-beam region the returned
@@ -695,7 +695,7 @@ Because the whole object is the dedup key, messages reachable from these two end
 are held to a stricter rule than the general "messages are not the contract": they may
 interpolate values that are constant across the grid (an antenna's accuracy estimate, a
 feed offset in units of `f`) but never values that vary per query. Correction-not-applied
-messages name the bounded reason (coverage or fitted support), not per-point coordinates.
+messages name the bounded reason (calibration coverage), not per-point coordinates.
 Expect at most a handful of entries here, not one per cell.
 
 ### Status policy

@@ -432,6 +432,7 @@ fn compute_cell_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::service::test_support::install_correction_surface;
     use antenna_core::data::types::{
         AntennaCalibration, BSplineModel4D, CalibrationCoverage, CalibrationMetadata,
         CalibrationStatus, FeedParameters, MeshParameters, PhysicalAntennaConfig,
@@ -570,7 +571,8 @@ mod tests {
             shape: [2, 2, 2, 2],
             // Wide ranges that encompass any az/el from the test geometry.
             knots_azimuth: vec![0.0, 0.0, 360.0, 360.0],
-            knots_elevation: vec![0.0, 0.0, 90.0, 90.0],
+            // The whole polar range, so fixture coverage up to 180° is contained (#97).
+            knots_elevation: vec![0.0, 0.0, 180.0, 180.0],
             // Cover the test frequency (8400 MHz).
             knots_frequency: vec![8000.0, 8000.0, 9000.0, 9000.0],
             // Cover the temperature constant used by the evaluator (290 K).
@@ -606,12 +608,12 @@ mod tests {
         // "Base": a 0 dB (no-op) constant correction surface, so apply_spillover
         // is OFF — same as the +2 dB fixture below, isolating the surface delta.
         let mut cal_base = make_h3_test_calibration();
-        cal_base.correction_surface = Some(constant_surface_db(0.0));
-        cal_base.calibration_coverage = None; // unrestricted → correction applies everywhere
+        // Coverage is the surface's whole support, so the correction applies at every cell.
+        install_correction_surface(&mut cal_base, constant_surface_db(0.0));
 
-        // Same calibration but with a +2 dB correction surface and unrestricted coverage.
+        // Same calibration and coverage, with a +2 dB correction surface.
         let mut cal_corr = cal_base.clone();
-        cal_corr.correction_surface = Some(constant_surface_db(2.0));
+        install_correction_surface(&mut cal_corr, constant_surface_db(2.0));
 
         // Disable the cache so each run computes fresh (avoids cross-test key collisions).
         let cache1 = GainCache::new(false, 1);
@@ -679,13 +681,12 @@ mod tests {
     #[test]
     fn h3_mixed_coverage_reports_partial_correction() {
         let mut calibration = make_h3_test_calibration();
-        calibration.correction_surface = Some(constant_surface_db(2.0));
-        calibration.calibration_coverage = None;
+        install_correction_surface(&mut calibration, constant_surface_db(2.0));
 
         let mut request = make_h3_test_request();
         request.n_rings = 1;
 
-        // Discover one deterministic successful cell direction with unrestricted coverage,
+        // Discover one deterministic successful cell direction with full-support coverage,
         // then narrow coverage to exactly that point. The repeated geometry calculation is
         // deterministic, so one cell remains corrected while the others are excluded.
         let baseline = compute_h3_link_budget(
@@ -1025,7 +1026,7 @@ mod tests {
         });
 
         let mut calibrated = make_h3_test_calibration();
-        calibrated.correction_surface = Some(constant_surface_db(2.0));
+        install_correction_surface(&mut calibrated, constant_surface_db(2.0));
         calibrated.calibration_coverage = Some(full_coverage);
 
         let mut partial = make_h3_test_calibration();
@@ -1033,7 +1034,7 @@ mod tests {
             accuracy_estimate_db: 1.5,
             coverage: partial_coverage.clone(),
         });
-        partial.correction_surface = Some(constant_surface_db(2.0));
+        install_correction_surface(&mut partial, constant_surface_db(2.0));
         partial.calibration_coverage = Some(partial_coverage);
 
         let mut spatially_outside = make_h3_test_calibration();
@@ -1041,7 +1042,7 @@ mod tests {
             accuracy_estimate_db: 1.5,
             coverage: spatially_disjoint_coverage.clone(),
         });
-        spatially_outside.correction_surface = Some(constant_surface_db(2.0));
+        install_correction_surface(&mut spatially_outside, constant_surface_db(2.0));
         spatially_outside.calibration_coverage = Some(spatially_disjoint_coverage);
 
         for (name, calibration, with_squint, correction_applied, warning_codes) in [
@@ -1167,7 +1168,7 @@ mod tests {
     #[test]
     fn sequential_and_parallel_traversals_are_equivalent() {
         let mut calibration = make_h3_test_calibration();
-        calibration.correction_surface = Some(constant_surface_db(2.0));
+        install_correction_surface(&mut calibration, constant_surface_db(2.0));
 
         let mut request = make_h3_test_request();
         request.n_rings = 3;
@@ -1358,7 +1359,7 @@ mod tests {
         // A corrected rear direction does not take the uncorrected floor-only shortcut,
         // so it also reaches the stub and retains the warning on a cache hit.
         let mut corrected_rear = make_h3_test_calibration();
-        corrected_rear.correction_surface = Some(constant_surface_db(2.0));
+        install_correction_surface(&mut corrected_rear, constant_surface_db(2.0));
         let corrected_cache = GainCache::new(true, 100);
         for pass in ["cold", "hot"] {
             let response = compute_h3_link_budget(

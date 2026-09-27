@@ -286,8 +286,9 @@ pub struct ComputationMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub correction_surface_ms: Option<f64>,
 
-    /// Whether a present correction surface was not applied because the query was
-    /// outside calibration coverage or fitted support.
+    /// Whether the served gain is physics extrapolated outside calibration coverage: a
+    /// present correction surface was not applied there, or a partially calibrated
+    /// antenna was queried outside its measured region.
     pub extrapolated: bool,
 
     /// Physical spillover loss folded into `gain_db`, in dB (a small **negative**

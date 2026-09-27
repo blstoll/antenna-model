@@ -78,6 +78,10 @@ Recent bumps cover the versioning cases, and they moved the axes differently:
   multiplicity `== order`, interior `<= order-1`) moved into the core layout, so the loader
   enforces the invariant set the fitter builds to. Every producer already complied, so no
   artifact this codebase wrote is newly rejected; bumping for it was decided against.
+  **#97 tightened loading the same way, also unbumped:** a correction surface requires a
+  `calibration_coverage` record, coverage ⊆ fitted support per axis (inclusive), and a
+  `PartiallyCalibrated` status's coverage must equal `calibration_coverage`. See "Coverage
+  and support" below.
 - **D21 (5.0 / container 4)** added `metadata.angular_resolution` and **fixes no wrong number
   at all** — every 4.0 artifact means what it said and no consumer reads the new field. But
   postcard is positional, so a 4.0 payload is short by the `Option` discriminant and everything
@@ -255,6 +259,26 @@ See "Artifact wire format" above.
 
 Queries outside calibrated ranges generate warnings but still return values (extrapolated).
 The artifact's validity/coverage elevation ranges are polar-angle ranges (see D26 above).
+
+## Coverage and support (issue #97)
+
+**Coverage** says where measurements justify applying a correction; **support** says where
+the spline can be evaluated. The invariant is containment — `coverage ⊆ support` — never
+equality, and a surface without coverage is rejected, not treated as covered everywhere.
+
+- **Full mode** clamps each axis's knot bounds to one measured domain
+  (`CorrectionSurface::measured_domain`) and `export_full_calibration` writes coverage and
+  validity ranges from that same value. **Do not recompute extents from `measurements` in
+  export** — the test `full_mode_coverage_and_support_are_one_measured_domain` passes it wider
+  data on purpose.
+- **Boresight mode** writes `CalibrationCoverage::boresight_cone` — narrower than its flat
+  support by design — through `AntennaCalibrationBuilder::partially_calibrated`, which writes
+  the status's coverage and `calibration_coverage` from one value.
+- The service prepares a `CoveredCorrectionSurface` (surface + coverage, constructible only
+  when contained). Its served law is `Unavailable` / `OutsideCoverage` / `Applied`; the
+  served `OutsideSupport` arm is a logged, defensive invariant-violation branch.
+  `FittedCorrectionSurface::evaluate` still returns `OutsideSupport` for direct queries —
+  cross-validation depends on it.
 
 ## No system BLAS — the build is pure Rust
 
