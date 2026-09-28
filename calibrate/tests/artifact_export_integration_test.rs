@@ -3,9 +3,9 @@
 //! This exercises the on-disk round-trip that matters for the service:
 //! build a 3D correction surface, convert + assemble an `AntennaCalibration`,
 //! write it with the ANTC header used by full mode, then load it back through
-//! the service loader (`antenna_core::data::loader::load_calibration_artifact`).
+//! the service loader (`antenna_core::artifact::read`).
 
-use antenna_core::data::loader::load_calibration_artifact;
+use antenna_core::artifact;
 use antenna_core::model::FittedCorrectionSurface;
 use antenna_core::types::CALIBRATION_SCHEMA_VERSION;
 use calibrate::artifact_export::{export_full_calibration, ExportPhysicalParams};
@@ -54,7 +54,7 @@ fn build_measurements() -> Vec<MeasurementPoint> {
 
 /// Write an artifact through the production writer; never hand-roll the ANTC header (D2).
 fn write_antc(calibration: &antenna_core::types::AntennaCalibration, path: &std::path::Path) {
-    calibrate::artifact_export::write_calibration_artifact(calibration, path).expect("write");
+    artifact::write(path, calibration).expect("write");
 }
 
 #[test]
@@ -109,7 +109,7 @@ fn test_full_export_loads_via_service() {
     write_antc(&calibration, tmp.path());
 
     // Load via the service loader (exercises ANTC + CRC + postcard + validate).
-    let loaded = load_calibration_artifact(tmp.path()).expect("service load");
+    let loaded = artifact::read(tmp.path()).expect("service load");
 
     assert_eq!(loaded.antenna_id, "integ_antenna");
     assert_eq!(loaded.feed_id, "x_band");
@@ -300,7 +300,7 @@ fn the_angular_resolution_assessment_round_trips_through_the_artifact() {
 
     let tmp = tempfile::NamedTempFile::new().expect("tmp");
     write_antc(&calibration, tmp.path());
-    let loaded = load_calibration_artifact(tmp.path()).expect("service load");
+    let loaded = artifact::read(tmp.path()).expect("service load");
 
     let served = loaded
         .metadata
@@ -383,7 +383,7 @@ fn the_stamped_diameter_is_the_one_the_assessment_was_made_against() {
 
     let tmp = tempfile::NamedTempFile::new().expect("tmp");
     write_antc(&calibration, tmp.path());
-    let loaded = load_calibration_artifact(tmp.path()).expect("service load");
+    let loaded = artifact::read(tmp.path()).expect("service load");
 
     let stamped_diameter = loaded.physical_config.reflector.diameter_m;
     assert_eq!(stamped_diameter, DIAMETER_M);
@@ -477,7 +477,7 @@ fn export_write_load(
 
     let tmp = tempfile::NamedTempFile::new().expect("tmp");
     write_antc(&calibration, tmp.path());
-    load_calibration_artifact(tmp.path())
+    artifact::read(tmp.path())
         .expect("service load")
         .correction_surface
         .expect("correction surface present")

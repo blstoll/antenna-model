@@ -2,7 +2,7 @@
 description: Calibration pipeline, artifact schema/container version axes, and wire-format rules for calibrate and the artifact data layer.
 paths:
   - "calibrate/**"
-  - "antenna-core/src/data/**"
+  - "antenna-core/src/artifact/**"
   - "antenna-core/src/types/**"
   - "calibration_data/**"
   - "scripts/generate-cr159703-artifact.sh"
@@ -54,11 +54,15 @@ wrong artifact.
 ## Artifact wire format
 
 An artifact is an `AntennaCalibration` encoded with **postcard** (documented, versioned wire
-format), wrapped in the ANTC header (magic + version + CRC32 + length).
-`artifact_export::write_calibration_artifact` is the tool's **only** artifact writer, shared by
-full and boresight mode (D2).
+format), wrapped in the ANTC header (magic + version + CRC32 + length). `antenna_core::artifact`
+owns both directions (#106): `decode`/`encode` on bytes, `read`/`write` on files. `decode` is
+the extension point for any new loader (S3, HTTP) — never re-implement a check beside it.
+`artifact::write` is `calibrate`'s **only** artifact writer, shared by full and boresight mode
+(D2). `ArtifactError` separates `Framing`, `Version`, `Io`, and `Validation(ValidationError)`,
+so a caller can tell a corrupt file from a sound file describing an invalid model.
 
-**Two version axes; the loader enforces both:**
+**Two version axes; `decode` enforces both,** in order: framing, CRC, container, decode,
+schema, validation. Validation never runs on a foreign schema major.
 
 - **Container** — the ANTC header `u32` (`ANTC_ARTIFACT_VERSION` = **4**), readable before the
   decode.
@@ -99,18 +103,16 @@ Recent bumps cover the versioning cases, and they moved the axes differently:
 - **Producers must stamp the constant, never a literal.** Three carried `"2.0"` by hand and
   would have drifted straight past the bump; D23 found a *fourth* hand-rolled ANTC writer in a
   test carrying a literal `2u32`.
-- **There is exactly one definition of the framing** (D27):
-  `antenna_core::data::loader::encode_calibration_artifact`, beside the loader that reads it.
-  `write_calibration_artifact` wraps it and adds file I/O; test helpers use it too. **Do not lay
-  the header out by hand** — that is how the repo accumulated a fourth copy and then a fifth
-  that wrote no header at all.
+- **There is exactly one definition of the framing** (D27): `antenna_core::artifact::encode`,
+  beside the `decode` that reads it. `write` wraps it with file I/O; test helpers use it too.
+  **Do not lay the header out by hand.**
 - **ANTC framing is required on load.** The legacy headerless fallback is gone.
 - **Do NOT add `#[serde(skip_serializing_if)]` / `skip` / `flatten` to any serialized
   calibration type** — postcard is positional and non-self-describing, so those attributes
   silently corrupt the format. See the module docs of `antenna_core::types`.
 
-Read `data/loader.rs`'s module docs and `docs/calibration-workflow-guide.md` §10.5.1 before
-touching either.
+Read `antenna_core::artifact`'s module docs and `docs/calibration-workflow-guide.md` §10.5.1
+before touching either.
 
 ## No `.bin` artifacts ship in-repo (D9, decided 2026-08-16)
 
@@ -263,9 +265,9 @@ The artifact's validity/coverage elevation ranges are polar-angle ranges (see D2
 
 ## Artifacts are validated at construction (#105)
 
-An `AntennaCalibration` comes only from `AntennaCalibrationBuilder::build` or the loader, and
-both run the one validation `antenna_core::artifact` owns — so consumers never re-check, and
-there is deliberately **no public validate function**. The service's repository inserts
+An `AntennaCalibration` comes only from `AntennaCalibrationBuilder::build` or
+`artifact::decode`, and both run the one validation `antenna_core::artifact` owns — so
+consumers never re-check, and there is deliberately **no public validate function**. The service's repository inserts
 without validating. Tests that need a valid artifact start from one builder per crate —
 `antenna_core::types::fixtures` in core, `service::test_support::calibration_builder` in
 `antenna-model` — and may still mutate one afterwards to prove a rejection. See

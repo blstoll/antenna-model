@@ -12,7 +12,10 @@
 //! - [`AntennaModelError`]: Top-level error type encompassing all error categories
 
 use std::io;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
+
+use crate::artifact::ArtifactError;
 
 /// Top-level error type for the Antenna Model Service
 ///
@@ -112,9 +115,13 @@ pub enum DataError {
         source: io::Error,
     },
 
-    /// General data loading error
-    #[error("failed to load calibration from {path}: {reason}")]
-    LoadError { path: String, reason: String },
+    /// A calibration artifact file could not be read or decoded into a valid artifact.
+    #[error("{}", artifact_failure(path, source))]
+    Artifact {
+        path: PathBuf,
+        #[source]
+        source: ArtifactError,
+    },
 
     /// Data validation error
     #[error("validation failed for {path}: {reason}")]
@@ -123,6 +130,14 @@ pub enum DataError {
     /// Configuration error during data loading
     #[error("configuration error: {reason}")]
     ConfigurationError { reason: String },
+}
+
+/// [`ArtifactError::Io`] already names the path; every other artifact failure needs it.
+fn artifact_failure(path: &Path, source: &ArtifactError) -> String {
+    match source {
+        ArtifactError::Io { .. } => source.to_string(),
+        _ => format!("calibration artifact {}: {source}", path.display()),
+    }
 }
 
 /// Errors related to API/HTTP operations
@@ -626,6 +641,24 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_artifact_failure_names_its_path_exactly_once() {
+        let path = PathBuf::from("calibration_data/antenna_1.bin");
+        let io = ArtifactError::Io {
+            path: path.clone(),
+            source: io::Error::from(io::ErrorKind::NotFound),
+        };
+        let framing = ArtifactError::Framing(crate::artifact::FramingError::MissingHeader);
+        for source in [io, framing] {
+            let message = DataError::Artifact {
+                path: path.clone(),
+                source,
+            }
+            .to_string();
+            assert_eq!(message.matches("antenna_1.bin").count(), 1, "{message}");
+        }
+    }
 
     #[test]
     fn test_data_error_display() {

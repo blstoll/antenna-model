@@ -6,7 +6,7 @@
 //! `boresight_calibration::build_calibration_artifact`, and both must write the same ANTC
 //! container framing — container stamp and CRC — and load through the *service's* loader.
 
-use antenna_core::data::loader::{ANTC_ARTIFACT_VERSION, ANTC_HEADER_LEN, ANTC_MAGIC};
+use antenna_core::artifact::{ANTC_ARTIFACT_VERSION, ANTC_HEADER_LEN, ANTC_MAGIC};
 use antenna_core::types::{
     CalibrationStatus, BORESIGHT_COVERAGE_CONE_DEG, CALIBRATION_SCHEMA_VERSION,
 };
@@ -165,7 +165,7 @@ fn cli_boresight_mode_writes_a_service_loadable_artifact() {
 
     // The point of this assertion: the artifact must load through the SERVICE's loader,
     // not just calibrate's own round-trip code.
-    let calibration = antenna_core::data::loader::load_calibration_artifact(&run.artifact)
+    let calibration = antenna_core::artifact::read(&run.artifact)
         .expect("the service loader must accept a freshly written boresight artifact");
 
     assert_eq!(calibration.antenna_id, ANTENNA_ID);
@@ -192,8 +192,8 @@ fn cli_boresight_mode_writes_a_service_loadable_artifact() {
 #[test]
 fn boresight_fixture_stays_below_the_correction_fit_threshold() {
     let run = run_boresight();
-    let calibration = antenna_core::data::loader::load_calibration_artifact(&run.artifact)
-        .expect("load the boresight artifact");
+    let calibration =
+        antenna_core::artifact::read(&run.artifact).expect("load the boresight artifact");
 
     // See BORESIGHT_CSV's comment. The two tests above are about the framing of a
     // *no-correction* boresight artifact; if this fixture drifts across the 0.5 dB
@@ -210,7 +210,7 @@ fn boresight_fixture_stays_below_the_correction_fit_threshold() {
 fn a_boresight_artifact_carrying_a_frequency_correction_loads() {
     let run = run_boresight_over(RIPPLED_BORESIGHT_CSV);
 
-    let calibration = antenna_core::data::loader::load_calibration_artifact(&run.artifact).expect(
+    let calibration = antenna_core::artifact::read(&run.artifact).expect(
         "the service loader must accept a boresight artifact that carries a frequency \
              correction (roadmap D13 — degenerate correction axes)",
     );
@@ -251,8 +251,8 @@ fn a_boresight_artifact_carrying_a_frequency_correction_loads() {
 #[test]
 fn boresight_coverage_is_written_as_an_on_axis_cone() {
     let run = run_boresight_over(RIPPLED_BORESIGHT_CSV);
-    let calibration = antenna_core::data::loader::load_calibration_artifact(&run.artifact)
-        .expect("load the rippled boresight artifact");
+    let calibration =
+        antenna_core::artifact::read(&run.artifact).expect("load the rippled boresight artifact");
 
     let coverage = calibration
         .calibration_coverage
@@ -307,8 +307,8 @@ fn boresight_coverage_is_written_as_an_on_axis_cone() {
 #[test]
 fn the_carried_frequency_correction_evaluates_to_a_real_value() {
     let run = run_boresight_over(RIPPLED_BORESIGHT_CSV);
-    let calibration = antenna_core::data::loader::load_calibration_artifact(&run.artifact)
-        .expect("load the rippled boresight artifact");
+    let calibration =
+        antenna_core::artifact::read(&run.artifact).expect("load the rippled boresight artifact");
     let correction = calibration
         .correction_surface
         .as_ref()
@@ -353,8 +353,8 @@ fn corrupting_a_boresight_artifact_is_detected() {
     let corrupted = run.artifact.with_extension("corrupt.bin");
     std::fs::write(&corrupted, &bytes).expect("write corrupted artifact");
 
-    let err = antenna_core::data::loader::load_calibration_artifact(&corrupted)
-        .expect_err("a corrupted payload must not load");
+    let err =
+        antenna_core::artifact::read(&corrupted).expect_err("a corrupted payload must not load");
     assert!(
         err.to_string().contains("CRC32 mismatch"),
         "expected a CRC failure, got: {err}"

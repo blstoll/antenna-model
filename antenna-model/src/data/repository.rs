@@ -5,7 +5,7 @@
 use crate::config::{AntennaConfig, AntennaConfigEntry, CalibrationConfig, FeedSpecConfig};
 use crate::error::DataError;
 use crate::model::CoveredCorrectionSurface;
-use antenna_core::data::loader::load_calibration_artifact;
+use antenna_core::artifact;
 use antenna_core::types::{
     AntennaCalibration, BSplineModel4D, CalibrationMetadata, CalibrationStatus, FeedParameters,
     MeshParameters, PhysicalAntennaConfig, ReflectorGeometry, ValidationError, ValidityRanges,
@@ -184,7 +184,11 @@ impl CalibrationRepository {
                 );
 
                 let calibration_path = config.data_directory.join(calibration_file);
-                let calibration = load_calibration_artifact(&calibration_path)?;
+                let calibration =
+                    artifact::read(&calibration_path).map_err(|source| DataError::Artifact {
+                        path: calibration_path.clone(),
+                        source,
+                    })?;
 
                 // Verify antenna_id matches configuration
                 if calibration.antenna_id != entry.id {
@@ -528,7 +532,6 @@ fn build_validity_ranges(feed_spec: &FeedSpecConfig) -> ValidityRanges {
 mod tests {
     use super::*;
     use crate::service::test_support::{calibration_builder, install_correction_surface};
-    use std::io::Write;
     use tempfile::{NamedTempFile, TempDir};
 
     fn create_test_calibration(antenna_id: &str, feed_id: &str) -> AntennaCalibration {
@@ -539,14 +542,9 @@ mod tests {
             .unwrap()
     }
 
-    /// Write an artifact the way a real producer does — ANTC framing around the postcard
-    /// payload, matching `calibrate::artifact_export::write_calibration_artifact` (D27).
     fn write_calibration_file(calibration: &AntennaCalibration) -> NamedTempFile {
-        let bytes = antenna_core::data::loader::encode_calibration_artifact(calibration).unwrap();
-
-        let mut temp_file = NamedTempFile::new().unwrap();
-        temp_file.write_all(&bytes).unwrap();
-        temp_file.flush().unwrap();
+        let temp_file = NamedTempFile::new().unwrap();
+        artifact::write(temp_file.path(), calibration).unwrap();
         temp_file
     }
 

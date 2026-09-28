@@ -6,7 +6,7 @@ use super::{AngularResolution, MeasurementDensity, ParameterSource};
 /// formatted `MAJOR.MINOR`.
 ///
 /// This is the **schema** axis: what a decoded [`super::AntennaCalibration`] means. The
-/// **container** axis, [`crate::data::loader::ANTC_ARTIFACT_VERSION`], says how file
+/// **container** axis, [`crate::artifact::ANTC_ARTIFACT_VERSION`], says how file
 /// bytes become a payload.
 ///
 /// - **MAJOR** — the field set, field order, or the meaning of an existing field

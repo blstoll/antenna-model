@@ -10,9 +10,8 @@ use std::path::PathBuf;
 use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, EnvFilter};
 
-use calibrate::artifact_export::{
-    export_full_calibration, write_calibration_artifact, ExportPhysicalParams,
-};
+use antenna_core::artifact;
+use calibrate::artifact_export::{export_full_calibration, ExportPhysicalParams};
 use calibrate::{
     assess_angular_resolution,
     build_calibration_artifact,
@@ -483,10 +482,8 @@ async fn run_boresight_calibration(args: Args) -> Result<()> {
     )
     .context("Failed to build calibration artifact")?;
 
-    // Serialize and save. Same ANTC container framing as full mode — one writer, so the
-    // two producers cannot drift apart on version stamping or CRC (roadmap D2).
-    write_calibration_artifact(&calibration, &args.output)
-        .context("Failed to write calibration artifact")?;
+    // The same writer as full mode, so the producers cannot drift on framing (D2).
+    artifact::write(&args.output, &calibration).context("Failed to write calibration artifact")?;
 
     let file_size = std::fs::metadata(&args.output)?.len();
     info!(
@@ -894,7 +891,7 @@ async fn run_calibration(args: Args) -> Result<()> {
     )
     .context("Failed to build service-loadable calibration artifact")?;
 
-    write_calibration_artifact(&service_calibration, &args.output)
+    artifact::write(&args.output, &service_calibration)
         .context("Failed to write service calibration artifact")?;
 
     let file_size = std::fs::metadata(&args.output)?.len();

@@ -315,25 +315,21 @@ mod tests {
     /// is `no surface → Unavailable`, `outside coverage → OutsideCoverage`, else `Applied`.
     /// The defensive `OutsideSupport` arm is never reached.
     ///
-    /// Every artifact goes through the real artifact path — encoded, written, loaded and
+    /// Every artifact goes through the real artifact path — encoded, then decoded and
     /// validated — and the sweep straddles every coverage and support bound it can: the
     /// full-mode box's edges, the boresight cone, and frequencies inside, on, and beyond
     /// both. The sweep must also *reach* each permitted outcome, or it proves nothing.
     #[test]
     fn valid_loaded_artifacts_serve_only_unavailable_outside_coverage_or_applied() {
-        use antenna_core::data::loader::{encode_calibration_artifact, load_calibration_artifact};
+        use antenna_core::artifact;
         use antenna_core::model::PHYSICS_MODEL_VERSION;
         use antenna_core::types::CALIBRATION_SCHEMA_VERSION;
         use std::collections::BTreeSet;
-        use std::io::Write;
 
         fn loaded(mut calibration: AntennaCalibration) -> AntennaCalibration {
             calibration.metadata.format_version = CALIBRATION_SCHEMA_VERSION.to_string();
             calibration.metadata.physics_model_version = PHYSICS_MODEL_VERSION;
-            let mut file = tempfile::NamedTempFile::new().unwrap();
-            file.write_all(&encode_calibration_artifact(&calibration).unwrap())
-                .unwrap();
-            load_calibration_artifact(file.path()).expect("a valid artifact must load")
+            artifact::decode(&artifact::encode(&calibration)).expect("a valid artifact must load")
         }
 
         // Full mode: a surface over a bounded box, coverage equal to its support.
