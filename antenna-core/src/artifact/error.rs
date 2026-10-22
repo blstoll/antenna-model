@@ -61,7 +61,10 @@ pub enum FramingError {
 #[derive(Debug, Error)]
 pub enum VersionError {
     /// The ANTC container version differs from [`ANTC_ARTIFACT_VERSION`].
-    #[error("ANTC container version {found} (this build reads version {ANTC_ARTIFACT_VERSION})")]
+    #[error(
+        "ANTC container version {found} (this build reads version {ANTC_ARTIFACT_VERSION}); \
+         regenerate the calibration artifact with a matching `calibrate` build"
+    )]
     Container { found: u32 },
 
     /// The schema stamp's MAJOR differs from [`CALIBRATION_SCHEMA_VERSION`]'s: the payload's

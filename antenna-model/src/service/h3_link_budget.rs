@@ -431,10 +431,10 @@ fn compute_cell_result(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::service::test_support::{calibration_builder, install_correction_surface};
-    use antenna_core::types::{
-        AntennaCalibration, BSplineModel4D, CalibrationCoverage, CalibrationStatus,
+    use crate::service::test_support::{
+        calibration_builder, constant_surface, install_correction_surface,
     };
+    use antenna_core::types::{AntennaCalibration, CalibrationCoverage, CalibrationStatus};
 
     use crate::api::schemas::GainRequest;
 
@@ -509,35 +509,23 @@ mod tests {
         }
     }
 
-    /// Build a constant-valued 4D B-spline correction surface.
+    /// Build a constant-valued B-spline correction surface.
     ///
-    /// Uses order-2 (linear), shape [2, 2, 2, 2] (4 control points per axis means
-    /// 16 coefficients total).  The knot vectors are clamped and wide enough to
-    /// cover the test request's az/el/freq/temp values.
+    /// Uses order-2 (linear), shape [2, 2, 2]. The knot vectors are clamped and wide enough
+    /// to cover the test request's az/el/freq values.
     ///
     /// For a B-spline with all equal coefficients `c`, the partition-of-unity
     /// property guarantees that the interpolant evaluates to exactly `c` everywhere
     /// in range.
-    fn constant_surface_db(value: f64) -> BSplineModel4D {
-        // Order 2, shape [2,2,2,2]: knot vectors need length >= n + order = 2 + 2 = 4.
+    fn constant_surface_db(value: f64) -> crate::model::FittedCorrectionSurface {
         // Clamped knots for order 2: [lo, lo, hi, hi].
-        let surface = BSplineModel4D {
-            // 2×2×2×2 = 16 coefficients, all equal to `value`.
-            coefficients: vec![value; 16],
-            shape: [2, 2, 2, 2],
-            // Wide ranges that encompass any az/el from the test geometry.
-            knots_azimuth: vec![0.0, 0.0, 360.0, 360.0],
-            // The whole polar range, so fixture coverage up to 180° is contained (#97).
-            knots_elevation: vec![0.0, 0.0, 180.0, 180.0],
-            // Cover the test frequency (8400 MHz).
-            knots_frequency: vec![8000.0, 8000.0, 9000.0, 9000.0],
-            // Cover the temperature constant used by the evaluator (290 K).
-            knots_temperature: vec![280.0, 280.0, 300.0, 300.0],
-            spline_order: 2,
-        };
-        crate::model::FittedCorrectionSurface::from_model4d(&surface)
-            .expect("constant_surface_db must satisfy the core layout rules");
-        surface
+        constant_surface(
+            2,
+            vec![0.0, 0.0, 360.0, 360.0],
+            vec![0.0, 0.0, 180.0, 180.0],
+            vec![8000.0, 8000.0, 9000.0, 9000.0],
+            value,
+        )
     }
 
     /// Core correctness test: a constant +2 dB correction surface must shift

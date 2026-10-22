@@ -26,19 +26,6 @@ pub enum ValidationError {
     #[error("Invalid spline order: {0}")]
     InvalidSplineOrder(u8),
 
-    /// A correction surface's temperature slabs differ; every slab must be identical.
-    #[error(
-        "Correction surface temperature slab {temperature_slab} differs from slab 0 at \
-         spatial coefficient {coefficient_index} (expected {expected}, got {actual}); \
-         schema 5.1 requires every temperature slab to be identical"
-    )]
-    TemperatureDependentCorrection {
-        temperature_slab: usize,
-        coefficient_index: usize,
-        expected: f64,
-        actual: f64,
-    },
-
     /// A range has `min > max` or lies outside physical bounds.
     #[error("Invalid range for {dimension}: [{min}, {max}]")]
     InvalidRange {

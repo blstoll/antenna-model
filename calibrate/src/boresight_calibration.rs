@@ -31,15 +31,14 @@ use tracing::{debug, info};
 use crate::design_specs_loader::{DesignSpecs, TuningBounds};
 use crate::frequency_correction;
 use antenna_core::model::{
-    compute_g_over_t, AntennaConfigurationBuilder, FeedParametersBuilder, IntegrationParams,
-    MeshParametersBuilder, ReflectorGeometryBuilder, PHYSICS_MODEL_VERSION,
+    compute_g_over_t, AntennaConfigurationBuilder, FeedParametersBuilder, FittedCorrectionSurface,
+    IntegrationParams, MeshParametersBuilder, ReflectorGeometryBuilder, PHYSICS_MODEL_VERSION,
 };
 use antenna_core::types::{
-    AntennaCalibration, AntennaCalibrationBuilder, BSplineModel4D, CalibrationCoverage,
-    CalibrationMetadataBuilder, FeedParameters as DataFeedParameters, MeasurementDensity,
-    MeshParameters as DataMeshParameters, ParameterSource, PhysicalAntennaConfigBuilder,
-    ReflectorGeometry as DataReflectorGeometry, ValidityRangesBuilder, BORESIGHT_COVERAGE_CONE_DEG,
-    CALIBRATION_SCHEMA_VERSION,
+    AntennaCalibration, AntennaCalibrationBuilder, CalibrationCoverage, CalibrationMetadataBuilder,
+    FeedParameters as DataFeedParameters, MeasurementDensity, MeshParameters as DataMeshParameters,
+    ParameterSource, PhysicalAntennaConfigBuilder, ReflectorGeometry as DataReflectorGeometry,
+    ValidityRangesBuilder, BORESIGHT_COVERAGE_CONE_DEG, CALIBRATION_SCHEMA_VERSION,
 };
 
 /// Boresight measurement point (frequency sweep at azimuth=0, elevation=0)
@@ -214,7 +213,7 @@ pub struct BoresightCalibrationResult {
     /// Number of function evaluations
     pub function_evaluations: usize,
     /// Optional 1D frequency correction surface (degenerate 4D B-spline)
-    pub frequency_correction: Option<BSplineModel4D>,
+    pub frequency_correction: Option<FittedCorrectionSurface>,
 }
 
 /// Objective function for boresight parameter tuning
@@ -521,8 +520,9 @@ pub fn calibrate_boresight(
     ) {
         Ok(correction) => {
             info!("    ✓ Frequency correction fitted successfully");
-            info!("      Shape: {:?}", correction.shape);
-            info!("      Frequency control points: {}", correction.shape[2]);
+            let shape = correction.layout().shape();
+            info!("      Shape: {:?}", shape);
+            info!("      Frequency control points: {}", shape[2]);
             Some(correction)
         }
         Err(e) => {
@@ -547,7 +547,7 @@ pub fn calibrate_boresight(
 impl TuningPass {
     fn into_result(
         self,
-        frequency_correction: Option<BSplineModel4D>,
+        frequency_correction: Option<FittedCorrectionSurface>,
     ) -> BoresightCalibrationResult {
         BoresightCalibrationResult {
             tuned_params: self.params,
@@ -847,7 +847,7 @@ pub fn build_calibration_artifact(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use antenna_core::model::{CoveredCorrectionSurface, FittedCorrectionSurface};
+    use antenna_core::model::CoveredCorrectionSurface;
 
     fn create_test_design_specs() -> DesignSpecs {
         use crate::design_specs_loader::{FeedSpecs, MeshSpecs, ReflectorSpecs};
@@ -1201,14 +1201,9 @@ frequency_mhz,g_over_t_db,temperature_k
 
         let correction = correction_result.unwrap();
 
-        // Azimuth, elevation and temperature are flat: order + 1 = 4 identical layers each,
-        // since a single layer over degenerate knots has no support (D13).
-        assert_eq!(correction.shape[0], 4); // Azimuth: flat
-        assert_eq!(correction.shape[1], 4); // Elevation: flat
-        assert_eq!(correction.shape[2], 4); // Frequency: 4 control points
-        assert_eq!(correction.shape[3], 4); // Temperature: flat
-        FittedCorrectionSurface::from_model4d(&correction)
-            .expect("a fitted frequency correction must load through the service");
+        // E-clock and E-cone are flat: order + 1 = 4 identical layers each, since a single
+        // layer over degenerate knots has no support (D13); frequency has 4 control points.
+        assert_eq!(correction.layout().shape(), [4, 4, 4]);
 
         // Verify it can be stored in BoresightCalibrationResult
         let calibration_result = BoresightCalibrationResult {
@@ -1228,7 +1223,14 @@ frequency_mhz,g_over_t_db,temperature_k
 
         // Verify frequency_correction is Some and can be used in build_calibration_artifact
         assert!(calibration_result.frequency_correction.is_some());
-        assert_eq!(calibration_result.frequency_correction.unwrap().shape[2], 4);
+        assert_eq!(
+            calibration_result
+                .frequency_correction
+                .unwrap()
+                .layout()
+                .shape()[2],
+            4
+        );
     }
 
     // Note: Full calibration tests require physics model integration

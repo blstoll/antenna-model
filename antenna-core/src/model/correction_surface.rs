@@ -1,9 +1,9 @@
 //! Correction-surface layout, construction, and evaluation (GitHub issues #92, #95).
 //!
-//! This module is the mathematical owner of fitted residual surfaces. Callers use
-//! domain coordinates (E-clock, E-cone, and frequency); schema 5's synthetic
-//! temperature axis is confined to the wire adapter in this module
-//! ([`FittedCorrectionSurface::from_model4d`] / [`FittedCorrectionSurface::to_model4d`]).
+//! This module is the mathematical owner of fitted residual surfaces. A surface has exactly
+//! the three axes calibration models — E-clock, E-cone, and frequency — and callers use
+//! those domain coordinates. Temperature is not an axis: it is the scalar
+//! `ValidityRanges::temperature_const` (issue #98).
 //!
 //! # One place constructs a layout, one place defines its invariants
 //!
@@ -36,13 +36,9 @@
 //! fitter could have built, and a surface's support is always `[lower, upper]` of its
 //! [`ClampedAxis`]. See #95.
 //!
-//! Schema 5's synthetic temperature axis is not executable — no query has a temperature
-//! coordinate — so it is held to the same rules only when this module *writes* it; on
-//! decode it must satisfy rules 1–4 and carry identical slabs (issue #92). Issue #98 retires
-//! it.
 
 use crate::types::{
-    AntennaCalibration, BSplineModel4D, CalibrationCoverage, CorrectionDomain,
+    AntennaCalibration, CalibrationCoverage, CorrectionDomain,
     ValidationError as DataValidationError,
 };
 
@@ -137,13 +133,12 @@ impl CoveredCorrectionSurface {
         calibration
             .correction_surface
             .as_ref()
-            .map(|model| {
-                let surface = FittedCorrectionSurface::from_model4d(model)?;
+            .map(|surface| {
                 let coverage = calibration
                     .coverage()?
                     .cloned()
                     .ok_or(DataValidationError::MissingCoverage)?;
-                Self::new(surface, coverage)
+                Self::new(surface.clone(), coverage)
             })
             .transpose()
     }
@@ -281,27 +276,12 @@ impl CorrectionSurfaceLayout {
         knots_frequency: Vec<f64>,
         spline_order: u8,
     ) -> std::result::Result<Self, DataValidationError> {
-        Self::new_with_axis_names(
-            shape,
-            [knots_e_clock, knots_e_cone, knots_frequency],
-            ["E-clock", "E-cone", "frequency"],
-            spline_order,
-        )
-    }
-
-    fn new_with_axis_names(
-        shape: [usize; 3],
-        knots: [Vec<f64>; 3],
-        names: [&'static str; 3],
-        spline_order: u8,
-    ) -> std::result::Result<Self, DataValidationError> {
         validate_order(spline_order)?;
         let order = spline_order as usize;
-        let [knots_first, knots_second, knots_third] = knots;
         let axes = [
-            validated_axis(names[0], shape[0], knots_first, order)?,
-            validated_axis(names[1], shape[1], knots_second, order)?,
-            validated_axis(names[2], shape[2], knots_third, order)?,
+            validated_axis("E-clock", shape[0], knots_e_clock, order)?,
+            validated_axis("E-cone", shape[1], knots_e_cone, order)?,
+            validated_axis("frequency", shape[2], knots_frequency, order)?,
         ];
 
         coefficient_count(shape).ok_or_else(|| DataValidationError::InvalidKnotVector {
@@ -412,57 +392,6 @@ impl FittedCorrectionSurface {
         Ok(Self {
             layout,
             coefficients,
-        })
-    }
-
-    /// Adapt schema 5's byte-compatible 4D wire type into the executable 3D model.
-    ///
-    /// The synthetic temperature dimension is accepted only when every slab is
-    /// identical. Validation and flattening happen here once; evaluation never scans
-    /// the wire coefficients.
-    pub fn from_model4d(model: &BSplineModel4D) -> std::result::Result<Self, DataValidationError> {
-        let layout = schema5_layout(model)?;
-        let coefficients = model.coefficients[..layout.coefficient_count()].to_vec();
-        Self::new(layout, coefficients)
-    }
-
-    /// Construct schema 5's 4D wire type around this surface — the inverse of
-    /// [`Self::from_model4d`].
-    ///
-    /// This is construction, not conversion: the canonical slab *is* the wire slab, under
-    /// the historical field names `knots_azimuth := E-clock` and
-    /// `knots_elevation := E-cone` (issue #94). The synthetic temperature axis is a
-    /// [`ClampedAxis::flat`] axis over `[temperature_lower_k, temperature_upper_k]` with the
-    /// slab replicated verbatim across its `order + 1` layers, so the wire surface is
-    /// temperature-independent. The written temperature axis is held to the full invariant
-    /// set, so an empty or non-finite interval is refused.
-    pub fn to_model4d(
-        &self,
-        temperature_lower_k: f64,
-        temperature_upper_k: f64,
-    ) -> std::result::Result<BSplineModel4D, DataValidationError> {
-        let order = self.layout.order;
-        let temperature = ClampedAxis::flat(temperature_lower_k, temperature_upper_k);
-        let n_temperature = temperature.coefficient_count(order);
-        let knots_temperature = validated_axis(
-            "temperature",
-            n_temperature,
-            temperature.knot_vector(order),
-            order,
-        )?
-        .knots;
-
-        let [n_e_clock, n_e_cone, n_frequency] = self.layout.shape;
-        Ok(BSplineModel4D {
-            coefficients: (0..n_temperature)
-                .flat_map(|_| self.coefficients.iter().copied())
-                .collect(),
-            shape: [n_e_clock, n_e_cone, n_frequency, n_temperature],
-            knots_azimuth: self.layout.knots_e_clock().to_vec(),
-            knots_elevation: self.layout.knots_e_cone().to_vec(),
-            knots_frequency: self.layout.knots_frequency().to_vec(),
-            knots_temperature,
-            spline_order: self.layout.spline_order(),
         })
     }
 
@@ -583,10 +512,7 @@ fn invalid_knots(name: &'static str, reason: impl Into<String>) -> DataValidatio
     }
 }
 
-/// Rules 2–4 of the invariant set: the structure any wire axis must have to be read at all.
-///
-/// The only axis held to these alone is schema 5's synthetic temperature axis on decode;
-/// see the module docs.
+/// Rules 2–4 of the invariant set: the structure an axis must have to be read at all.
 fn structurally_valid_knots(
     name: &'static str,
     coefficient_count: usize,
@@ -626,64 +552,6 @@ fn structurally_valid_knots(
         ));
     }
     Ok(knots)
-}
-
-fn schema5_layout(
-    model: &BSplineModel4D,
-) -> std::result::Result<CorrectionSurfaceLayout, DataValidationError> {
-    let layout = CorrectionSurfaceLayout::new_with_axis_names(
-        [model.shape[0], model.shape[1], model.shape[2]],
-        [
-            model.knots_azimuth.clone(),
-            model.knots_elevation.clone(),
-            model.knots_frequency.clone(),
-        ],
-        ["azimuth", "elevation", "frequency"],
-        model.spline_order,
-    )?;
-    // The synthetic temperature axis is never evaluated, so decode holds it to the
-    // structural rules only (module docs); `to_model4d` writes it to the full set.
-    structurally_valid_knots(
-        "temperature",
-        model.shape[3],
-        model.knots_temperature.clone(),
-        model.spline_order as usize,
-    )?;
-
-    let slab_size = layout.coefficient_count();
-    let expected = slab_size.checked_mul(model.shape[3]).ok_or_else(|| {
-        DataValidationError::InvalidKnotVector {
-            dimension: "correction surface".to_string(),
-            reason: format!("coefficient shape {:?} overflows usize", model.shape),
-        }
-    })?;
-    if model.coefficients.len() != expected {
-        return Err(DataValidationError::InconsistentShape {
-            expected,
-            actual: model.coefficients.len(),
-        });
-    }
-
-    let reference = &model.coefficients[..slab_size];
-    for temperature_slab in 1..model.shape[3] {
-        let start = temperature_slab * slab_size;
-        let slab = &model.coefficients[start..start + slab_size];
-        if let Some((coefficient_index, (&expected, &actual))) = reference
-            .iter()
-            .zip(slab)
-            .enumerate()
-            .find(|(_, (expected, actual))| expected != actual)
-        {
-            return Err(DataValidationError::TemperatureDependentCorrection {
-                temperature_slab,
-                coefficient_index,
-                expected,
-                actual,
-            });
-        }
-    }
-
-    Ok(layout)
 }
 
 fn coefficient_count(shape: [usize; 3]) -> Option<usize> {
@@ -929,45 +797,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn schema5_adapter_rejects_temperature_varying_coefficients() {
-        let model = BSplineModel4D {
-            coefficients: vec![1.0; 8].into_iter().chain(vec![2.0; 8]).collect(),
-            shape: [2, 2, 2, 2],
-            knots_azimuth: vec![0.0, 0.0, 10.0, 10.0],
-            knots_elevation: vec![0.0, 0.0, 20.0, 20.0],
-            knots_frequency: vec![8_000.0, 8_000.0, 9_000.0, 9_000.0],
-            knots_temperature: vec![280.0, 280.0, 300.0, 300.0],
-            spline_order: 2,
-        };
-
-        let error = FittedCorrectionSurface::from_model4d(&model).unwrap_err();
-        assert!(
-            error.to_string().contains("temperature slab 1"),
-            "error must identify the unequal slab: {error}"
-        );
-    }
-
-    #[test]
-    fn schema5_adapter_flattens_identical_temperature_slabs_once() {
-        let model = BSplineModel4D {
-            coefficients: vec![1.5; 16],
-            shape: [2, 2, 2, 2],
-            knots_azimuth: vec![0.0, 0.0, 10.0, 10.0],
-            knots_elevation: vec![0.0, 0.0, 20.0, 20.0],
-            knots_frequency: vec![8_000.0, 8_000.0, 9_000.0, 9_000.0],
-            knots_temperature: vec![280.0, 280.0, 300.0, 300.0],
-            spline_order: 2,
-        };
-
-        let surface = FittedCorrectionSurface::from_model4d(&model).unwrap();
-        assert_eq!(surface.layout().shape(), [2, 2, 2]);
-        assert_eq!(
-            surface.evaluate(5.0, 10.0, 8_500.0),
-            CorrectionEvaluation::Applied(1.5)
-        );
-    }
-
     // ------------------------------------------------------------------------
     // Construction and the one invariant set (GitHub issue #95)
     // ------------------------------------------------------------------------
@@ -1169,62 +998,5 @@ mod tests {
     fn a_decreasing_knot_vector_is_rejected() {
         let error = layout_error([3, 2, 2], vec![0.0, 0.0, 12.0, 10.0, 10.0], 2);
         assert_e_clock_rejected(error, "non-decreasing");
-    }
-
-    #[test]
-    fn the_wire_adapter_round_trips_a_fitted_surface_exactly() {
-        let layout = CorrectionSurfaceLayout::clamped(
-            ClampedAxis::new(0.0, 8.0, vec![4.0]),
-            ClampedAxis::new(0.0, 15.0, vec![5.0, 10.0]),
-            ClampedAxis::new(8_000.0, 9_000.0, vec![]),
-            2,
-        )
-        .unwrap();
-        let coefficients: Vec<f64> = (0..24).map(|index| index as f64 * 0.25).collect();
-        let surface = FittedCorrectionSurface::new(layout, coefficients.clone()).unwrap();
-
-        let model = surface.to_model4d(280.0, 300.0).unwrap();
-        assert_eq!(
-            model.shape,
-            [3, 4, 2, 3],
-            "flat temperature axis: order + 1 layers"
-        );
-        assert_eq!(
-            model.knots_temperature,
-            vec![280.0, 280.0, 290.0, 300.0, 300.0]
-        );
-        for slab in model.coefficients.chunks(24) {
-            assert_eq!(
-                slab,
-                coefficients.as_slice(),
-                "every slab is the canonical slab"
-            );
-        }
-        assert_eq!(
-            FittedCorrectionSurface::from_model4d(&model).unwrap(),
-            surface
-        );
-    }
-
-    #[test]
-    fn the_wire_adapter_refuses_an_empty_or_non_finite_temperature_interval() {
-        let layout = CorrectionSurfaceLayout::clamped(
-            ClampedAxis::new(0.0, 10.0, vec![]),
-            ClampedAxis::new(0.0, 20.0, vec![]),
-            ClampedAxis::new(8_000.0, 9_000.0, vec![]),
-            2,
-        )
-        .unwrap();
-        let surface = FittedCorrectionSurface::new(layout, vec![0.0; 8]).unwrap();
-        for (lower, upper) in [(290.0, 290.0), (300.0, 280.0), (f64::NAN, 300.0)] {
-            let error = surface
-                .to_model4d(lower, upper)
-                .expect_err("temperature interval must be real and non-empty");
-            assert!(
-                matches!(&error, DataValidationError::InvalidKnotVector { dimension, .. }
-                    if dimension == "temperature"),
-                "[{lower}, {upper}]: {error}"
-            );
-        }
     }
 }

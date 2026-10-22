@@ -539,9 +539,8 @@ The system supports multiple calibration statuses, enabling graceful degradation
    2. **Tune physical parameters** across all measurement points
    3. **Optional correction surface**:
       - Fit a sparse **3D** B-spline over E-clock, E-cone, and frequency.
-      - Serialize it through the schema-5 `BSplineModel4D` wire type by repeating the same
-        coefficients across its retained synthetic temperature axis; postcard's positional
-        encoding means that wire field cannot be removed in schema 5.
+      - Store it as that three-axis surface (schema 6, issue #98); temperature is the scalar
+        `validity_ranges.temperature_const`, not an axis.
       - Use measurements to construct the sparse grid.
    4. **Validate**: Check in-coverage accuracy
    5. **Output**: Calibration artifact with coverage metadata
@@ -579,9 +578,8 @@ The calibration artifacts vary based on calibration status:
 3. **Correction Surface** (Dense)
    - Runtime uses one validated **3D B-spline** over E-clock, E-cone, and frequency,
      implemented by `antenna-core/src/model/correction_surface.rs` and applied by the
-     served-gain law. `BSplineModel4D` remains the schema-5 wire type for byte
-     compatibility; its synthetic temperature slabs must be identical and are flattened
-     once during load/preparation, so temperature is not a query coordinate.
+     served-gain law, and stored in the artifact with exactly those three axes (schema 6,
+     issue #98). Temperature is not a query coordinate.
    - ~~Separate tables for main lobe, sidelobes, far field~~ — *not implemented.* One
      surface covers the whole fitted domain; there is no lobe-region partition.
    - **Coverage and support** (issue #97): `calibration_coverage` gates the empirical
@@ -619,8 +617,8 @@ The calibration artifacts vary based on calibration status:
 
 2. **Optional Frequency Correction** (1D)
    - Frequency-only correction: `correction(freq)`
-   - Executed through the 3D runtime evaluator with collapsed spatial axes; serialized in
-     the schema-5 4D wire shape with identical synthetic temperature slabs.
+   - Executed through the 3D runtime evaluator with flat spatial axes, and stored as that
+     same three-axis surface.
    - **Applied only**: When query is at or near boresight
 
 3. **Calibration Coverage Metadata**

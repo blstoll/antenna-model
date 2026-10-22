@@ -1197,7 +1197,9 @@ fn ray_trace_stub_warning(
 mod tests {
     use super::*;
     use crate::service::test_support::install_correction_surface;
-    use crate::service::test_support::{create_test_calibration, dummy_correction_surface};
+    use crate::service::test_support::{
+        constant_surface, create_test_calibration, dummy_correction_surface,
+    };
 
     /// The prepared value is shared across parallel grid workers (issue #63 onward), so
     /// `Sync` is a structural requirement, not an accident of today's fields. Adding a
@@ -1253,19 +1255,14 @@ mod tests {
     /// coefficient count actually matches its knot vectors. (`dummy_correction_surface`
     /// is deliberately not reused here: it exists to make a surface *present*, and its
     /// all-zero coefficients hide the shape mismatch.)
-    fn constant_correction_surface(correction_db: f64) -> antenna_core::types::BSplineModel4D {
-        let order = 3usize;
-        let layers = order + 1;
-        let n_freq = 4;
-        antenna_core::types::BSplineModel4D {
-            coefficients: vec![correction_db; layers * layers * n_freq * layers],
-            shape: [layers, layers, n_freq, layers],
-            knots_azimuth: vec![0.0, 0.0, 0.0, 180.0, 360.0, 360.0, 360.0],
-            knots_elevation: vec![0.0, 0.0, 0.0, 90.0, 180.0, 180.0, 180.0],
-            knots_frequency: vec![8000.0, 8000.0, 8000.0, 8300.0, 9000.0, 9000.0, 9000.0],
-            knots_temperature: vec![0.0, 0.0, 0.0, 500.0, 1000.0, 1000.0, 1000.0],
-            spline_order: order as u8,
-        }
+    fn constant_correction_surface(correction_db: f64) -> crate::model::FittedCorrectionSurface {
+        constant_surface(
+            3,
+            vec![0.0, 0.0, 0.0, 180.0, 360.0, 360.0, 360.0],
+            vec![0.0, 0.0, 0.0, 90.0, 180.0, 180.0, 180.0],
+            vec![8000.0, 8000.0, 8000.0, 8300.0, 9000.0, 9000.0, 9000.0],
+            correction_db,
+        )
     }
 
     #[test]
@@ -2196,10 +2193,14 @@ mod tests {
     /// matches [`constant_correction_surface`].
     fn narrow_elevation_correction_surface(
         correction_db: f64,
-    ) -> antenna_core::types::BSplineModel4D {
-        let mut surface = constant_correction_surface(correction_db);
-        surface.knots_elevation = vec![0.0, 0.0, 0.0, 1.0, 2.0, 2.0, 2.0];
-        surface
+    ) -> crate::model::FittedCorrectionSurface {
+        constant_surface(
+            3,
+            vec![0.0, 0.0, 0.0, 180.0, 360.0, 360.0, 360.0],
+            vec![0.0, 0.0, 0.0, 1.0, 2.0, 2.0, 2.0],
+            vec![8000.0, 8000.0, 8000.0, 8300.0, 9000.0, 9000.0, 9000.0],
+            correction_db,
+        )
     }
 
     /// The cache key the prepared value builds for one squint-corrected direction.

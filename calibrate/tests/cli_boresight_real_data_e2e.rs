@@ -58,7 +58,6 @@
 use antenna_core::types::{AntennaCalibration, CalibrationStatus, CALIBRATION_SCHEMA_VERSION};
 use antenna_model::api::schemas::{GainRequest, GainResponse, Position3D};
 use antenna_model::data::repository::CalibrationRepository;
-use antenna_model::model::FittedCorrectionSurface;
 use antenna_model::service::compute_gain_from_request;
 use antenna_model::warnings::WarningCode;
 use std::path::{Path, PathBuf};
@@ -576,7 +575,7 @@ fn sa_8002a_real_data_fits_and_carries_a_frequency_correction() {
     });
 
     assert_eq!(
-        correction.shape[2],
+        correction.layout().shape()[2],
         SA_PUBLISHED.len(),
         "the frequency axis carries one control point per measured row"
     );
@@ -648,7 +647,6 @@ fn sa_8002a_correction_is_material_not_decorative() {
         .correction_surface
         .as_ref()
         .expect("the SA 8002A artifact must carry a correction surface");
-    let fitted = FittedCorrectionSurface::from_model4d(correction).unwrap();
 
     // The residual the tuner could not remove IS what the correction must absorb. Measured
     // 0.6214 dB — comfortably larger than the corrected-path tolerance, so the test above
@@ -666,7 +664,7 @@ fn sa_8002a_correction_is_material_not_decorative() {
     // drive the basis to zero here (the D15 silent-zero failure mode).
     let mut max_abs = 0.0_f64;
     for &(frequency_mhz, _) in &SA_PUBLISHED {
-        let value = fitted
+        let value = correction
             .evaluate(0.0, 0.0, frequency_mhz)
             .correction_db()
             .expect("published frequency left support");

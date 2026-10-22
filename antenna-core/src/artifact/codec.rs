@@ -2,6 +2,7 @@ use std::path::Path;
 
 use tracing::{debug, info, warn};
 
+use super::wire::CalibrationRecord;
 use super::{validation, ArtifactError, FramingError, VersionError};
 use crate::model::PHYSICS_MODEL_VERSION;
 use crate::types::{AntennaCalibration, CALIBRATION_SCHEMA_VERSION};
@@ -13,7 +14,7 @@ pub const ANTC_MAGIC: &[u8; 4] = b"ANTC";
 ///
 /// Bump it whenever existing files can no longer be decoded — a codec change or any payload
 /// layout change — so they are rejected before a positional decode can misread them.
-pub const ANTC_ARTIFACT_VERSION: u32 = 4;
+pub const ANTC_ARTIFACT_VERSION: u32 = 5;
 
 /// Byte length of an ANTC header: magic 4 + version 4 + CRC32 4 + payload length 8.
 pub const ANTC_HEADER_LEN: usize = 20;
@@ -25,8 +26,8 @@ pub fn encode(calibration: &AntennaCalibration) -> Vec<u8> {
     // postcard into a growable Vec fails only for a sequence of unknown length or a custom
     // `Serialize` error; every calibration type derives `Serialize` over sized collections.
     #[allow(clippy::expect_used)]
-    let payload =
-        postcard::to_allocvec(calibration).expect("derived Serialize into a Vec is infallible");
+    let payload = postcard::to_allocvec(&CalibrationRecord::from(calibration))
+        .expect("derived Serialize into a Vec is infallible");
     Header::for_payload(&payload).frame(&payload)
 }
 
@@ -49,9 +50,10 @@ pub fn decode(bytes: &[u8]) -> Result<AntennaCalibration, ArtifactError> {
         return Err(VersionError::Container { found: version }.into());
     }
 
-    let calibration: AntennaCalibration =
+    let record: CalibrationRecord =
         postcard::from_bytes(payload).map_err(FramingError::Undecodable)?;
-    check_schema_version(&calibration.metadata.format_version)?;
+    check_schema_version(&record.metadata.format_version)?;
+    let calibration = record.into_domain()?;
     validation::validate(&calibration)?;
 
     info!(
@@ -242,7 +244,7 @@ fn check_schema_version(stamp: &str) -> Result<(), VersionError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{fixtures, BSplineModel4D, CalibrationCoverage, CalibrationStatus};
+    use crate::types::{fixtures, CalibrationCoverage, CalibrationStatus, ValidationError};
 
     /// Re-frames an encoded artifact with one header field changed.
     fn reframed(bytes: &[u8], change: impl FnOnce(Header) -> Header) -> Vec<u8> {
@@ -255,7 +257,7 @@ mod tests {
     }
 
     fn payload(calibration: &AntennaCalibration) -> Vec<u8> {
-        postcard::to_allocvec(calibration).unwrap()
+        postcard::to_allocvec(&CalibrationRecord::from(calibration)).unwrap()
     }
 
     fn major() -> u32 {
@@ -497,46 +499,139 @@ mod tests {
         );
     }
 
-    fn schema_5_0_with_surface(coefficients: Vec<f64>) -> AntennaCalibration {
-        let mut calibration = valid();
-        calibration.metadata.format_version = "5.0".to_string();
-        calibration.correction_surface = Some(BSplineModel4D {
-            coefficients,
-            shape: [2, 2, 2, 2],
-            knots_azimuth: vec![0.0, 0.0, 10.0, 10.0],
-            knots_elevation: vec![0.0, 0.0, 20.0, 20.0],
-            knots_frequency: vec![8_000.0, 8_000.0, 9_000.0, 9_000.0],
-            knots_temperature: vec![280.0, 280.0, 300.0, 300.0],
-            spline_order: 2,
-        });
-        calibration.calibration_coverage = Some(
-            CalibrationCoverage::builder()
-                .azimuth_range(0.0, 10.0)
-                .elevation_range(0.0, 20.0)
-                .frequency_range(8_000.0, 9_000.0)
-                .num_measurements(1000)
-                .has_correction_surface(true)
-                .build()
-                .unwrap(),
+    /// The schema-6 payload, declared independently of the codec's own record so the
+    /// documented layout — not whatever the codec happens to write — is what is pinned.
+    #[derive(serde::Serialize, serde::Deserialize)]
+    struct Schema6Payload {
+        antenna_id: String,
+        feed_id: String,
+        metadata: crate::types::CalibrationMetadata,
+        physical_config: crate::types::PhysicalAntennaConfig,
+        correction_surface: Option<Schema6Surface>,
+        validity_ranges: crate::types::ValidityRanges,
+        calibration_status: Option<CalibrationStatus>,
+        calibration_coverage: Option<CalibrationCoverage>,
+    }
+
+    #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
+    struct Schema6Surface {
+        coefficients: Vec<f64>,
+        shape: [usize; 3],
+        knots_e_clock: Vec<f64>,
+        knots_e_cone: Vec<f64>,
+        knots_frequency: Vec<f64>,
+        spline_order: u8,
+    }
+
+    fn schema6_payload(calibration: &AntennaCalibration) -> Schema6Payload {
+        let encoded = encode(calibration);
+        let (_, payload) = Header::split(&encoded).unwrap();
+        postcard::from_bytes(payload).unwrap()
+    }
+
+    #[test]
+    fn the_payload_stores_a_three_axis_surface_e_clock_fastest() {
+        // The coefficient at (i_clock, i_cone, i_freq) is 100·i_freq + 10·i_cone + i_clock,
+        // so the stored order is legible.
+        let calibration = fixtures::calibrated()
+            .correction_surface(fixtures::indexed_surface_over(fixtures::DOMAIN))
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            schema6_payload(&calibration).correction_surface,
+            Some(Schema6Surface {
+                coefficients: vec![0.0, 1.0, 10.0, 11.0, 100.0, 101.0, 110.0, 111.0],
+                shape: [2, 2, 2],
+                knots_e_clock: vec![0.0, 0.0, 360.0, 360.0],
+                knots_e_cone: vec![0.0, 0.0, 30.0, 30.0],
+                knots_frequency: vec![8_000.0, 8_000.0, 8_500.0, 8_500.0],
+                spline_order: 2,
+            })
         );
-        calibration
     }
 
+    /// The layout invariant set holds for a surface arriving as bytes (#95): the builder can
+    /// only be handed a valid [`crate::model::FittedCorrectionSurface`], so decode is where a
+    /// malformed one can still appear.
     #[test]
-    fn schema_5_0_flat_temperature_artifact_loads_under_minor_policy() {
-        let calibration = schema_5_0_with_surface(vec![1.0; 16]);
-        assert_eq!(decode(&encode(&calibration)).unwrap(), calibration);
-    }
+    fn a_decoded_surface_is_held_to_the_layout_invariants() {
+        let valid = fixtures::calibrated().build().unwrap();
+        let decoded_with = |edit: fn(&mut Schema6Surface)| {
+            let mut payload = schema6_payload(&valid);
+            if let Some(surface) = payload.correction_surface.as_mut() {
+                edit(surface);
+            }
+            let bytes = postcard::to_allocvec(&payload).unwrap();
+            decode(&Header::for_payload(&bytes).frame(&bytes))
+        };
+        let rejection = |edit| match decoded_with(edit) {
+            Err(ArtifactError::Validation(error)) => error,
+            other => panic!("expected a validation error, got {other:?}"),
+        };
 
-    #[test]
-    fn schema_5_0_temperature_varying_artifact_is_rejected() {
-        let calibration = schema_5_0_with_surface([vec![1.0; 8], vec![2.0; 8]].concat());
-        match decode(&encode(&calibration)) {
-            Err(ArtifactError::Validation(e)) => assert!(
-                e.to_string().contains("temperature slab 1"),
-                "rejection must name the unequal slab: {e}"
+        assert_eq!(
+            decoded_with(|_| {}).unwrap(),
+            valid,
+            "control: the unedited payload decodes"
+        );
+        assert_eq!(
+            rejection(|s| {
+                s.coefficients.pop();
+            }),
+            ValidationError::InconsistentShape {
+                expected: 8,
+                actual: 7
+            }
+        );
+        assert_eq!(
+            rejection(|s| s.spline_order = 0),
+            ValidationError::InvalidSplineOrder(0)
+        );
+        for (edit, axis) in [
+            (
+                (|s: &mut Schema6Surface| s.knots_e_clock = vec![0.0, 360.0])
+                    as fn(&mut Schema6Surface),
+                "E-clock",
             ),
-            other => panic!("temperature-varying surface must be rejected, got {other:?}"),
+            (|s| s.knots_e_cone = vec![0.0, 30.0, 0.0, 30.0], "E-cone"),
+            (|s| s.knots_frequency = vec![8_000.0; 4], "frequency"),
+        ] {
+            match rejection(edit) {
+                ValidationError::InvalidKnotVector { dimension, .. } => assert_eq!(dimension, axis),
+                other => panic!("expected InvalidKnotVector on {axis}, got {other:?}"),
+            }
+        }
+    }
+
+    /// A pre-6 container is refused on its header, before its payload is decoded or validated:
+    /// the payload here is not even an `AntennaCalibration`.
+    #[test]
+    fn a_pre_schema_6_container_is_refused_before_its_payload_is_read() {
+        let garbage = b"not a postcard payload";
+        let control = Header::for_payload(garbage).frame(garbage);
+        assert!(
+            matches!(
+                decode(&control),
+                Err(ArtifactError::Framing(FramingError::Undecodable(_)))
+            ),
+            "control: at this build's container version the payload is decoded and fails"
+        );
+
+        let old = Header {
+            version: 4,
+            ..Header::for_payload(garbage)
+        }
+        .frame(garbage);
+        match decode(&old) {
+            Err(error @ ArtifactError::Version(VersionError::Container { found: 4 })) => {
+                let message = error.to_string();
+                assert!(
+                    message.contains("regenerate the calibration artifact"),
+                    "the rejection must tell the operator what to do: {message}"
+                );
+            }
+            other => panic!("expected a container version error, got {other:?}"),
         }
     }
 

@@ -120,17 +120,8 @@ fn test_full_export_loads_via_service() {
         .as_ref()
         .expect("correction surface present");
 
-    // Shape: spatial axes copy directly (no top-padding; service evaluator fixed),
-    // temperature = order + 1.
-    let [n_clock, n_cone, n_freq] = surface.shape();
-    assert_eq!(correction.shape[0], n_clock, "azimuth control points");
-    assert_eq!(correction.shape[1], n_cone, "elevation control points");
-    assert_eq!(correction.shape[2], n_freq, "frequency control points");
-    assert_eq!(
-        correction.shape[3],
-        surface.spline_order() + 1,
-        "temperature layers"
-    );
+    // Shape: the three fitted axes, in canonical order, with no padding.
+    assert_eq!(correction.layout().shape(), surface.shape());
 
     // Coverage round-trips with the measurement count.
     let coverage = loaded.calibration_coverage.expect("coverage present");
@@ -144,14 +135,14 @@ fn test_full_export_loads_via_service() {
     ));
 }
 
-/// Fit the standard round-trip surface and carry it all the way to a decoded wire model:
+/// Fit the standard round-trip surface and carry it all the way to a decoded artifact:
 /// fit, export, write with the production writer, load through the service loader.
 ///
 /// The two tests below make different assertions about the same journey, so the journey
 /// itself is defined once.
 fn fit_export_write_load() -> (
     calibrate::correction_surface::CorrectionSurface,
-    antenna_core::types::BSplineModel4D,
+    FittedCorrectionSurface,
 ) {
     let measurements = build_measurements();
     let predictions = vec![0.0; measurements.len()];
@@ -166,15 +157,14 @@ fn fit_export_write_load() -> (
 /// This replaces the sampled fit-versus-serve equivalence test that preceded issue #94.
 /// That test drew a grid of probes and asked whether two independently-indexed surface
 /// models agreed to `1e-9` — a question worth asking only while two models existed. The fit
-/// now solves in the artifact's canonical coefficient order, so export is construction of
-/// the schema-5 wire adapter around that one surface, and the stronger claim is available:
+/// now solves in the artifact's canonical coefficient order and export stores that one
+/// surface (#98), so the stronger claim is available:
 /// after a real write and a service load, the decoded surface is **exactly equal** to the
 /// one the fitter produced. Sampling cannot distinguish a surface from a close copy of it;
 /// equality can, and it needs no tolerance.
 #[test]
 fn the_served_surface_is_exactly_the_fitted_surface_after_a_service_load() {
-    let (surface, model) = fit_export_write_load();
-    let served = FittedCorrectionSurface::from_model4d(&model).expect("decode the wire model");
+    let (surface, served) = fit_export_write_load();
 
     assert_eq!(
         &served,
@@ -193,51 +183,6 @@ fn the_served_surface_is_exactly_the_fitted_surface_after_a_service_load() {
         peak > 0.1,
         "the fitted surface must carry a real correction, got max |coefficient| = {peak:e} dB"
     );
-}
-
-/// The wire adapter is a renaming, not a reindexing.
-///
-/// Every schema-5 temperature slab must be the fitted coefficient vector *verbatim*, and
-/// each wire knot vector its domain axis verbatim (#94). A reindexing loop would still
-/// round-trip cleanly if the decode inverted it, so the assertion is
-/// on the wire bytes' own order rather than on what comes back out of them.
-#[test]
-fn every_wire_temperature_slab_is_the_canonical_coefficient_vector_verbatim() {
-    let (surface, model) = fit_export_write_load();
-    let coefficients = surface.coefficients();
-
-    assert_eq!(
-        model.knots_azimuth,
-        surface.knots_e_clock(),
-        "azimuth := E-clock"
-    );
-    assert_eq!(
-        model.knots_elevation,
-        surface.knots_e_cone(),
-        "elevation := E-cone"
-    );
-    assert_eq!(
-        model.knots_frequency,
-        surface.knots_frequency(),
-        "frequency"
-    );
-    assert_eq!(
-        [model.shape[0], model.shape[1], model.shape[2]],
-        surface.shape(),
-        "the first three wire axes are the domain axes, in order"
-    );
-    assert_eq!(
-        model.coefficients.len(),
-        coefficients.len() * model.shape[3],
-        "the wire vector is the canonical slab replicated once per temperature layer"
-    );
-
-    for (layer, slab) in model.coefficients.chunks(coefficients.len()).enumerate() {
-        assert_eq!(
-            slab, coefficients,
-            "temperature slab {layer} must be the canonical coefficient vector verbatim"
-        );
-    }
 }
 
 /// D21: the angular-resolution assessment must survive producer → ANTC → service loader
@@ -453,13 +398,13 @@ fn round_trip_physical() -> ExportPhysicalParams {
 
 /// Export, write through the production writer, and load back through the service loader.
 ///
-/// Returns the loaded 4D correction surface — i.e. the object the *service* would hold,
+/// Returns the loaded correction surface — i.e. the object the *service* would hold,
 /// not the one the producer built, so every assertion made against it has crossed postcard,
 /// the ANTC container and the loader's artifact validation.
 fn export_write_load(
     surface: &calibrate::correction_surface::CorrectionSurface,
     measurements: &[MeasurementPoint],
-) -> antenna_core::types::BSplineModel4D {
+) -> FittedCorrectionSurface {
     let calibration = export_full_calibration(
         "integ_antenna",
         "x_band",
@@ -503,9 +448,7 @@ fn export_write_load(
 ///
 /// The probe grid is **derived from the served knot vectors** rather than hand-listed, so it
 /// lands exactly on every executable-axis knot — the clamped ends *and* the interior ones —
-/// plus a midpoint in each span. The wire temperature knots are checked separately because
-/// schema 5 retains that field but exposes no runtime temperature query. Deriving the grid
-/// also means it follows the fixture: change the knot counts and the probes move with them
+/// plus a midpoint in each span. Deriving the grid also means it follows the fixture: change the knot counts and the probes move with them
 /// instead of quietly going stale.
 #[test]
 fn the_round_trip_agrees_at_every_axis_boundary_after_a_service_load() {
@@ -513,12 +456,10 @@ fn the_round_trip_agrees_at_every_axis_boundary_after_a_service_load() {
     let predictions = vec![0.0; measurements.len()];
     let surface = fit_correction_surface(&measurements, &predictions, &round_trip_params())
         .expect("surface fit");
-    let model = export_write_load(&surface, &measurements);
-    let fitted = FittedCorrectionSurface::from_model4d(&model).unwrap();
+    let fitted = export_write_load(&surface, &measurements);
 
     // Every distinct knot on an axis, plus the midpoint of each span between them. The
-    // clamped end knots are the domain bounds, so this covers both edges of all three
-    // executable axes. Temperature remains a validated schema-5 wire axis only.
+    // clamped end knots are the domain bounds, so this covers both edges of all three axes.
     fn probes(knots: &[f64]) -> Vec<f64> {
         let mut distinct: Vec<f64> = Vec::new();
         for &k in knots {
@@ -533,20 +474,16 @@ fn the_round_trip_agrees_at_every_axis_boundary_after_a_service_load() {
         out
     }
 
-    let clocks = probes(&model.knots_azimuth);
-    let cones = probes(&model.knots_elevation);
-    let freqs = probes(&model.knots_frequency);
-    let temps = probes(&model.knots_temperature);
+    let layout = fitted.layout();
+    let clocks = probes(layout.knots_e_clock());
+    let cones = probes(layout.knots_e_cone());
+    let freqs = probes(layout.knots_frequency());
 
     // The fixture's knots: 4 distinct on each spatial angle (2 clamped ends + 2 interior),
-    // 3 on frequency, 3 on the flat temperature axis. Asserted so that a fixture change
-    // which silently collapses an axis cannot shrink this test's reach unnoticed.
+    // 3 on frequency. Asserted so that a fixture change which silently collapses an axis
+    // cannot shrink this test's reach unnoticed.
     assert_eq!((clocks.len(), cones.len()), (7, 7), "clock/cone probes");
-    assert_eq!(
-        (freqs.len(), temps.len()),
-        (5, 5),
-        "frequency/temperature probes"
-    );
+    assert_eq!(freqs.len(), 5, "frequency probes");
 
     let mut max_err = 0.0_f64;
     let mut max_expected = 0.0_f64;
@@ -608,8 +545,8 @@ fn the_round_trip_agrees_at_every_axis_boundary_after_a_service_load() {
 ///
 /// An earlier version of this comment claimed boresight mode *is* the single-frequency
 /// artifact, "collapsing the frequency axis with a flat axis". That was wrong, and worth
-/// recording because it is an easy misreading: boresight collapses **E-clock, E-cone and
-/// temperature** with `ClampedAxis::flat` and *fits* frequency like any other axis.
+/// recording because it is an easy misreading: boresight collapses **E-clock and E-cone**
+/// with `ClampedAxis::flat` and *fits* frequency like any other axis.
 ///
 /// What both refusals are protecting is not obvious, so it belongs here. A degenerate axis —
 /// `order` equal knots — has an empty evaluable span, so it would evaluate to a **zero
@@ -641,10 +578,10 @@ fn a_minimal_frequency_axis_round_trips_and_a_degenerate_one_is_refused() {
         "zero interior knots at order 4 must leave exactly `order` frequency coefficients"
     );
 
-    let model = export_write_load(&surface, &measurements);
-    let fitted = FittedCorrectionSurface::from_model4d(&model).unwrap();
+    let fitted = export_write_load(&surface, &measurements);
     assert_eq!(
-        model.shape[2], 4,
+        fitted.layout().shape()[2],
+        4,
         "the served frequency axis must carry the same 4"
     );
 
@@ -743,13 +680,11 @@ fn a_minimal_frequency_axis_round_trips_and_a_degenerate_one_is_refused() {
 
     // Positive control: the same call with the minimum it does accept succeeds, so the
     // refusal above is about the point count and not about this call being broken.
-    let four_frequencies = calibrate::frequency_correction::fit_frequency_correction(
+    calibrate::frequency_correction::fit_frequency_correction(
         &[7100.0, 7500.0, 8000.0, 8450.0],
         &[0.8, 0.6, 0.5, 0.7],
     )
     .expect("four frequencies is the documented minimum and must fit");
-    antenna_core::model::FittedCorrectionSurface::from_model4d(&four_frequencies)
-        .expect("and the result must be one the service loader accepts");
 }
 
 /// The whole round trip must run inside a **small** thread stack (D3).
@@ -774,8 +709,7 @@ fn the_round_trip_fits_in_a_small_thread_stack() {
             let predictions = vec![0.0; measurements.len()];
             let surface = fit_correction_surface(&measurements, &predictions, &round_trip_params())
                 .expect("surface fit");
-            let model = export_write_load(&surface, &measurements);
-            let fitted = FittedCorrectionSurface::from_model4d(&model).unwrap();
+            let fitted = export_write_load(&surface, &measurements);
 
             let expected = surface.evaluate(8200.0, 5.0, 175.0).expect("3D eval");
             let got = applied_value(&fitted, 175.0, 5.0, 8200.0);

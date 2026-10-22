@@ -2395,18 +2395,14 @@ mod tests {
     /// Full mode fits **cubic** surfaces: order 4 (`order = degree + 1`). GitHub issue #95
     /// moved knot construction into core without changing that, and boresight's order-3
     /// (quadratic) correction is pinned separately in `frequency_correction`. Checked on the
-    /// shipped parameters, on the fitted surface, and on the wire artifact, so a change to
-    /// any of the three fails here.
+    /// shipped parameters and on the fitted surface the artifact stores, so a change to
+    /// either fails here.
     #[test]
     fn full_mode_fits_cubic_order_4_surfaces() {
         assert_eq!(CorrectionSurfaceParams::shipped().spline_order, 4);
         let surface = fitted_surface(24.0);
         assert_eq!(surface.spline_order(), 4);
-        let wire = surface
-            .fitted()
-            .to_model4d(289.0, 291.0)
-            .expect("wire construction");
-        assert_eq!(wire.spline_order, 4);
+        assert_eq!(surface.fitted().layout().spline_order(), 4);
     }
 
     /// The delivered knot spacing is what the surface can actually follow, and it is not the

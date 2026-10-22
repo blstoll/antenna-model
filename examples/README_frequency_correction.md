@@ -10,7 +10,7 @@ The frequency correction module (`calibrate/src/frequency_correction.rs`) provid
 2. **Fit 1D B-spline**: Create a quadratic (order 3) B-spline correction across frequency
    dimension. In this repository `order = degree + 1`; this correction has always been
    quadratic, and was mislabelled cubic until issue #95
-3. **Convert to a flat-axis 4D B-spline**: Package as a 4D B-spline for service compatibility
+3. **Build a flat-axis surface**: Package it as the artifact's three-axis correction surface
 
 ## When to Use
 
@@ -83,27 +83,27 @@ if should_fit_correction(&residuals_by_freq) {
 }
 ```
 
-## Flat-axis 4D B-spline Structure
+## Flat-axis Surface Structure
 
-The fitted frequency correction is stored as a 4D B-spline that varies only along
-frequency. The other three axes are **flat**, not degenerate:
+The fitted frequency correction is a `FittedCorrectionSurface` that varies only along
+frequency. The E-clock and E-cone axes are **flat**, not degenerate. As stored in the
+artifact (schema 6):
 
 ```rust
-BSplineModel4D {
+{
     // order + 1 = 4 identical layers on each collapsed axis; N frequency control points
-    shape: [4, 4, N_freq, 4],
+    shape: [4, 4, N_freq],
 
     // Flat dimensions: a clamped knot vector over a real span, one interior knot
-    knots_azimuth:     [0.0,   0.0,   0.0,   180.0, 360.0,  360.0,  360.0],
-    knots_elevation:   [0.0,   0.0,   0.0,    90.0, 180.0,  180.0,  180.0],
-    knots_temperature: [0.0,   0.0,   0.0,   500.0, 1000.0, 1000.0, 1000.0],
+    knots_e_clock: [0.0, 0.0, 0.0, 180.0, 360.0, 360.0, 360.0],
+    knots_e_cone:  [0.0, 0.0, 0.0,  90.0, 180.0, 180.0, 180.0],
 
     // Frequency dimension (proper B-spline)
     knots_frequency: [f_min, ..., f_max],  // Clamped quadratic B-spline
 
-    // Each residual replicated across every flat layer, in the service's
-    // idx = i_az + n_az * (i_el + n_el * (i_freq + n_freq * i_temp)) layout
-    coefficients: vec![...; 4 * 4 * N_freq * 4],
+    // Each residual replicated across every flat layer, in the canonical
+    // idx = i_eclock + n_eclock * (i_econe + n_econe * i_freq) layout
+    coefficients: vec![...; 4 * 4 * N_freq],
     spline_order: 3,  // Quadratic (degree 2)
 }
 ```
@@ -203,5 +203,5 @@ cargo run --release --bin calibrate -- \
 
 - **Optional enhancement**: Boresight calibration works without frequency correction
 - **Threshold**: Only fit if `max(abs(residuals)) > 0.5 dB`
-- **Compatible**: Uses standard `BSplineModel4D` format for service compatibility
-- **Performance**: Minimal overhead (`4 × 4 × N_freq × 4` coefficients, simple interpolation)
+- **Compatible**: Uses the artifact's standard three-axis correction surface
+- **Performance**: Minimal overhead (`4 × 4 × N_freq` coefficients, simple interpolation)

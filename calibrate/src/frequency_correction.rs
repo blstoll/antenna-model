@@ -1,9 +1,8 @@
 //! Frequency-only correction surface fitting for boresight calibration.
 //!
 //! This module provides functionality to fit a 1D frequency-only correction surface
-//! to boresight measurement residuals. The correction is stored in schema 5's 4D
-//! wire type, whose E-clock, E-cone, and synthetic temperature axes are *flat* —
-//! constant, but with a real span. Runtime evaluation adapts it to three dimensions.
+//! to boresight measurement residuals. The correction is a three-axis surface whose
+//! E-clock and E-cone axes are *flat* — constant, but with a real span.
 //!
 //! # Use Case
 //!
@@ -14,8 +13,8 @@
 //! # Design
 //!
 //! - Input: Frequency-residual pairs (measured - physics model at boresight)
-//! - Output: 4D B-spline that varies only along frequency, shape
-//!   `[order+1, order+1, N_freq, order+1]`
+//! - Output: B-spline surface that varies only along frequency, shape
+//!   `[order+1, order+1, N_freq]`
 //! - Threshold: Only fit if max(abs(residuals)) > 0.5 dB
 //! - Method: **quadratic** B-spline (order 3) whose control points are the residuals
 //!   themselves, with interior knots at evenly spaced interior measured frequencies
@@ -36,7 +35,6 @@
 //! `order` equal knots has nothing to evaluate over, and the core layout refuses it (D13, #95).
 
 use antenna_core::model::{ClampedAxis, CorrectionSurfaceLayout, FittedCorrectionSurface};
-use antenna_core::types::BSplineModel4D;
 use thiserror::Error;
 
 /// Span of the flat E-clock axis, in degrees.
@@ -63,11 +61,6 @@ const E_CLOCK_AXIS_DEG: (f64, f64) = (0.0, 360.0);
 /// correction surface as a **polar angle from boresight** (0° on axis), so the
 /// full range is `[0, 180]`. See [`E_CLOCK_AXIS_DEG`].
 const E_CONE_AXIS_DEG: (f64, f64) = (0.0, 180.0);
-
-/// Span of the synthetic flat temperature wire axis, in Kelvin. Schema 5.1 keeps
-/// these knots for byte compatibility, but the evaluator has no temperature query
-/// coordinate. See [`E_CLOCK_AXIS_DEG`].
-const TEMPERATURE_AXIS_K: (f64, f64) = (0.0, 1000.0);
 
 /// The boresight frequency correction's spline order: 3, i.e. **quadratic** (degree 2).
 ///
@@ -143,11 +136,11 @@ pub fn should_fit_correction(residuals: &[f64]) -> bool {
 /// flat in every axis but frequency.
 ///
 /// The spline is **quadratic** (order 3 = degree 2; see the module docs), with the residuals
-/// used directly as its frequency control points. The resulting 4D B-spline has:
-/// - shape = `[F, F, N_freq, F]` with `F = spline_order + 1`, where `N_freq` is
+/// used directly as its frequency control points. The resulting surface has:
+/// - shape = `[F, F, N_freq]` with `F = spline_order + 1`, where `N_freq` is
 ///   the number of frequency control points
 /// - Frequency dimension: proper B-spline with `N_freq` control points
-/// - E-clock, E-cone and temperature: **flat** axes (identical coefficient layers over a
+/// - E-clock and E-cone: **flat** axes (identical coefficient layers over a
 ///   real span, see the module docs) so the surface is exactly constant along them
 ///
 /// # Arguments
@@ -157,7 +150,7 @@ pub fn should_fit_correction(residuals: &[f64]) -> bool {
 ///
 /// # Returns
 ///
-/// A 4D B-spline model that can be stored in `AntennaCalibration.correction_surface`
+/// A surface that can be stored in `AntennaCalibration.correction_surface`
 ///
 /// # Errors
 ///
@@ -176,12 +169,13 @@ pub fn should_fit_correction(residuals: &[f64]) -> bool {
 /// let residuals = vec![0.8, 0.6, 0.5, 0.7];
 ///
 /// let correction = fit_frequency_correction(&frequencies, &residuals).unwrap();
-/// assert_eq!(correction.spline_order, 3); // quadratic
-/// assert_eq!(correction.shape, [4, 4, 4, 4]); // flat, flat, 4 frequencies, flat
-/// antenna_core::model::FittedCorrectionSurface::from_model4d(&correction)
-///     .expect("the service loader must accept this");
+/// assert_eq!(correction.layout().spline_order(), 3); // quadratic
+/// assert_eq!(correction.layout().shape(), [4, 4, 4]); // flat, flat, 4 frequencies
 /// ```
-pub fn fit_frequency_correction(frequencies: &[f64], residuals: &[f64]) -> Result<BSplineModel4D> {
+pub fn fit_frequency_correction(
+    frequencies: &[f64],
+    residuals: &[f64],
+) -> Result<FittedCorrectionSurface> {
     validate_inputs(frequencies, residuals)?;
 
     let layout = CorrectionSurfaceLayout::clamped(
@@ -193,16 +187,13 @@ pub fn fit_frequency_correction(frequencies: &[f64], residuals: &[f64]) -> Resul
 
     // Replicate each frequency's control point across every flat angular layer, in the
     // canonical coefficient order the layout declares — E-clock fastest, then E-cone, then
-    // frequency. The synthetic temperature axis is the wire adapter's business, not this
-    // module's (GitHub issue #94).
+    // frequency (GitHub issue #94).
     let [n_e_clock, n_e_cone, _] = layout.shape();
     let coefficients = residuals
         .iter()
         .flat_map(|&residual| std::iter::repeat_n(residual, n_e_clock * n_e_cone))
         .collect();
-    let fitted = FittedCorrectionSurface::new(layout, coefficients)?;
-
-    Ok(fitted.to_model4d(TEMPERATURE_AXIS_K.0, TEMPERATURE_AXIS_K.1)?)
+    Ok(FittedCorrectionSurface::new(layout, coefficients)?)
 }
 
 /// Validates input data for B-spline fitting.
@@ -315,49 +306,28 @@ mod tests {
         let result = fit_frequency_correction(&frequencies, &residuals);
         assert!(result.is_ok());
 
-        let bspline = result.unwrap();
+        let surface = result.unwrap();
+        let layout = surface.layout();
         // order + 1 = 4 layers on each flat axis; 4 frequency control points.
-        assert_eq!(bspline.shape, [4, 4, 4, 4]);
-        assert_eq!(bspline.spline_order, 3);
-        assert_eq!(bspline.coefficients.len(), 4 * 4 * 4 * 4);
+        assert_eq!(layout.shape(), [4, 4, 4]);
+        assert_eq!(layout.spline_order(), 3);
+        assert_eq!(surface.coefficients().len(), 4 * 4 * 4);
 
         // Knot vectors: 2*order + 1 on each flat axis, n + order on frequency.
-        assert_eq!(bspline.knots_azimuth.len(), 7);
-        assert_eq!(bspline.knots_elevation.len(), 7);
-        assert_eq!(bspline.knots_temperature.len(), 7);
-        assert!(bspline.knots_frequency.len() >= frequencies.len());
+        assert_eq!(layout.knots_e_clock().len(), 7);
+        assert_eq!(layout.knots_e_cone().len(), 7);
+        assert!(layout.knots_frequency().len() >= frequencies.len());
 
         // Each flat axis spans its full documented interval.
-        assert_eq!(bspline.knots_azimuth.first(), Some(&E_CLOCK_AXIS_DEG.0));
-        assert_eq!(bspline.knots_azimuth.last(), Some(&E_CLOCK_AXIS_DEG.1));
-        assert_eq!(bspline.knots_elevation.first(), Some(&E_CONE_AXIS_DEG.0));
-        assert_eq!(bspline.knots_elevation.last(), Some(&E_CONE_AXIS_DEG.1));
-        assert_eq!(
-            bspline.knots_temperature.first(),
-            Some(&TEMPERATURE_AXIS_K.0)
-        );
-        assert_eq!(
-            bspline.knots_temperature.last(),
-            Some(&TEMPERATURE_AXIS_K.1)
-        );
+        assert_eq!(layout.knots_e_clock().first(), Some(&E_CLOCK_AXIS_DEG.0));
+        assert_eq!(layout.knots_e_clock().last(), Some(&E_CLOCK_AXIS_DEG.1));
+        assert_eq!(layout.knots_e_cone().first(), Some(&E_CONE_AXIS_DEG.0));
+        assert_eq!(layout.knots_e_cone().last(), Some(&E_CONE_AXIS_DEG.1));
     }
 
-    /// Guards against a boresight frequency correction the service loader refuses (D13).
-    #[test]
-    fn frequency_correction_is_accepted_by_the_service_side_validator() {
-        let frequencies = vec![7100.0, 7500.0, 8000.0, 8450.0];
-        let residuals = vec![0.8, 0.6, 0.5, 0.7];
-        let bspline = fit_frequency_correction(&frequencies, &residuals).unwrap();
-
-        FittedCorrectionSurface::from_model4d(&bspline).expect(
-            "fit_frequency_correction must produce a surface the service loader accepts; \
-             the degenerate-axis defect has regressed",
-        );
-    }
-
-    /// The three collapsed axes must be *flat*, not merely valid: the fitted
-    /// correction is a function of frequency alone, so moving along azimuth,
-    /// elevation or temperature must not change the evaluated value by so much
+    /// The two collapsed axes must be *flat*, not merely valid: the fitted
+    /// correction is a function of frequency alone, so moving along azimuth
+    /// or elevation must not change the evaluated value by so much
     /// as a rounding step.
     ///
     /// This is the assertion that a "just lengthen the degenerate knot vectors"
@@ -367,8 +337,7 @@ mod tests {
     fn collapsed_axes_are_flat_not_just_valid() {
         let frequencies = vec![3700.0, 3950.0, 4200.0, 5925.0, 6175.0, 6425.0];
         let residuals = vec![0.9, 0.7, 0.55, -0.8, -0.95, -0.6];
-        let bspline = fit_frequency_correction(&frequencies, &residuals).unwrap();
-        let surface = FittedCorrectionSurface::from_model4d(&bspline).unwrap();
+        let surface = fit_frequency_correction(&frequencies, &residuals).unwrap();
 
         let freq = 4000.0;
         let reference = applied_value(&surface, 0.0, 0.0, freq);
@@ -399,8 +368,7 @@ mod tests {
     fn correction_reproduces_the_endpoint_residuals() {
         let frequencies = vec![3700.0, 3950.0, 4200.0, 5925.0, 6175.0, 6425.0];
         let residuals = vec![0.9, 0.7, 0.55, -0.8, -0.95, -0.6];
-        let bspline = fit_frequency_correction(&frequencies, &residuals).unwrap();
-        let surface = FittedCorrectionSurface::from_model4d(&bspline).unwrap();
+        let surface = fit_frequency_correction(&frequencies, &residuals).unwrap();
 
         for (freq, expected) in [
             (frequencies[0], residuals[0]),
@@ -428,8 +396,7 @@ mod tests {
         // A deliberately spiky residual sequence maximises the smoothing gap.
         let frequencies = vec![1000.0, 1100.0, 1200.0, 1300.0, 1400.0];
         let residuals = vec![0.0, 2.0, 0.0, 2.0, 0.0];
-        let bspline = fit_frequency_correction(&frequencies, &residuals).unwrap();
-        let surface = FittedCorrectionSurface::from_model4d(&bspline).unwrap();
+        let surface = fit_frequency_correction(&frequencies, &residuals).unwrap();
 
         let got = applied_value(&surface, 0.0, 0.0, frequencies[1]);
 
@@ -511,10 +478,10 @@ mod tests {
     fn the_frequency_knot_vector_is_preserved_through_the_core_layout() {
         let frequencies = vec![100.0, 200.0, 300.0, 400.0, 500.0];
         let residuals = vec![0.5, 0.6, 0.4, 0.7, 0.5];
-        let bspline = fit_frequency_correction(&frequencies, &residuals).unwrap();
+        let surface = fit_frequency_correction(&frequencies, &residuals).unwrap();
 
         assert_eq!(
-            bspline.knots_frequency,
+            surface.layout().knots_frequency(),
             vec![100.0, 100.0, 100.0, 200.0, 300.0, 500.0, 500.0, 500.0]
         );
     }
@@ -530,11 +497,10 @@ mod tests {
     fn the_boresight_frequency_correction_is_quadratic_order_3() {
         let frequencies = vec![100.0, 200.0, 300.0, 400.0, 500.0];
         let residuals = vec![0.0, 2.0, -1.0, 3.0, 0.5];
-        let bspline = fit_frequency_correction(&frequencies, &residuals).unwrap();
-        assert_eq!(bspline.spline_order, BORESIGHT_SPLINE_ORDER);
+        let surface = fit_frequency_correction(&frequencies, &residuals).unwrap();
+        assert_eq!(surface.layout().spline_order(), BORESIGHT_SPLINE_ORDER);
         assert_eq!(BORESIGHT_SPLINE_ORDER, 3);
 
-        let surface = FittedCorrectionSurface::from_model4d(&bspline).unwrap();
         // Four equally spaced samples inside the single span [300, 500].
         let v: Vec<f64> = [320.0, 360.0, 400.0, 440.0]
             .iter()
@@ -575,34 +541,28 @@ mod tests {
     }
 
     #[test]
-    fn test_flat_4d_structure() {
+    fn test_flat_axes_structure() {
         // Test with many frequency points
         let frequencies: Vec<f64> = (0..20).map(|i| 7000.0 + i as f64 * 100.0).collect();
         let residuals: Vec<f64> = (0..20).map(|i| (i as f64 * 0.1).sin()).collect();
 
-        let bspline = fit_frequency_correction(&frequencies, &residuals).unwrap();
+        let surface = fit_frequency_correction(&frequencies, &residuals).unwrap();
 
         // Flat axes carry order + 1 = 4 identical layers; frequency carries the data.
-        assert_eq!(bspline.shape[0], 4); // Azimuth: flat
-        assert_eq!(bspline.shape[1], 4); // Elevation: flat
-        assert_eq!(bspline.shape[2], 20); // Frequency: 20 control points
-        assert_eq!(bspline.shape[3], 4); // Temperature: flat
-
-        assert_eq!(bspline.coefficients.len(), 4 * 4 * 20 * 4);
-        FittedCorrectionSurface::from_model4d(&bspline).expect("structure must stay loadable");
+        let [n_clock, n_cone, n_freq] = surface.layout().shape();
+        assert_eq!((n_clock, n_cone, n_freq), (4, 4, 20));
+        assert_eq!(surface.coefficients().len(), 4 * 4 * 20);
 
         // Every flat layer of a given frequency index carries the same residual.
-        let [n_az, n_el, n_freq, n_temp] = bspline.shape;
         for (i_freq, &residual) in residuals.iter().enumerate() {
-            for i_temp in 0..n_temp {
-                for i_el in 0..n_el {
-                    for i_az in 0..n_az {
-                        let idx = i_az + n_az * (i_el + n_el * (i_freq + n_freq * i_temp));
-                        assert_eq!(
-                            bspline.coefficients[idx], residual,
-                            "layer ({i_az}, {i_el}, {i_freq}, {i_temp}) is not a replica"
-                        );
-                    }
+            for i_cone in 0..n_cone {
+                for i_clock in 0..n_clock {
+                    let idx = i_clock + n_clock * (i_cone + n_cone * i_freq);
+                    assert_eq!(
+                        surface.coefficients()[idx],
+                        residual,
+                        "layer ({i_clock}, {i_cone}, {i_freq}) is not a replica"
+                    );
                 }
             }
         }
@@ -613,27 +573,19 @@ mod tests {
         let frequencies = vec![7100.0, 7500.0, 8000.0, 8450.0, 8900.0];
         let residuals = vec![0.5, 0.6, 0.4, 0.7, 0.5];
 
-        let bspline = fit_frequency_correction(&frequencies, &residuals).unwrap();
+        let surface = fit_frequency_correction(&frequencies, &residuals).unwrap();
+        let knots = surface.layout().knots_frequency();
 
         // Check knot vector starts and ends at data bounds
-        assert_eq!(bspline.knots_frequency[0], frequencies[0]);
-        assert_eq!(
-            bspline.knots_frequency[bspline.knots_frequency.len() - 1],
-            frequencies[frequencies.len() - 1]
-        );
+        assert_eq!(knots[0], frequencies[0]);
+        assert_eq!(knots[knots.len() - 1], frequencies[frequencies.len() - 1]);
 
         // Clamped at order 3: first and last knots are repeated exactly 3 times
-        assert_eq!(bspline.knots_frequency[0], bspline.knots_frequency[1]);
-        assert_eq!(bspline.knots_frequency[1], bspline.knots_frequency[2]);
+        assert_eq!(knots[0], knots[1]);
+        assert_eq!(knots[1], knots[2]);
 
-        let n = bspline.knots_frequency.len();
-        assert_eq!(
-            bspline.knots_frequency[n - 1],
-            bspline.knots_frequency[n - 2]
-        );
-        assert_eq!(
-            bspline.knots_frequency[n - 2],
-            bspline.knots_frequency[n - 3]
-        );
+        let n = knots.len();
+        assert_eq!(knots[n - 1], knots[n - 2]);
+        assert_eq!(knots[n - 2], knots[n - 3]);
     }
 }

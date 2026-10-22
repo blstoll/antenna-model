@@ -1,10 +1,10 @@
 //! Shared test-only calibration fixtures for the service layer.
 
-use crate::model::FittedCorrectionSurface;
+use crate::model::{CorrectionSurfaceLayout, FittedCorrectionSurface};
 use antenna_core::types::{
-    AntennaCalibration, AntennaCalibrationBuilder, BSplineModel4D, CalibrationCoverage,
-    CalibrationMetadata, CalibrationStatus, FeedParameters, MeshParameters, PhysicalAntennaConfig,
-    ReflectorGeometry, ValidityRanges,
+    AntennaCalibration, AntennaCalibrationBuilder, CalibrationCoverage, CalibrationMetadata,
+    CalibrationStatus, FeedParameters, MeshParameters, PhysicalAntennaConfig, ReflectorGeometry,
+    ValidityRanges,
 };
 /// The one builder for antenna-model test artifacts: a 10 m / f/D 0.5 dish with a mesh, an
 /// on-axis feed, and validity ranges wide enough that nothing extrapolates by accident.
@@ -64,6 +64,34 @@ pub(crate) fn create_test_calibration(status: CalibrationStatus) -> AntennaCalib
     builder.calibration_status(status).build().unwrap()
 }
 
+/// A surface over the given clamped knot vectors whose every coefficient is `value_db`, so
+/// it evaluates to exactly `value_db` everywhere in its support (partition of unity). Each
+/// axis's coefficient count is its knot count minus `spline_order`.
+pub(crate) fn constant_surface(
+    spline_order: u8,
+    knots_e_clock: Vec<f64>,
+    knots_e_cone: Vec<f64>,
+    knots_frequency: Vec<f64>,
+    value_db: f64,
+) -> FittedCorrectionSurface {
+    let order = usize::from(spline_order);
+    let shape = [
+        knots_e_clock.len() - order,
+        knots_e_cone.len() - order,
+        knots_frequency.len() - order,
+    ];
+    let layout = CorrectionSurfaceLayout::new(
+        shape,
+        knots_e_clock,
+        knots_e_cone,
+        knots_frequency,
+        spline_order,
+    )
+    .expect("fixture correction surface must be valid");
+    FittedCorrectionSurface::new(layout, vec![value_db; shape.iter().product()])
+        .expect("fixture coefficient count matches its layout")
+}
+
 /// A valid, evaluable correction surface for tests that need to represent
 /// "corrected physics" (surface present ⇒ off-axis warning silent, spillover
 /// off). All coefficients are zero, so it contributes 0 dB wherever it is
@@ -71,16 +99,14 @@ pub(crate) fn create_test_calibration(status: CalibrationStatus) -> AntennaCalib
 /// end-to-end query does not extrapolate. Only its PRESENCE matters for the
 /// P11 predicate, but making it evaluable lets it also be used in the
 /// end-to-end `compute_gain` tests.
-pub(crate) fn dummy_correction_surface() -> antenna_core::types::BSplineModel4D {
-    antenna_core::types::BSplineModel4D {
-        coefficients: vec![0.0; 2 * 2 * 2],
-        shape: [2, 2, 2, 1],
-        knots_azimuth: vec![0.0, 0.0, 360.0, 360.0],
-        knots_elevation: vec![0.0, 0.0, 90.0, 90.0],
-        knots_frequency: vec![1000.0, 1000.0, 10000.0, 10000.0],
-        knots_temperature: vec![290.0, 290.0, 290.0],
-        spline_order: 2,
-    }
+pub(crate) fn dummy_correction_surface() -> FittedCorrectionSurface {
+    constant_surface(
+        2,
+        vec![0.0, 0.0, 360.0, 360.0],
+        vec![0.0, 0.0, 90.0, 90.0],
+        vec![1000.0, 1000.0, 10000.0, 10000.0],
+        0.0,
+    )
 }
 
 /// Attach `surface` to `calibration` the way a valid artifact carries one: with a coverage
@@ -91,12 +117,9 @@ pub(crate) fn dummy_correction_surface() -> antenna_core::types::BSplineModel4D 
 /// support, the relationship a full-mode artifact has.
 pub(crate) fn install_correction_surface(
     calibration: &mut AntennaCalibration,
-    surface: BSplineModel4D,
+    surface: FittedCorrectionSurface,
 ) {
-    let support = FittedCorrectionSurface::from_model4d(&surface)
-        .expect("fixture correction surface must be valid")
-        .layout()
-        .support();
+    let support = surface.layout().support();
     calibration
         .calibration_coverage
         .get_or_insert_with(|| CalibrationCoverage::from_domain(support, 1_000, true));
