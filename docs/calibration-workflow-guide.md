@@ -95,7 +95,7 @@ All calibration levels produce binary `.bin` files containing:
 - **Antenna metadata**: ID, name, feeds
 - **Physical configuration**: Reflector geometry, feed parameters, mesh properties
 - **Calibration status**: Fully/Partially/Uncalibrated with accuracy estimates
-- **Correction surface** (optional): schema-5 4D wire model adapted once to a 3D E-clock/E-cone/frequency evaluator
+- **Correction surface** (optional): a 3D E-clock/E-cone/frequency B-spline (schema 6)
 - **Validity ranges**: Azimuth, elevation, frequency, temperature
 
 The service loads these artifacts at startup from the `calibration_data/` directory.
@@ -662,7 +662,7 @@ Error: Failed to parse CSV: Missing column 'frequency_mhz'
 
 ## 4. Full Grid Calibration Workflow
 
-Full grid calibration fits a 3D correction surface from dense measurements across E-clock, E-cone, and frequency. Schema-5 artifacts retain a synthetic flat temperature axis on the wire, but runtime correction queries are three-dimensional and apply only inside fitted support. This provides ±1 dB accuracy everywhere in the calibrated region.
+Full grid calibration fits a 3D correction surface from dense measurements across E-clock, E-cone, and frequency. The artifact stores exactly those three axes (schema 6), and correction queries apply only inside fitted support. This provides ±1 dB accuracy everywhere in the calibrated region.
 
 ### 4.1 Test Planning
 
@@ -773,7 +773,7 @@ The full calibration tool performs:
 3. **Compute residuals**: `residual = measured - physics_model`
 4. **Fit correction surface** (3D B-spline to residuals)
    - E-clock, E-cone, and frequency
-   - Cubic (order 4) B-spline fit; export adds only the schema-5 flat temperature wire axis
+   - Cubic (order 4) B-spline fit, stored in the artifact as fitted
 5. **Cross-validation** (if `--validate` flag)
    - Split data into training/test sets
    - Verify <1 dB error in main lobe and first sidelobe

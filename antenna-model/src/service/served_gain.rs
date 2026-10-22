@@ -337,7 +337,7 @@ impl PreparedServedGain {
 
     /// Project using the correction result cached when the repository entry was inserted.
     ///
-    /// One insertion performs the schema-5 temperature-slab scan, then every rectangular-grid
+    /// One insertion pairs the surface with its coverage, then every rectangular-grid
     /// point reuses the immutable executable surface. Cached validation failures remain errors.
     pub(crate) fn prepare_with_cached_correction(
         calibration: AntennaCalibration,
@@ -1198,7 +1198,8 @@ mod tests {
     use super::*;
     use crate::service::test_support::install_correction_surface;
     use crate::service::test_support::{
-        constant_surface, create_test_calibration, dummy_correction_surface,
+        constant_correction_surface, constant_surface, create_test_calibration,
+        dummy_correction_surface,
     };
 
     /// The prepared value is shared across parallel grid workers (issue #63 onward), so
@@ -1246,23 +1247,6 @@ mod tests {
             Duration::from_secs(300),
         )
         .expect("prepare must succeed for the canonical test artifact")
-    }
-
-    /// A correction surface that evaluates to exactly `correction_db` anywhere in its
-    /// span. Shaped the way `calibrate::fit_frequency_correction` writes a flat-axis
-    /// frequency correction — `order + 1` identical layers per axis over the full
-    /// queryable span — because a B-spline is only a partition of unity when its
-    /// coefficient count actually matches its knot vectors. (`dummy_correction_surface`
-    /// is deliberately not reused here: it exists to make a surface *present*, and its
-    /// all-zero coefficients hide the shape mismatch.)
-    fn constant_correction_surface(correction_db: f64) -> crate::model::FittedCorrectionSurface {
-        constant_surface(
-            3,
-            vec![0.0, 0.0, 0.0, 180.0, 360.0, 360.0, 360.0],
-            vec![0.0, 0.0, 0.0, 90.0, 180.0, 180.0, 180.0],
-            vec![8000.0, 8000.0, 8000.0, 8300.0, 9000.0, 9000.0, 9000.0],
-            correction_db,
-        )
     }
 
     #[test]
@@ -2194,11 +2178,13 @@ mod tests {
     fn narrow_elevation_correction_surface(
         correction_db: f64,
     ) -> crate::model::FittedCorrectionSurface {
+        let base = constant_correction_surface(correction_db);
+        let layout = base.layout();
         constant_surface(
-            3,
-            vec![0.0, 0.0, 0.0, 180.0, 360.0, 360.0, 360.0],
+            layout.spline_order(),
+            layout.knots_e_clock().to_vec(),
             vec![0.0, 0.0, 0.0, 1.0, 2.0, 2.0, 2.0],
-            vec![8000.0, 8000.0, 8000.0, 8300.0, 9000.0, 9000.0, 9000.0],
+            layout.knots_frequency().to_vec(),
             correction_db,
         )
     }

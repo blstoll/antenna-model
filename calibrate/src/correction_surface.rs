@@ -261,10 +261,9 @@ pub struct ResidualPoint {
 /// A fitted 3D B-spline correction surface: one canonical model plus its fit statistics.
 ///
 /// The geometry and the coefficients are the core [`FittedCorrectionSurface`] the solve
-/// produced — this type keeps no second copy of them and no second indexing law. Export is
-/// therefore *construction* of the schema-5 wire adapter from this surface (see
-/// [`FittedCorrectionSurface::to_model4d`]), never conversion between two mathematical
-/// surface models with their own coefficient orders (GitHub issues #94, #95).
+/// produced — this type keeps no second copy of them and no second indexing law. Export
+/// stores that surface in the artifact as is, never converting between two mathematical
+/// surface models with their own coefficient orders (GitHub issues #94, #95, #98).
 #[derive(Debug, Clone)]
 pub struct CorrectionSurface {
     /// The solved surface: validated layout plus coefficients in core's canonical

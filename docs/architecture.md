@@ -564,7 +564,7 @@ struct AntennaCalibration {
     feed_id: String,                 // Multi-feed support
     metadata: CalibrationMetadata,
     physical_config: PhysicalAntennaConfig,  // Always present
-    correction_surface: Option<CorrectionSurface>,  // Optional for partial/uncalibrated
+    correction_surface: Option<FittedCorrectionSurface>,  // Optional for partial/uncalibrated
     validity_ranges: ValidityRanges,
 
     // NEW: Calibration status and coverage
@@ -598,8 +598,8 @@ struct PhysicalAntennaConfig {
     mesh: Option<MeshParameters>,
 }
 
-// Schema 6 (#98): in memory a validated `FittedCorrectionSurface`; on the wire this record.
-struct CorrectionSurface {
+// Schema 6 (#98): the wire record of a `FittedCorrectionSurface`.
+struct SurfaceRecord {
     coefficients: Vec<f64>,          // i_eclock + n_eclock * (i_econe + n_econe * i_frequency)
     shape: [usize; 3],               // [n_eclock, n_econe, n_frequency]
     knots_e_clock: Vec<f64>,

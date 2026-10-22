@@ -129,7 +129,7 @@ const MODEL_AGREEMENT_DB: f64 = 1e-3;
 /// from a kink lands inside 0.05 dB.
 ///
 /// This is the tight, purely internal assertion of the file: fill → CSV → fit → artifact →
-/// service loader → schema-5 adapter → 3D fitted evaluator, with no measurement uncertainty in it at all. A
+/// service loader → 3D fitted evaluator, with no measurement uncertainty in it at all. A
 /// regression anywhere in that chain shows up here first and unambiguously.
 const CORRECTION_FIDELITY_DB: f64 = 0.30;
 

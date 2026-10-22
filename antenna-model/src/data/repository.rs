@@ -32,8 +32,7 @@ pub(crate) fn prepare_correction(calibration: &AntennaCalibration) -> PreparedCo
 #[derive(Debug, Clone)]
 struct CalibrationEntry {
     calibration: AntennaCalibration,
-    /// The schema-5 wire surface validated, flattened, and paired with its coverage exactly
-    /// once when inserted.
+    /// The correction surface paired with its coverage exactly once when inserted.
     correction_surface: PreparedCorrection,
 }
 
@@ -379,7 +378,7 @@ impl CalibrationRepository {
     /// Get a calibration together with its once-prepared correction surface.
     ///
     /// The cached validation error preserves the behavior of direct test/programmatic
-    /// insertion without rescanning schema-5 coefficient slabs on every evaluated point.
+    /// insertion without re-checking coverage containment on every evaluated point.
     pub(crate) fn get_prepared_calibration(
         &self,
         antenna_id: &str,

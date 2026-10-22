@@ -3,8 +3,8 @@
 //!
 //! An artifact is `[magic 4][version u32 LE][crc32 u32 LE][len u64 LE][payload]`, the
 //! payload a postcard-encoded record of an [`AntennaCalibration`] whose correction surface is
-//! a three-axis `[E-clock, E-cone, frequency]` record (schema 6, issue #98). [`decode`] is the extension point for
-//! any loader — file, object store, HTTP — and runs every check in order; [`encode`] is its
+//! a three-axis `[E-clock, E-cone, frequency]` record (schema 6, issue #98). [`decode`] is the
+//! extension point for any loader — file, object store, HTTP — and runs every check in order; [`encode`] is its
 //! inverse, and [`read`]/[`write`] wrap both for files. This is the only definition of the
 //! ANTC framing (D27): do not lay the header out by hand.
 //!

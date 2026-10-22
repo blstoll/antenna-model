@@ -868,8 +868,7 @@ async fn run_calibration(args: Args) -> Result<()> {
         angular_resolution: Some(angular_resolution.clone()),
     };
 
-    // Build a service-loadable AntennaCalibration (4D B-spline correction
-    // surface) and write it as the binary artifact. `artifact_metadata` above drives only the
+    // Build a service-loadable AntennaCalibration and write it as the binary artifact. `artifact_metadata` above drives only the
     // optional `--metadata` sidecar. The validation report also supplies the served-behavior
     // RMSE stamped into the artifact's generic accuracy fields, but the report struct itself is
     // written only to the optional `--report` JSON sidecar.

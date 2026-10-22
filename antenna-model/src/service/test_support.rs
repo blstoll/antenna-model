@@ -92,6 +92,23 @@ pub(crate) fn constant_surface(
         .expect("fixture coefficient count matches its layout")
 }
 
+/// A correction surface that evaluates to exactly `correction_db` anywhere in its
+/// span. Shaped the way `calibrate::fit_frequency_correction` writes a flat-axis
+/// frequency correction — `order + 1` identical layers per axis over the full
+/// queryable span — because a B-spline is only a partition of unity when its
+/// coefficient count actually matches its knot vectors. (`dummy_correction_surface`
+/// is deliberately not reused here: it exists to make a surface *present*, and its
+/// all-zero coefficients hide the shape mismatch.)
+pub(crate) fn constant_correction_surface(correction_db: f64) -> FittedCorrectionSurface {
+    constant_surface(
+        3,
+        vec![0.0, 0.0, 0.0, 180.0, 360.0, 360.0, 360.0],
+        vec![0.0, 0.0, 0.0, 90.0, 180.0, 180.0, 180.0],
+        vec![8000.0, 8000.0, 8000.0, 8300.0, 9000.0, 9000.0, 9000.0],
+        correction_db,
+    )
+}
+
 /// A valid, evaluable correction surface for tests that need to represent
 /// "corrected physics" (surface present ⇒ off-axis warning silent, spillover
 /// off). All coefficients are zero, so it contributes 0 dB wherever it is

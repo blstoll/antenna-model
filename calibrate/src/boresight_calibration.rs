@@ -212,7 +212,7 @@ pub struct BoresightCalibrationResult {
     pub iterations: usize,
     /// Number of function evaluations
     pub function_evaluations: usize,
-    /// Optional 1D frequency correction surface (degenerate 4D B-spline)
+    /// Optional frequency correction surface, flat along E-clock and E-cone
     pub frequency_correction: Option<FittedCorrectionSurface>,
 }
 

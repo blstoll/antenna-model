@@ -272,7 +272,9 @@ pub(crate) fn evaluate_gain_from_request_with_budget(
 mod tests {
     use super::*;
     use crate::api::schemas::Position3D;
-    use crate::service::test_support::{constant_surface, install_correction_surface};
+    use crate::service::test_support::{
+        constant_correction_surface, constant_surface, install_correction_surface,
+    };
     use crate::service::test_support::{create_test_calibration, dummy_correction_surface};
     use crate::warnings::WarningCode;
     use antenna_core::types::{
@@ -1041,25 +1043,15 @@ mod tests {
             .build()
             .unwrap();
 
-        // A flat-axis frequency correction shaped exactly as calibrate's
-        // `fit_frequency_correction` writes it: order + 1 identical layers on
-        // E-clock/E-cone over their full queryable spans.
-        let surface = |value: f64| {
-            constant_surface(
-                3,
-                vec![0.0, 0.0, 0.0, 180.0, 360.0, 360.0, 360.0],
-                vec![0.0, 0.0, 0.0, 90.0, 180.0, 180.0, 180.0],
-                vec![8000.0, 8000.0, 8000.0, 8300.0, 9000.0, 9000.0, 9000.0],
-                value,
-            )
-        };
-
         let serve = |correction_db: f64| {
             let mut calibration = create_test_calibration(CalibrationStatus::PartiallyCalibrated {
                 accuracy_estimate_db: 1.5,
                 coverage: coverage.clone(),
             });
-            install_correction_surface(&mut calibration, surface(correction_db));
+            install_correction_surface(
+                &mut calibration,
+                constant_correction_surface(correction_db),
+            );
             let mut repo = CalibrationRepository::new();
             repo.add_calibration(calibration);
             compute_gain_from_request(&request, &repo).unwrap()

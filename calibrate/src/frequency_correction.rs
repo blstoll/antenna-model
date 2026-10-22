@@ -132,8 +132,7 @@ pub fn should_fit_correction(residuals: &[f64]) -> bool {
     max_abs_residual > THRESHOLD_DB
 }
 
-/// Fits a 1D frequency-only correction surface and packages it as schema 5's 4D wire type,
-/// flat in every axis but frequency.
+/// Fits a 1D frequency-only correction surface, flat along E-clock and E-cone.
 ///
 /// The spline is **quadratic** (order 3 = degree 2; see the module docs), with the residuals
 /// used directly as its frequency control points. The resulting surface has:
@@ -326,8 +325,8 @@ mod tests {
     }
 
     /// The two collapsed axes must be *flat*, not merely valid: the fitted
-    /// correction is a function of frequency alone, so moving along azimuth
-    /// or elevation must not change the evaluated value by so much
+    /// correction is a function of frequency alone, so moving along E-clock
+    /// or E-cone must not change the evaluated value by so much
     /// as a rounding step.
     ///
     /// This is the assertion that a "just lengthen the degenerate knot vectors"
