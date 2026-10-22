@@ -564,7 +564,7 @@ struct AntennaCalibration {
     feed_id: String,                 // Multi-feed support
     metadata: CalibrationMetadata,
     physical_config: PhysicalAntennaConfig,  // Always present
-    correction_surface: Option<BSplineModel4D>,  // Optional for partial/uncalibrated
+    correction_surface: Option<FittedCorrectionSurface>,  // Optional for partial/uncalibrated
     validity_ranges: ValidityRanges,
 
     // NEW: Calibration status and coverage
@@ -598,14 +598,14 @@ struct PhysicalAntennaConfig {
     mesh: Option<MeshParameters>,
 }
 
-struct BSplineModel4D {
-    coefficients: Vec<f64>,          // Flattened 4D array
-    shape: [usize; 4],               // Dimensions
-    knots_azimuth: Vec<f64>,
-    knots_elevation: Vec<f64>,
+// Schema 6 (#98): the wire record of a `FittedCorrectionSurface`.
+struct SurfaceRecord {
+    coefficients: Vec<f64>,          // i_eclock + n_eclock * (i_econe + n_econe * i_frequency)
+    shape: [usize; 3],               // [n_eclock, n_econe, n_frequency]
+    knots_e_clock: Vec<f64>,
+    knots_e_cone: Vec<f64>,
     knots_frequency: Vec<f64>,
-    knots_temperature: Vec<f64>,
-    spline_order: u8,                // Typically 3 for cubic
+    spline_order: u8,                // degree + 1: 4 full mode (cubic), 3 boresight
 }
 
 struct ValidityRanges {
@@ -1332,7 +1332,7 @@ docker push registry.local/antenna-model:v1.2.3
 - A/B testing for model updates
 
 ### 9.4 Advanced Features
-- Multi-temperature support (full 4D)
+- Multi-temperature support (temperature as a correction-surface axis; a schema MAJOR)
 - Uncertainty quantification
 - Real-time model updates
 - Federated antenna configurations
@@ -1421,7 +1421,6 @@ antenna-model/                       # Cargo workspace root (3 members, roadmap 
 │       │   ├── mod.rs               # Postcard layout rules; re-exports
 │       │   ├── antenna_calibration.rs   # AntennaCalibration (artifact root)
 │       │   ├── metadata.rs          # CalibrationMetadata, CALIBRATION_SCHEMA_VERSION
-│       │   ├── bspline_model.rs     # BSplineModel4D (correction-surface wire type)
 │       │   ├── physical_config.rs   # PhysicalAntennaConfig: reflector + feed + mesh
 │       │   ├── reflector_geometry.rs, feed_parameters.rs, mesh_parameters.rs
 │       │   ├── calibration_status.rs, calibration_coverage.rs

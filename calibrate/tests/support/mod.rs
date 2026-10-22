@@ -11,7 +11,6 @@
 
 #![allow(dead_code)] // Not every consumer of this module uses every helper.
 
-use antenna_core::types::BSplineModel4D;
 use antenna_model::model::{
     compute_g_over_t, AntennaConfiguration, AntennaConfigurationBuilder, FeedParametersBuilder,
     FittedCorrectionSurface, IntegrationParams, MeshParametersBuilder, ReflectorGeometryBuilder,
@@ -75,11 +74,6 @@ pub const BIAS_CONST_DB: f64 = 0.80;
 pub const BIAS_FREQ_DB: f64 = 0.50;
 pub const BIAS_CLOCK_DB: f64 = 0.60;
 pub const BIAS_CONE_DB: f64 = 0.40;
-
-/// Prepare a schema-5 wire surface once for repeated three-axis probes.
-pub fn fitted_correction_surface(model: &BSplineModel4D) -> FittedCorrectionSurface {
-    FittedCorrectionSurface::from_model4d(model).expect("valid correction surface")
-}
 
 /// Extract the correction for a test query that must be inside fitted support.
 pub fn correction_value(

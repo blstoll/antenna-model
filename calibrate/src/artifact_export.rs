@@ -5,13 +5,10 @@
 //!
 //! # The correction surface is constructed in core
 //!
-//! The fitted surface's knot vectors, shape, and schema-5 wire form all belong to
-//! `antenna_core::model::correction_surface` (GitHub issues #94, #95). This module asks
-//! [`to_model4d`](antenna_core::model::FittedCorrectionSurface::to_model4d) for the wire
-//! type and supplies only the synthetic temperature interval, which it derives from the
-//! measured temperatures. The legacy wire
-//! names (`knots_azimuth` for E-clock, `knots_elevation` for E-cone) and the flat temperature
-//! axis are that adapter's business; neither appears in this crate.
+//! The fitted surface's knot vectors and shape belong to
+//! `antenna_core::model::correction_surface` (GitHub issues #94, #95), and its wire form to
+//! `antenna_core::artifact` (#98). This module stores the fitted
+//! [`FittedCorrectionSurface`](antenna_core::model::FittedCorrectionSurface) as is.
 //!
 //! `validity_ranges` and `calibration_coverage` still carry the same legacy names
 //! (`azimuth_range`/`elevation_range`) for the E-clock and E-cone extents, which is why the
@@ -36,11 +33,6 @@ pub enum ArtifactExportError {
     /// The source correction surface had an unexpected shape (e.g. zero in a dimension).
     #[error("invalid correction surface: {0}")]
     InvalidSurface(String),
-
-    /// The core wire adapter refused to construct the correction surface's wire form.
-    /// Carries the typed core error, which names the axis (GitHub issue #95).
-    #[error("invalid correction surface: {0}")]
-    InvalidCorrectionSurface(#[from] antenna_core::types::ValidationError),
 
     /// The assembled artifact broke an artifact invariant.
     #[error("invalid calibration artifact: {0}")]
@@ -162,11 +154,7 @@ pub fn export_full_calibration(
             }
         })?;
 
-    // Build the 4D correction surface over a flat temperature interval enclosing
-    // the measured temperatures (with a 1 K pad to guarantee a nonzero interval).
-    let t_lo = t_meas_lo - 1.0;
-    let t_hi = t_meas_hi + 1.0;
-    let correction = surface.fitted().to_model4d(t_lo, t_hi)?;
+    let correction = surface.fitted().clone();
 
     // Physical config.
     let reflector = DataReflectorGeometry {
@@ -262,8 +250,9 @@ pub fn export_full_calibration(
         .physics_model_version(PHYSICS_MODEL_VERSION)
         .angular_resolution(angular_resolution)
         .notes(format!(
-            "Full calibration with 4D correction surface (shape {:?}), R²={:.6}",
-            correction.shape, r_squared
+            "Full calibration with correction surface (shape {:?}), R²={:.6}",
+            correction.layout().shape(),
+            r_squared
         ))
         .build()
         .map_err(|e| ArtifactExportError::BuildFailed {
@@ -290,19 +279,7 @@ pub fn export_full_calibration(
 mod tests {
     use super::*;
     use crate::correction_surface::{fit_correction_surface, CorrectionSurfaceParams};
-    use antenna_core::model::{CoveredCorrectionSurface, FittedCorrectionSurface};
-
-    fn applied_value(
-        surface: &FittedCorrectionSurface,
-        e_clock_deg: f64,
-        e_cone_deg: f64,
-        frequency_mhz: f64,
-    ) -> f64 {
-        surface
-            .evaluate(e_clock_deg, e_cone_deg, frequency_mhz)
-            .correction_db()
-            .expect("test query left fitted support")
-    }
+    use antenna_core::model::CoveredCorrectionSurface;
 
     /// Smooth synthetic residual function over (clock, cone, freq).
     fn residual(clock_deg: f64, cone_deg: f64, freq_mhz: f64, freq0: f64) -> f64 {
@@ -356,94 +333,6 @@ mod tests {
     }
 
     #[test]
-    fn the_constructed_wire_model_validates() {
-        let (surface, _freq0) = make_test_surface();
-        let model = surface
-            .fitted()
-            .to_model4d(289.0, 291.0)
-            .expect("wire construction should succeed");
-        FittedCorrectionSurface::from_model4d(&model)
-            .expect("the exported 4D model must satisfy the core layout rules");
-
-        // Shape mapping: spatial axes copy directly (no padding now that the
-        // service's find_knot_span off-by-one is fixed); temperature axis has order+1 layers.
-        let [n_clock, n_cone, n_freq] = surface.shape();
-        assert_eq!(model.shape[0], n_clock); // azimuth <- clock, no pad
-        assert_eq!(model.shape[1], n_cone); // elevation <- cone, no pad
-        assert_eq!(model.shape[2], n_freq); // frequency, no pad
-        assert_eq!(model.shape[3], surface.spline_order() + 1);
-    }
-
-    #[test]
-    fn test_round_trip_matches_3d_evaluation() {
-        let (surface, _freq0) = make_test_surface();
-        let t_lo = 289.0;
-        let t_hi = 291.0;
-        let model = surface
-            .fitted()
-            .to_model4d(t_lo, t_hi)
-            .expect("wire construction should succeed");
-        let fitted = FittedCorrectionSurface::from_model4d(&model).unwrap();
-
-        // Sample interior points AND the exact domain boundaries of every axis
-        // (fitted ranges: clock [0, 350], cone [0, 10], freq [8000, 8400]) —
-        // including the temperature boundaries of the synthetic 4D axis: interior-only
-        // sampling cannot see a divergence at an edge (D15).
-        let clocks = [
-            0.0, 10.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0, 349.0, 350.0,
-        ];
-        let cones = [0.0, 0.5, 3.0, 5.0, 7.0, 9.5, 10.0];
-        let freqs = [8000.0, 8050.0, 8200.0, 8350.0, 8400.0];
-        let mut max_err = 0.0_f64;
-        let mut samples = 0;
-        for &k in &clocks {
-            for &c in &cones {
-                for &f in &freqs {
-                    let expected = surface.evaluate(f, c, k).expect("3D evaluate");
-                    let got = applied_value(&fitted, k, c, f);
-                    let err = (got - expected).abs();
-                    max_err = max_err.max(err);
-                    samples += 1;
-                    assert!(
-                        err < 1e-9,
-                        "mismatch at clock={k}, cone={c}, freq={f}: \
-                         expected={expected}, got={got}, err={err}"
-                    );
-                }
-            }
-        }
-        assert!(samples >= 20, "expected >=20 samples, got {samples}");
-        eprintln!("round-trip max error over {samples} samples: {max_err:e}");
-    }
-
-    #[test]
-    fn test_temperature_axis_is_flat_not_zero() {
-        // The flat temperature axis must NOT zero out the correction.
-        let (surface, _freq0) = make_test_surface();
-        let model = surface
-            .fitted()
-            .to_model4d(280.0, 300.0)
-            .expect("wire construction");
-        let fitted = FittedCorrectionSurface::from_model4d(&model).unwrap();
-
-        // A point with a clearly nonzero expected correction.
-        let (k, c, f) = (90.0, 5.0, 8200.0);
-        let expected = surface.evaluate(f, c, k).expect("3D evaluate");
-        assert!(
-            expected.abs() > 1e-3,
-            "test point should have nonzero correction, got {expected}"
-        );
-
-        // Preparation accepts the schema-5 adapter only because every synthetic
-        // temperature slab is identical; runtime evaluation has no temperature input.
-        let got = applied_value(&fitted, k, c, f);
-        assert!(
-            (got - expected).abs() < 1e-9,
-            "flat-temperature adapter changed the correction: expected={expected}, got={got}"
-        );
-    }
-
-    #[test]
     fn test_export_full_calibration_assembles() {
         let (surface, _freq0) = make_test_surface();
         let measurements: Vec<MeasurementPoint> = {
@@ -487,7 +376,11 @@ mod tests {
 
         assert_eq!(cal.antenna_id, "test_antenna");
         assert_eq!(cal.feed_id, "x_band");
-        assert!(cal.correction_surface.is_some());
+        assert_eq!(
+            cal.correction_surface.as_ref(),
+            Some(surface.fitted()),
+            "the artifact stores the fitted surface exactly"
+        );
         assert!(matches!(
             cal.calibration_status,
             Some(CalibrationStatus::FullyCalibrated { .. })

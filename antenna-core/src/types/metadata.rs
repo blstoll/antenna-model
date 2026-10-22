@@ -18,7 +18,7 @@ use super::{AngularResolution, MeasurementDensity, ParameterSource};
 /// A layout change bumps MAJOR here **and** the container version. Producers stamp this
 /// constant, never a literal. Bump history and procedure:
 /// `docs/calibration-workflow-guide.md` §10.5.1.
-pub const CALIBRATION_SCHEMA_VERSION: &str = "5.1";
+pub const CALIBRATION_SCHEMA_VERSION: &str = "6.0";
 
 /// Provenance and fit-quality metadata for one calibration artifact.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -272,7 +272,9 @@ pub(crate) fn evaluate_gain_from_request_with_budget(
 mod tests {
     use super::*;
     use crate::api::schemas::Position3D;
-    use crate::service::test_support::install_correction_surface;
+    use crate::service::test_support::{
+        constant_correction_surface, constant_surface, install_correction_surface,
+    };
     use crate::service::test_support::{create_test_calibration, dummy_correction_surface};
     use crate::warnings::WarningCode;
     use antenna_core::types::{
@@ -333,15 +335,13 @@ mod tests {
         }
 
         // Full mode: a surface over a bounded box, coverage equal to its support.
-        let full_mode_surface = antenna_core::types::BSplineModel4D {
-            coefficients: vec![1.0; 2 * 2 * 2],
-            shape: [2, 2, 2, 1],
-            knots_azimuth: vec![0.0, 0.0, 360.0, 360.0],
-            knots_elevation: vec![0.0, 0.0, 20.0, 20.0],
-            knots_frequency: vec![8_000.0, 8_000.0, 8_600.0, 8_600.0],
-            knots_temperature: vec![290.0, 290.0, 290.0],
-            spline_order: 2,
-        };
+        let full_mode_surface = constant_surface(
+            2,
+            vec![0.0, 0.0, 360.0, 360.0],
+            vec![0.0, 0.0, 20.0, 20.0],
+            vec![8_000.0, 8_000.0, 8_600.0, 8_600.0],
+            1.0,
+        );
         let mut full_mode = create_test_calibration(CalibrationStatus::FullyCalibrated {
             accuracy_estimate_db: 1.0,
         });
@@ -357,15 +357,13 @@ mod tests {
 
         // Boresight: a flat correction evaluable in every direction, covered only on axis.
         let flat = |lower: f64, upper: f64| vec![lower, lower, 0.5 * (lower + upper), upper, upper];
-        let boresight_surface = antenna_core::types::BSplineModel4D {
-            coefficients: vec![1.0; 3 * 3 * 3],
-            shape: [3, 3, 3, 1],
-            knots_azimuth: flat(0.0, 360.0),
-            knots_elevation: flat(0.0, 180.0),
-            knots_frequency: flat(8_000.0, 8_600.0),
-            knots_temperature: vec![290.0, 290.0, 290.0],
-            spline_order: 2,
-        };
+        let boresight_surface = constant_surface(
+            2,
+            flat(0.0, 360.0),
+            flat(0.0, 180.0),
+            flat(8_000.0, 8_600.0),
+            1.0,
+        );
         let mut boresight = create_test_calibration(CalibrationStatus::PartiallyCalibrated {
             accuracy_estimate_db: 1.5,
             coverage: CalibrationCoverage::boresight_cone((8_000.0, 8_600.0), 5, true),
@@ -442,15 +440,13 @@ mod tests {
             calibration.validity_ranges.temperature_const = temperature_const;
             install_correction_surface(
                 &mut calibration,
-                antenna_core::types::BSplineModel4D {
-                    coefficients: vec![1.0; 2 * 2 * 2],
-                    shape: [2, 2, 2, 1],
-                    knots_azimuth: vec![0.0, 0.0, 360.0, 360.0],
-                    knots_elevation: vec![0.0, 0.0, 90.0, 90.0],
-                    knots_frequency: vec![8000.0, 8000.0, 9000.0, 9000.0],
-                    knots_temperature: vec![290.0, 290.0, 290.0],
-                    spline_order: 2,
-                },
+                constant_surface(
+                    2,
+                    vec![0.0, 0.0, 360.0, 360.0],
+                    vec![0.0, 0.0, 90.0, 90.0],
+                    vec![8000.0, 8000.0, 9000.0, 9000.0],
+                    1.0,
+                ),
             );
             calibration
         };
@@ -476,16 +472,15 @@ mod tests {
     /// truthful response metadata and warning codes.
     #[test]
     fn public_gain_path_returns_physics_only_beyond_a_distant_surfaces_coverage() {
-        let surface =
-            |clock_knots, cone_knots, correction_db| antenna_core::types::BSplineModel4D {
-                coefficients: vec![correction_db; 8],
-                shape: [2, 2, 2, 1],
-                knots_azimuth: clock_knots,
-                knots_elevation: cone_knots,
-                knots_frequency: vec![8000.0, 8000.0, 9000.0, 9000.0],
-                knots_temperature: vec![290.0, 290.0, 290.0],
-                spline_order: 2,
-            };
+        let surface = |clock_knots, cone_knots, correction_db| {
+            constant_surface(
+                2,
+                clock_knots,
+                cone_knots,
+                vec![8000.0, 8000.0, 9000.0, 9000.0],
+                correction_db,
+            )
+        };
         let repository_with = |correction_surface| {
             let mut repository = CalibrationRepository::new();
             let mut calibration = create_test_calibration(CalibrationStatus::FullyCalibrated {
@@ -690,15 +685,13 @@ mod tests {
         // the temperature-independent correction test above, so the surface evaluates.
         install_correction_surface(
             &mut calibration,
-            antenna_core::types::BSplineModel4D {
-                coefficients: vec![1.0; 2 * 2 * 2],
-                shape: [2, 2, 2, 1],
-                knots_azimuth: vec![0.0, 0.0, 360.0, 360.0],
-                knots_elevation: vec![0.0, 0.0, 90.0, 90.0],
-                knots_frequency: vec![8000.0, 8000.0, 9000.0, 9000.0],
-                knots_temperature: vec![290.0, 290.0, 290.0],
-                spline_order: 2,
-            },
+            constant_surface(
+                2,
+                vec![0.0, 0.0, 360.0, 360.0],
+                vec![0.0, 0.0, 90.0, 90.0],
+                vec![8000.0, 8000.0, 9000.0, 9000.0],
+                1.0,
+            ),
         );
         repo.add_calibration(calibration);
 
@@ -742,15 +735,13 @@ mod tests {
             });
         install_correction_surface(
             &mut calibration_with_surface,
-            antenna_core::types::BSplineModel4D {
-                coefficients: vec![0.0; 2 * 2 * 2],
-                shape: [2, 2, 2, 1],
-                knots_azimuth: vec![0.0, 0.0, 360.0, 360.0],
-                knots_elevation: vec![0.0, 0.0, 90.0, 90.0],
-                knots_frequency: vec![8000.0, 8000.0, 9000.0, 9000.0],
-                knots_temperature: vec![290.0, 290.0, 290.0],
-                spline_order: 2,
-            },
+            constant_surface(
+                2,
+                vec![0.0, 0.0, 360.0, 360.0],
+                vec![0.0, 0.0, 90.0, 90.0],
+                vec![8000.0, 8000.0, 9000.0, 9000.0],
+                0.0,
+            ),
         );
         assert!(calibration_with_surface.correction_surface.is_some());
         repo_calibrated.add_calibration(calibration_with_surface);
@@ -904,15 +895,13 @@ mod tests {
             });
         install_correction_surface(
             &mut calibration_with_surface,
-            antenna_core::types::BSplineModel4D {
-                coefficients: vec![0.0; 2 * 2 * 2],
-                shape: [2, 2, 2, 1],
-                knots_azimuth: vec![0.0, 0.0, 360.0, 360.0],
-                knots_elevation: vec![0.0, 0.0, 90.0, 90.0],
-                knots_frequency: vec![8000.0, 8000.0, 9000.0, 9000.0],
-                knots_temperature: vec![290.0, 290.0, 290.0],
-                spline_order: 2,
-            },
+            constant_surface(
+                2,
+                vec![0.0, 0.0, 360.0, 360.0],
+                vec![0.0, 0.0, 90.0, 90.0],
+                vec![8000.0, 8000.0, 9000.0, 9000.0],
+                0.0,
+            ),
         );
         repo_calibrated.add_calibration(calibration_with_surface);
         let response_calibrated = compute_gain_from_request(&request, &repo_calibrated).unwrap();
@@ -957,15 +946,13 @@ mod tests {
         // is out of coverage (→ correction not applied).
         install_correction_surface(
             &mut calibration,
-            antenna_core::types::BSplineModel4D {
-                coefficients: vec![0.0; 2 * 2 * 2],
-                shape: [2, 2, 2, 1],
-                knots_azimuth: vec![0.0, 0.0, 5.0, 5.0],
-                knots_elevation: vec![0.0, 0.0, 5.0, 5.0],
-                knots_frequency: vec![8000.0, 8000.0, 9000.0, 9000.0],
-                knots_temperature: vec![290.0, 290.0, 290.0],
-                spline_order: 2,
-            },
+            constant_surface(
+                2,
+                vec![0.0, 0.0, 5.0, 5.0],
+                vec![0.0, 0.0, 5.0, 5.0],
+                vec![8000.0, 8000.0, 9000.0, 9000.0],
+                0.0,
+            ),
         );
         repo.add_calibration(calibration);
 
@@ -1056,30 +1043,15 @@ mod tests {
             .build()
             .unwrap();
 
-        // A flat-axis frequency correction shaped exactly as calibrate's
-        // `fit_frequency_correction` writes it: order + 1 identical layers on
-        // azimuth/elevation/temperature over their full queryable spans.
-        let surface = |value: f64| {
-            let order = 3usize;
-            let layers = order + 1;
-            let n_freq = 4;
-            antenna_core::types::BSplineModel4D {
-                coefficients: vec![value; layers * layers * n_freq * layers],
-                shape: [layers, layers, n_freq, layers],
-                knots_azimuth: vec![0.0, 0.0, 0.0, 180.0, 360.0, 360.0, 360.0],
-                knots_elevation: vec![0.0, 0.0, 0.0, 90.0, 180.0, 180.0, 180.0],
-                knots_frequency: vec![8000.0, 8000.0, 8000.0, 8300.0, 9000.0, 9000.0, 9000.0],
-                knots_temperature: vec![0.0, 0.0, 0.0, 500.0, 1000.0, 1000.0, 1000.0],
-                spline_order: order as u8,
-            }
-        };
-
         let serve = |correction_db: f64| {
             let mut calibration = create_test_calibration(CalibrationStatus::PartiallyCalibrated {
                 accuracy_estimate_db: 1.5,
                 coverage: coverage.clone(),
             });
-            install_correction_surface(&mut calibration, surface(correction_db));
+            install_correction_surface(
+                &mut calibration,
+                constant_correction_surface(correction_db),
+            );
             let mut repo = CalibrationRepository::new();
             repo.add_calibration(calibration);
             compute_gain_from_request(&request, &repo).unwrap()
@@ -1185,15 +1157,13 @@ mod tests {
         // Add a correction surface so out-of-coverage detection triggers
         install_correction_surface(
             &mut calibration,
-            antenna_core::types::BSplineModel4D {
-                coefficients: vec![0.0; 8],
-                shape: [2, 2, 2, 1],
-                knots_azimuth: vec![0.0, 0.0, 10.0, 10.0],
-                knots_elevation: vec![0.0, 0.0, 10.0, 10.0],
-                knots_frequency: vec![8000.0, 8000.0, 9000.0, 9000.0],
-                knots_temperature: vec![290.0, 290.0, 290.0],
-                spline_order: 2,
-            },
+            constant_surface(
+                2,
+                vec![0.0, 0.0, 10.0, 10.0],
+                vec![0.0, 0.0, 10.0, 10.0],
+                vec![8000.0, 8000.0, 9000.0, 9000.0],
+                0.0,
+            ),
         );
         repo.add_calibration(calibration);
 

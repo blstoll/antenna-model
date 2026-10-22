@@ -9,7 +9,9 @@
 //! # Wire format: postcard is positional
 //!
 //! Artifacts are encoded with [`postcard`], which is non-self-describing and decodes
-//! fields by position. On any type reachable from [`AntennaCalibration`], do **not**
+//! fields by position. [`AntennaCalibration`] itself is not serialized: `crate::artifact`
+//! encodes a private wire record that mirrors it field for field, carrying the correction
+//! surface as a three-axis record. On any serialized type reachable from that record, do **not**
 //! add `#[serde(skip_serializing_if = ...)]`, `#[serde(skip)]`, `#[serde(flatten)]`, or
 //! untagged/internally-tagged enums: a conditionally omitted field shifts every field
 //! after it and decodes into the wrong values without error. `#[serde(default)]` alone
@@ -18,7 +20,6 @@
 
 mod angular_resolution;
 mod antenna_calibration;
-mod bspline_model;
 mod calibration_coverage;
 mod calibration_status;
 mod correction_domain;
@@ -36,7 +37,6 @@ mod validity_ranges;
 
 pub use angular_resolution::{AngularResolution, MIN_KNOTS_PER_LOBE_PERIOD};
 pub use antenna_calibration::{AntennaCalibration, AntennaCalibrationBuilder};
-pub use bspline_model::{BSplineModel4D, BSplineModel4DBuilder};
 pub use calibration_coverage::{
     CalibrationCoverage, CalibrationCoverageBuilder, BORESIGHT_COVERAGE_CONE_DEG,
 };

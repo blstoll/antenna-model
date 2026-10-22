@@ -95,7 +95,7 @@ All calibration levels produce binary `.bin` files containing:
 - **Antenna metadata**: ID, name, feeds
 - **Physical configuration**: Reflector geometry, feed parameters, mesh properties
 - **Calibration status**: Fully/Partially/Uncalibrated with accuracy estimates
-- **Correction surface** (optional): schema-5 4D wire model adapted once to a 3D E-clock/E-cone/frequency evaluator
+- **Correction surface** (optional): a 3D E-clock/E-cone/frequency B-spline (schema 6)
 - **Validity ranges**: Azimuth, elevation, frequency, temperature
 
 The service loads these artifacts at startup from the `calibration_data/` directory.
@@ -662,7 +662,7 @@ Error: Failed to parse CSV: Missing column 'frequency_mhz'
 
 ## 4. Full Grid Calibration Workflow
 
-Full grid calibration fits a 3D correction surface from dense measurements across E-clock, E-cone, and frequency. Schema-5 artifacts retain a synthetic flat temperature axis on the wire, but runtime correction queries are three-dimensional and apply only inside fitted support. This provides ±1 dB accuracy everywhere in the calibrated region.
+Full grid calibration fits a 3D correction surface from dense measurements across E-clock, E-cone, and frequency. The artifact stores exactly those three axes (schema 6), and correction queries apply only inside fitted support. This provides ±1 dB accuracy everywhere in the calibrated region.
 
 ### 4.1 Test Planning
 
@@ -773,7 +773,7 @@ The full calibration tool performs:
 3. **Compute residuals**: `residual = measured - physics_model`
 4. **Fit correction surface** (3D B-spline to residuals)
    - E-clock, E-cone, and frequency
-   - Cubic (order 4) B-spline fit; export adds only the schema-5 flat temperature wire axis
+   - Cubic (order 4) B-spline fit, stored in the artifact as fitted
 5. **Cross-validation** (if `--validate` flag)
    - Split data into training/test sets
    - Verify <1 dB error in main lobe and first sidelobe
@@ -1910,6 +1910,29 @@ is bit-identical. Check first that the artifact does not carry the defect the bu
 reject — restamping a wrong artifact launders it past the new gate. (For C13 that check is
 "the feed's axial offset is not the focal length"; a lateral offset is legitimate, and one of
 these two fixtures has one.)
+
+**6.0 / container 5 (GitHub issue #98, 2026-10-21) retires the synthetic temperature
+axis.** The correction surface is stored as the three axes calibration actually models —
+shape `[n_eclock, n_econe, n_frequency]`, coefficients indexed
+`i_eclock + n_eclock * (i_econe + n_econe * i_frequency)` — instead of schema 5's
+`BSplineModel4D` with a fourth temperature axis whose slabs had to be identical. Temperature
+stays where it always meant something: the scalar `validity_ranges.temperature_const`. Both
+axes move because this is a *layout* change: the surface record lost a knot vector and a shape
+element, so a schema-5 payload decodes from the wrong offsets, and only the container stamp
+is readable early enough to refuse it. `decode` rejects a container-4 file on its header —
+before the payload is decoded or validated — and tells the operator to regenerate the
+artifact. There is deliberately no legacy 4D decoder: artifacts are regenerable (D9), and a
+second positional decoder would keep alive the representation this bump removes.
+`AntennaCalibration` is no longer serialized directly; `antenna_core::artifact` encodes a
+private wire record that mirrors it and converts the surface to and from the validated
+`FittedCorrectionSurface` inside `encode`/`decode`. Served corrections are unchanged
+bit-for-bit — evaluation already ignored temperature — which was checked by regenerating a
+full-mode and a boresight artifact before and after and comparing every knot, coefficient and
+a 13,824-point evaluation grid each. The two committed fixtures carry no correction surface, so
+their payload layout is identical across the bump (the surface's `None` is one byte in an
+unchanged position): they were checked correction-free under the old decoder, then
+**restamped** — `format_version` set to 6.0 and re-framed at container 5 through
+`artifact::write`, every other value unchanged.
 
 **5.1 (GitHub issue #92, 2026-09-20) tightens validation without moving a byte.**
 Schema-5 artifacts retain the historical temperature fields, but every temperature

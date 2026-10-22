@@ -54,8 +54,10 @@ wrong artifact.
 ## Artifact wire format
 
 An artifact is an `AntennaCalibration` encoded with **postcard** (documented, versioned wire
-format), wrapped in the ANTC header (magic + version + CRC32 + length). `antenna_core::artifact`
-owns both directions (#106): `decode`/`encode` on bytes, `read`/`write` on files. `decode` is
+format) through a private wire record in `antenna_core::artifact` (#98) — the domain type is
+not serialized directly; the record mirrors it field for field and carries the correction
+surface as plain `[E-clock, E-cone, frequency]` data — wrapped in the ANTC header (magic +
+version + CRC32 + length). `antenna_core::artifact` owns both directions (#106): `decode`/`encode` on bytes, `read`/`write` on files. `decode` is
 the extension point for any new loader (S3, HTTP) — never re-implement a check beside it.
 `artifact::write` is `calibrate`'s **only** artifact writer, shared by full and boresight mode
 (D2). `ArtifactError` separates `Framing`, `Version`, `Io`, and `Validation(ValidationError)`,
@@ -64,13 +66,19 @@ so a caller can tell a corrupt file from a sound file describing an invalid mode
 **Two version axes; `decode` enforces both,** in order: framing, CRC, container, decode,
 schema, validation. Validation never runs on a foreign schema major.
 
-- **Container** — the ANTC header `u32` (`ANTC_ARTIFACT_VERSION` = **4**), readable before the
+- **Container** — the ANTC header `u32` (`ANTC_ARTIFACT_VERSION` = **5**), readable before the
   decode.
-- **Schema** — `metadata.format_version` (`CALIBRATION_SCHEMA_VERSION` = **"5.1"**), readable
+- **Schema** — `metadata.format_version` (`CALIBRATION_SCHEMA_VERSION` = **"6.0"**), readable
   only after it. A foreign MAJOR is a hard error.
 
 Recent bumps cover the versioning cases, and they moved the axes differently:
 
+- **#98 (6.0 / container 5)** retired schema 5's synthetic temperature axis: the surface is
+  stored as `[n_eclock, n_econe, n_frequency]`, E-clock fastest, and temperature is only the
+  scalar `validity_ranges.temperature_const`. A layout change, so both axes moved; a
+  container-4 file is refused on its header with a "regenerate" message, and there is
+  deliberately no legacy decoder. Served corrections are bit-identical. The two committed
+  fixtures are correction-free, so their layout did not move and they were restamped.
 - **#92 (5.1 / container 4)** tightened correction-surface validation without moving any
   bytes: every synthetic temperature slab must be identical, runtime evaluation uses only
   E-clock/E-cone/frequency, and outside fitted support has no numeric correction. Valid 5.0

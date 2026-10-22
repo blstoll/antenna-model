@@ -4,11 +4,11 @@
 
 use crate::config::{AntennaConfig, AntennaConfigEntry, CalibrationConfig, FeedSpecConfig};
 use crate::error::DataError;
-use crate::model::CoveredCorrectionSurface;
+use crate::model::{CoveredCorrectionSurface, FittedCorrectionSurface};
 use antenna_core::artifact;
 use antenna_core::types::{
-    AntennaCalibration, BSplineModel4D, CalibrationMetadata, CalibrationStatus, FeedParameters,
-    MeshParameters, PhysicalAntennaConfig, ReflectorGeometry, ValidationError, ValidityRanges,
+    AntennaCalibration, CalibrationMetadata, CalibrationStatus, FeedParameters, MeshParameters,
+    PhysicalAntennaConfig, ReflectorGeometry, ValidationError, ValidityRanges,
     CALIBRATION_SCHEMA_VERSION,
 };
 use parking_lot::RwLock;
@@ -32,8 +32,7 @@ pub(crate) fn prepare_correction(calibration: &AntennaCalibration) -> PreparedCo
 #[derive(Debug, Clone)]
 struct CalibrationEntry {
     calibration: AntennaCalibration,
-    /// The schema-5 wire surface validated, flattened, and paired with its coverage exactly
-    /// once when inserted.
+    /// The correction surface paired with its coverage exactly once when inserted.
     correction_surface: PreparedCorrection,
 }
 
@@ -379,7 +378,7 @@ impl CalibrationRepository {
     /// Get a calibration together with its once-prepared correction surface.
     ///
     /// The cached validation error preserves the behavior of direct test/programmatic
-    /// insertion without rescanning schema-5 coefficient slabs on every evaluated point.
+    /// insertion without re-checking coverage containment on every evaluated point.
     pub(crate) fn get_prepared_calibration(
         &self,
         antenna_id: &str,
@@ -416,13 +415,13 @@ impl CalibrationRepository {
     /// * `feed_id` - Feed identifier
     ///
     /// # Returns
-    /// * `Some(Option<BSplineModel4D>)` - Calibration found (may or may not have correction surface)
+    /// * `Some(Option<FittedCorrectionSurface>)` - Calibration found (may or may not have correction surface)
     /// * `None` - No calibration for this antenna-feed combination
     pub fn get_correction_surface(
         &self,
         antenna_id: &str,
         feed_id: &str,
-    ) -> Option<Option<BSplineModel4D>> {
+    ) -> Option<Option<FittedCorrectionSurface>> {
         self.get_calibration(antenna_id, feed_id)
             .map(|cal| cal.correction_surface)
     }
@@ -531,7 +530,9 @@ fn build_validity_ranges(feed_spec: &FeedSpecConfig) -> ValidityRanges {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::service::test_support::{calibration_builder, install_correction_surface};
+    use crate::service::test_support::{
+        calibration_builder, constant_surface, install_correction_surface,
+    };
     use tempfile::{NamedTempFile, TempDir};
 
     fn create_test_calibration(antenna_id: &str, feed_id: &str) -> AntennaCalibration {
@@ -638,15 +639,13 @@ mod tests {
         let mut calibration = create_test_calibration("antenna_1", "x_band");
         install_correction_surface(
             &mut calibration,
-            BSplineModel4D {
-                coefficients: vec![1.0; 8],
-                shape: [2, 2, 2, 1],
-                knots_azimuth: vec![0.0, 0.0, 360.0, 360.0],
-                knots_elevation: vec![0.0, 0.0, 180.0, 180.0],
-                knots_frequency: vec![8_000.0, 8_000.0, 9_000.0, 9_000.0],
-                knots_temperature: vec![290.0, 290.0, 290.0],
-                spline_order: 2,
-            },
+            constant_surface(
+                2,
+                vec![0.0, 0.0, 360.0, 360.0],
+                vec![0.0, 0.0, 180.0, 180.0],
+                vec![8_000.0, 8_000.0, 9_000.0, 9_000.0],
+                1.0,
+            ),
         );
         repo.add_calibration(calibration);
 

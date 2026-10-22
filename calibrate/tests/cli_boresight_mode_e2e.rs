@@ -10,7 +10,6 @@ use antenna_core::artifact::{ANTC_ARTIFACT_VERSION, ANTC_HEADER_LEN, ANTC_MAGIC}
 use antenna_core::types::{
     CalibrationStatus, BORESIGHT_COVERAGE_CONE_DEG, CALIBRATION_SCHEMA_VERSION,
 };
-use antenna_model::model::FittedCorrectionSurface;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -223,9 +222,9 @@ fn a_boresight_artifact_carrying_a_frequency_correction_loads() {
         )
     });
 
-    // One control point per measured frequency; the other three axes are flat.
+    // One control point per measured frequency; the other two axes are flat.
     assert_eq!(
-        correction.shape[2],
+        correction.layout().shape()[2],
         RIPPLED_BORESIGHT_CSV.lines().count() - 1,
         "frequency axis should carry one control point per measurement row"
     );
@@ -313,14 +312,13 @@ fn the_carried_frequency_correction_evaluates_to_a_real_value() {
         .correction_surface
         .as_ref()
         .expect("rippled fixture must carry a correction surface");
-    let fitted = FittedCorrectionSurface::from_model4d(correction).unwrap();
 
     // The ripple is ±1 dB about the smooth sweep, so the fitted correction must be
     // materially nonzero somewhere across the band. Sample every measured frequency.
     let frequencies = [7100.0, 7450.0, 7800.0, 8150.0, 8500.0];
     let mut max_abs = 0.0_f64;
     for freq in frequencies {
-        let value = fitted
+        let value = correction
             .evaluate(0.0, 0.0, freq)
             .correction_db()
             .expect("measured frequency left support");

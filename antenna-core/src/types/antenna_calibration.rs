@@ -1,9 +1,8 @@
-use serde::{Deserialize, Serialize};
-
 use super::{
-    BSplineModel4D, CalibrationCoverage, CalibrationMetadata, CalibrationStatus,
-    PhysicalAntennaConfig, ValidationError, ValidityRanges,
+    CalibrationCoverage, CalibrationMetadata, CalibrationStatus, PhysicalAntennaConfig,
+    ValidationError, ValidityRanges,
 };
+use crate::model::FittedCorrectionSurface;
 
 /// Complete calibration data for one antenna-feed combination — the payload of one
 /// `.bin` artifact.
@@ -17,7 +16,7 @@ use super::{
 /// a correction surface only together with a coverage record contained by its fitted
 /// support; and a `PartiallyCalibrated` status carrying the same coverage as
 /// `calibration_coverage`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AntennaCalibration {
     /// Unique identifier for this antenna.
     pub antenna_id: String,
@@ -32,19 +31,16 @@ pub struct AntennaCalibration {
     pub physical_config: PhysicalAntennaConfig,
 
     /// Residual correction surface fitted to `measured − physics`, if any.
-    #[serde(default)]
-    pub correction_surface: Option<BSplineModel4D>,
+    pub correction_surface: Option<FittedCorrectionSurface>,
 
     /// Parameter ranges reported in antenna metadata.
     pub validity_ranges: ValidityRanges,
 
     /// Level of calibration data available.
-    #[serde(default)]
     pub calibration_status: Option<CalibrationStatus>,
 
     /// Where measurements justify applying the correction surface. Required whenever
     /// `correction_surface` is present; read it through [`Self::coverage`].
-    #[serde(default)]
     pub calibration_coverage: Option<CalibrationCoverage>,
 }
 
@@ -91,7 +87,7 @@ pub struct AntennaCalibrationBuilder {
     feed_id: Option<String>,
     metadata: Option<CalibrationMetadata>,
     physical_config: Option<PhysicalAntennaConfig>,
-    correction_surface: Option<BSplineModel4D>,
+    correction_surface: Option<FittedCorrectionSurface>,
     validity_ranges: Option<ValidityRanges>,
     calibration_status: Option<CalibrationStatus>,
     calibration_coverage: Option<CalibrationCoverage>,
@@ -118,7 +114,7 @@ impl AntennaCalibrationBuilder {
         self
     }
 
-    pub fn correction_surface(mut self, correction: BSplineModel4D) -> Self {
+    pub fn correction_surface(mut self, correction: FittedCorrectionSurface) -> Self {
         self.correction_surface = Some(correction);
         self
     }
@@ -182,39 +178,6 @@ mod tests {
         assert_eq!(calibration.feed_id, "x_band");
         assert!(calibration.correction_surface.is_none());
         assert!(calibration.physics_is_uncorrected());
-    }
-
-    #[test]
-    fn test_serialization_round_trip() {
-        let original = fixtures::calibrated().build().unwrap();
-
-        let encoded = postcard::to_allocvec(&original).unwrap();
-        let decoded: AntennaCalibration = postcard::from_bytes(&encoded).unwrap();
-
-        assert_eq!(original, decoded);
-        assert!(decoded.correction_surface.is_some());
-    }
-
-    #[test]
-    fn test_serialization_round_trip_json() {
-        let original = fixtures::builder().build().unwrap();
-
-        let json = serde_json::to_string(&original).unwrap();
-        let decoded: AntennaCalibration = serde_json::from_str(&json).unwrap();
-
-        assert_eq!(original, decoded);
-    }
-
-    #[test]
-    fn test_serialization_without_optional_records() {
-        let calibration = fixtures::builder().build().unwrap();
-        assert!(calibration.calibration_status.is_none());
-        assert!(calibration.calibration_coverage.is_none());
-
-        let encoded = postcard::to_allocvec(&calibration).unwrap();
-        let decoded: AntennaCalibration = postcard::from_bytes(&encoded).unwrap();
-
-        assert_eq!(calibration, decoded);
     }
 
     #[test]

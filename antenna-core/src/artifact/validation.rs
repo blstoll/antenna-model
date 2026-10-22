@@ -229,9 +229,9 @@ fn angular_resolution(resolution: &AngularResolution) -> Checked {
 mod tests {
     use crate::types::fixtures::{self, DOMAIN};
     use crate::types::{
-        AngularResolution, AntennaCalibration, AntennaCalibrationBuilder, BSplineModel4D,
-        CalibrationCoverage, CalibrationMetadata, CalibrationStatus, CorrectionDomain,
-        MeshParameters, PhysicalAntennaConfig, ValidationError, ValidityRanges,
+        AngularResolution, AntennaCalibration, AntennaCalibrationBuilder, CalibrationCoverage,
+        CalibrationMetadata, CalibrationStatus, CorrectionDomain, MeshParameters,
+        PhysicalAntennaConfig, ValidationError, ValidityRanges,
     };
 
     fn rejection(builder: AntennaCalibrationBuilder) -> ValidationError {
@@ -435,72 +435,6 @@ mod tests {
             }),
             "clock_lobe_period_deg"
         );
-    }
-
-    /// The knot-layout rules hold for a surface arriving through the builder (#95).
-    mod correction_surface_layout {
-        use super::*;
-
-        fn with_surface(edit: impl FnOnce(&mut BSplineModel4D)) -> AntennaCalibrationBuilder {
-            let mut surface = fixtures::surface_over(DOMAIN, 0.5);
-            edit(&mut surface);
-            fixtures::calibrated().correction_surface(surface)
-        }
-
-        #[test]
-        fn coefficient_count_must_match_shape() {
-            assert_eq!(
-                rejection(with_surface(|s| {
-                    s.coefficients.pop();
-                })),
-                ValidationError::InconsistentShape {
-                    expected: 8,
-                    actual: 7
-                }
-            );
-        }
-
-        #[test]
-        fn knot_vectors_must_fit_the_shape_and_not_decrease() {
-            let dimension = |builder| match rejection(builder) {
-                ValidationError::InvalidKnotVector { dimension, reason } => (dimension, reason),
-                other => panic!("expected InvalidKnotVector, got {other:?}"),
-            };
-            assert_eq!(
-                dimension(with_surface(|s| s.knots_azimuth = vec![0.0, 360.0])).0,
-                "azimuth"
-            );
-            let (axis, reason) = dimension(with_surface(|s| {
-                s.knots_elevation = vec![0.0, 30.0, 0.0, 30.0]
-            }));
-            assert_eq!(axis, "elevation");
-            assert!(reason.contains("non-decreasing"), "{reason}");
-        }
-
-        #[test]
-        fn spline_order_must_be_in_range() {
-            assert_eq!(
-                rejection(with_surface(|s| s.spline_order = 0)),
-                ValidationError::InvalidSplineOrder(0)
-            );
-        }
-
-        #[test]
-        fn temperature_slabs_must_be_identical() {
-            let surface = BSplineModel4D {
-                coefficients: [vec![0.5; 8], vec![0.6; 8]].concat(),
-                shape: [2, 2, 2, 2],
-                knots_temperature: vec![280.0, 280.0, 300.0, 300.0],
-                ..fixtures::surface_over(DOMAIN, 0.5)
-            };
-            assert!(matches!(
-                rejection(fixtures::calibrated().correction_surface(surface)),
-                ValidationError::TemperatureDependentCorrection {
-                    temperature_slab: 1,
-                    ..
-                }
-            ));
-        }
     }
 
     /// Coverage must lie within, not equal, the surface's fitted support (#97).

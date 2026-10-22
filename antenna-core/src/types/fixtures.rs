@@ -1,10 +1,11 @@
 //! The one builder-based fixture for tests that need a valid artifact.
 
 use super::{
-    AntennaCalibration, AntennaCalibrationBuilder, BSplineModel4D, CalibrationCoverage,
-    CalibrationMetadata, CalibrationStatus, CorrectionDomain, FeedParameters,
-    PhysicalAntennaConfig, ReflectorGeometry, ValidityRanges,
+    AntennaCalibration, AntennaCalibrationBuilder, CalibrationCoverage, CalibrationMetadata,
+    CalibrationStatus, CorrectionDomain, FeedParameters, PhysicalAntennaConfig, ReflectorGeometry,
+    ValidityRanges,
 };
+use crate::model::{ClampedAxis, CorrectionSurfaceLayout, FittedCorrectionSurface};
 
 /// The domain [`calibrated`] covers and its surface supports.
 pub(crate) const DOMAIN: CorrectionDomain = CorrectionDomain {
@@ -67,19 +68,40 @@ pub(crate) fn builder() -> AntennaCalibrationBuilder {
         .validity_ranges(validity_ranges())
 }
 
+/// A linear (order 2) surface whose support is exactly `support`, with the given eight
+/// coefficients in canonical E-clock-fastest order.
+fn linear_surface_over(
+    support: CorrectionDomain,
+    coefficients: Vec<f64>,
+) -> FittedCorrectionSurface {
+    let axis = |(lower, upper): (f64, f64)| ClampedAxis::new(lower, upper, vec![]);
+    let layout = CorrectionSurfaceLayout::clamped(
+        axis(support.e_clock_deg),
+        axis(support.e_cone_deg),
+        axis(support.frequency_mhz),
+        2,
+    )
+    .unwrap();
+    FittedCorrectionSurface::new(layout, coefficients).unwrap()
+}
+
 /// A linear (order 2) surface whose support is exactly `support`, constant `value_db`.
-pub(crate) fn surface_over(support: CorrectionDomain, value_db: f64) -> BSplineModel4D {
-    let clamped = |(lower, upper): (f64, f64)| vec![lower, lower, upper, upper];
-    BSplineModel4D::builder()
-        .coefficients(vec![value_db; 8])
-        .shape([2, 2, 2, 1])
-        .knots_azimuth(clamped(support.e_clock_deg))
-        .knots_elevation(clamped(support.e_cone_deg))
-        .knots_frequency(clamped(support.frequency_mhz))
-        .knots_temperature(vec![280.0, 280.0, 300.0])
-        .spline_order(2)
-        .build()
-        .unwrap()
+pub(crate) fn surface_over(support: CorrectionDomain, value_db: f64) -> FittedCorrectionSurface {
+    linear_surface_over(support, vec![value_db; 8])
+}
+
+/// A linear (order 2) surface whose support is exactly `support`, with the coefficient at
+/// `(i_clock, i_cone, i_freq)` equal to `100·i_freq + 10·i_cone + i_clock`.
+pub(crate) fn indexed_surface_over(support: CorrectionDomain) -> FittedCorrectionSurface {
+    linear_surface_over(
+        support,
+        (0..2)
+            .flat_map(|freq| {
+                (0..2).flat_map(move |cone| (0..2).map(move |clock| (freq, cone, clock)))
+            })
+            .map(|(freq, cone, clock)| f64::from(100 * freq + 10 * cone + clock))
+            .collect(),
+    )
 }
 
 /// A valid fully-calibrated artifact's builder: a surface over [`DOMAIN`], covering it.

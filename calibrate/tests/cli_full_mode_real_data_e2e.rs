@@ -59,7 +59,7 @@ use antenna_model::service::compute_gain_from_request;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use support::{correction_value, fitted_correction_surface};
+use support::correction_value;
 
 // ============================================================================
 // Identity of the run
@@ -129,7 +129,7 @@ const MODEL_AGREEMENT_DB: f64 = 1e-3;
 /// from a kink lands inside 0.05 dB.
 ///
 /// This is the tight, purely internal assertion of the file: fill → CSV → fit → artifact →
-/// service loader → schema-5 adapter → 3D fitted evaluator, with no measurement uncertainty in it at all. A
+/// service loader → 3D fitted evaluator, with no measurement uncertainty in it at all. A
 /// regression anywhere in that chain shows up here first and unambiguously.
 const CORRECTION_FIDELITY_DB: f64 = 0.30;
 
@@ -774,14 +774,14 @@ fn assert_full_mode_artifact_loads_and_presents_as_calibrated(scenario: &RealDat
 
     // The surface the shipped knot configuration declares: 4/6/8 internal knots at order 4
     // over axes with enough distinct values to place every one of them strictly inside
-    // (roadmap D19/D20), i.e. 12 × 10 × 8 × 5 with azimuth fastest.
+    // (roadmap D19/D20), i.e. 12 × 10 × 8 with E-clock fastest.
     let surface = calibration
         .correction_surface
         .as_ref()
         .expect("correction surface");
     assert_eq!(
-        surface.shape,
-        [12, 10, 8, 5],
+        surface.layout().shape(),
+        [12, 10, 8],
         "the grid is sized so the fitter can place all 4/6/8 requested knots; a different \
          shape means an axis lost knots to interior-only placement or minimum spacing"
     );
@@ -1022,8 +1022,7 @@ fn assert_the_correction_surface_fits_the_fill(scenario: &RealDataScenario) {
 /// The served correction reproduces, at every anchor, the residual the fill injected there.
 ///
 /// This is the file's tight assertion: no measurement uncertainty enters it, only the chain
-/// fill → CSV → fit → artifact → loader → schema-5 adapter → 3D evaluator. The retained
-/// wire names map E-clock/E-cone onto azimuth/elevation.
+/// fill → CSV → fit → artifact → loader → 3D evaluator.
 fn assert_the_served_correction_reproduces_the_injected_residual(scenario: &RealDataScenario) {
     let calibration = &scenario.calibration;
     let surface = calibration
@@ -1031,11 +1030,10 @@ fn assert_the_served_correction_reproduces_the_injected_residual(scenario: &Real
         .as_ref()
         .expect("correction surface");
 
-    let fitted = fitted_correction_surface(surface);
     let mut worst = 0.0_f64;
     for anchor in scenario.generated.anchors() {
         let correction = correction_value(
-            &fitted,
+            surface,
             anchor.clock_deg,
             anchor.cone_deg,
             ANCHOR_FREQUENCY_MHZ,

@@ -430,7 +430,7 @@ fn compute_emitter_position_from_angles(
 mod tests {
     use super::*;
     use crate::data::repository::CalibrationRepository;
-    use crate::service::test_support::install_correction_surface;
+    use crate::service::test_support::{constant_surface, install_correction_surface};
 
     #[test]
     fn grid_summary_uses_dispositions_and_ignores_failed_points() {
@@ -687,9 +687,8 @@ mod tests {
     #[test]
     fn test_partial_failures_no_nan_in_response() {
         use antenna_core::types::{
-            AntennaCalibration, BSplineModel4D, CalibrationMetadata, CalibrationStatus,
-            FeedParameters, MeshParameters, PhysicalAntennaConfig, ReflectorGeometry,
-            ValidityRanges,
+            AntennaCalibration, CalibrationMetadata, CalibrationStatus, FeedParameters,
+            MeshParameters, PhysicalAntennaConfig, ReflectorGeometry, ValidityRanges,
         };
 
         // Build a minimal repository with a working antenna
@@ -740,15 +739,13 @@ mod tests {
             .unwrap();
         install_correction_surface(
             &mut cal,
-            BSplineModel4D {
-                coefficients: vec![0.0; 16],
-                shape: [2, 2, 2, 2],
-                knots_azimuth: vec![0.0, 0.0, 360.0, 360.0],
-                knots_elevation: vec![0.0, 0.0, 90.0, 90.0],
-                knots_frequency: vec![8000.0, 8000.0, 9000.0, 9000.0],
-                knots_temperature: vec![280.0, 280.0, 300.0, 300.0],
-                spline_order: 2,
-            },
+            constant_surface(
+                2,
+                vec![0.0, 0.0, 360.0, 360.0],
+                vec![0.0, 0.0, 90.0, 90.0],
+                vec![8000.0, 8000.0, 9000.0, 9000.0],
+                0.0,
+            ),
         );
         repository.add_calibration(cal);
 
@@ -807,9 +804,8 @@ mod tests {
     #[test]
     fn mixed_coverage_heatmap_reports_partial_correction() {
         use antenna_core::types::{
-            AntennaCalibration, BSplineModel4D, CalibrationCoverage, CalibrationMetadata,
-            CalibrationStatus, FeedParameters, PhysicalAntennaConfig, ReflectorGeometry,
-            ValidityRanges,
+            AntennaCalibration, CalibrationCoverage, CalibrationMetadata, CalibrationStatus,
+            FeedParameters, PhysicalAntennaConfig, ReflectorGeometry, ValidityRanges,
         };
 
         let metadata = CalibrationMetadata::builder()
@@ -855,15 +851,13 @@ mod tests {
             .unwrap();
         install_correction_surface(
             &mut calibration,
-            BSplineModel4D {
-                coefficients: vec![1.0; 16],
-                shape: [2, 2, 2, 2],
-                knots_azimuth: vec![0.0, 0.0, 360.0, 360.0],
-                knots_elevation: vec![0.0, 0.0, 180.0, 180.0],
-                knots_frequency: vec![8000.0, 8000.0, 9000.0, 9000.0],
-                knots_temperature: vec![280.0, 280.0, 300.0, 300.0],
-                spline_order: 2,
-            },
+            constant_surface(
+                2,
+                vec![0.0, 0.0, 360.0, 360.0],
+                vec![0.0, 0.0, 180.0, 180.0],
+                vec![8000.0, 8000.0, 9000.0, 9000.0],
+                1.0,
+            ),
         );
 
         let vehicle_position = Position3D::geodetic(0.0, 0.0, 0.0);
